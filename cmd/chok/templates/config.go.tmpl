@@ -1,0 +1,12 @@
+package app
+
+import "github.com/zynthara/chok/config"
+
+// Config is the application configuration.
+// Fields are populated by chok from: CLI flags > env vars > config file > default tags.
+type Config struct {
+	HTTP    config.HTTPOptions    `mapstructure:"http"`
+	Log     config.SlogOptions    `mapstructure:"log"`
+	SQLite  config.SQLiteOptions  `mapstructure:"sqlite"`
+	Account config.AccountOptions `mapstructure:"account"`
+}

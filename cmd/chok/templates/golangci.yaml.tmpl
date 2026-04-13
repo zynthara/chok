@@ -1,0 +1,32 @@
+run:
+  timeout: 5m
+  tests: false
+
+linters:
+  default: all
+  disable:
+    - wsl
+    - nlreturn
+    - varnamelen
+    - exhaustruct
+    - gochecknoglobals
+    - wrapcheck
+    - ireturn
+    - err113
+    - dupl
+    - mnd
+    - tagliatelle
+
+linters-settings:
+  goimports:
+    local-prefixes: {{.Module}}
+  funlen:
+    lines: 120
+  cyclop:
+    max-complexity: 20
+
+output:
+  formats:
+    - format: colored-line-number
+  sort-order:
+    - file

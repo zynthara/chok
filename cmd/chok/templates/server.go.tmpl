@@ -1,0 +1,70 @@
+package app
+
+import (
+	"context"
+
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/account"
+	"github.com/zynthara/chok/apierr"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/middleware"
+	"github.com/zynthara/chok/server"
+	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/version"
+
+	"{{.Module}}/internal/handler"
+)
+
+var cfg Config
+
+// NewApp creates the application instance.
+func NewApp() *chok.App {
+	return chok.New("{{.Name}}",
+		chok.WithVersion(version.Get()),
+		chok.WithConfig(&cfg),
+		chok.WithSetup(setup),
+	)
+}
+
+func setup(_ context.Context, a *chok.App) error {
+	// --- Database ---
+
+	gdb, err := db.NewSQLite(&cfg.SQLite)
+	if err != nil {
+		return err
+	}
+	a.SetDB(gdb)
+	a.AddCleanup(func(_ context.Context) error { return db.Close(gdb) })
+
+	// --- Error mapper ---
+
+	apierr.RegisterMapper(store.MapError)
+
+	// --- HTTP Server ---
+
+	srv := server.NewHTTPServer(&cfg.HTTP)
+	server.RegisterHealthz(srv)
+	srv.Use(
+		middleware.Recovery(),
+		middleware.RequestID(),
+		middleware.Logger(a.Logger()),
+	)
+
+	// --- Account (register/login/password) ---
+
+	acct, err := account.Setup(gdb, a.Logger(), &cfg.Account, srv.Group("/auth"))
+	if err != nil {
+		return err
+	}
+
+	// --- Protected API routes ---
+
+	api := srv.Group("/api/v1")
+	if acct != nil {
+		api.Use(middleware.Authn(acct.TokenParser(), acct.PrincipalResolver()))
+	}
+	handler.RegisterRoutes(api)
+
+	a.AddServer(srv)
+	return nil
+}

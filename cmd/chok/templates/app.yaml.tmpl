@@ -1,0 +1,15 @@
+http:
+  addr: ":8080"
+
+log:
+  level: info
+  format: json
+  output:
+    - stdout
+
+sqlite:
+  path: "{{.Name}}.db"
+
+account:
+  enabled: true
+  signing_key: "CHANGE-ME-generate-with-openssl-rand-base64-32"
