@@ -11,9 +11,11 @@ version: 2
 
 project_name: chok
 
-before:
-  hooks:
-    - go mod tidy
+# No `before.hooks` here. `go mod tidy` is already part of the `ci`
+# workflow (and `make tidy` for local dev), so re-running it inside
+# the release pipeline only risks rewriting go.sum and tripping
+# debug.ReadBuildInfo's `vcs.modified=true` flag — which would surface
+# as a `+dirty` suffix in `chok version` for tagged release binaries.
 
 builds:
   - id: chok
