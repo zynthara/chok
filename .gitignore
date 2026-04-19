@@ -1,0 +1,56 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Build output
+/_output/
+/chok
+/chok-dev
+
+# Editor/IDE
+# .idea/
+# .vscode/
+
+# Runtime artefacts produced by example apps / local smoke runs.
+# Each example uses SQLite by default and lumberjack-rotated log
+# files; these are local-only state, must never enter the tree.
+# The `examples/` directory itself stays version-controlled.
+*.db
+*.db-shm
+*.db-wal
+examples/**/logs/
+examples/**/cache/
+
+# macOS Finder droppings
+.DS_Store
+
+# Local-only planning / scratch space. Anything inside .private/ is
+# considered intentionally outside the public history — internal
+# design drafts, agent SPECs, ad-hoc notes. Use docs/ for anything
+# meant to ship to readers.
+.private/

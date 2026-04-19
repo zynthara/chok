@@ -1,0 +1,16 @@
+package app
+
+import "github.com/zynthara/chok/config"
+
+// Config is the application configuration. Fields are populated by chok
+// from: CLI flags > env vars > config file > struct-tag defaults.
+//
+// The Database field uses DatabaseOptions, the discriminator-based
+// shape (driver: sqlite|mysql) recommended for new projects. Switching
+// drivers later is a yaml change with no Go code edit required.
+type Config struct {
+	HTTP     config.HTTPOptions     `mapstructure:"http"`
+	Log      config.SlogOptions     `mapstructure:"log"`
+	Database config.DatabaseOptions `mapstructure:"database"`
+	Account  config.AccountOptions  `mapstructure:"account"`
+}

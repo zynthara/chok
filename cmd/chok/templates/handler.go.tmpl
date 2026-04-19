@@ -1,0 +1,32 @@
+package handler
+
+import (
+	"context"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/zynthara/chok/auth"
+	"github.com/zynthara/chok/handler"
+)
+
+// RegisterRoutes registers business API routes.
+func RegisterRoutes(rg *gin.RouterGroup) {
+	rg.GET("/me", handler.HandleRequest(me))
+}
+
+// --- Handlers ---
+
+type meRequest struct{}
+
+type meResponse struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func me(ctx context.Context, _ *meRequest) (*meResponse, error) {
+	p, _ := auth.PrincipalFrom(ctx)
+	return &meResponse{
+		ID:   p.Subject,
+		Name: p.Name,
+	}, nil
+}

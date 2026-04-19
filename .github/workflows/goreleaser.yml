@@ -1,0 +1,43 @@
+# Tag-driven release pipeline.
+#
+# Fires when release-please merges a release PR (or when someone hand-
+# pushes `git tag vX.Y.Z && git push --tags`). goreleaser then:
+#   - cross-compiles chok for linux/darwin/windows × amd64/arm64
+#   - packages each as tar.gz (zip on Windows) with LICENSE + README + CHANGELOG
+#   - emits a checksums.txt
+#   - publishes a GitHub Release with the artefacts attached
+
+name: goreleaser
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # needed to publish releases
+  packages: write   # reserved for future container images
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history → goreleaser changelog generation
+
+      - name: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

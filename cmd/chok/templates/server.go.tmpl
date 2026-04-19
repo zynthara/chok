@@ -1,0 +1,38 @@
+package app
+
+import (
+	"context"
+
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/apierr"
+	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/version"
+
+	"{{.Module}}/internal/handler"
+)
+
+var cfg Config
+
+// NewApp creates the application instance.
+//
+// The framework auto-registers Components from the Config struct:
+//   - config.HTTPOptions     → HTTPComponent (gin + default middleware)
+//   - config.DatabaseOptions → DBComponent (driver picked from yaml)
+//   - config.AccountOptions  → AccountComponent ("/auth", if enabled)
+//   - (always)               → HealthComponent ("/healthz") + MetricsComponent ("/metrics")
+//
+// Add chok.WithTables(db.Table(&MyModel{}, ...)) once you have models
+// to migrate. WithRoutes wires business routes after all Components
+// have Init'd.
+func NewApp() *chok.App {
+	apierr.RegisterMapper(store.MapError)
+	return chok.New("{{.Name}}",
+		chok.WithVersion(version.Get()),
+		chok.WithConfig(&cfg),
+		chok.WithRoutes(func(_ context.Context, a *chok.App) error {
+			api := a.API("/api/v1", a.AuthMiddleware())
+			handler.RegisterRoutes(api)
+			return nil
+		}),
+	)
+}

@@ -1,0 +1,9 @@
+module {{.Module}}
+
+go 1.26.1
+
+require github.com/zynthara/chok {{.ChokVersion}}
+{{- if .ChokReplace}}
+
+replace github.com/zynthara/chok => {{.ChokReplace}}
+{{- end}}

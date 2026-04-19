@@ -1,0 +1,92 @@
+# goreleaser.yaml
+#
+# Triggered by `git push --tags` from the release-please workflow.
+# Builds chok CLI for the common host platforms, packages them, and
+# creates a GitHub Release with the artefacts attached.
+#
+# Local dry-run:    make snapshot
+# CI run:           .github/workflows/goreleaser.yml on tag push
+
+version: 2
+
+project_name: chok
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: chok
+    main: ./cmd/chok
+    binary: chok
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/zynthara/chok/version.version={{.Version}}
+      - -X github.com/zynthara/chok/version.gitHash={{.ShortCommit}}
+      - -X github.com/zynthara/chok/version.buildTime={{.Date}}
+
+archives:
+  - id: chok
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  # release-please owns CHANGELOG.md curation; the GitHub Release notes
+  # use the same body so we don't double-author the human-facing log.
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: zynthara
+    name: chok
+  draft: false
+  prerelease: auto
+  mode: replace
+  header: |
+    ## chok {{ .Tag }}
+
+    Built {{ .Date }} from commit {{ .ShortCommit }}.
+
+    Install via Go toolchain:
+
+    ```
+    go install github.com/zynthara/chok/cmd/chok@{{ .Tag }}
+    ```
+
+    Or download the binary for your platform below.
+
+# Future: brews / scoops / nfpms blocks once package channels exist.

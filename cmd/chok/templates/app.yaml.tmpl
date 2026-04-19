@@ -1,0 +1,30 @@
+http:
+  addr: ":8080"
+
+log:
+  level: info
+  format: json
+  output:
+    - stdout
+
+# Discriminator-based database config. Switch to MySQL by setting
+# `driver: mysql` and filling the `mysql:` block; chok ignores the
+# unselected branch.
+database:
+  driver: sqlite
+  sqlite:
+    path: "{{.Name}}.db"
+  # mysql:
+  #   host: "127.0.0.1"
+  #   port: 3306
+  #   username: "{{.Name}}"
+  #   password: ""
+  #   database: "{{.Name}}"
+
+account:
+  enabled: true
+  # Generate a real key before running in any non-throwaway environment:
+  #   openssl rand -base64 32
+  # Override at runtime via {{.NameUpper}}_ACCOUNT_SIGNING_KEY rather than
+  # committing the value.
+  signing_key: "CHANGE-ME-generate-with-openssl-rand-base64-32"

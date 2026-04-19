@@ -1,0 +1,29 @@
+# release-please-action keeps a long-lived "release PR" open against
+# main. Each push to main re-runs the action: it parses the new
+# conventional-commit messages (fix:, feat:, chore:, etc.) and updates
+# the open PR with the next semver bump and an auto-generated
+# CHANGELOG entry. Merging the PR creates a git tag, which then
+# triggers the goreleaser workflow.
+#
+# Source of truth: .release-please-config.json + .release-please-manifest.json
+# at the repository root.
+
+name: release-please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json

@@ -1,0 +1,81 @@
+.DEFAULT_GOAL := all
+
+# ==============================================================================
+# Variables
+
+ROOT_DIR := $(shell pwd)
+OUTPUT_DIR := $(ROOT_DIR)/_output
+BIN_DIR := $(OUTPUT_DIR)/bin
+
+APP := {{.Name}}
+CMD_DIR := ./cmd/$(APP)
+
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+GIT_HASH ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+GO := go
+GOFLAGS := -trimpath
+LDFLAGS := -s -w \
+	-X github.com/zynthara/chok/version.version=$(VERSION) \
+	-X github.com/zynthara/chok/version.gitHash=$(GIT_HASH) \
+	-X github.com/zynthara/chok/version.buildTime=$(BUILD_TIME)
+
+# ==============================================================================
+# Targets
+
+all: tidy lint test build ## Default: tidy + lint + test + build
+
+##@ Build
+
+.PHONY: build
+build: ## Build the binary into _output/bin/
+	@echo "==> Building $(APP)..."
+	@mkdir -p $(BIN_DIR)
+	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(APP) $(CMD_DIR)
+	@echo "==> Binary: $(BIN_DIR)/$(APP)"
+
+.PHONY: run
+run: build ## Build and run
+	$(BIN_DIR)/$(APP)
+
+##@ Test
+
+.PHONY: test
+test: ## Run unit tests
+	$(GO) test -race -count=1 ./...
+
+.PHONY: cover
+cover: ## Run tests and emit a coverage report
+	$(GO) test -race -coverprofile=$(OUTPUT_DIR)/coverage.out ./...
+	$(GO) tool cover -html=$(OUTPUT_DIR)/coverage.out -o $(OUTPUT_DIR)/coverage.html
+	@echo "==> Coverage report: $(OUTPUT_DIR)/coverage.html"
+
+##@ Lint & Format
+
+.PHONY: lint
+lint: ## Run golangci-lint (must be installed)
+	golangci-lint run ./...
+
+.PHONY: tidy
+tidy: ## Tidy module dependencies
+	$(GO) mod tidy
+
+.PHONY: format
+format: ## Format code (gofmt + go mod tidy)
+	gofmt -s -w .
+	$(GO) mod tidy
+
+##@ Clean
+
+.PHONY: clean
+clean: ## Remove build outputs
+	@echo "==> Cleaning..."
+	@rm -rf $(OUTPUT_DIR)
+	@rm -f $(APP).db
+
+##@ Help
+
+.PHONY: help
+help: ## Show this help
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
