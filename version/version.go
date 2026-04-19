@@ -63,10 +63,21 @@ func Get() Info {
 		return info
 	}
 
+	// `version != "dev"` means ldflags injected an explicit, curated
+	// version — typical of release builds and `make build`. Once that
+	// happens we trust the build pipeline's claim about the artefact's
+	// identity and ignore vcs.modified, which can flip to true for
+	// reasons that have nothing to do with the source (CI runners
+	// touching go.sum, GitHub-managed merge commits, ephemeral build
+	// caches). Dev builds (`go test`, `go run`, `go install ...@latest`)
+	// keep the live vcs.modified flag because there it really does
+	// correlate with whether the working tree was clean.
+	ldflagsInjected := info.Version != "dev"
+
 	// main.Version is set when the binary was built via
 	// `go install path@v1.2.3` — surface it when ldflags didn't
 	// provide an explicit override.
-	if info.Version == "dev" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+	if !ldflagsInjected && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		info.Version = bi.Main.Version
 	}
 
@@ -84,7 +95,7 @@ func Get() Info {
 				info.BuildTime = s.Value
 			}
 		case "vcs.modified":
-			if s.Value == "true" {
+			if s.Value == "true" && !ldflagsInjected {
 				info.Modified = true
 			}
 		}

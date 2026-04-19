@@ -2,8 +2,15 @@
 # main. Each push to main re-runs the action: it parses the new
 # conventional-commit messages (fix:, feat:, chore:, etc.) and updates
 # the open PR with the next semver bump and an auto-generated
-# CHANGELOG entry. Merging the PR creates a git tag, which then
-# triggers the goreleaser workflow.
+# CHANGELOG entry. Merging the PR creates a git tag.
+#
+# This workflow ALSO inlines goreleaser, conditional on the action's
+# `release_created` output. The reason: GitHub's anti-loop policy
+# means tags created by GITHUB_TOKEN do not trigger other workflows,
+# so a separate `on: push: tags: [v*]` job would never see release-
+# please's tag and the release would publish without artefacts.
+# Running goreleaser inside the same workflow side-steps that
+# limitation without needing a personal-access-token detour.
 #
 # Source of truth: .release-please-config.json + .release-please-manifest.json
 # at the repository root.
@@ -24,6 +31,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           config-file: .release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Everything below runs only when release-please actually cut a
+      # release this run (i.e. a release PR was just merged).
+
+      - if: ${{ steps.release.outputs.release_created }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - if: ${{ steps.release.outputs.release_created }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - if: ${{ steps.release.outputs.release_created }}
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

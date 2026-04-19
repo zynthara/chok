@@ -1,11 +1,14 @@
-# Tag-driven release pipeline.
+# Tag-driven goreleaser fallback.
 #
-# Fires when release-please merges a release PR (or when someone hand-
-# pushes `git tag vX.Y.Z && git push --tags`). goreleaser then:
-#   - cross-compiles chok for linux/darwin/windows × amd64/arm64
-#   - packages each as tar.gz (zip on Windows) with LICENSE + README + CHANGELOG
-#   - emits a checksums.txt
-#   - publishes a GitHub Release with the artefacts attached
+# Normal release flow: release-please.yml inlines goreleaser, so the
+# automatic v* tag it creates triggers a build inside the same job —
+# bypassing GitHub's anti-loop policy that suppresses cross-workflow
+# triggers from GITHUB_TOKEN-created tags.
+#
+# This separate workflow stays as a manual fallback for ad-hoc tag
+# pushes (`git tag vX.Y.Z && git push --tags` from a developer
+# machine, or rerunning a release tag from the GitHub UI). goreleaser
+# is idempotent over an existing release thanks to mode: replace.
 
 name: goreleaser
 
