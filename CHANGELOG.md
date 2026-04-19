@@ -10,6 +10,13 @@ This file is maintained automatically by
 release-PR workflow is in motion. For design-level release notes (the
 *why* behind each version), see [`docs/changelog.md`](docs/changelog.md).
 
+## [0.1.2](https://github.com/zynthara/chok/compare/v0.1.1...v0.1.2) (2026-04-19)
+
+
+### Bug Fixes
+
+* **release:** ignore vcs.modified for ldflags-injected builds + inline goreleaser ([971bdcb](https://github.com/zynthara/chok/commit/971bdcb49e455b0152616689856cd5e5f5f9c4ec))
+
 ## [0.1.1](https://github.com/zynthara/chok/compare/v0.1.0...v0.1.1) (2026-04-19)
 
 
