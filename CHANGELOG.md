@@ -10,6 +10,13 @@ This file is maintained automatically by
 release-PR workflow is in motion. For design-level release notes (the
 *why* behind each version), see [`docs/changelog.md`](docs/changelog.md).
 
+## [0.1.1](https://github.com/zynthara/chok/compare/v0.1.0...v0.1.1) (2026-04-19)
+
+
+### Bug Fixes
+
+* **release:** drop redundant go mod tidy from goreleaser before-hooks ([7351568](https://github.com/zynthara/chok/commit/7351568a38e651caf2cceb8564cd604d8cc4b739))
+
 ## [0.1.0] - 2026-04-19
 
 ### Added
