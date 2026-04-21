@@ -737,16 +737,29 @@ func (a *App) registerBuiltinLogger() {
 // memory/file cache before the registry started, preventing Redis from
 // entering the chain — a design bug documented in changelog round 12.
 
-// discoverOne scans the top-level fields of a config struct for fields of
-// type T. Returns a pointer to the single match, or nil if not found.
-// Returns an error if more than one top-level field of type T exists —
-// this catches misconfigured config structs that embed the same Options
-// type in multiple places.
+// discoverOne scans a config struct tree for fields of type T. Returns a
+// pointer to the single match, or nil if not found. Returns an error when
+// more than one field of type T exists anywhere in the tree — this catches
+// misconfigured config structs that embed the same Options type in
+// multiple places.
 //
-// Only top-level fields are scanned (not nested structs). This prevents
-// surprising auto-registration when a nested struct coincidentally contains
-// an Options type. Users who need nested config must register Components
-// explicitly via WithSetup.
+// Scanning rules:
+//   - Nested value-type structs are descended into, so users can organise
+//     their Config naturally (e.g. `Config.Cache.Memory`, `Config.Cache.File`).
+//   - Pointer-typed fields are skipped entirely (neither matched nor
+//     descended). This preserves the no-pointer-Options contract enforced
+//     by validateNoPointerOptions — pointer Options break the reload
+//     invariant because Reload's Set() copies values in-place and a
+//     cached *PointerField would still hold the old object.
+//   - Once a field matches *T, the walker does NOT descend into its own
+//     fields — prevents double-counting if T happens to embed another T.
+//   - config.SelfValidating types (e.g. DatabaseOptions with its mutually
+//     exclusive SQLite/MySQL branches) are treated as opaque: the walker
+//     neither matches them nor descends. Symmetric with validateFields,
+//     which already stops recursing at SelfValidating so unselected
+//     branches are not evaluated.
+//   - Value-semantic structs like time.Time are skipped via isAtomicStruct
+//     to avoid fruitless recursion into standard-library primitives.
 func discoverOne[T any](cfg any) (*T, error) {
 	rv := reflect.ValueOf(cfg)
 	if rv.Kind() == reflect.Ptr {
@@ -760,24 +773,7 @@ func discoverOne[T any](cfg any) (*T, error) {
 	}
 
 	var matches []*T
-	for i := range rv.NumField() {
-		fv := rv.Field(i)
-		ft := rv.Type().Field(i)
-		if !ft.IsExported() {
-			continue
-		}
-		if fv.Kind() == reflect.Ptr {
-			if fv.IsNil() {
-				continue
-			}
-			fv = fv.Elem()
-		}
-		if fv.CanAddr() {
-			if t, ok := fv.Addr().Interface().(*T); ok {
-				matches = append(matches, t)
-			}
-		}
-	}
+	walkForDiscover(rv, &matches)
 
 	switch len(matches) {
 	case 0:
@@ -786,8 +782,56 @@ func discoverOne[T any](cfg any) (*T, error) {
 		return matches[0], nil
 	default:
 		var zero T
-		return nil, fmt.Errorf("found %d top-level fields of type %T, expected at most 1", len(matches), zero)
+		return nil, fmt.Errorf("found %d fields of type %T in config tree, expected at most 1", len(matches), zero)
 	}
+}
+
+// walkForDiscover recursively collects every *T reachable from rv under
+// the rules documented on discoverOne. rv must already be a struct Value.
+func walkForDiscover[T any](rv reflect.Value, out *[]*T) {
+	t := rv.Type()
+	for i := range rv.NumField() {
+		fv := rv.Field(i)
+		ft := t.Field(i)
+		if !ft.IsExported() {
+			continue
+		}
+		// Pointer fields: skip entirely. See doc on discoverOne.
+		if fv.Kind() == reflect.Ptr {
+			continue
+		}
+		if fv.CanAddr() {
+			if tv, ok := fv.Addr().Interface().(*T); ok {
+				*out = append(*out, tv)
+				continue
+			}
+		}
+		if fv.Kind() != reflect.Struct {
+			continue
+		}
+		if isAtomicStruct(fv.Type()) {
+			continue
+		}
+		// SelfValidating types own their own internal structure; the
+		// framework must not assume anything about their fields.
+		if fv.CanAddr() {
+			if _, ok := fv.Addr().Interface().(config.SelfValidating); ok {
+				continue
+			}
+		}
+		walkForDiscover(fv, out)
+	}
+}
+
+// isAtomicStruct returns true for value-semantic struct types that must
+// never be descended into by discoverOne. time.Duration is int64, not a
+// struct, so it doesn't need an entry here — only struct-kind values do.
+func isAtomicStruct(t reflect.Type) bool {
+	switch t {
+	case reflect.TypeFor[time.Time]():
+		return true
+	}
+	return false
 }
 
 // logShutdownBudget outputs the shutdown time allocation so operators can

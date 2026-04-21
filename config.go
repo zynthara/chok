@@ -331,12 +331,18 @@ var knownOptionsTypes = []reflect.Type{
 	reflect.TypeFor[config.DebugOptions](),
 }
 
-// validateNoPointerOptions checks that no top-level field in the config
-// struct is a pointer to a known Options type. Pointer fields break the
-// immutable reload contract because reflect.Value.Set replaces the
-// struct content in-place; a resolver caching a *PointerField pointer
-// would still hold the old object after reload. Value-embedded fields
-// are safe because their address is stable within the parent struct.
+// validateNoPointerOptions checks that no field in the config tree is a
+// pointer to a known Options type. Pointer fields break the immutable
+// reload contract because reflect.Value.Set replaces the struct content
+// in-place; a resolver caching a *PointerField pointer would still hold
+// the old object after reload. Value-embedded fields are safe because
+// their address is stable within the parent struct.
+//
+// Since discoverOne now walks nested structs to find Options types, this
+// check must also walk the tree — otherwise a user could bury
+// `*CacheMemoryOptions` inside a sub-struct and silently bypass the
+// invariant. SelfValidating types are opaque to the framework and are
+// not descended into, symmetric with discoverOne and validateFields.
 func validateNoPointerOptions(rv reflect.Value) error {
 	if rv.Kind() == reflect.Ptr {
 		if rv.IsNil() {
@@ -347,21 +353,41 @@ func validateNoPointerOptions(rv reflect.Value) error {
 	if rv.Kind() != reflect.Struct {
 		return nil
 	}
+	return walkForPointerOptions(rv, rv.Type().Name())
+}
+
+func walkForPointerOptions(rv reflect.Value, pathPrefix string) error {
 	t := rv.Type()
 	for i := range t.NumField() {
+		fv := rv.Field(i)
 		ft := t.Field(i)
 		if !ft.IsExported() {
 			continue
 		}
-		if ft.Type.Kind() != reflect.Ptr {
+		if ft.Type.Kind() == reflect.Ptr {
+			elemType := ft.Type.Elem()
+			for _, known := range knownOptionsTypes {
+				if elemType == known {
+					return fmt.Errorf("config field %s.%s must be value-embedded (not a pointer) for reload safety; use %s instead of *%s",
+						pathPrefix, ft.Name, known.Name(), known.Name())
+				}
+			}
 			continue
 		}
-		elemType := ft.Type.Elem()
-		for _, known := range knownOptionsTypes {
-			if elemType == known {
-				return fmt.Errorf("config field %s.%s must be value-embedded (not a pointer) for reload safety; use %s instead of *%s",
-					t.Name(), ft.Name, known.Name(), known.Name())
+		if ft.Type.Kind() != reflect.Struct {
+			continue
+		}
+		if isAtomicStruct(ft.Type) {
+			continue
+		}
+		if fv.CanAddr() {
+			if _, ok := fv.Addr().Interface().(config.SelfValidating); ok {
+				continue
 			}
+		}
+		childPrefix := pathPrefix + "." + ft.Name
+		if err := walkForPointerOptions(fv, childPrefix); err != nil {
+			return err
 		}
 	}
 	return nil

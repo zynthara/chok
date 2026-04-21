@@ -756,6 +756,36 @@ Component 零耦合具体 config schema。
 **规则**：有 `config.Options` 类型的组件走 auto-register；无 Options
 的组件必须在 `WithSetup` 中显式 `Register`。
 
+**Config 组织**：auto-register 的字段扫描（`discoverOne[T]`）会遍历整棵
+Config 树，因此扁平和嵌套两种写法都受支持。用户可以按业务直觉把相关
+Options 组织在子结构里：
+
+```go
+// 扁平（可用）
+type Config struct {
+    HTTP        config.HTTPOptions
+    CacheMemory config.CacheMemoryOptions
+    CacheFile   config.CacheFileOptions
+}
+
+// 嵌套（也可用，yaml 可写 cache: { memory, file }）
+type Config struct {
+    HTTP  config.HTTPOptions
+    Cache struct {
+        Memory config.CacheMemoryOptions `mapstructure:"memory"`
+        File   config.CacheFileOptions   `mapstructure:"file"`
+    } `mapstructure:"cache"`
+}
+```
+
+扫描约束：
+- 全树中同一 Options 类型**只允许出现 1 次**，否则启动失败（避免歧义）
+- 指针字段（`*Options`）既不匹配也不下钻——违反 reload 的 value 语义
+  契约，由 `validateNoPointerOptions` 在顶层同步 fail-fast
+- `config.SelfValidating` 类型（如 `DatabaseOptions` 这种
+  discriminator）为不透明边界，扫描不会下钻，这样内嵌的
+  `SQLiteOptions` / `MySQLOptions` 不会被意外匹配
+
 ### 9.1 Resolver 模式示例
 
 ```go
