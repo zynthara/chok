@@ -144,6 +144,16 @@ func (m *Module) Close() error {
 	return nil
 }
 
+// Store returns the underlying User store for callers that need to do
+// admin-side user management (list / get / disable / role change /
+// admin-reset password). The exposed store applies the same query and
+// update field allow-lists configured in New, so callers cannot bypass
+// the schema restriction by writing through this handle.
+//
+// Intended consumers: an application's own admin handler. Casual access
+// from request handlers should still go through Module's auth flows.
+func (m *Module) Store() *store.Store[User] { return m.store }
+
 // LoginRateLimitEnabled reports whether per-email login throttling is
 // active. Useful for diagnostics, /healthz reporting, and tests that
 // need to confirm a builder propagated the LoginRateWindow /
@@ -177,7 +187,8 @@ func (m *Module) PrincipalResolver() middleware.PrincipalResolver {
 }
 
 // ActiveCheck returns a gin middleware that verifies the authenticated user
-// still exists and is active by hitting the database on every request.
+// still exists, is active, and the JWT's password version matches the
+// current one in the DB. It hits the database on every request.
 //
 // PrincipalResolver is stateless by design (no DB per request). Apply
 // ActiveCheck to routes where real-time revocation matters:
@@ -185,6 +196,11 @@ func (m *Module) PrincipalResolver() middleware.PrincipalResolver {
 //	api := srv.Group("/api/v1")
 //	api.Use(middleware.Authn(acct.TokenParser(), acct.PrincipalResolver()))
 //	api.Use(acct.ActiveCheck())
+//
+// The pv check rejects tokens whose roles or password are stale: any
+// admin operation that wants to invalidate existing tokens (disable,
+// role change, password reset) bumps PasswordVersion in the DB, and the
+// next request from that token's holder will be 401'd here.
 func (m *Module) ActiveCheck() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		p, ok := auth.PrincipalFrom(c.Request.Context())
@@ -205,6 +221,14 @@ func (m *Module) ActiveCheck() gin.HandlerFunc {
 		}
 		if !user.Active {
 			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated.WithMessage("account is disabled"))
+			c.Abort()
+			return
+		}
+		// pv mismatch ⇒ 用户的 roles / password 在 token 签发后被改过，
+		// 老 token 不应再被接受（让 client 重新登录拿新 claims）。
+		// JSON unmarshal 把数字转成 float64，所以这里类型断言走 float64。
+		if pv, ok := p.Claims["pv"].(float64); !ok || int(pv) != user.PasswordVersion {
+			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated.WithMessage("token invalidated, please re-login"))
 			c.Abort()
 			return
 		}
