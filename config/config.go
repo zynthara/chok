@@ -371,6 +371,10 @@ type AccountOptions struct {
 	// window=15m, limit=10.
 	LoginRateWindow time.Duration `mapstructure:"login_rate_window"`
 	LoginRateLimit  int           `mapstructure:"login_rate_limit"`
+	// DisableRegister 关闭 POST /register 公开注册端点。true 时仍支持 login、
+	// change-password、reset-password 等已认证路径；公开注册路径不注册，
+	// 直接访问返回 404。适合"内部使用 / 仅 admin 创建账号"的场景。
+	DisableRegister bool `mapstructure:"disable_register" default:"false"`
 }
 
 func (o *AccountOptions) Validate() error {

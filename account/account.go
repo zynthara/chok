@@ -31,12 +31,13 @@ type Sender interface {
 
 // Module manages user accounts.
 type Module struct {
-	jwt      *jwt.Manager
-	resetJWT *jwt.Manager // short-lived tokens for password reset
-	store    *store.Store[User]
-	sender   Sender // nil → forgot/reset-password routes are not registered
-	logger   log.Logger
-	limiter  *loginLimiter // nil when rate limiting is disabled
+	jwt             *jwt.Manager
+	resetJWT        *jwt.Manager // short-lived tokens for password reset
+	store           *store.Store[User]
+	sender          Sender // nil → forgot/reset-password routes are not registered
+	logger          log.Logger
+	limiter         *loginLimiter // nil when rate limiting is disabled
+	disableRegister bool          // true → RegisterRoutes skips POST /register
 }
 
 // Option configures a Module.
@@ -49,6 +50,7 @@ type moduleConfig struct {
 	sender          Sender
 	loginRateWindow time.Duration // 0 = disabled
 	loginRateLimit  int           // max attempts per window
+	disableRegister bool
 }
 
 // WithSigningKey sets the JWT signing key (required, >= 32 bytes).
@@ -81,6 +83,15 @@ func WithLoginRateLimit(window time.Duration, maxAttempts int) Option {
 		c.loginRateWindow = window
 		c.loginRateLimit = maxAttempts
 	}
+}
+
+// WithoutPublicRegister disables the POST /register endpoint. Login and
+// authenticated endpoints still work; only the anonymous self-register
+// route is skipped. Use this in deployments where admins provision
+// accounts (via account.Module.Store().Create) instead of letting
+// visitors register themselves.
+func WithoutPublicRegister() Option {
+	return func(c *moduleConfig) { c.disableRegister = true }
 }
 
 // New creates an account module.
@@ -117,11 +128,12 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 	)
 
 	m := &Module{
-		jwt:      jwtMgr,
-		resetJWT: resetMgr,
-		store:    s,
-		sender:   cfg.sender,
-		logger:   logger,
+		jwt:             jwtMgr,
+		resetJWT:        resetMgr,
+		store:           s,
+		sender:          cfg.sender,
+		logger:          logger,
+		disableRegister: cfg.disableRegister,
 	}
 	if cfg.loginRateWindow > 0 && cfg.loginRateLimit > 0 {
 		m.limiter = newLoginLimiter(cfg.loginRateWindow, cfg.loginRateLimit)
@@ -293,7 +305,7 @@ func Setup(gdb *gorm.DB, logger log.Logger, opts *config.AccountOptions, r Route
 //
 // Public routes (no auth required):
 //
-//	POST /register
+//	POST /register          (skipped when WithoutPublicRegister is set)
 //	POST /login
 //	POST /forgot-password   (only if WithSender is configured)
 //	POST /reset-password    (only if WithSender is configured)
@@ -303,7 +315,9 @@ func Setup(gdb *gorm.DB, logger log.Logger, opts *config.AccountOptions, r Route
 //	POST /refresh-token
 //	PUT  /change-password
 func (m *Module) RegisterRoutes(r RouteGroup) {
-	r.POST("/register", handler.HandleRequest(m.register, handler.WithSuccessCode(201)))
+	if !m.disableRegister {
+		r.POST("/register", handler.HandleRequest(m.register, handler.WithSuccessCode(201)))
+	}
 	r.POST("/login", handler.HandleRequest(m.login))
 
 	if m.sender != nil {

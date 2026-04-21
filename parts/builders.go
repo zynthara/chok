@@ -54,6 +54,9 @@ func DefaultAccountBuilder(opts *config.AccountOptions) AccountBuilder {
 		if opts.LoginRateWindow > 0 && opts.LoginRateLimit > 0 {
 			aopts = append(aopts, account.WithLoginRateLimit(opts.LoginRateWindow, opts.LoginRateLimit))
 		}
+		if opts.DisableRegister {
+			aopts = append(aopts, account.WithoutPublicRegister())
+		}
 		return account.New(gdb, k.Logger(), aopts...)
 	}
 }
