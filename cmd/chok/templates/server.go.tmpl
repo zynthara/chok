@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/zynthara/chok"
-	"github.com/zynthara/chok/apierr"
 	"github.com/zynthara/chok/store"
 	"github.com/zynthara/chok/version"
 
@@ -25,10 +24,10 @@ var cfg Config
 // to migrate. WithRoutes wires business routes after all Components
 // have Init'd.
 func NewApp() *chok.App {
-	apierr.RegisterMapper(store.MapError)
 	return chok.New("{{.Name}}",
 		chok.WithVersion(version.Get()),
 		chok.WithConfig(&cfg),
+		chok.WithErrorMapper(store.MapError),
 		chok.WithRoutes(func(_ context.Context, a *chok.App) error {
 			api := a.API("/api/v1", a.AuthMiddleware())
 			handler.RegisterRoutes(api)

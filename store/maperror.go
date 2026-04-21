@@ -15,9 +15,9 @@ import (
 // they are server-side bugs and should surface as 500, not mislead the
 // client with a 400.
 //
-// Usage: register in the application's Setup callback:
+// Usage: register per-App via chok.WithErrorMapper:
 //
-//	apierr.RegisterMapper(store.MapError)
+//	chok.New("app", chok.WithErrorMapper(store.MapError), ...)
 func MapError(err error) *apierr.Error {
 	switch {
 	case errors.Is(err, ErrNotFound):

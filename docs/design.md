@@ -1082,9 +1082,9 @@ swagger:
 var cfg Config
 
 func NewApp() *chok.App {
-    apierr.RegisterMapper(chokstore.MapError)
     return chok.New("blog",
         chok.WithConfig(&cfg),
+        chok.WithErrorMapper(chokstore.MapError),
         chok.WithTables(
             db.Table(&model.Post{},
                 db.SoftUnique("uk_post_title_owner", "title", "owner_id")),

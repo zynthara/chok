@@ -12,7 +12,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -21,7 +20,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/zynthara/chok"
-	"github.com/zynthara/chok/apierr"
 	"github.com/zynthara/chok/component"
 	"github.com/zynthara/chok/config"
 	"github.com/zynthara/chok/db"
@@ -51,15 +49,13 @@ func blogRoutes() func(context.Context, *chok.App) error {
 	}
 }
 
-var mapOnce sync.Once
-
 // NewApp creates the blog application. The framework auto-registers
 // every Component from the Config struct fields — all the user provides
 // is table definitions and business routes.
 func NewApp() *chok.App {
-	mapOnce.Do(func() { apierr.RegisterMapper(chokstore.MapError) })
 	return chok.New("blog",
 		chok.WithConfig(&cfg),
+		chok.WithErrorMapper(chokstore.MapError),
 		chok.WithTables(blogTables...),
 		chok.WithRoutes(blogRoutes()),
 	)
@@ -69,8 +65,6 @@ func NewApp() *chok.App {
 // tests. Uses explicit Component registration because the test DB
 // connection must outlive the App lifecycle.
 func NewTestRouter() *gin.Engine {
-	mapOnce.Do(func() { apierr.RegisterMapper(chokstore.MapError) })
-
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
 	if err != nil {
 		panic(err)
@@ -92,6 +86,7 @@ func NewTestRouter() *gin.Engine {
 	).WithoutAccessLog()
 
 	a := chok.New("blog-test",
+		chok.WithErrorMapper(chokstore.MapError),
 		chok.WithSetup(func(ctx context.Context, app *chok.App) error {
 			app.Register(httpComp)
 			app.Register(parts.NewDBComponent(
