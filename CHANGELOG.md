@@ -10,6 +10,20 @@ This file is maintained automatically by
 release-PR workflow is in motion. For design-level release notes (the
 *why* behind each version), see [`docs/changelog.md`](docs/changelog.md).
 
+## [0.1.3](https://github.com/zynthara/chok/compare/v0.1.2...v0.1.3) (2026-04-21)
+
+
+### Features
+
+* **account:** expose User Store + ActiveCheck verifies pv ([0d40a96](https://github.com/zynthara/chok/commit/0d40a96e4ea3e377d0a1a4941417f0059a7e7109))
+* **account:** 可选关闭公开注册 ([93c9ab7](https://github.com/zynthara/chok/commit/93c9ab7cb87ff3c61a37a1056705a6410822c3e8))
+* **config:** auto-register discovers Options in nested structs ([be9f979](https://github.com/zynthara/chok/commit/be9f979b2ecf7e407bb1a6cd40faf29240c10e72))
+
+
+### Code Refactoring
+
+* **apierr:** use per-App WithErrorMapper in scaffold and example ([77c71de](https://github.com/zynthara/chok/commit/77c71de3268c37aa9b96f2786e46946eb7f88108))
+
 ## [0.1.2](https://github.com/zynthara/chok/compare/v0.1.1...v0.1.2) (2026-04-19)
 
 
