@@ -49,11 +49,12 @@ examples/**/cache/
 # macOS Finder droppings
 .DS_Store
 
-# Local-only planning / scratch space. Anything inside .private/ is
-# considered intentionally outside the public history — internal
-# design drafts, agent SPECs, ad-hoc notes. Use docs/ for anything
-# meant to ship to readers.
+# Local-only planning / scratch space. Anything inside .private/ or
+# .pr/ is considered intentionally outside the public history —
+# internal design drafts, PR preparation notes, agent SPECs, ad-hoc
+# notes. Use docs/ for anything meant to ship to readers.
 .private/
+.pr/
 
 # Claude Code per-repo session state. Never goes upstream.
 .claude/
