@@ -45,6 +45,14 @@ type Sender interface {
 //     receive store.ErrUnknownUpdateField at request time, instead of being
 //     able to silently bypass the PV-bump contract. Roles / disable / password
 //     changes MUST flow through the corresponding Module methods.
+//
+//     The protection is store-API-level only — Module.Store().DB() returns
+//     the underlying *gorm.DB as a documented escape hatch, so a caller
+//     willing to bypass the store layer can still write any column. This
+//     matches CLAUDE.md's "DON'T bypass the store with raw *gorm.DB" rule:
+//     the framework rejects accidental writes through the public Store API,
+//     but does not (and cannot) prevent an engineer who deliberately
+//     reaches for raw gorm. Treat publicStore as a guardrail, not a wall.
 type Module struct {
 	jwt             *jwt.Manager
 	resetJWT        *jwt.Manager // short-lived tokens for password reset
@@ -148,8 +156,10 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 	)
 	// publicStore is what Module.Store() exposes. UpdateFields drops
 	// password_hash / password_version / roles / active / email_verified —
-	// callers attempting to write them get store.ErrUnknownUpdateField,
-	// which is the framework-level enforcement of the PV-bump contract.
+	// callers attempting to write them through the store API get
+	// store.ErrUnknownUpdateField. This is store-API-level enforcement;
+	// raw gorm via Module.Store().DB() remains an escape hatch (see
+	// Module struct doc).
 	publicStore := store.New[User](gdb, logger,
 		store.WithQueryFields("id", "email", "name", "email_verified", "created_at"),
 		store.WithUpdateFields("name", "email"),
@@ -193,17 +203,23 @@ func (m *Module) Close() error {
 // whitelist. Attempting to write them through this handle returns
 // store.ErrUnknownUpdateField. The PV-bump invariant (every roles or
 // active change must invalidate existing tokens) is therefore not
-// bypassable through the public store; callers MUST use:
+// bypassable through the store API; callers MUST use:
 //
-//   - Module.UpdateUserRoles      to change Roles (bumps PV in tx)
-//   - Module.SetUserActive        to enable/disable an account (bumps PV)
-//   - Module.BumpPasswordVersion  to force-revoke all tokens
-//   - Module.MarkEmailVerified    to flip EmailVerified
+//   - Module.UpdateUserRoles      to change Roles (atomic UPDATE, bumps PV)
+//   - Module.SetUserActive        to enable/disable an account (atomic UPDATE, bumps PV)
+//   - Module.BumpPasswordVersion  to force-revoke all tokens (atomic UPDATE)
+//   - Module.MarkEmailVerified    to flip EmailVerified (no PV bump)
 //   - the /change-password and /reset-password routes for password writes
 //
 // Intended consumers: application admin handlers (user listing, profile
 // edits) and any read-side aggregation. Casual access from request
 // handlers should still go through Module's auth flows.
+//
+// Caveat: the returned *store.Store exposes DB() / ScopedDB() as
+// documented escape hatches. A caller that reaches for raw gorm bypasses
+// every restriction listed above. This is intentional — the framework
+// trusts engineers to honour CLAUDE.md's "DON'T bypass the store with
+// raw *gorm.DB" rule for sensitive writes.
 func (m *Module) Store() *store.Store[User] { return m.publicStore }
 
 // LoginRateLimitEnabled reports whether per-email login throttling is
@@ -392,7 +408,15 @@ func (m *Module) RegisterRoutes(r RouteGroup) {
 		r.POST("/reset-password", handler.HandleAction(m.resetPassword))
 	}
 
-	authed := r.Group("", middleware.Authn(m.jwt, m.PrincipalResolver()))
+	// Use AuthChain (Authn + ActiveCheck) rather than bare Authn so the
+	// PV-bump revocation invariant (SPEC §9) is enforced on Module's own
+	// authenticated routes too. Without ActiveCheck, an admin's
+	// BumpPasswordVersion / UpdateUserRoles call on a user does not
+	// invalidate that user's ability to hit /change-password until the
+	// token's natural expiry — if the user (or an attacker holding the
+	// token + password) racing the admin can rotate the password, they
+	// regain a fresh token and the revocation is defeated.
+	authed := r.Group("", m.AuthChain()...)
 	authed.POST("/refresh-token", handler.HandleRequest(m.refreshToken))
 	authed.PUT("/change-password", handler.HandleAction(m.changePassword))
 }
