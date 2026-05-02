@@ -90,7 +90,7 @@ func (m *Module) register(ctx context.Context, req *registerRequest) (*tokenResp
 		Name:         name,
 		Active:       true,
 	}
-	if err := m.store.Create(ctx, user); err != nil {
+	if err := m.userStore.Create(ctx, user); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
 			return nil, apierr.ErrConflict.WithMessage("email already registered")
 		}
@@ -123,7 +123,7 @@ func (m *Module) login(ctx context.Context, req *loginRequest) (*tokenResponse, 
 		}
 	}
 
-	user, err := m.store.Get(ctx, store.Where(where.WithFilter("email", req.Email)))
+	user, err := m.userStore.Get(ctx, store.Where(where.WithFilter("email", req.Email)))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Perform a dummy hash comparison to prevent timing-based
@@ -170,7 +170,7 @@ func (m *Module) refreshToken(ctx context.Context, _ *refreshTokenRequest) (*tok
 	}
 
 	// Verify user still exists and is active.
-	user, err := m.store.Get(ctx, store.RID(p.Subject))
+	user, err := m.userStore.Get(ctx, store.RID(p.Subject))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, apierr.ErrUnauthenticated.WithMessage("account not found")
@@ -197,7 +197,7 @@ func (m *Module) changePassword(ctx context.Context, req *changePasswordRequest)
 		return apierr.ErrUnauthenticated
 	}
 
-	user, err := m.store.Get(ctx, store.RID(p.Subject))
+	user, err := m.userStore.Get(ctx, store.RID(p.Subject))
 	if err != nil {
 		return err
 	}
@@ -223,13 +223,13 @@ func (m *Module) changePassword(ctx context.Context, req *changePasswordRequest)
 	}
 	user.PasswordHash = hash
 	user.PasswordVersion++
-	return m.store.Update(ctx, store.RID(user.RID), store.Fields(user, "password_hash", "password_version"))
+	return m.userStore.Update(ctx, store.RID(user.RID), store.Fields(user, "password_hash", "password_version"))
 }
 
 func (m *Module) forgotPassword(ctx context.Context, req *forgotPasswordRequest) error {
 	req.Email = normalizeEmail(req.Email)
 
-	user, err := m.store.Get(ctx, store.Where(where.WithFilter("email", req.Email)))
+	user, err := m.userStore.Get(ctx, store.Where(where.WithFilter("email", req.Email)))
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
@@ -285,7 +285,7 @@ func (m *Module) resetPassword(ctx context.Context, req *resetPasswordRequest) e
 		return apierr.ErrInvalidArgument.WithMessage("invalid or expired reset token")
 	}
 
-	user, err := m.store.Get(ctx, store.RID(subject))
+	user, err := m.userStore.Get(ctx, store.RID(subject))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return apierr.ErrInvalidArgument.WithMessage("invalid or expired reset token")
@@ -319,7 +319,7 @@ func (m *Module) resetPassword(ctx context.Context, req *resetPasswordRequest) e
 	}
 	user.PasswordHash = hash
 	user.PasswordVersion++
-	return m.store.Update(ctx, store.RID(user.RID), store.Fields(user, "password_hash", "password_version"))
+	return m.userStore.Update(ctx, store.RID(user.RID), store.Fields(user, "password_hash", "password_version"))
 }
 
 // ---------------------------------------------------------------------------

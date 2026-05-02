@@ -7,14 +7,21 @@ import (
 )
 
 // User is the built-in user model for the account module.
+//
+// EmailVerified gates the LinkByEmail OAuth auto-merge flow (see
+// account-multiprovider SPEC §8). Default false; flipped to true via
+// Module.MarkEmailVerified after the application's own email-verification
+// flow completes (link click, magic code, etc. — chok does not impose a
+// delivery mechanism).
 type User struct {
 	db.SoftDeleteModel
-	Email           string `json:"email"    gorm:"size:200;not null"`
-	PasswordHash    string `json:"-"        gorm:"column:password_hash;size:128;not null"`
-	PasswordVersion int    `json:"-"        gorm:"column:password_version;default:0;not null"`
-	Name            string `json:"name"     gorm:"size:100;default:'';not null"`
-	Roles           string `json:"-"        gorm:"column:roles;size:500;default:'';not null"`
-	Active          bool   `json:"-"        gorm:"default:true;not null"`
+	Email           string `json:"email"          gorm:"size:200;not null"`
+	EmailVerified   bool   `json:"email_verified" gorm:"column:email_verified;default:false;not null"`
+	PasswordHash    string `json:"-"              gorm:"column:password_hash;size:128;not null"`
+	PasswordVersion int    `json:"-"              gorm:"column:password_version;default:0;not null"`
+	Name            string `json:"name"           gorm:"size:100;default:'';not null"`
+	Roles           string `json:"-"              gorm:"column:roles;size:500;default:'';not null"`
+	Active          bool   `json:"-"              gorm:"default:true;not null"`
 }
 
 // RIDPrefix returns the prefix for user resource IDs (e.g. "usr_abc123").

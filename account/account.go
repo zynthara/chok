@@ -30,10 +30,26 @@ type Sender interface {
 }
 
 // Module manages user accounts.
+//
+// Two User stores are intentionally maintained:
+//
+//   - userStore — Module-private, UpdateFields includes every column on the
+//     User table (password_hash, password_version, roles, active, etc.).
+//     Used by changePassword / resetPassword / UpdateUserRoles / SetUserActive
+//     / BumpPasswordVersion / MarkEmailVerified — paths the framework
+//     guarantees include the PV-bump invariant where required.
+//
+//   - publicStore — exposed via Module.Store(), UpdateFields restricted to
+//     "name" and "email". Sensitive columns are removed from the whitelist
+//     so that callers attempting m.Store().Update(..., Set({"roles": ...}))
+//     receive store.ErrUnknownUpdateField at request time, instead of being
+//     able to silently bypass the PV-bump contract. Roles / disable / password
+//     changes MUST flow through the corresponding Module methods.
 type Module struct {
 	jwt             *jwt.Manager
 	resetJWT        *jwt.Manager // short-lived tokens for password reset
-	store           *store.Store[User]
+	userStore       *store.Store[User]
+	publicStore     *store.Store[User]
 	sender          Sender // nil → forgot/reset-password routes are not registered
 	logger          log.Logger
 	limiter         *loginLimiter // nil when rate limiting is disabled
@@ -122,15 +138,28 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 		return nil, err
 	}
 
-	s := store.New[User](gdb, logger,
-		store.WithQueryFields("id", "email", "name", "created_at"),
-		store.WithUpdateFields("name", "email", "password_hash", "password_version", "roles", "active"),
+	// userStore is Module-private: full UpdateFields whitelist so internal
+	// flows (changePassword, resetPassword, UpdateUserRoles, ...) can write
+	// every column. Sensitive writes are gated by Module methods, not by the
+	// store layer.
+	userStore := store.New[User](gdb, logger,
+		store.WithQueryFields("id", "email", "name", "email_verified", "created_at"),
+		store.WithUpdateFields("name", "email", "email_verified", "password_hash", "password_version", "roles", "active"),
+	)
+	// publicStore is what Module.Store() exposes. UpdateFields drops
+	// password_hash / password_version / roles / active / email_verified —
+	// callers attempting to write them get store.ErrUnknownUpdateField,
+	// which is the framework-level enforcement of the PV-bump contract.
+	publicStore := store.New[User](gdb, logger,
+		store.WithQueryFields("id", "email", "name", "email_verified", "created_at"),
+		store.WithUpdateFields("name", "email"),
 	)
 
 	m := &Module{
 		jwt:             jwtMgr,
 		resetJWT:        resetMgr,
-		store:           s,
+		userStore:       userStore,
+		publicStore:     publicStore,
 		sender:          cfg.sender,
 		logger:          logger,
 		disableRegister: cfg.disableRegister,
@@ -156,15 +185,26 @@ func (m *Module) Close() error {
 	return nil
 }
 
-// Store returns the underlying User store for callers that need to do
-// admin-side user management (list / get / disable / role change /
-// admin-reset password). The exposed store applies the same query and
-// update field allow-lists configured in New, so callers cannot bypass
-// the schema restriction by writing through this handle.
+// Store returns the User store for callers that need read-side user
+// management (list, get) plus a restricted set of writes (name, email).
 //
-// Intended consumers: an application's own admin handler. Casual access
-// from request handlers should still go through Module's auth flows.
-func (m *Module) Store() *store.Store[User] { return m.store }
+// Sensitive columns — password_hash, password_version, roles, active,
+// email_verified — are intentionally NOT in the exposed store's update
+// whitelist. Attempting to write them through this handle returns
+// store.ErrUnknownUpdateField. The PV-bump invariant (every roles or
+// active change must invalidate existing tokens) is therefore not
+// bypassable through the public store; callers MUST use:
+//
+//   - Module.UpdateUserRoles      to change Roles (bumps PV in tx)
+//   - Module.SetUserActive        to enable/disable an account (bumps PV)
+//   - Module.BumpPasswordVersion  to force-revoke all tokens
+//   - Module.MarkEmailVerified    to flip EmailVerified
+//   - the /change-password and /reset-password routes for password writes
+//
+// Intended consumers: application admin handlers (user listing, profile
+// edits) and any read-side aggregation. Casual access from request
+// handlers should still go through Module's auth flows.
+func (m *Module) Store() *store.Store[User] { return m.publicStore }
 
 // LoginRateLimitEnabled reports whether per-email login throttling is
 // active. Useful for diagnostics, /healthz reporting, and tests that
@@ -198,6 +238,33 @@ func (m *Module) PrincipalResolver() middleware.PrincipalResolver {
 	}
 }
 
+// AuthChain is the blessed authentication middleware chain for protected
+// business routes. Equivalent to:
+//
+//	[]gin.HandlerFunc{
+//	    middleware.Authn(m.TokenParser(), m.PrincipalResolver()),
+//	    m.ActiveCheck(),
+//	}
+//
+// returned as a single slice for ergonomic mounting:
+//
+//	api := srv.Group("/api/v1", m.AuthChain()...)
+//
+// **Use AuthChain, not bare Authn.** Authn alone only validates the JWT
+// signature and populates auth.Principal — it does not touch the database.
+// The framework's "PV bump invalidates outstanding tokens" guarantee
+// (UpdateUserRoles / SetUserActive / BumpPasswordVersion) requires
+// ActiveCheck, which queries the user row on every request and rejects
+// disabled accounts or stale token versions. A route that mounts only
+// Authn will continue serving disabled / role-revoked users until their
+// token naturally expires, breaking the revocation contract.
+func (m *Module) AuthChain() []gin.HandlerFunc {
+	return []gin.HandlerFunc{
+		middleware.Authn(m.TokenParser(), m.PrincipalResolver()),
+		m.ActiveCheck(),
+	}
+}
+
 // ActiveCheck returns a gin middleware that verifies the authenticated user
 // still exists, is active, and the JWT's password version matches the
 // current one in the DB. It hits the database on every request.
@@ -221,7 +288,7 @@ func (m *Module) ActiveCheck() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		user, err := m.store.Get(c.Request.Context(), store.RID(p.Subject))
+		user, err := m.userStore.Get(c.Request.Context(), store.RID(p.Subject))
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated.WithMessage("account not found"))

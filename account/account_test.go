@@ -109,7 +109,7 @@ func TestRegister_EmptyName_UsesmaskedEmail(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 
-	user, err := m.store.Get(context.Background(), store.Where(where.WithFilter("email", "alice@test.com")))
+	user, err := m.userStore.Get(context.Background(), store.Where(where.WithFilter("email", "alice@test.com")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -679,12 +679,12 @@ func TestActiveCheck_DisabledUser_Blocked(t *testing.T) {
 	token := decodeToken(t, w)
 
 	// Disable the user directly in the store.
-	user, err := m.store.Get(context.Background(), store.Where(where.WithFilter("email", "alice@test.com")))
+	user, err := m.userStore.Get(context.Background(), store.Where(where.WithFilter("email", "alice@test.com")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	user.Active = false
-	if err := m.store.Update(context.Background(), store.RID(user.RID), store.Fields(user, "active")); err != nil {
+	if err := m.userStore.Update(context.Background(), store.RID(user.RID), store.Fields(user, "active")); err != nil {
 		t.Fatal(err)
 	}
 
