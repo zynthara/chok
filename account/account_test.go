@@ -37,7 +37,7 @@ func setupModule(t *testing.T, opts ...Option) (*Module, *gin.Engine) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Migrate(context.Background(), gdb, Table()); err != nil {
+	if err := db.Migrate(context.Background(), gdb, Table(), IdentityTable()); err != nil {
 		t.Fatal(err)
 	}
 

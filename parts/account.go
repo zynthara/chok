@@ -74,13 +74,18 @@ func (a *AccountComponent) Init(ctx context.Context, k component.Kernel) error {
 	return nil
 }
 
-// Migrate creates the User table. Account drives its own schema
-// (separate from whatever tables the app declared on DBComponent).
+// Migrate creates the User and Identity tables. Account drives its own
+// schema (separate from whatever tables the app declared on DBComponent).
+//
+// IdentityTable is migrated regardless of whether OAuth providers are
+// registered — leaving an empty table costs nothing and lets a deployment
+// flip from password-only to OAuth-enabled by config without a separate
+// migration step. SPEC §4.3 documents this as the intended behaviour.
 func (a *AccountComponent) Migrate(ctx context.Context) error {
 	if a.module == nil {
 		return nil // disabled
 	}
-	return db.Migrate(ctx, a.db, account.Table())
+	return db.Migrate(ctx, a.db, account.Table(), account.IdentityTable())
 }
 
 // Close releases account.Module resources — currently the login rate

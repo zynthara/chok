@@ -142,6 +142,28 @@ func (m *Module) login(ctx context.Context, req *loginRequest) (*tokenResponse, 
 		return nil, apierr.ErrUnauthenticated.WithMessage("account is disabled")
 	}
 
+	// SPEC §4.1 v0.3.5: reject password login on OAuth-only accounts.
+	// An OAuth-bootstrapped User has PasswordVersion=0 and a synthetic
+	// random PasswordHash — even if an attacker brute-forces the random
+	// secret, login should still fail with a directing message rather
+	// than yielding a token. The "no password history" check is what
+	// distinguishes a true OAuth-only user from a freshly-registered
+	// password user (also PV=0): the latter has no Identity rows.
+	if user.PasswordVersion == 0 {
+		hasHistory, err := m.userHasPasswordHistory(ctx, user.RID)
+		if err != nil {
+			return nil, err
+		}
+		if !hasHistory {
+			// Don't bump the rate limiter — this isn't a credential
+			// failure, it's a routing decision. The user just needs
+			// to switch to the OAuth button.
+			return nil, apierr.ErrUnauthenticated.
+				WithReason("OAUTH_ONLY_ACCOUNT").
+				WithMessage("此账号未设置密码,请使用 OAuth 登录")
+		}
+	}
+
 	if err := auth.ComparePassword(user.PasswordHash, req.Password); err != nil {
 		if m.limiter != nil {
 			m.limiter.record(limitKeys...)

@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -58,10 +60,24 @@ type Module struct {
 	resetJWT        *jwt.Manager // short-lived tokens for password reset
 	userStore       *store.Store[User]
 	publicStore     *store.Store[User]
-	sender          Sender // nil → forgot/reset-password routes are not registered
+	idStore         *store.Store[Identity] // OAuth identities; populated regardless of provider count
+	sender          Sender                 // nil → forgot/reset-password routes are not registered
 	logger          log.Logger
 	limiter         *loginLimiter // nil when rate limiting is disabled
 	disableRegister bool          // true → RegisterRoutes skips POST /register
+
+	// OAuth wiring (Phase 2). Lazily assembled on first RegisterProvider —
+	// pure password deployments never spin up the carrier/store goroutines.
+	oauthMu                  sync.Mutex
+	signingKey               string // retained for HKDF cookie-secret derivation
+	providers                map[string]AuthProvider
+	sessionCarrier           SessionCarrier
+	sessionStore             OAuthSessionStore
+	authCodeStore            AuthCodeStore
+	allowedRedirectBacks     []string // SPEC §6.1 absolute-URL prefixes
+	oauthCallbackFrontendURL string   // SPEC §7 fixed front-end landing URL
+	linkByEmail              bool     // SPEC §8 default false
+	firstRedirectURL         string   // first provider's RedirectURL — informs dev-mode auto-detect
 }
 
 // Option configures a Module.
@@ -75,6 +91,17 @@ type moduleConfig struct {
 	loginRateWindow time.Duration // 0 = disabled
 	loginRateLimit  int           // max attempts per window
 	disableRegister bool
+
+	// OAuth (Phase 2). Carrier / Store / AuthCodeStore default to nil so
+	// New() does not spawn background resources for pure-password
+	// deployments — they are created on first RegisterProvider unless
+	// the caller injected explicit instances via the WithXxx options.
+	sessionCarrier           SessionCarrier
+	sessionStore             OAuthSessionStore
+	authCodeStore            AuthCodeStore
+	allowedRedirectBacks     []string
+	oauthCallbackFrontendURL string
+	linkByEmail              bool
 }
 
 // WithSigningKey sets the JWT signing key (required, >= 32 bytes).
@@ -116,6 +143,73 @@ func WithLoginRateLimit(window time.Duration, maxAttempts int) Option {
 // visitors register themselves.
 func WithoutPublicRegister() Option {
 	return func(c *moduleConfig) { c.disableRegister = true }
+}
+
+// WithSessionCarrier overrides the default cookie-based SessionCarrier
+// (HMAC-signed cookie, secret HKDF-derived from SigningKey). Use this
+// when you need a query-string carrier (legacy SPAs that strip cookies)
+// or a custom signing scheme.
+//
+// Passing nil panics at Module.New — Carrier is mandatory once OAuth is
+// in play.
+func WithSessionCarrier(c SessionCarrier) Option {
+	return func(m *moduleConfig) { m.sessionCarrier = c }
+}
+
+// WithOAuthSessionStore overrides the default in-process LRU
+// MemorySessionStore. Production deployments serving multiple replicas
+// MUST inject a shared backend (Redis is the canonical choice) — Memory
+// only works when /auth/start and /auth/callback land on the same
+// process.
+func WithOAuthSessionStore(s OAuthSessionStore) Option {
+	return func(m *moduleConfig) { m.sessionStore = s }
+}
+
+// WithAuthCodeStore overrides the default AuthCodeStore (which shares
+// backing storage with the default OAuthSessionStore via prefixed keys).
+// Independent override is supported so deployments can keep auth-code
+// state local while pushing OAuth session state to Redis, or vice versa.
+func WithAuthCodeStore(s AuthCodeStore) Option {
+	return func(m *moduleConfig) { m.authCodeStore = s }
+}
+
+// WithAllowedRedirectBacks declares a set of absolute URL prefixes that
+// /auth/{name}/start will accept on its ?redirect_back parameter. The
+// default empty list permits relative paths only; supply this option to
+// support multi-front-end deployments where the SPA lives on a different
+// host than the chok back-end.
+//
+// Each entry must include scheme + host (+ port if non-default). Trailing
+// "/" widens to an entire site; an exact URL narrows to one landing page.
+// HTTP entries are accepted but emit a startup WARN — production
+// deployments should be HTTPS-only.
+func WithAllowedRedirectBacks(urls ...string) Option {
+	return func(m *moduleConfig) {
+		m.allowedRedirectBacks = append(m.allowedRedirectBacks, urls...)
+	}
+}
+
+// WithOAuthCallbackFrontendURL sets the fixed front-end landing URL the
+// OAuth callback flow redirects to with the one-shot ?code parameter.
+// Required for any deployment that registers OAuth providers — Module
+// returns an error from RegisterProvider if this is empty when the
+// provider count is about to become non-zero.
+//
+// Typical value: "https://app.example.com/auth/oauth-finish".
+func WithOAuthCallbackFrontendURL(u string) Option {
+	return func(m *moduleConfig) { m.oauthCallbackFrontendURL = u }
+}
+
+// WithLinkByEmail enables the SPEC §8 auto-merge path: when an OAuth
+// callback arrives for a brand-new (provider, provider_account_id) and
+// the IdP-supplied email matches an existing local user, the new
+// Identity is attached to that user. Defaults to false because automerge
+// only works safely once the local /register flow includes an email
+// verification step (which chok does not bundle today). Even with this
+// option enabled, ResolveOAuthIdentity still requires
+// IdP-side EmailVerified=true and !IsAliasedEmail before merging.
+func WithLinkByEmail(enabled bool) Option {
+	return func(m *moduleConfig) { m.linkByEmail = enabled }
 }
 
 // New creates an account module.
@@ -164,15 +258,32 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 		store.WithQueryFields("id", "email", "name", "email_verified", "created_at"),
 		store.WithUpdateFields("name", "email"),
 	)
+	// idStore is always created — Identity rows are written only by OAuth
+	// flows, but having the store ready means switching deployments from
+	// password-only to OAuth at runtime needs no Module surgery. Schema
+	// is created by parts.AccountComponent.Migrate (Phase 2 update).
+	idStore := store.New[Identity](gdb, logger,
+		store.WithQueryFields("id", "user_id", "provider", "provider_account_id", "email", "last_used_at"),
+		store.WithUpdateFields("email", "profile", "last_used_at"),
+	)
 
 	m := &Module{
-		jwt:             jwtMgr,
-		resetJWT:        resetMgr,
-		userStore:       userStore,
-		publicStore:     publicStore,
-		sender:          cfg.sender,
-		logger:          logger,
-		disableRegister: cfg.disableRegister,
+		jwt:                      jwtMgr,
+		resetJWT:                 resetMgr,
+		userStore:                userStore,
+		publicStore:              publicStore,
+		idStore:                  idStore,
+		sender:                   cfg.sender,
+		logger:                   logger,
+		disableRegister:          cfg.disableRegister,
+		signingKey:               cfg.signingKey,
+		providers:                map[string]AuthProvider{},
+		sessionCarrier:           cfg.sessionCarrier,
+		sessionStore:             cfg.sessionStore,
+		authCodeStore:            cfg.authCodeStore,
+		allowedRedirectBacks:     append([]string(nil), cfg.allowedRedirectBacks...),
+		oauthCallbackFrontendURL: cfg.oauthCallbackFrontendURL,
+		linkByEmail:              cfg.linkByEmail,
 	}
 	if cfg.loginRateWindow > 0 && cfg.loginRateLimit > 0 {
 		m.limiter = newLoginLimiter(cfg.loginRateWindow, cfg.loginRateLimit)
@@ -185,6 +296,14 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 // Close waits for any in-flight cleanup so the App's shutdown budget
 // covers them rather than leaving the goroutine running until the
 // process terminates. Safe to call multiple times.
+//
+// OAuth resources (sessionCarrier, sessionStore, authCodeStore) are
+// optional — they are only assembled lazily on the first
+// RegisterProvider call. Close walks them with an io.Closer type
+// assertion so stateless implementations (e.g. CookieCarrier, the
+// default authCodeStore-as-prefix-bucket adapter) don't pay a no-op
+// Close cost. errors.Join surfaces all close failures without short-
+// circuiting, matching the SPEC §12 contract.
 func (m *Module) Close() error {
 	if m == nil {
 		return nil
@@ -192,7 +311,26 @@ func (m *Module) Close() error {
 	if m.limiter != nil {
 		m.limiter.Close()
 	}
-	return nil
+	var errs []error
+	if c, ok := m.sessionCarrier.(io.Closer); ok {
+		if err := c.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("sessionCarrier: %w", err))
+		}
+	}
+	if s, ok := m.sessionStore.(io.Closer); ok {
+		if err := s.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("sessionStore: %w", err))
+		}
+	}
+	if a, ok := m.authCodeStore.(io.Closer); ok {
+		// MemorySessionStore.Close is sync.Once-guarded, so when both
+		// stores share a backing *MemorySessionStore the second Close
+		// is a no-op return nil — no need for an explicit alias check.
+		if err := a.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("authCodeStore: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Store returns the User store for callers that need read-side user
@@ -333,9 +471,17 @@ func (m *Module) ActiveCheck() gin.HandlerFunc {
 
 // RouteGroup is the minimal interface for registering routes.
 // *gin.RouterGroup satisfies this (use srv.Group("/path") to obtain one).
+//
+// v0.3.1 break: GET / DELETE were added so OAuth routes
+// (/auth/identities, /auth/identities/:id) can be mounted. *gin.RouterGroup
+// inherits both natively, so 99% of business code (which passes
+// srv.Group("/auth")) keeps compiling. Custom mock implementations of
+// RouteGroup may need to add the missing methods.
 type RouteGroup interface {
+	GET(string, ...gin.HandlerFunc) gin.IRoutes
 	POST(string, ...gin.HandlerFunc) gin.IRoutes
 	PUT(string, ...gin.HandlerFunc) gin.IRoutes
+	DELETE(string, ...gin.HandlerFunc) gin.IRoutes
 	Group(string, ...gin.HandlerFunc) *gin.RouterGroup
 }
 
@@ -392,11 +538,17 @@ func Setup(gdb *gorm.DB, logger log.Logger, opts *config.AccountOptions, r Route
 //	POST /login
 //	POST /forgot-password   (only if WithSender is configured)
 //	POST /reset-password    (only if WithSender is configured)
+//	GET  /auth/{name}/start    (one entry per registered OAuth provider)
+//	GET|POST /auth/{name}/callback
+//	POST /auth/exchange     (only if any OAuth provider is registered)
 //
 // Authenticated routes:
 //
-//	POST /refresh-token
-//	PUT  /change-password
+//	POST   /refresh-token
+//	PUT    /change-password
+//	GET    /auth/identities          (only if any OAuth provider is registered)
+//	POST   /auth/identities/link
+//	DELETE /auth/identities/:id
 func (m *Module) RegisterRoutes(r RouteGroup) {
 	if !m.disableRegister {
 		r.POST("/register", handler.HandleRequest(m.register, handler.WithSuccessCode(201)))
@@ -406,6 +558,33 @@ func (m *Module) RegisterRoutes(r RouteGroup) {
 	if m.sender != nil {
 		r.POST("/forgot-password", handler.HandleAction(m.forgotPassword))
 		r.POST("/reset-password", handler.HandleAction(m.resetPassword))
+	}
+
+	// OAuth public routes — only mounted when any provider was
+	// registered. The provider count is captured under oauthMu to avoid
+	// racing with a concurrent RegisterProvider; the routes themselves
+	// are read-only references to m so post-registration provider
+	// changes are visible immediately.
+	m.oauthMu.Lock()
+	providerNames := make([]string, 0, len(m.providers))
+	for name := range m.providers {
+		providerNames = append(providerNames, name)
+	}
+	hasOAuth := len(providerNames) > 0
+	m.oauthMu.Unlock()
+
+	for _, name := range providerNames {
+		p := m.providers[name]
+		r.GET("/auth/"+name+"/start", m.handleBegin(p))
+		switch providerHTTPMethodFor(p) {
+		case "POST":
+			r.POST("/auth/"+name+"/callback", m.handleCallback(p))
+		default:
+			r.GET("/auth/"+name+"/callback", m.handleCallback(p))
+		}
+	}
+	if hasOAuth {
+		r.POST("/auth/exchange", handler.HandleRequest(m.handleExchange))
 	}
 
 	// Use AuthChain (Authn + ActiveCheck) rather than bare Authn so the
@@ -419,4 +598,9 @@ func (m *Module) RegisterRoutes(r RouteGroup) {
 	authed := r.Group("", m.AuthChain()...)
 	authed.POST("/refresh-token", handler.HandleRequest(m.refreshToken))
 	authed.PUT("/change-password", handler.HandleAction(m.changePassword))
+	if hasOAuth {
+		authed.GET("/auth/identities", handler.HandleRequest(m.handleListIdentities))
+		authed.POST("/auth/identities/link", handler.HandleRequest(m.handleLinkIdentity))
+		authed.DELETE("/auth/identities/:id", handler.HandleAction(m.handleUnlinkIdentity))
+	}
 }

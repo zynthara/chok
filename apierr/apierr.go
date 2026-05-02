@@ -129,15 +129,65 @@ func (e *Error) Wrap(cause error) *Error {
 // Unwrap returns the wrapped cause, if any.
 func (e *Error) Unwrap() error { return e.cause }
 
+// WithReason returns a copy with a different application-level reason
+// code (the stable, machine-readable string surfaced in JSON responses).
+// Use it to refine a generic sentinel into a domain-specific code without
+// changing the HTTP Code:
+//
+//	apierr.ErrInvalidArgument.WithReason("OAUTH_EMAIL_REQUIRED").WithMessage("...")
+//
+// Like WithMessage / WithMetadata, this returns a copy — the original
+// sentinel is not mutated, and Is() will no longer match the original
+// sentinel by Reason (intentional: WithReason is the explicit opt-out
+// from sentinel matching).
+func (e *Error) WithReason(reason string) *Error {
+	cp := *e
+	cp.Reason = reason
+	if e.Metadata != nil {
+		cp.Metadata = make(map[string]any, len(e.Metadata))
+		maps.Copy(cp.Metadata, e.Metadata)
+	}
+	if e.Headers != nil {
+		cp.Headers = make(map[string]string, len(e.Headers))
+		for hk, hv := range e.Headers {
+			cp.Headers[hk] = hv
+		}
+	}
+	return &cp
+}
+
+// WithDetails merges the given map into Metadata in one call. Convenience
+// over chained WithMetadata for handlers that already have a map literal:
+//
+//	apierr.ErrInvalidArgument.WithDetails(map[string]any{
+//	    "provider": "github",
+//	    "missing":  "email",
+//	})
+func (e *Error) WithDetails(d map[string]any) *Error {
+	cp := *e
+	cp.Metadata = make(map[string]any, len(e.Metadata)+len(d))
+	maps.Copy(cp.Metadata, e.Metadata)
+	maps.Copy(cp.Metadata, d)
+	if e.Headers != nil {
+		cp.Headers = make(map[string]string, len(e.Headers))
+		for hk, hv := range e.Headers {
+			cp.Headers[hk] = hv
+		}
+	}
+	return &cp
+}
+
 // Predefined errors.
 var (
-	ErrInternal         = New(500, "InternalError", "internal server error")
-	ErrNotFound         = New(404, "NotFound", "resource not found")
-	ErrBind             = New(400, "BindError", "request bind error")
-	ErrInvalidArgument  = New(400, "InvalidArgument", "invalid argument")
-	ErrUnauthenticated  = New(401, "Unauthenticated", "unauthenticated")
-	ErrPermissionDenied = New(403, "PermissionDenied", "permission denied")
-	ErrConflict         = New(409, "Conflict", "resource version conflict")
-	ErrTooManyRequests  = New(429, "TooManyRequests", "too many requests, please try again later")
-	ErrGatewayTimeout   = New(504, "GatewayTimeout", "request timed out")
+	ErrInternal           = New(500, "InternalError", "internal server error")
+	ErrNotFound           = New(404, "NotFound", "resource not found")
+	ErrBind               = New(400, "BindError", "request bind error")
+	ErrInvalidArgument    = New(400, "InvalidArgument", "invalid argument")
+	ErrUnauthenticated    = New(401, "Unauthenticated", "unauthenticated")
+	ErrPermissionDenied   = New(403, "PermissionDenied", "permission denied")
+	ErrConflict           = New(409, "Conflict", "resource version conflict")
+	ErrGone               = New(410, "Gone", "resource is no longer available")
+	ErrFailedPrecondition = New(412, "FailedPrecondition", "precondition failed")
+	ErrTooManyRequests    = New(429, "TooManyRequests", "too many requests, please try again later")
+	ErrGatewayTimeout     = New(504, "GatewayTimeout", "request timed out")
 )
