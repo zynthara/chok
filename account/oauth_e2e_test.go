@@ -699,6 +699,97 @@ func TestUnlinkIdentity_RaceLeavesOneMethod(t *testing.T) {
 	}
 }
 
+// TestSetup_HonoursOAuthFields proves account.Setup forwards the full
+// AccountOptions surface — LinkByEmail / AllowedRedirectBacks /
+// OAuthCallbackFrontendURL / Providers — through to the live Module.
+// Pre-fix Setup ignored these four fields, so a standalone caller
+// passing yaml-driven OAuth config would build a Module that thought
+// OAuth was disabled (no /auth/{name}/start routes mounted).
+func TestSetup_HonoursOAuthFields(t *testing.T) {
+	t.Cleanup(account.ResetProviderRegistryForTest)
+	account.RegisterProviderFactory("setupfake", func(rawCfg any) (account.AuthProvider, error) {
+		return testfake.New("setupfake"), nil
+	})
+
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	mod, err := account.Setup(gdb, log.Empty(),
+		&config.AccountOptions{
+			Enabled:                  true,
+			SigningKey:               e2eSigningKey,
+			LinkByEmail:              true,
+			AllowedRedirectBacks:     []string{"https://app.example.test/"},
+			OAuthCallbackFrontendURL: "https://app.example.test/auth/finish",
+			Providers: map[string]config.ProviderRawOptions{
+				"setupfake": {Enabled: true},
+			},
+		},
+		r.Group("/auth"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mod == nil {
+		t.Fatal("Setup returned nil")
+	}
+
+	// Provider must be registered (proves OAuth fields were forwarded).
+	if names := mod.ProviderNames(); len(names) != 1 || names[0] != "setupfake" {
+		t.Fatalf("provider not registered via Setup: got %v", names)
+	}
+
+	// /auth/setupfake/start must be mounted (proves OAuthCallbackFrontendURL
+	// passed validation and routes were registered).
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/auth/setupfake/start", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("/auth/setupfake/start: %d %s", w.Code, w.Body.String())
+	}
+
+	// Allowlist passed through: an absolute URL in the configured prefix
+	// must be accepted on redirect_back.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET",
+		"/auth/setupfake/start?redirect_back=https://app.example.test/post-login", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("allowlisted redirect_back rejected: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSetup_RejectsEnabledProviderWithoutFrontendURL covers the SPEC
+// §10.3 fail-fast: AccountOptions.Validate refuses configs where any
+// provider is enabled but oauth_callback_frontend_url is empty —
+// Setup must surface that as an error rather than silently building
+// a half-configured module.
+func TestSetup_RejectsEnabledProviderWithoutFrontendURL(t *testing.T) {
+	t.Cleanup(account.ResetProviderRegistryForTest)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	_, err = account.Setup(gdb, log.Empty(),
+		&config.AccountOptions{
+			Enabled:    true,
+			SigningKey: e2eSigningKey,
+			Providers: map[string]config.ProviderRawOptions{
+				"any": {Enabled: true},
+			},
+		},
+		r.Group("/auth"),
+	)
+	if err == nil {
+		t.Fatal("expected fail-fast on missing oauth_callback_frontend_url")
+	}
+}
+
 // TestOAuth_DevModeAutoDetect covers High #6: when the first registered
 // AuthProvider implements RedirectURLProvider AND its URL is HTTP-on-
 // localhost, RegisterProvider must propagate the hint into the default

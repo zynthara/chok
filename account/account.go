@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -501,13 +502,109 @@ type RouteGroup interface {
 	Group(string, ...gin.HandlerFunc) *gin.RouterGroup
 }
 
-// Setup creates the account module from config, migrates the User table,
-// and registers routes — all in one call.
+// OptionsFromConfig converts config.AccountOptions into the slice of
+// account.Option that account.New expects. Both account.Setup and
+// parts.DefaultAccountBuilder route through it so the two entry points
+// stay in sync — earlier divergence (Setup forwarding only signing key
+// + expirations while builder forwarded the new OAuth fields too)
+// silently broke standalone Setup callers using yaml-driven OAuth.
+//
+// The returned slice does NOT include framework-internal options that
+// resolve from config (LoginRateLimit pair, DisableRegister) — those
+// are added here. Callers wanting to layer extras (e.g. WithSender)
+// pass them as modOpts to Setup or append manually.
+func OptionsFromConfig(opts *config.AccountOptions) []Option {
+	if opts == nil {
+		return nil
+	}
+	out := []Option{WithSigningKey(opts.SigningKey)}
+	if opts.Expiration > 0 {
+		out = append(out, WithExpiration(opts.Expiration))
+	}
+	if opts.ResetExpiration > 0 {
+		out = append(out, WithResetExpiration(opts.ResetExpiration))
+	}
+	if opts.LoginRateWindow > 0 && opts.LoginRateLimit > 0 {
+		out = append(out, WithLoginRateLimit(opts.LoginRateWindow, opts.LoginRateLimit))
+	}
+	if opts.DisableRegister {
+		out = append(out, WithoutPublicRegister())
+	}
+	if opts.LinkByEmail {
+		out = append(out, WithLinkByEmail(true))
+	}
+	if len(opts.AllowedRedirectBacks) > 0 {
+		out = append(out, WithAllowedRedirectBacks(opts.AllowedRedirectBacks...))
+	}
+	if opts.OAuthCallbackFrontendURL != "" {
+		out = append(out, WithOAuthCallbackFrontendURL(opts.OAuthCallbackFrontendURL))
+	}
+	return out
+}
+
+// RegisterConfiguredProviders walks opts.Providers in deterministic
+// (sorted) order and registers each Enabled entry on the Module via
+// the global ProviderFactory registry. Unknown provider names cause a
+// fail-fast error so a typo in chok.yaml doesn't silently disable an
+// IdP. Disabled entries are skipped — yaml entries serve as kill
+// switches without removing the config block.
+//
+// account.Setup and parts.DefaultAccountBuilder both call this so the
+// "yaml drives provider list" behaviour is identical regardless of
+// entry point.
+func RegisterConfiguredProviders(m *Module, opts *config.AccountOptions) error {
+	if m == nil || opts == nil || len(opts.Providers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(opts.Providers))
+	for name := range opts.Providers {
+		names = append(names, name)
+	}
+	// Deterministic registration order — map iteration is randomised.
+	for _, name := range sortedNames(names) {
+		raw := opts.Providers[name]
+		if !raw.Enabled {
+			continue
+		}
+		factory, ok := LookupProviderFactory(name)
+		if !ok {
+			return fmt.Errorf("account: provider %q is enabled in config but no factory is registered "+
+				"(missing `_ \"github.com/zynthara/chok/account/providers/%s\"` import?)",
+				name, name)
+		}
+		provider, err := factory(&raw)
+		if err != nil {
+			return fmt.Errorf("account: build provider %q: %w", name, err)
+		}
+		if err := m.RegisterProvider(provider); err != nil {
+			return fmt.Errorf("account: register provider %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// sortedNames returns a sorted copy. Pulled out so OptionsFromConfig /
+// RegisterConfiguredProviders don't pull in `sort` at the top — keeps
+// the helper section reflect-light.
+func sortedNames(names []string) []string {
+	out := append([]string(nil), names...)
+	sort.Strings(out)
+	return out
+}
+
+// Setup creates the account module from config, migrates the schema,
+// registers OAuth providers declared in opts.Providers, and registers
+// routes — all in one call.
 //
 // Returns (nil, nil) if opts is nil or opts.Enabled is false.
 // Extra modOpts (e.g. WithSender) are applied on top of config values.
 //
 //	acct, err := account.Setup(gdb, logger, &cfg.Account, srv.Group("/auth"))
+//
+// As of Phase 3 Setup honours the full AccountOptions surface
+// (LinkByEmail / AllowedRedirectBacks / OAuthCallbackFrontendURL /
+// Providers) — yaml-driven OAuth works on the standalone entry point
+// the same way it does through parts.AccountComponent.
 func Setup(gdb *gorm.DB, logger log.Logger, opts *config.AccountOptions, r RouteGroup, modOpts ...Option) (*Module, error) {
 	if opts == nil || !opts.Enabled {
 		return nil, nil
@@ -517,36 +614,29 @@ func Setup(gdb *gorm.DB, logger log.Logger, opts *config.AccountOptions, r Route
 		return nil, fmt.Errorf("account: %w", err)
 	}
 
-	// Setup is a legacy standalone entry point — callers using the
-	// framework should prefer AccountComponent, which propagates the
-	// registry ctx to Migrate. Here we fall back to context.Background
-	// so schema creation runs to completion even when Setup is called
-	// from a short-lived request context.
-	//
-	// MigrateSchema is the canonical migration path: it covers Table()
-	// + IdentityTable() AutoMigrate AND the has_password backfill that
+	// MigrateSchema is the canonical migration path: AutoMigrate
+	// (Table + IdentityTable) plus the has_password backfill that
 	// rescues legacy password rows whose has_password column defaults
-	// to false post-AutoMigrate. Earlier versions of Setup migrated
-	// only Table(), which left Identity-using callers without the
-	// table and legacy password users locked out as "OAuth-only".
+	// to false post-AutoMigrate. Setup uses context.Background so
+	// schema creation runs to completion even when called from a
+	// short-lived request context.
 	if err := MigrateSchema(context.Background(), gdb); err != nil {
 		return nil, fmt.Errorf("account: migrate: %w", err)
 	}
 
-	combined := []Option{
-		WithSigningKey(opts.SigningKey),
-	}
-	if opts.Expiration > 0 {
-		combined = append(combined, WithExpiration(opts.Expiration))
-	}
-	if opts.ResetExpiration > 0 {
-		combined = append(combined, WithResetExpiration(opts.ResetExpiration))
-	}
+	combined := append([]Option(nil), OptionsFromConfig(opts)...)
 	combined = append(combined, modOpts...)
 
 	m, err := New(gdb, logger, combined...)
 	if err != nil {
 		return nil, fmt.Errorf("account: %w", err)
+	}
+
+	if err := RegisterConfiguredProviders(m, opts); err != nil {
+		// Tear down the just-built module so callers don't leak the
+		// limiter goroutine etc. on a half-constructed Setup.
+		_ = m.Close()
+		return nil, err
 	}
 
 	m.RegisterRoutes(r)

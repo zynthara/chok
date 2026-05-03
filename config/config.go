@@ -689,6 +689,20 @@ func Redact(cfg any) any {
 }
 
 // redactValue recursively copies a struct value, masking sensitive fields.
+//
+// Walks through:
+//   - struct fields tagged sensitive:"true" (string only — replaced verbatim)
+//   - nested structs / pointers to structs (recurse)
+//   - map[string]V values (recurse into each value, plus heuristic
+//     mask of map keys whose name looks like a secret — see
+//     redactSensitiveMap)
+//   - slices / arrays of structs (recurse element-wise)
+//
+// Without the map and slice paths, ProviderRawOptions.Raw
+// (map[string]any) leaks every key the provider yaml carried — most
+// of which are exactly the secrets we want hidden (client_secret,
+// private_key, ...). Maps are by-reference in Go's reflect so we
+// reflect.MakeMap a fresh copy rather than mutating the caller's data.
 func redactValue(v reflect.Value) reflect.Value {
 	out := reflect.New(v.Type()).Elem()
 	out.Set(v)
@@ -705,44 +719,188 @@ func redactValue(v reflect.Value) reflect.Value {
 			}
 			continue
 		}
-		actual := fv
-		if actual.Kind() == reflect.Ptr {
-			if actual.IsNil() {
-				continue
-			}
-			actual = actual.Elem()
-		}
-		if actual.Kind() == reflect.Struct {
-			redacted := redactValue(actual)
-			if fv.Kind() == reflect.Ptr {
-				ptr := reflect.New(actual.Type())
-				ptr.Elem().Set(redacted)
-				fv.Set(ptr)
-			} else {
-				fv.Set(redacted)
-			}
-		}
+		fv.Set(redactReflectValue(fv))
 	}
 	return out
 }
+
+// redactReflectValue dispatches on kind. Struct → redactValue;
+// Ptr/Interface → unwrap and recurse;  Map → redactSensitiveMap;
+// Slice/Array → redact each element. Anything else passes through
+// unchanged. Returns a value of the same type as v so callers can
+// Set() directly.
+func redactReflectValue(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Ptr:
+		if v.IsNil() {
+			return v
+		}
+		inner := redactReflectValue(v.Elem())
+		ptr := reflect.New(v.Type().Elem())
+		ptr.Elem().Set(inner)
+		return ptr
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		inner := redactReflectValue(v.Elem())
+		// Wrap the redacted inner value back into the interface type.
+		out := reflect.New(v.Type()).Elem()
+		out.Set(inner)
+		return out
+	case reflect.Struct:
+		return redactValue(v)
+	case reflect.Map:
+		return redactSensitiveMap(v)
+	case reflect.Slice, reflect.Array:
+		// Skip []byte and similar — only recurse when elements are
+		// containers. Strings inside slices have no sensitive: tag
+		// (it lives on struct fields) so leaving them untouched is
+		// correct.
+		ek := v.Type().Elem().Kind()
+		if ek != reflect.Struct && ek != reflect.Ptr && ek != reflect.Interface && ek != reflect.Map {
+			return v
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := range v.Len() {
+			out.Index(i).Set(redactReflectValue(v.Index(i)))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// redactSensitiveMap returns a fresh map with sensitive keys masked.
+// "Sensitive" means the key name (case-insensitive) matches one of the
+// well-known secret-shaped tokens — see isSensitiveKey. Non-sensitive
+// keys pass through, including a recurse for nested struct/map values.
+func redactSensitiveMap(v reflect.Value) reflect.Value {
+	if v.IsNil() {
+		return v
+	}
+	out := reflect.MakeMapWithSize(v.Type(), v.Len())
+	iter := v.MapRange()
+	for iter.Next() {
+		k := iter.Key()
+		val := iter.Value()
+		if k.Kind() == reflect.String && isSensitiveKey(k.String()) {
+			masked := reflect.New(val.Type()).Elem()
+			// Replace the value with the redactedPlaceholder string,
+			// re-wrapped into whatever interface{} / typed slot the
+			// map holds. Non-string slots get a generic "***" string
+			// boxed via interface{} — adequate for the diagnostic
+			// path Redact serves.
+			placeholder := reflect.ValueOf(redactedPlaceholder)
+			if placeholder.Type().AssignableTo(val.Type()) {
+				masked.Set(placeholder)
+			} else if val.Kind() == reflect.Interface {
+				masked.Set(placeholder)
+			}
+			out.SetMapIndex(k, masked)
+			continue
+		}
+		out.SetMapIndex(k, redactReflectValue(val))
+	}
+	return out
+}
+
+// isSensitiveKey reports whether a config map key name looks like it
+// holds a secret. We err on the side of redaction — false positives
+// only blank a value in a diagnostic dump, while a false negative
+// leaks credentials.
+func isSensitiveKey(name string) bool {
+	lower := strings.ToLower(name)
+	for _, tok := range []string{
+		"secret",
+		"password",
+		"passwd",
+		"private_key",
+		"privatekey",
+		"api_key",
+		"apikey",
+		"token",
+		"signing_key",
+		"client_secret",
+	} {
+		if strings.Contains(lower, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// Defined-but-unmethoded twins of the *Options types whose GoString
+// implementations need to print "raw struct fields" without recursing
+// through their own GoString. Go's method-set rules: methods declared
+// on type T do NOT automatically belong to `type U T` — only struct
+// embedding promotes methods, and that promotion path is what made
+// the earlier `struct{ T }{o}` trick infinite-loop on %#v. A separate
+// named type with the same underlying layout sidesteps the recursion
+// entirely.
+type (
+	mysqlOptionsRaw   MySQLOptions
+	redisOptionsRaw   RedisOptions
+	accountOptionsRaw AccountOptions
+)
 
 // GoString implements fmt.GoStringer for MySQLOptions.
 // Prevents accidental credential leaks when using %#v.
 func (o MySQLOptions) GoString() string {
 	o.Password = redactSensitive(o.Password)
-	return fmt.Sprintf("%#v", struct{ MySQLOptions }{o})
+	return fmt.Sprintf("%#v", mysqlOptionsRaw(o))
 }
 
 // GoString implements fmt.GoStringer for RedisOptions.
 func (o RedisOptions) GoString() string {
 	o.Password = redactSensitive(o.Password)
-	return fmt.Sprintf("%#v", struct{ RedisOptions }{o})
+	return fmt.Sprintf("%#v", redisOptionsRaw(o))
 }
 
 // GoString implements fmt.GoStringer for AccountOptions.
+//
+// Mask both SigningKey and any sensitive map keys inside
+// Providers[name].Raw — without the latter, %#v on an AccountOptions
+// with OAuth providers configured leaks every client_secret / private_key
+// the operator put in yaml.
 func (o AccountOptions) GoString() string {
 	o.SigningKey = redactSensitive(o.SigningKey)
-	return fmt.Sprintf("%#v", struct{ AccountOptions }{o})
+	if len(o.Providers) > 0 {
+		safe := make(map[string]ProviderRawOptions, len(o.Providers))
+		for name, raw := range o.Providers {
+			safe[name] = ProviderRawOptions{
+				Enabled: raw.Enabled,
+				Raw:     redactSensitiveAnyMap(raw.Raw),
+			}
+		}
+		o.Providers = safe
+	}
+	return fmt.Sprintf("%#v", accountOptionsRaw(o))
+}
+
+// redactSensitiveAnyMap is the AccountOptions-specific shim around
+// redactSensitiveMap that takes / returns the concrete
+// map[string]any type. Reflect-free for the hot path; callers of
+// Redact() still hit the generic version through redactReflectValue.
+func redactSensitiveAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		if isSensitiveKey(k) {
+			out[k] = redactedPlaceholder
+			continue
+		}
+		// Nested map values get a recursive pass so a struct-shaped
+		// provider config (like nested objects) still gets cleaned.
+		if nested, ok := v.(map[string]any); ok {
+			out[k] = redactSensitiveAnyMap(nested)
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // String implements fmt.Stringer for MySQLOptions.

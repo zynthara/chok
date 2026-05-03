@@ -439,7 +439,8 @@ fsnotify─┼──▶ handleReload ──▶ App.Reload(ctx)
 | `CacheMemoryOptions` | enabled / capacity / TTL |
 | `CacheFileOptions` | enabled / path / TTL（badger） |
 | `SwaggerOptions` | enabled / title / version / prefix / bearer_auth |
-| `AccountOptions` | enabled / signing_key / expirations |
+| `AccountOptions` | enabled / signing_key / expirations / login_rate_window+limit / disable_register / link_by_email / allowed_redirect_backs / oauth_callback_frontend_url / providers |
+| `ProviderRawOptions` | enabled + 任意 provider-specific 键(走 mapstructure `,remain` 收集到 `Raw map[string]any`),由 provider 包通过 `raw.Decode(&typed)` 解出强类型配置 |
 
 ---
 
@@ -821,6 +822,52 @@ parts.NewAccountComponent(
     "/auth",  // group path
 )
 ```
+
+#### 9.2.1 OAuth 配置驱动（v0.3.6 / Phase 3）
+
+OAuth provider 走 `chok.yaml` 启用,业务方仅需 **一行** blank import 让 provider 包的 `init()` 注册到全局 factory 表:
+
+```go
+// main.go
+import (
+    _ "github.com/zynthara/chok/account/providers/google"   // Phase 4 起
+    _ "github.com/zynthara/chok/account/providers/github"
+    "github.com/zynthara/chok/chok"
+)
+```
+
+```yaml
+# chok.yaml
+account:
+  enabled: true
+  signing_key: "${JWT_SECRET}"
+  link_by_email: false                       # SPEC §8 默认关
+  allowed_redirect_backs:                    # SPEC §6.1 redirect_back 白名单
+    - "https://app.example.com/"
+  oauth_callback_frontend_url: "https://app.example.com/auth/finish"
+  providers:
+    google:
+      enabled: true
+      client_id:     "${GOOGLE_CLIENT_ID}"
+      client_secret: "${GOOGLE_CLIENT_SECRET}"
+      redirect_url:  "${OAUTH_REDIRECT_BASE}/auth/google/callback"
+```
+
+`parts.DefaultAccountBuilder`(等价 `account.OptionsFromConfig` + `account.RegisterConfiguredProviders`)在 Init 阶段:
+
+1. yaml 字段映射成 `account.With*` Option(`LinkByEmail` / `AllowedRedirectBacks` / `OAuthCallbackFrontendURL`)
+2. 遍历 `opts.Providers`(sorted),`enabled=true` 项查 `account.LookupProviderFactory(name)` → factory(`*config.ProviderRawOptions`) → `m.RegisterProvider(p)`
+3. factory 不存在 → fail-fast 报"missing `_ \"github.com/.../providers/X\"` import"
+
+环境变量可覆盖 yaml 任意子键(包括 provider 内部敏感字段):
+
+```
+$APP_PREFIX_ACCOUNT_PROVIDERS_GOOGLE_CLIENT_SECRET=…  # 覆盖 yaml 里的同名键
+```
+
+`account.Setup` 与 `parts.DefaultAccountBuilder` 共用 `OptionsFromConfig` + `RegisterConfiguredProviders` 路径,两条入口对齐。
+
+`config.Redact(&cfg)` 与 `AccountOptions.GoString` 都对 `Providers[name].Raw` 做基于关键字(`*secret*` / `*password*` / `*private_key*` / `*api_key*` / `*token*`)的 mask,直接 log 整个 config 不会泄密。
 
 ### 9.3 特殊模式
 

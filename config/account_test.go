@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -134,5 +135,132 @@ func TestProviderRawOptions_Decode_Nil(t *testing.T) {
 	var dst struct{}
 	if err := raw.Decode(&dst); err == nil {
 		t.Fatal("expected error for nil receiver")
+	}
+}
+
+// TestRedact_AccountOptions_MasksProviderSecrets covers the H1
+// regression: ProviderRawOptions.Raw is map[string]any holding
+// arbitrary provider keys (client_secret, private_key, ...). Pre-fix
+// Redact only descended into structs, so secrets in Raw leaked. Now
+// the recursion enters maps and a key-name heuristic masks values
+// whose key matches one of the well-known secret tokens
+// (`*secret*`, `*password*`, `*private_key*`, `*token*`, `*api_key*`).
+func TestRedact_AccountOptions_MasksProviderSecrets(t *testing.T) {
+	cfg := struct {
+		Account AccountOptions `mapstructure:"account"`
+	}{
+		Account: AccountOptions{
+			Enabled:                  true,
+			SigningKey:               "this-is-a-test-signing-key-32bytes!",
+			OAuthCallbackFrontendURL: "https://app.example.com/auth/finish",
+			Providers: map[string]ProviderRawOptions{
+				"google": {
+					Enabled: true,
+					Raw: map[string]any{
+						"client_id":     "abc",
+						"client_secret": "TOP-SECRET-VALUE",
+						"scopes":        []string{"openid"},
+					},
+				},
+				"apple": {
+					Enabled: true,
+					Raw: map[string]any{
+						"service_id":  "com.example.svc",
+						"team_id":     "TEAMABC",
+						"key_id":      "KEYXYZ",
+						"private_key": "-----BEGIN PRIVATE KEY-----\nXXXXX",
+					},
+				},
+			},
+		},
+	}
+
+	out := Redact(&cfg)
+	dump := fmt.Sprintf("%#v", out)
+
+	// Sanity: ordinary values still present.
+	for _, want := range []string{"abc", "com.example.svc", "TEAMABC"} {
+		if !strings.Contains(dump, want) {
+			t.Errorf("non-sensitive value %q lost in redaction", want)
+		}
+	}
+
+	// Critical: every secret-shaped value must be gone.
+	for _, leaked := range []string{
+		"TOP-SECRET-VALUE",
+		"-----BEGIN PRIVATE KEY-----",
+		"this-is-a-test-signing-key-32bytes!",
+	} {
+		if strings.Contains(dump, leaked) {
+			t.Errorf("secret leaked in Redact output: %q\n--full dump--\n%s", leaked, dump)
+		}
+	}
+
+	// Heuristic-masked keys must still be present (we mask the value,
+	// not the key) so an operator reading the redacted output knows
+	// what was scrubbed.
+	for _, key := range []string{"client_secret", "private_key"} {
+		if !strings.Contains(dump, key) {
+			t.Errorf("expected key %q to remain in redacted output", key)
+		}
+	}
+}
+
+// TestGoString_AccountOptions_MasksProviderSecrets covers the same
+// path through fmt.Sprintf("%#v", account.AccountOptions{...}) — the
+// route any "log the whole config" call lands on. AccountOptions.GoString
+// must not pass Providers.Raw through verbatim.
+func TestGoString_AccountOptions_MasksProviderSecrets(t *testing.T) {
+	o := AccountOptions{
+		Enabled:    true,
+		SigningKey: "this-is-a-test-signing-key-32bytes!",
+		Providers: map[string]ProviderRawOptions{
+			"google": {Enabled: true, Raw: map[string]any{
+				"client_id":     "abc",
+				"client_secret": "TOP-SECRET-VALUE",
+			}},
+		},
+	}
+	got := fmt.Sprintf("%#v", o)
+	if strings.Contains(got, "TOP-SECRET-VALUE") {
+		t.Errorf("client_secret leaked in GoString: %s", got)
+	}
+	if strings.Contains(got, "this-is-a-test-signing-key-32bytes!") {
+		t.Errorf("signing_key leaked in GoString: %s", got)
+	}
+	if !strings.Contains(got, "abc") {
+		t.Errorf("client_id (non-sensitive) lost in GoString: %s", got)
+	}
+}
+
+// TestIsSensitiveKey covers the heuristic. A few tricky cases worth
+// pinning so a future "tighten the matcher" doesn't accidentally
+// downgrade from "redact known shapes" to "redact only literal
+// `secret`".
+func TestIsSensitiveKey(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"client_secret", true},
+		{"ClientSecret", true},
+		{"private_key", true},
+		{"PRIVATE_KEY", true},
+		{"api_key", true},
+		{"apikey", true},
+		{"refresh_token", true},
+		{"signing_key", true},
+		{"password", true},
+		{"client_id", false},
+		{"scope", false},
+		{"redirect_url", false},
+		{"team_id", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSensitiveKey(tc.name); got != tc.want {
+				t.Fatalf("isSensitiveKey(%q) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
 }

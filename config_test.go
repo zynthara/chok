@@ -128,6 +128,55 @@ func TestConfig_DefaultPathNotFound_Skip(t *testing.T) {
 	}
 }
 
+// TestConfig_ProviderEnvOverridesYAML proves the second-pass env
+// binding: yaml carries account.providers.google.client_secret, env
+// var TESTCFG_ACCOUNT_PROVIDERS_GOOGLE_CLIENT_SECRET should override
+// it. Pre-fix bindEnvs stopped at `map[string]ProviderRawOptions` so
+// the env never bound; the override silently fell through.
+func TestConfig_ProviderEnvOverridesYAML(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "p.yaml")
+	yaml := `
+account:
+  enabled: true
+  signing_key: "this-is-a-test-signing-key-32bytes!"
+  oauth_callback_frontend_url: "https://app.example.com/auth/finish"
+  providers:
+    google:
+      enabled: true
+      client_id: "yaml-id"
+      client_secret: "yaml-secret"
+`
+	if err := os.WriteFile(cfgFile, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TESTCFG_ACCOUNT_PROVIDERS_GOOGLE_CLIENT_SECRET", "env-secret")
+	t.Setenv("TESTCFG_ACCOUNT_PROVIDERS_GOOGLE_CLIENT_ID", "env-id")
+
+	type cfgT struct {
+		Account config.AccountOptions `mapstructure:"account"`
+	}
+	var cfg cfgT
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	app := New("testcfg",
+		WithLogger(log.Empty()),
+		WithConfig(&cfg, cfgFile),
+	)
+	_ = app.Run(ctx)
+
+	google, ok := cfg.Account.Providers["google"]
+	if !ok {
+		t.Fatal("google provider missing")
+	}
+	if got, _ := google.Raw["client_secret"].(string); got != "env-secret" {
+		t.Fatalf("env did not override client_secret: got %q", got)
+	}
+	if got, _ := google.Raw["client_id"].(string); got != "env-id" {
+		t.Fatalf("env did not override client_id: got %q", got)
+	}
+}
+
 // TestConfig_AccountProvidersFromYAML covers Phase 3's contract:
 // `account.providers.<name>.enabled` plus arbitrary provider-specific
 // keys round-trip through viper into config.AccountOptions. Provider

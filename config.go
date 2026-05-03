@@ -58,6 +58,21 @@ func (a *App) loadConfig() error {
 		}
 	}
 
+	// Second-pass env binding for keys reachable only through the
+	// loaded yaml. bindEnvs walks the static struct shape and stops at
+	// `map[string]X` because the keys are dynamic; without this pass,
+	// `account.providers.google.client_secret` (and any other map-leaf
+	// path) would never receive an env override.
+	//
+	// Implementation note: viper.Unmarshal reads from AllSettings(),
+	// not from Get(), so BindEnv alone doesn't propagate env values
+	// into the unmarshalled struct for these dynamic keys. We resolve
+	// it imperatively — for every yaml-discovered key, query the env
+	// directly and Set() the override into viper so AllSettings sees
+	// it. Static struct paths still go through bindEnvs/AutomaticEnv
+	// the normal way; this is purely the map-leaf escape hatch.
+	bindMapEnvOverrides(v, a.envPrefix)
+
 	// Unmarshal into the typed config struct.
 	if err := v.Unmarshal(a.configPtr); err != nil {
 		return fmt.Errorf("chok: unmarshal config: %w", err)
@@ -122,6 +137,11 @@ func (a *App) reloadConfigImmutable() (bool, map[string]bool, error) {
 			return false, nil, fmt.Errorf("chok: reload bind flags: %w", err)
 		}
 	}
+
+	// Mirror loadConfig: bind every yaml-discovered key (incl. dynamic
+	// map children like account.providers.<name>.<key>) so env vars
+	// with full path can override them on reload too.
+	bindMapEnvOverrides(v, a.envPrefix)
 
 	if err := v.Unmarshal(freshCfg); err != nil {
 		return false, nil, fmt.Errorf("chok: reload unmarshal config: %w", err)
@@ -276,7 +296,43 @@ func registerDefaults(v *viper.Viper, prefix string, t reflect.Type) {
 	}
 }
 
+// bindMapEnvOverrides closes the loop on env binding for yaml-
+// discovered keys that the static struct walker can't reach (chiefly
+// `map[string]ProviderRawOptions` whose subkeys are operator-supplied).
+//
+// Approach: for every key viper currently knows about (after yaml
+// load), compute the corresponding env name and, if set, viper.Set
+// the value back into the merged settings. Unmarshal reads from
+// AllSettings, so this is the spot where env wins.
+//
+// envPrefix mirrors the same lookup viper.AutomaticEnv uses:
+//
+//	"foo.bar.baz" → "<PREFIX>_FOO_BAR_BAZ"
+//
+// Idempotent and side-effect-free except for v.Set on actually-
+// overridden keys.
+func bindMapEnvOverrides(v *viper.Viper, envPrefix string) {
+	prefix := strings.ToUpper(envPrefix)
+	for _, k := range v.AllKeys() {
+		envKey := strings.ToUpper(strings.ReplaceAll(k, ".", "_"))
+		if prefix != "" {
+			envKey = prefix + "_" + envKey
+		}
+		if val, ok := os.LookupEnv(envKey); ok {
+			v.Set(k, val)
+		}
+	}
+}
+
 // bindEnvs recursively binds env vars for all leaf fields.
+//
+// Maps are intentionally skipped: BindEnv on `account.providers`
+// (a map[string]ProviderRawOptions field) makes viper treat that
+// path as an opaque leaf, which suppresses the yaml-discovered
+// children from AllKeys() and breaks per-subkey env overrides for
+// dynamic data like provider configs. bindMapEnvOverrides handles
+// the map case after yaml is loaded, when the dynamic key set is
+// known.
 func bindEnvs(v *viper.Viper, prefix string, t reflect.Type) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -305,6 +361,10 @@ func bindEnvs(v *viper.Viper, prefix string, t reflect.Type) {
 
 		if ft.Kind() == reflect.Struct {
 			bindEnvs(v, key, ft)
+			continue
+		}
+		if ft.Kind() == reflect.Map {
+			// Skip — see bindMapEnvOverrides for the dynamic-key path.
 			continue
 		}
 
