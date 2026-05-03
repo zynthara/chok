@@ -97,10 +97,9 @@ func (a *AuthzComponent) Init(ctx context.Context, k component.Kernel) error {
 // implementations close their Watcher subscriber + clear audit hooks;
 // pure-function authorizers without io.Closer are no-ops.
 //
-// errors.Join is intentional: a Casbin enforcer that hits trouble
-// closing its Redis subscriber should still let chok continue
-// shutdown — the error surfaces in registry.Stop's aggregate so an
-// operator sees it without blocking other components.
+// The returned error surfaces in registry.Stop's aggregate so an
+// operator sees a Watcher / adapter teardown failure without blocking
+// other components from shutting down.
 func (a *AuthzComponent) Close(ctx context.Context) error {
 	if a.auth == nil {
 		return nil

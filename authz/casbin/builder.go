@@ -39,8 +39,25 @@ import (
 // underlying Casbin runtime. chok's bundled adapter (adapter.go)
 // reuses whichever GORM driver the application already configured;
 // nothing more, nothing extra.
+//
+// Failure ordering: unsupported flags (RedisWatcher / AuditEnabled)
+// are checked BEFORE dbFromKernel + newGormAdapter so a misconfigured
+// startup doesn't leave a freshly-migrated casbin_rule table behind
+// when the flag would have failed anyway.
 func Builder(opts Options) parts.AuthzBuilder {
 	return func(k component.Kernel) (authz.Authorizer, error) {
+		// Watcher and audit integrations land in follow-up PRs; until
+		// then, surface "you set the flag but nothing will fire" as a
+		// startup error rather than letting policy changes silently
+		// stay local. Done first so a failed startup leaves no DB
+		// schema side effects (no AutoMigrate, no LoadPolicy).
+		if opts.RedisWatcher {
+			return nil, errors.New("authz/casbin: RedisWatcher=true requires the redis-watcher integration which is not yet shipped — disable in chok.yaml or await the follow-up PR")
+		}
+		if opts.AuditEnabled {
+			return nil, errors.New("authz/casbin: AuditEnabled=true requires the audit component which is not yet shipped — disable in chok.yaml or await the follow-up PR")
+		}
+
 		gdb, err := dbFromKernel(k)
 		if err != nil {
 			return nil, fmt.Errorf("authz/casbin: %w", err)
@@ -54,17 +71,6 @@ func Builder(opts Options) parts.AuthzBuilder {
 		auth, err := newAuthorizer(opts.modelOrDefault(), adapter)
 		if err != nil {
 			return nil, err
-		}
-
-		// Watcher and audit integrations land in follow-up PRs; until
-		// then, surface "you set the flag but nothing will fire" as a
-		// startup error rather than letting policy changes silently
-		// stay local.
-		if opts.RedisWatcher {
-			return nil, errors.New("authz/casbin: RedisWatcher=true requires the redis-watcher integration which is not yet shipped — disable in chok.yaml or await the follow-up PR")
-		}
-		if opts.AuditEnabled {
-			return nil, errors.New("authz/casbin: AuditEnabled=true requires the audit component which is not yet shipped — disable in chok.yaml or await the follow-up PR")
 		}
 
 		return auth, nil

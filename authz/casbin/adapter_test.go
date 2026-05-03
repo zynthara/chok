@@ -1,6 +1,10 @@
 package casbin
 
 import (
+	"context"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/casbin/casbin/v3/model"
@@ -253,6 +257,317 @@ func TestSavePolicy_TruncateAndReplace(t *testing.T) {
 	}
 	if len(m2["p"]["p"].Policy) != 1 || m2["p"]["p"].Policy[0][0] != "new" {
 		t.Fatalf("SavePolicy didn't truncate-and-replace, got %v", m2["p"]["p"].Policy)
+	}
+}
+
+// TestRuleToRow_RejectsOversize verifies the boundary check that
+// stops custom Options.Model with policy width > V0..V5 from silently
+// truncating data on AddPolicy / SavePolicy. Any rule longer than 6
+// must error rather than store a corrupted prefix.
+func TestRuleToRow_RejectsOversize(t *testing.T) {
+	cases := [][]string{
+		{"a", "b", "c", "d", "e", "f", "g"},                // 7 cols
+		{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}, // way over
+	}
+	for _, c := range cases {
+		_, err := ruleToRow("p", c)
+		if err == nil {
+			t.Errorf("expected error for %d-col rule, got nil", len(c))
+			continue
+		}
+		if !strings.Contains(err.Error(), "max supported is 6") {
+			t.Errorf("expected 'max supported is 6' message, got %q", err)
+		}
+	}
+}
+
+// TestRuleToRow_AcceptsBoundary covers the 6-col limit (max storage
+// width). Failing this would mean the boundary check is too strict.
+func TestRuleToRow_AcceptsBoundary(t *testing.T) {
+	r, err := ruleToRow("p", []string{"a", "b", "c", "d", "e", "f"})
+	if err != nil {
+		t.Fatalf("6-col rule should be accepted, got %v", err)
+	}
+	if r.V5 != "f" {
+		t.Errorf("V5 = %q, want %q", r.V5, "f")
+	}
+}
+
+// TestSavePolicy_RejectsOversize covers the SavePolicy fast-fail when
+// the model carries a 7+ col policy. Without the check the SavePolicy
+// transaction would commit truncated rows that would not round-trip.
+func TestSavePolicy_RejectsOversize(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := model.NewModel()
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
+	m["p"]["p"].Policy = [][]string{{"a", "b", "c", "d", "e", "f", "g"}}
+	if err := a.SavePolicy(m); err == nil {
+		t.Fatal("expected error on oversize policy")
+	}
+	// Pre-existing rows must remain (transaction rolled back).
+	if err := a.AddPolicy("p", "p", []string{"alice", "*", "task", "read"}); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Model(&CasbinRule{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("rollback failed, expected 1 row, got %d", count)
+	}
+}
+
+// TestSavePolicy_EmptyModel_TruncatesTable covers the documented
+// "empty rules → bulk-replace clears the table" semantics. The
+// current impl returns nil after the Delete; the test pins this
+// behaviour so a refactor doesn't accidentally turn empty save into
+// "leave existing rows alone".
+func TestSavePolicy_EmptyModel_TruncatesTable(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddPolicy("p", "p", []string{"alice", "*", "task", "read"}); err != nil {
+		t.Fatal(err)
+	}
+	m := model.NewModel()
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
+	// m has no policies; SavePolicy should clear the table.
+	if err := a.SavePolicy(m); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Model(&CasbinRule{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected empty table after SavePolicy(empty), got %d rows", count)
+	}
+}
+
+// TestAdapter_UniqueIndex_DuplicateInsert verifies the chok adapter
+// rejects (or silently ignores via OnConflict) duplicate (ptype, V0..V5)
+// tuples at the database layer. Without this guarantee, multi-instance
+// Bootstrap leaves duplicate rows in casbin_rule that LoadPolicy then
+// has to dedupe at runtime.
+func TestAdapter_UniqueIndex_DuplicateInsert(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := []string{"alice", "*", "task", "read"}
+	for i := range 3 {
+		if err := a.AddPolicy("p", "p", rule); err != nil {
+			t.Fatalf("AddPolicy iteration %d: %v", i, err)
+		}
+	}
+	var count int64
+	if err := db.Model(&CasbinRule{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("3 AddPolicy of identical rule should leave 1 row, got %d", count)
+	}
+}
+
+// TestAdapter_AddPolicies_DuplicateInBatch covers two dedupe paths:
+// (a) duplicate rule inside the same batch slice, (b) duplicate of a
+// pre-existing row. Both must converge on a single row.
+func TestAdapter_AddPolicies_DuplicateInBatch(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddPolicy("p", "p", []string{"alice", "*", "task", "read"}); err != nil {
+		t.Fatal(err)
+	}
+	ba := a.(persist.BatchAdapter)
+	rules := [][]string{
+		{"alice", "*", "task", "read"},   // dup of pre-existing
+		{"alice", "*", "task", "read"},   // dup inside batch
+		{"bob", "*", "task", "write"},    // new
+		{"alice", "*", "task", "delete"}, // new
+	}
+	if err := ba.AddPolicies("p", "p", rules); err != nil {
+		t.Fatalf("batch AddPolicies should not error on duplicates: %v", err)
+	}
+	var count int64
+	if err := db.Model(&CasbinRule{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		var rows []CasbinRule
+		_ = db.Find(&rows).Error
+		t.Errorf("expected 3 distinct rows, got %d (rows: %+v)", count, rows)
+	}
+}
+
+// TestAdapter_MultiInstance_BootstrapIdempotent simulates two
+// independent enforcer instances over the same DB (a multi-pod
+// deployment) Bootstrapping concurrently. With the unique index +
+// OnConflict{DoNothing:true}, the final state must have exactly one
+// (g, usr_root, admin, *) and one (p, admin, *, *, *) row regardless
+// of which instance won the race for either INSERT.
+//
+// Uses a temp file because SQLite ":memory:" gives each *sql.DB
+// connection its own private database, which would defeat the
+// "shared storage" premise of this test.
+func TestAdapter_MultiInstance_BootstrapIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "casbin.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{Logger: gormlogger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func() Service {
+		adapter, aerr := newGormAdapter(db)
+		if aerr != nil {
+			t.Fatal(aerr)
+		}
+		auth, aerr := newAuthorizer(rbacWithDomainsModel, adapter)
+		if aerr != nil {
+			t.Fatal(aerr)
+		}
+		return auth
+	}
+	svc1 := build()
+	svc2 := build()
+	cfg := BootstrapConfig{AdminUserID: "usr_root"}
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(2)
+	go func() { defer wg.Done(); err1 = Bootstrap(context.Background(), svc1, cfg) }()
+	go func() { defer wg.Done(); err2 = Bootstrap(context.Background(), svc2, cfg) }()
+	wg.Wait()
+	if err1 != nil {
+		t.Errorf("svc1 Bootstrap: %v", err1)
+	}
+	if err2 != nil {
+		t.Errorf("svc2 Bootstrap: %v", err2)
+	}
+
+	var rows []CasbinRule
+	if err := db.Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	gCount, pCount := 0, 0
+	for _, r := range rows {
+		if r.Ptype == "g" && r.V0 == "usr_root" {
+			gCount++
+		}
+		if r.Ptype == "p" && r.V0 == "admin" {
+			pCount++
+		}
+	}
+	if gCount != 1 {
+		t.Errorf("g(usr_root, admin, *) count = %d, want 1 (rows: %+v)", gCount, rows)
+	}
+	if pCount != 1 {
+		t.Errorf("p(admin, *, *, *) count = %d, want 1 (rows: %+v)", pCount, rows)
+	}
+}
+
+// TestBootstrap_BatchPath verifies the *casbinAuthorizer.grantRoleBatch
+// fast path is exercised when Bootstrap's Service argument satisfies
+// batchGranter (the chok-shipped enforcer does). The functional check
+// is "all perms persisted in one go"; we can't directly count round-
+// trips from inside the test, but the type assertion path is the
+// invariant — without it we'd fall back to the per-perm GrantRole loop.
+func TestBootstrap_BatchPath(t *testing.T) {
+	db := newAdapterDB(t)
+	adapter, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := newAuthorizer(rbacWithDomainsModel, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := Service(auth).(batchGranter); !ok {
+		t.Fatal("*casbinAuthorizer must satisfy batchGranter for Bootstrap fast path")
+	}
+	cfg := BootstrapConfig{
+		AdminUserID: "usr_root",
+		AdminPerms: []Permission{
+			{Object: "task", Action: "read"},
+			{Object: "task", Action: "write"},
+			{Object: "audit", Action: "read"},
+			{Object: "user", Action: "list"},
+		},
+	}
+	if err := Bootstrap(context.Background(), auth, cfg); err != nil {
+		t.Fatal(err)
+	}
+	var pCount int64
+	if err := db.Model(&CasbinRule{}).Where("ptype = ? AND v0 = ?", "p", "admin").
+		Count(&pCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if pCount != 4 {
+		t.Errorf("expected 4 admin policy rows, got %d", pCount)
+	}
+	// Re-running Bootstrap with same cfg must remain idempotent —
+	// unique index makes it a no-op even via the batch path.
+	if err := Bootstrap(context.Background(), auth, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&CasbinRule{}).Where("ptype = ? AND v0 = ?", "p", "admin").
+		Count(&pCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if pCount != 4 {
+		t.Errorf("after re-Bootstrap, expected 4 admin policy rows, got %d", pCount)
+	}
+}
+
+// TestWithAuditHook_AtomicSwap exercises the atomic.Pointer auditFn:
+// installing a hook fires it once per mutation; clearing it stops
+// further events. Phase 6 doesn't wire a real audit producer (the
+// Builder rejects AuditEnabled=true), but the storage primitive is
+// the eventual integration point and must be race-free.
+func TestWithAuditHook_AtomicSwap(t *testing.T) {
+	db := newAdapterDB(t)
+	adapter, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := newAuthorizer(rbacWithDomainsModel, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fired int
+	auth.withAuditHook(func(_, _, _, _ string) { fired++ })
+	if err := auth.GrantRole(context.Background(), "admin", "task", "read"); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 1 {
+		t.Errorf("after GrantRole, fired = %d, want 1", fired)
+	}
+	auth.withAuditHook(nil)
+	if err := auth.GrantRole(context.Background(), "admin", "task", "write"); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 1 {
+		t.Errorf("after nil-swap, fired = %d, want 1 (no new fires)", fired)
+	}
+	if err := auth.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.GrantRole(context.Background(), "admin", "audit", "read"); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 1 {
+		t.Errorf("after Close, fired = %d, want 1 (Close also clears hook)", fired)
 	}
 }
 

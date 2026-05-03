@@ -310,3 +310,39 @@ func TestBuilder_RejectsMissingDB(t *testing.T) {
 		t.Fatal("expected error when DB component absent")
 	}
 }
+
+// TestBuilder_FailFastBeforeAutoMigrate proves the Builder rejects
+// unsupported flags BEFORE touching the database. A misconfigured
+// startup must not leave a half-initialised casbin_rule table behind
+// when the same flag would have failed the eventual policy load.
+func TestBuilder_FailFastBeforeAutoMigrate(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
+		return db, nil
+	})
+	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		opts casbin.Options
+	}{
+		{"RedisWatcher", casbin.Options{RedisWatcher: true}},
+		{"AuditEnabled", casbin.Options{AuditEnabled: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := casbin.Builder(tc.opts)(&fakeKernel{db: dbc})
+			if err == nil {
+				t.Fatal("expected fail-fast error")
+			}
+			if db.Migrator().HasTable("casbin_rule") {
+				t.Errorf("Builder fail-fast on %s left casbin_rule table behind — schema should not be touched before flag check", tc.name)
+			}
+		})
+	}
+}

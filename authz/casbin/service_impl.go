@@ -2,7 +2,6 @@ package casbin
 
 import (
 	"context"
-	"errors"
 	"fmt"
 )
 
@@ -22,6 +21,8 @@ import (
 //     duplicate writes don't generate spurious events. Casbin's
 //     AddPolicy returns (true, nil) on insert, (false, nil) on dup;
 //     we treat the dup case as a no-op (no audit entry).
+//     fireAudit() does an atomic.Pointer.Load under the hood so the
+//     read is race-free against Close.
 //
 // Errors propagate verbatim from the Casbin SDK — wrapped with the
 // method name + parameters for log readability when needed.
@@ -37,8 +38,8 @@ func (a *casbinAuthorizer) AddUserToRole(ctx context.Context, userID, role strin
 	if err != nil {
 		return err
 	}
-	if added && a.auditFn != nil {
-		a.auditFn("AddUserToRole", role, userID, globalDomain)
+	if added {
+		a.fireAudit("AddUserToRole", role, userID, globalDomain)
 	}
 	return nil
 }
@@ -49,8 +50,8 @@ func (a *casbinAuthorizer) RemoveUserFromRole(ctx context.Context, userID, role 
 	if err != nil {
 		return err
 	}
-	if removed && a.auditFn != nil {
-		a.auditFn("RemoveUserFromRole", role, userID, globalDomain)
+	if removed {
+		a.fireAudit("RemoveUserFromRole", role, userID, globalDomain)
 	}
 	return nil
 }
@@ -62,7 +63,7 @@ func (a *casbinAuthorizer) UserRoles(ctx context.Context, userID string) ([]stri
 
 // AddUserToRoleInDomain implements Service.
 func (a *casbinAuthorizer) AddUserToRoleInDomain(ctx context.Context, userID, role, domain string) error {
-	if err := rejectGlobalAsTenantUnlessLiteral(domain, "AddUserToRoleInDomain"); err != nil {
+	if err := rejectGlobalAsTenant(domain, "AddUserToRoleInDomain"); err != nil {
 		return err
 	}
 	dom := normalizeDomain(domain)
@@ -70,15 +71,15 @@ func (a *casbinAuthorizer) AddUserToRoleInDomain(ctx context.Context, userID, ro
 	if err != nil {
 		return err
 	}
-	if added && a.auditFn != nil {
-		a.auditFn("AddUserToRoleInDomain", role, userID, dom)
+	if added {
+		a.fireAudit("AddUserToRoleInDomain", role, userID, dom)
 	}
 	return nil
 }
 
 // RemoveUserFromRoleInDomain implements Service.
 func (a *casbinAuthorizer) RemoveUserFromRoleInDomain(ctx context.Context, userID, role, domain string) error {
-	if err := rejectGlobalAsTenantUnlessLiteral(domain, "RemoveUserFromRoleInDomain"); err != nil {
+	if err := rejectGlobalAsTenant(domain, "RemoveUserFromRoleInDomain"); err != nil {
 		return err
 	}
 	dom := normalizeDomain(domain)
@@ -86,15 +87,15 @@ func (a *casbinAuthorizer) RemoveUserFromRoleInDomain(ctx context.Context, userI
 	if err != nil {
 		return err
 	}
-	if removed && a.auditFn != nil {
-		a.auditFn("RemoveUserFromRoleInDomain", role, userID, dom)
+	if removed {
+		a.fireAudit("RemoveUserFromRoleInDomain", role, userID, dom)
 	}
 	return nil
 }
 
 // UserRolesInDomain implements Service.
 func (a *casbinAuthorizer) UserRolesInDomain(ctx context.Context, userID, domain string) ([]string, error) {
-	if err := rejectGlobalAsTenantUnlessLiteral(domain, "UserRolesInDomain"); err != nil {
+	if err := rejectGlobalAsTenant(domain, "UserRolesInDomain"); err != nil {
 		return nil, err
 	}
 	return a.enforcer.GetRolesForUserInDomain(userID, normalizeDomain(domain)), nil
@@ -132,8 +133,8 @@ func (a *casbinAuthorizer) GrantRole(ctx context.Context, role, obj, act string)
 	if err != nil {
 		return err
 	}
-	if added && a.auditFn != nil {
-		a.auditFn("GrantRole", role, obj, act)
+	if added {
+		a.fireAudit("GrantRole", role, obj, act)
 	}
 	return nil
 }
@@ -144,8 +145,8 @@ func (a *casbinAuthorizer) RevokeRole(ctx context.Context, role, obj, act string
 	if err != nil {
 		return err
 	}
-	if removed && a.auditFn != nil {
-		a.auditFn("RevokeRole", role, obj, act)
+	if removed {
+		a.fireAudit("RevokeRole", role, obj, act)
 	}
 	return nil
 }
@@ -168,7 +169,7 @@ func (a *casbinAuthorizer) RolePermissions(ctx context.Context, role string) ([]
 
 // GrantRoleInDomain implements Service.
 func (a *casbinAuthorizer) GrantRoleInDomain(ctx context.Context, role, obj, act, domain string) error {
-	if err := rejectGlobalAsTenantUnlessLiteral(domain, "GrantRoleInDomain"); err != nil {
+	if err := rejectGlobalAsTenant(domain, "GrantRoleInDomain"); err != nil {
 		return err
 	}
 	dom := normalizeDomain(domain)
@@ -176,15 +177,15 @@ func (a *casbinAuthorizer) GrantRoleInDomain(ctx context.Context, role, obj, act
 	if err != nil {
 		return err
 	}
-	if added && a.auditFn != nil {
-		a.auditFn("GrantRoleInDomain", role, obj, act)
+	if added {
+		a.fireAudit("GrantRoleInDomain", role, obj, act)
 	}
 	return nil
 }
 
 // RevokeRoleInDomain implements Service.
 func (a *casbinAuthorizer) RevokeRoleInDomain(ctx context.Context, role, obj, act, domain string) error {
-	if err := rejectGlobalAsTenantUnlessLiteral(domain, "RevokeRoleInDomain"); err != nil {
+	if err := rejectGlobalAsTenant(domain, "RevokeRoleInDomain"); err != nil {
 		return err
 	}
 	dom := normalizeDomain(domain)
@@ -192,15 +193,15 @@ func (a *casbinAuthorizer) RevokeRoleInDomain(ctx context.Context, role, obj, ac
 	if err != nil {
 		return err
 	}
-	if removed && a.auditFn != nil {
-		a.auditFn("RevokeRoleInDomain", role, obj, act)
+	if removed {
+		a.fireAudit("RevokeRoleInDomain", role, obj, act)
 	}
 	return nil
 }
 
 // RolePermissionsInDomain implements Service.
 func (a *casbinAuthorizer) RolePermissionsInDomain(ctx context.Context, role, domain string) ([]Permission, error) {
-	if err := rejectGlobalAsTenantUnlessLiteral(domain, "RolePermissionsInDomain"); err != nil {
+	if err := rejectGlobalAsTenant(domain, "RolePermissionsInDomain"); err != nil {
 		return nil, err
 	}
 	dom := normalizeDomain(domain)
@@ -228,8 +229,8 @@ func (a *casbinAuthorizer) GrantUser(ctx context.Context, userID, obj, act strin
 	if err != nil {
 		return err
 	}
-	if added && a.auditFn != nil {
-		a.auditFn("GrantUser", "(direct)", userID, obj+"/"+act)
+	if added {
+		a.fireAudit("GrantUser", "(direct)", userID, obj+"/"+act)
 	}
 	return nil
 }
@@ -240,8 +241,8 @@ func (a *casbinAuthorizer) RevokeUser(ctx context.Context, userID, obj, act stri
 	if err != nil {
 		return err
 	}
-	if removed && a.auditFn != nil {
-		a.auditFn("RevokeUser", "(direct)", userID, obj+"/"+act)
+	if removed {
+		a.fireAudit("RevokeUser", "(direct)", userID, obj+"/"+act)
 	}
 	return nil
 }
@@ -253,31 +254,17 @@ func (a *casbinAuthorizer) HasPermission(ctx context.Context, userID, obj, act s
 	return a.Authorize(ctx, userID, obj, act)
 }
 
-// HasPermissionInDomain implements Service.
+// HasPermissionInDomain implements Service. The reject check happens
+// here; AuthorizeInDomain already normalises the domain on its own,
+// so we pass the raw input through.
 func (a *casbinAuthorizer) HasPermissionInDomain(ctx context.Context, userID, obj, act, domain string) (bool, error) {
-	if err := rejectGlobalAsTenantUnlessLiteral(domain, "HasPermissionInDomain"); err != nil {
+	if err := rejectGlobalAsTenant(domain, "HasPermissionInDomain"); err != nil {
 		return false, err
 	}
-	return a.AuthorizeInDomain(ctx, userID, normalizeDomain(domain), obj, act)
+	return a.AuthorizeInDomain(ctx, userID, domain, obj, act)
 }
 
 // ReloadPolicy implements Service.
 func (a *casbinAuthorizer) ReloadPolicy(ctx context.Context) error {
 	return a.enforcer.LoadPolicy()
 }
-
-// rejectGlobalAsTenantUnlessLiteral wraps rejectGlobalAsTenant. The
-// "Unless" suffix exists for the rare future case where we want to
-// allow a literal "*" domain — currently never. The single rule:
-// any "InDomain" method with domain="*" is a misuse; route the
-// caller to the no-suffix variant via the structured error.
-func rejectGlobalAsTenantUnlessLiteral(domain, method string) error {
-	if err := rejectGlobalAsTenant(domain, method); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Static check on a stable error string consumers might match in
-// tests — wrapped via errors.As, never matched as text by callers.
-var _ = errors.New

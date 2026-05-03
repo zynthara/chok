@@ -1,19 +1,25 @@
 package casbin
 
 import (
-	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/casbin/casbin/v3/model"
 	"github.com/casbin/casbin/v3/persist"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // CasbinRule is the chok-shipped storage row for Casbin policies.
 // Wire-compatible with gorm-adapter v3's table layout (table name +
-// columns + sizes), so a deployment that has already run with
-// gorm-adapter can switch to the chok adapter without migration.
+// columns + sizes + composite unique index named "unique_index"), so a
+// deployment that has already run with gorm-adapter v3 can switch to
+// the chok adapter without migration. The unique index spans Ptype +
+// V0..V5 so the database itself rejects duplicate (ptype, rule) tuples
+// — Casbin's in-memory model dedupes per-instance, but multi-instance
+// Bootstrap or operators bypassing the Service path would otherwise
+// leave duplicate rows behind.
 //
 // We pull our own adapter rather than depending on gorm-adapter v3
 // because gorm-adapter blank-imports gorm.io/driver/postgres,
@@ -32,18 +38,23 @@ import (
 // the table creation portably.
 type CasbinRule struct {
 	ID    uint   `gorm:"primaryKey;autoIncrement"`
-	Ptype string `gorm:"size:100;index:idx_casbin_rule_ptype"`
-	V0    string `gorm:"size:100"`
-	V1    string `gorm:"size:100"`
-	V2    string `gorm:"size:100"`
-	V3    string `gorm:"size:100"`
-	V4    string `gorm:"size:100"`
-	V5    string `gorm:"size:100"`
+	Ptype string `gorm:"size:100;uniqueIndex:unique_index"`
+	V0    string `gorm:"size:100;uniqueIndex:unique_index"`
+	V1    string `gorm:"size:100;uniqueIndex:unique_index"`
+	V2    string `gorm:"size:100;uniqueIndex:unique_index"`
+	V3    string `gorm:"size:100;uniqueIndex:unique_index"`
+	V4    string `gorm:"size:100;uniqueIndex:unique_index"`
+	V5    string `gorm:"size:100;uniqueIndex:unique_index"`
 }
 
 // TableName pins the storage name to "casbin_rule" so existing data
 // from gorm-adapter v3 deployments stays accessible.
 func (CasbinRule) TableName() string { return "casbin_rule" }
+
+// maxRuleColumns is the storage width of CasbinRule (V0..V5). Custom
+// Options.Model that defines policy with more than 6 fields cannot be
+// persisted by this adapter; ruleToRow rejects them at the boundary.
+const maxRuleColumns = 6
 
 // gormAdapter is chok's persist.Adapter implementation. It satisfies
 // Casbin's persist.Adapter interface (LoadPolicy / SavePolicy /
@@ -100,27 +111,32 @@ func (a *gormAdapter) LoadPolicy(m model.Model) error {
 // adapter v3's behaviour and keeps SavePolicy semantics consistent
 // across adapter swaps.
 func (a *gormAdapter) SavePolicy(m model.Model) error {
+	var rows []CasbinRule
+	for _, sec := range []string{"p", "g"} {
+		ast, ok := m[sec]
+		if !ok {
+			continue
+		}
+		for ptype, assertion := range ast {
+			for _, rule := range assertion.Policy {
+				row, err := ruleToRow(ptype, rule)
+				if err != nil {
+					return fmt.Errorf("SavePolicy: %w", err)
+				}
+				rows = append(rows, row)
+			}
+		}
+	}
 	return a.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).
 			Delete(&CasbinRule{}).Error; err != nil {
 			return fmt.Errorf("SavePolicy clear: %w", err)
 		}
-		var rows []CasbinRule
-		for _, sec := range []string{"p", "g"} {
-			ast, ok := m[sec]
-			if !ok {
-				continue
-			}
-			for ptype, assertion := range ast {
-				for _, rule := range assertion.Policy {
-					rows = append(rows, ruleToRow(ptype, rule))
-				}
-			}
-		}
 		if len(rows) == 0 {
 			return nil
 		}
-		if err := tx.Create(&rows).Error; err != nil {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).
+			Create(&rows).Error; err != nil {
 			return fmt.Errorf("SavePolicy insert: %w", err)
 		}
 		return nil
@@ -128,17 +144,21 @@ func (a *gormAdapter) SavePolicy(m model.Model) error {
 }
 
 // AddPolicy inserts one row. SyncedEnforcer's policy-mutating call
-// chain converges here for both p (permission) and g (grouping) sections.
+// chain converges here for both p (permission) and g (grouping)
+// sections.
 //
-// Returns nil even when the row already exists; gorm's Create with a
-// duplicate primary key would normally error, but we don't have a
-// unique index on (ptype, v0..v5) so this is plain INSERT semantics
-// and duplicates produce two rows. Casbin upper layer dedupes during
-// LoadPolicy via the in-memory model, but operators running raw
-// AddPolicy calls bypass the model — same caveat as gorm-adapter v3.
+// The composite unique index on (ptype, v0..v5) plus
+// clause.OnConflict{DoNothing: true} make this idempotent at the
+// database layer: re-running Bootstrap or two pods racing to insert
+// the same tuple converge to a single row instead of growing
+// duplicates that LoadPolicy would later have to dedupe.
 func (a *gormAdapter) AddPolicy(_, ptype string, rule []string) error {
-	row := ruleToRow(ptype, rule)
-	if err := a.db.Create(&row).Error; err != nil {
+	row, err := ruleToRow(ptype, rule)
+	if err != nil {
+		return fmt.Errorf("authz/casbin AddPolicy: %w", err)
+	}
+	if err := a.db.Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&row).Error; err != nil {
 		return fmt.Errorf("authz/casbin AddPolicy: %w", err)
 	}
 	return nil
@@ -146,7 +166,8 @@ func (a *gormAdapter) AddPolicy(_, ptype string, rule []string) error {
 
 // RemovePolicy deletes rows matching (ptype, v0, v1, ...). Trailing
 // rule columns that aren't supplied are not constrained — equivalent
-// to gorm-adapter's "exact-match against the supplied prefix" semantics.
+// to gorm-adapter's "exact-match against the supplied prefix"
+// semantics.
 func (a *gormAdapter) RemovePolicy(_, ptype string, rule []string) error {
 	q := a.db.Where("ptype = ?", ptype)
 	q = applyValueColumns(q, 0, rule)
@@ -171,16 +192,24 @@ func (a *gormAdapter) RemoveFilteredPolicy(_, ptype string, fieldIndex int, fiel
 
 // AddPolicies (BatchAdapter) inserts many rows in one transaction.
 // Bootstrap-style writes hit this path; without it, seeding 100
-// permissions would issue 100 INSERTs and 100 round-trips.
+// permissions would issue 100 INSERTs and 100 round-trips. Like
+// AddPolicy, this uses OnConflict{DoNothing:true} so concurrent
+// instances bootstrapping the same admin permissions converge on a
+// single row per tuple.
 func (a *gormAdapter) AddPolicies(_, ptype string, rules [][]string) error {
 	if len(rules) == 0 {
 		return nil
 	}
 	rows := make([]CasbinRule, 0, len(rules))
 	for _, r := range rules {
-		rows = append(rows, ruleToRow(ptype, r))
+		row, err := ruleToRow(ptype, r)
+		if err != nil {
+			return fmt.Errorf("authz/casbin AddPolicies: %w", err)
+		}
+		rows = append(rows, row)
 	}
-	if err := a.db.Create(&rows).Error; err != nil {
+	if err := a.db.Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&rows).Error; err != nil {
 		return fmt.Errorf("authz/casbin AddPolicies: %w", err)
 	}
 	return nil
@@ -221,24 +250,32 @@ func formatPolicyLine(r CasbinRule) string {
 		}
 		end = i
 	}
-	out := r.Ptype
+	var b strings.Builder
+	b.WriteString(r.Ptype)
 	for i := 0; i < end; i++ {
-		out += ", " + values[i]
+		b.WriteString(", ")
+		b.WriteString(values[i])
 	}
-	return out
+	return b.String()
 }
 
 // ruleToRow projects a Casbin rule slice into the storage struct.
-func ruleToRow(ptype string, rule []string) CasbinRule {
+// Returns an error when the rule has more fields than the adapter can
+// store (V0..V5 = 6 values). Custom Options.Model with policy width >
+// 6 is unsupported — silently truncating would corrupt SavePolicy
+// round-trip.
+func ruleToRow(ptype string, rule []string) (CasbinRule, error) {
+	if len(rule) > maxRuleColumns {
+		return CasbinRule{}, fmt.Errorf(
+			"policy rule has %d fields, max supported is %d (custom Casbin model with more than V0..V5 not supported by chok adapter)",
+			len(rule), maxRuleColumns)
+	}
 	r := CasbinRule{Ptype: ptype}
 	cols := []*string{&r.V0, &r.V1, &r.V2, &r.V3, &r.V4, &r.V5}
 	for i, v := range rule {
-		if i >= len(cols) {
-			break
-		}
 		*cols[i] = v
 	}
-	return r
+	return r, nil
 }
 
 // applyValueColumns appends WHERE clauses for every supplied rule
@@ -273,10 +310,6 @@ func applyValueColumnsFiltered(q *gorm.DB, fieldIndex int, fieldValues []string)
 	}
 	return q
 }
-
-// _ keeps context.Background reachable for tests that use it without
-// importing context themselves through the adapter.
-var _ = context.Background
 
 // Compile-time interface assertions. SyncedEnforcer requires
 // persist.Adapter; persist.BatchAdapter is optional but lets
