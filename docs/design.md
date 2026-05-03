@@ -692,7 +692,9 @@ middleware.Logger(log.Logger)               // per-request logger；自动注入
 middleware.AccessLog(log.Logger)            // method/path/status/latency；tracing 激活时含 trace_id
 middleware.CORS(opts ...CORSOption)         // AllowCredentials + "*" 组合在构造时 panic
 middleware.Authn(tokenParser, principalResolver)
-middleware.Authz(authz.Authorizer)
+middleware.AttachAuthz(az authz.Authorizer)             // HTTPComponent 自动挂；手动挂用于子路由替换 Authorizer
+middleware.RequireAuthz(obj, act string)                // 单租户 / 全局
+middleware.RequireAuthzInDomain(obj, act, dParam string) // 多租户 (domain 取自 c.Param)；non-DomainAuthorizer 触发 fail-closed 500
 middleware.Timeout(d time.Duration)         // 注入 deadline；deadline 触发且未写响应则写 504
 ```
 

@@ -3,7 +3,6 @@ package casbin
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/casbin/casbin/v3/model"
 	"github.com/casbin/casbin/v3/persist"
@@ -84,20 +83,44 @@ func newGormAdapter(db *gorm.DB) (persist.Adapter, error) {
 }
 
 // LoadPolicy reads every casbin_rule row and feeds them to the
-// in-memory Casbin model via persist.LoadPolicyLine. The line format
-// is "ptype, v0, v1, ..." stopping at the first empty Vn — Casbin
-// trims trailing empty fields automatically.
+// in-memory Casbin model via persist.LoadPolicyArray.
+//
+// We deliberately bypass persist.LoadPolicyLine: that helper rebuilds
+// the row into a CSV string and re-parses it through csv.Reader, which
+// mis-splits any v0..v5 value containing the delimiter (", "), an
+// embedded quote, or leading whitespace. A subject like
+// "task,delete" inserted via AddPolicy would round-trip as two
+// fields under the line path and either corrupt the loaded model or
+// fail with an arity mismatch at app startup. Handing the row to
+// LoadPolicyArray as a []string keeps every byte intact.
+//
+// Order("id") makes load order deterministic across SQL drivers —
+// without it, Casbin's first-match matcher iteration becomes
+// driver-dependent.
 func (a *gormAdapter) LoadPolicy(m model.Model) error {
 	var rules []CasbinRule
-	if err := a.db.Find(&rules).Error; err != nil {
+	if err := a.db.Order("id").Find(&rules).Error; err != nil {
 		return fmt.Errorf("authz/casbin LoadPolicy: %w", err)
 	}
 	for _, r := range rules {
-		if err := persist.LoadPolicyLine(formatPolicyLine(r), m); err != nil {
-			return fmt.Errorf("authz/casbin LoadPolicy parse %q: %w", formatPolicyLine(r), err)
+		if err := persist.LoadPolicyArray(rowToLoadArray(r), m); err != nil {
+			return fmt.Errorf("authz/casbin LoadPolicy id=%d ptype=%s: %w", r.ID, r.Ptype, err)
 		}
 	}
 	return nil
+}
+
+// rowToLoadArray builds the [ptype, v0, v1, ...] slice
+// persist.LoadPolicyArray expects. Trailing empty Vn are elided so
+// the model's policy section matches the shape AddPolicy originally
+// inserted — Casbin treats trailing empties as explicit fields, which
+// would diverge from what GetPolicy / GetFilteredPolicy reports back
+// to Service callers.
+func rowToLoadArray(r CasbinRule) []string {
+	rule := rowToRule(r)
+	out := make([]string, 0, 1+len(rule))
+	out = append(out, r.Ptype)
+	return append(out, rule...)
 }
 
 // SavePolicy is the bulk-replace path Casbin uses when an operator
@@ -181,13 +204,36 @@ func (a *gormAdapter) RemovePolicy(_, ptype string, rule []string) error {
 // supplied at fieldIndex onwards. Empty values in fieldValues are
 // wildcards (skipped from the WHERE clause), matching Casbin's
 // documented semantics.
+//
+// Safety guard: an all-empty fieldValues (or zero-length) reduces to
+// "DELETE every row of this ptype" because every column constraint
+// gets skipped. Casbin's RBAC API never legitimately calls in this
+// shape — even DeleteRolesForUser supplies the user as v0 — so we
+// reject it as a footgun rather than silently wipe a section. Code
+// that actually wants "clear all p-rules" should call SavePolicy
+// with an empty model, which is the documented bulk-replace path.
 func (a *gormAdapter) RemoveFilteredPolicy(_, ptype string, fieldIndex int, fieldValues ...string) error {
+	if !hasAnyConstraint(fieldValues) {
+		return fmt.Errorf("authz/casbin RemoveFilteredPolicy: refusing to delete all rows of ptype %q with empty fieldValues; use SavePolicy(emptyModel) for a bulk clear", ptype)
+	}
 	q := a.db.Where("ptype = ?", ptype)
 	q = applyValueColumnsFiltered(q, fieldIndex, fieldValues)
 	if err := q.Delete(&CasbinRule{}).Error; err != nil {
 		return fmt.Errorf("authz/casbin RemoveFilteredPolicy: %w", err)
 	}
 	return nil
+}
+
+// hasAnyConstraint reports whether at least one fieldValues entry is
+// non-empty. Used by the filtered-delete paths to refuse a
+// "wildcard-everywhere" call that would silently truncate a ptype.
+func hasAnyConstraint(fieldValues []string) bool {
+	for _, v := range fieldValues {
+		if v != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // AddPolicies (BatchAdapter) inserts many rows in one transaction.
@@ -234,29 +280,141 @@ func (a *gormAdapter) RemovePolicies(_, ptype string, rules [][]string) error {
 	})
 }
 
-// formatPolicyLine builds the comma-separated string Casbin's
-// LoadPolicyLine expects: "ptype, v0, v1, ..." trimmed at the first
-// empty trailing Vn.
-func formatPolicyLine(r CasbinRule) string {
+// UpdatePolicy (UpdatableAdapter) atomically replaces oldRule with
+// newRule for a given (sec, ptype). Casbin v3's enforcer.UpdatePolicy
+// path does a hard `e.adapter.(persist.UpdatableAdapter)` assertion
+// (internal_api.go:171) and panics when the adapter doesn't satisfy
+// it — so this isn't optional even though chok's Service interface
+// doesn't yet expose UpdatePolicy. Implementing it keeps the adapter
+// contract complete and matches gorm-adapter v3's surface.
+//
+// Atomic by transaction: the old row is deleted and the new row
+// inserted in one tx, so partial failure rolls back. Both writes
+// honour the composite unique index — re-inserting a tuple that
+// would collide with an unrelated existing row triggers an error
+// rather than silently dropping (Update is "replace this exact
+// rule", not "merge").
+func (a *gormAdapter) UpdatePolicy(_, ptype string, oldRule, newRule []string) error {
+	newRow, err := ruleToRow(ptype, newRule)
+	if err != nil {
+		return fmt.Errorf("authz/casbin UpdatePolicy: %w", err)
+	}
+	return a.db.Transaction(func(tx *gorm.DB) error {
+		q := tx.Where("ptype = ?", ptype)
+		q = applyValueColumns(q, 0, oldRule)
+		if err := q.Delete(&CasbinRule{}).Error; err != nil {
+			return fmt.Errorf("authz/casbin UpdatePolicy delete: %w", err)
+		}
+		if err := tx.Create(&newRow).Error; err != nil {
+			return fmt.Errorf("authz/casbin UpdatePolicy insert: %w", err)
+		}
+		return nil
+	})
+}
+
+// UpdatePolicies (UpdatableAdapter) replaces N old rules with N new
+// rules in a single transaction. Casbin guarantees len(oldRules) ==
+// len(newRules) before calling (internal_api.go:202-204).
+func (a *gormAdapter) UpdatePolicies(_, ptype string, oldRules, newRules [][]string) error {
+	if len(oldRules) != len(newRules) {
+		return fmt.Errorf("authz/casbin UpdatePolicies: oldRules length %d != newRules length %d", len(oldRules), len(newRules))
+	}
+	if len(oldRules) == 0 {
+		return nil
+	}
+	newRows := make([]CasbinRule, 0, len(newRules))
+	for _, r := range newRules {
+		row, err := ruleToRow(ptype, r)
+		if err != nil {
+			return fmt.Errorf("authz/casbin UpdatePolicies: %w", err)
+		}
+		newRows = append(newRows, row)
+	}
+	return a.db.Transaction(func(tx *gorm.DB) error {
+		for _, r := range oldRules {
+			q := tx.Where("ptype = ?", ptype)
+			q = applyValueColumns(q, 0, r)
+			if err := q.Delete(&CasbinRule{}).Error; err != nil {
+				return fmt.Errorf("authz/casbin UpdatePolicies delete: %w", err)
+			}
+		}
+		if err := tx.Create(&newRows).Error; err != nil {
+			return fmt.Errorf("authz/casbin UpdatePolicies insert: %w", err)
+		}
+		return nil
+	})
+}
+
+// UpdateFilteredPolicies (UpdatableAdapter) deletes rows matching the
+// filter and inserts newRules. Returns the deleted rows so Casbin's
+// in-memory model can surface them to the watcher path. The same
+// "all-empty fieldValues is a footgun" guard as RemoveFilteredPolicy
+// applies — this avoids "replace every row of this ptype with newRules"
+// being a single-line operator typo.
+func (a *gormAdapter) UpdateFilteredPolicies(_, ptype string, newRules [][]string, fieldIndex int, fieldValues ...string) ([][]string, error) {
+	if !hasAnyConstraint(fieldValues) {
+		return nil, fmt.Errorf("authz/casbin UpdateFilteredPolicies: refusing to replace all rows of ptype %q with empty fieldValues; supply at least one constraint or use SavePolicy for a bulk replace", ptype)
+	}
+	newRows := make([]CasbinRule, 0, len(newRules))
+	for _, r := range newRules {
+		row, err := ruleToRow(ptype, r)
+		if err != nil {
+			return nil, fmt.Errorf("authz/casbin UpdateFilteredPolicies: %w", err)
+		}
+		newRows = append(newRows, row)
+	}
+
+	var oldRows []CasbinRule
+	err := a.db.Transaction(func(tx *gorm.DB) error {
+		q := tx.Where("ptype = ?", ptype)
+		q = applyValueColumnsFiltered(q, fieldIndex, fieldValues)
+		if err := q.Find(&oldRows).Error; err != nil {
+			return fmt.Errorf("authz/casbin UpdateFilteredPolicies select: %w", err)
+		}
+		// Re-build the WHERE chain on tx for the Delete: GORM consumes
+		// the chain on the Find above, so we need a fresh Where set.
+		dq := tx.Where("ptype = ?", ptype)
+		dq = applyValueColumnsFiltered(dq, fieldIndex, fieldValues)
+		if err := dq.Delete(&CasbinRule{}).Error; err != nil {
+			return fmt.Errorf("authz/casbin UpdateFilteredPolicies delete: %w", err)
+		}
+		if len(newRows) == 0 {
+			return nil
+		}
+		if err := tx.Create(&newRows).Error; err != nil {
+			return fmt.Errorf("authz/casbin UpdateFilteredPolicies insert: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]string, 0, len(oldRows))
+	for _, r := range oldRows {
+		out = append(out, rowToRule(r))
+	}
+	return out, nil
+}
+
+// rowToRule projects a stored row back into a Casbin rule slice,
+// trimming trailing empties so the result matches what AddPolicy
+// originally received. Used by UpdateFilteredPolicies' return path
+// so callers (and watchers) see the same shape they wrote.
+func rowToRule(r CasbinRule) []string {
 	values := []string{r.V0, r.V1, r.V2, r.V3, r.V4, r.V5}
-	// Walk forward and stop building once we hit the first empty
-	// trailing value. Empty values inside the populated prefix are
-	// preserved (Casbin treats them as explicit empty fields).
-	end := len(values)
+	end := 0
 	for i := len(values) - 1; i >= 0; i-- {
 		if values[i] != "" {
 			end = i + 1
 			break
 		}
-		end = i
 	}
-	var b strings.Builder
-	b.WriteString(r.Ptype)
-	for i := 0; i < end; i++ {
-		b.WriteString(", ")
-		b.WriteString(values[i])
+	if end == 0 {
+		return nil
 	}
-	return b.String()
+	out := make([]string, end)
+	copy(out, values[:end])
+	return out
 }
 
 // ruleToRow projects a Casbin rule slice into the storage struct.
@@ -314,7 +472,16 @@ func applyValueColumnsFiltered(q *gorm.DB, fieldIndex int, fieldValues []string)
 // Compile-time interface assertions. SyncedEnforcer requires
 // persist.Adapter; persist.BatchAdapter is optional but lets
 // AddPolicies / RemovePolicies bypass per-row round-trips.
+//
+// persist.UpdatableAdapter is also asserted because Casbin v3's
+// enforcer.UpdatePolicy / UpdatePolicies / UpdateFilteredPolicies
+// path does a hard `e.adapter.(persist.UpdatableAdapter)` assertion
+// (internal_api.go:171, :211, :328) and panics when the adapter
+// doesn't satisfy it. chok's Service interface doesn't currently
+// expose Update*, but a future Service extension or any caller that
+// reaches the underlying enforcer must not crash on it.
 var (
-	_ persist.Adapter      = (*gormAdapter)(nil)
-	_ persist.BatchAdapter = (*gormAdapter)(nil)
+	_ persist.Adapter          = (*gormAdapter)(nil)
+	_ persist.BatchAdapter     = (*gormAdapter)(nil)
+	_ persist.UpdatableAdapter = (*gormAdapter)(nil)
 )

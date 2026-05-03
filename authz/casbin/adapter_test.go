@@ -180,6 +180,104 @@ func TestRemoveFilteredPolicy_WildcardSlots(t *testing.T) {
 	}
 }
 
+// TestRemoveFilteredPolicy_AllEmpty_Rejected pins the safety guard:
+// calling RemoveFilteredPolicy with no constraints (or all-empty
+// fieldValues) must NOT silently delete every row of the ptype.
+// Casbin's RBAC API never calls in this shape — even DeleteRolesForUser
+// supplies the user as v0 — so the adapter rejects rather than risk a
+// data-loss footgun. Operators wanting a bulk clear should use
+// SavePolicy with an empty model.
+func TestRemoveFilteredPolicy_AllEmpty_Rejected(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range [][]string{
+		{"admin", "*", "task", "read"},
+		{"viewer", "*", "task", "read"},
+	} {
+		if err := a.AddPolicy("p", "p", r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name        string
+		fieldIndex  int
+		fieldValues []string
+	}{
+		{"zero values", 0, nil},
+		{"all empty 4", 0, []string{"", "", "", ""}},
+		{"all empty 6", 0, []string{"", "", "", "", "", ""}},
+		{"all empty starting at 1", 1, []string{"", "", ""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := a.RemoveFilteredPolicy("p", "p", tc.fieldIndex, tc.fieldValues...)
+			if err == nil {
+				t.Fatal("expected refusal error for all-empty filter")
+			}
+			if !strings.Contains(err.Error(), "refusing to delete all rows") {
+				t.Fatalf("expected refusal message, got %v", err)
+			}
+			var count int64
+			if err := db.Model(&CasbinRule{}).Where("ptype = ?", "p").Count(&count).Error; err != nil {
+				t.Fatal(err)
+			}
+			if count != 2 {
+				t.Errorf("rows survived check: count = %d, want 2 (rejection must not have deleted anything)", count)
+			}
+		})
+	}
+}
+
+// TestRemoveFilteredPolicy_PartialEmpty_KeepsCasbinSemantics verifies
+// the guard does NOT regress Casbin's documented "empty values are
+// wildcards" semantics — the legitimate path where at least one
+// constraint is supplied still works. DeleteRolesForUserInDomain
+// translates to RemoveFilteredGroupingPolicy(0, user, "", domain),
+// which reaches the adapter as ["alice", "", "ws_abc"] — middle slot
+// empty, but not all-empty.
+func TestRemoveFilteredPolicy_PartialEmpty_KeepsCasbinSemantics(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range [][]string{
+		{"alice", "admin", "ws_abc"},
+		{"alice", "viewer", "ws_abc"},
+		{"alice", "admin", "ws_def"},
+		{"bob", "admin", "ws_abc"},
+	} {
+		if err := a.AddPolicy("g", "g", r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Delete every alice grouping in ws_abc regardless of role.
+	if err := a.RemoveFilteredPolicy("g", "g", 0, "alice", "", "ws_abc"); err != nil {
+		t.Fatal(err)
+	}
+	m := model.NewModel()
+	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := a.LoadPolicy(m); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range m["g"]["g"].Policy {
+		if r[0] == "alice" && r[2] == "ws_abc" {
+			t.Errorf("alice/ws_abc grouping survived: %v", r)
+		}
+	}
+	// alice/ws_def and bob/ws_abc must still be there.
+	survivors := map[string]bool{}
+	for _, r := range m["g"]["g"].Policy {
+		survivors[r[0]+"|"+r[2]] = true
+	}
+	if !survivors["alice|ws_def"] || !survivors["bob|ws_abc"] {
+		t.Errorf("unrelated rules dropped: %+v", m["g"]["g"].Policy)
+	}
+}
+
 // TestAddPolicies_Batch covers the persist.BatchAdapter optimisation
 // path: SyncedEnforcer's Bootstrap-style setup uses AddPolicies to
 // batch many rules in one transaction.
@@ -223,6 +321,266 @@ func TestAddPolicies_Empty(t *testing.T) {
 	ba := a.(persist.BatchAdapter)
 	if err := ba.AddPolicies("p", "p", nil); err != nil {
 		t.Fatalf("empty batch should not error: %v", err)
+	}
+}
+
+// TestUpdatableAdapter_Contract proves the adapter satisfies the
+// persist.UpdatableAdapter interface. Casbin v3's enforcer.UpdatePolicy
+// path does a hard type assertion (internal_api.go:171) and panics
+// when the adapter is missing this — chok's Service doesn't yet expose
+// Update*, but the contract has to be honoured up front so any future
+// extension or watcher path doesn't crash.
+func TestUpdatableAdapter_Contract(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.(persist.UpdatableAdapter); !ok {
+		t.Fatal("gormAdapter must satisfy persist.UpdatableAdapter")
+	}
+}
+
+// TestUpdatePolicy_AtomicReplace exercises the basic Update path:
+// old rule deleted, new rule inserted, both in one transaction. The
+// before/after row counts pin the atomicity (no orphan rows on either
+// side of a happy-path call).
+func TestUpdatePolicy_AtomicReplace(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua := a.(persist.UpdatableAdapter)
+	if err := a.AddPolicy("p", "p", []string{"alice", "*", "task", "read"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddPolicy("p", "p", []string{"bob", "*", "task", "write"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ua.UpdatePolicy("p", "p",
+		[]string{"alice", "*", "task", "read"},
+		[]string{"alice", "*", "task", "delete"}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model.NewModel()
+	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := a.LoadPolicy(m); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range m["p"]["p"].Policy {
+		got[r[0]+"|"+r[3]] = true
+	}
+	if got["alice|read"] {
+		t.Error("old alice/read rule should have been deleted")
+	}
+	if !got["alice|delete"] {
+		t.Error("new alice/delete rule should have been inserted")
+	}
+	if !got["bob|write"] {
+		t.Error("unrelated bob rule should not have been touched")
+	}
+}
+
+// TestUpdatePolicy_Rollback covers the partial-failure path: the new
+// rule is malformed (7 cols), so ruleToRow fails before the
+// transaction opens. The old row must remain.
+func TestUpdatePolicy_Rollback(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua := a.(persist.UpdatableAdapter)
+	if err := a.AddPolicy("p", "p", []string{"alice", "*", "task", "read"}); err != nil {
+		t.Fatal(err)
+	}
+	err = ua.UpdatePolicy("p", "p",
+		[]string{"alice", "*", "task", "read"},
+		[]string{"a", "b", "c", "d", "e", "f", "g"}) // 7 cols, oversize
+	if err == nil {
+		t.Fatal("expected error for oversize newRule")
+	}
+	var count int64
+	if err := db.Model(&CasbinRule{}).Where("ptype = ?", "p").Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("rollback failed: expected 1 row, got %d", count)
+	}
+}
+
+// TestUpdatePolicies_Batch tests N→N atomic replacement.
+func TestUpdatePolicies_Batch(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua := a.(persist.UpdatableAdapter)
+	for _, r := range [][]string{
+		{"alice", "*", "task", "read"},
+		{"alice", "*", "task", "write"},
+	} {
+		if err := a.AddPolicy("p", "p", r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := [][]string{
+		{"alice", "*", "task", "read"},
+		{"alice", "*", "task", "write"},
+	}
+	new := [][]string{
+		{"alice", "*", "task", "view"},
+		{"alice", "*", "task", "edit"},
+	}
+	if err := ua.UpdatePolicies("p", "p", old, new); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Model(&CasbinRule{}).Where("ptype = ? AND v0 = ?", "p", "alice").Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 alice rows post-update, got %d", count)
+	}
+}
+
+// TestUpdatePolicies_LengthMismatch_Rejected pins Casbin's "old and
+// new lengths must match" invariant — the adapter checks defensively
+// even though the enforcer also checks (internal_api.go:202-204).
+func TestUpdatePolicies_LengthMismatch_Rejected(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua := a.(persist.UpdatableAdapter)
+	err = ua.UpdatePolicies("p", "p",
+		[][]string{{"alice", "*", "task", "read"}},
+		[][]string{{"a", "*", "x", "1"}, {"b", "*", "y", "2"}})
+	if err == nil {
+		t.Fatal("expected error for mismatched lengths")
+	}
+}
+
+// TestUpdateFilteredPolicies_RoundTrip exercises the find→delete→insert
+// cycle and verifies the returned old-rules slice matches what was
+// removed (callers / watchers depend on this for sync).
+func TestUpdateFilteredPolicies_RoundTrip(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua := a.(persist.UpdatableAdapter)
+	for _, r := range [][]string{
+		{"admin", "*", "task", "read"},
+		{"admin", "*", "task", "write"},
+		{"viewer", "*", "task", "read"},
+	} {
+		if err := a.AddPolicy("p", "p", r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Replace every "admin" rule with two new ones.
+	newRules := [][]string{
+		{"admin", "*", "audit", "read"},
+		{"admin", "*", "user", "list"},
+	}
+	old, err := ua.UpdateFilteredPolicies("p", "p", newRules, 0, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(old) != 2 {
+		t.Errorf("expected 2 old rules returned, got %d (%+v)", len(old), old)
+	}
+	for _, r := range old {
+		if r[0] != "admin" {
+			t.Errorf("returned rule should belong to admin, got %v", r)
+		}
+	}
+	m := model.NewModel()
+	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := a.LoadPolicy(m); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(m["p"]["p"].Policy); got != 3 {
+		t.Errorf("post-update row count = %d, want 3 (2 new admin + 1 viewer)", got)
+	}
+	// viewer must survive untouched.
+	survived := false
+	for _, r := range m["p"]["p"].Policy {
+		if r[0] == "viewer" {
+			survived = true
+		}
+	}
+	if !survived {
+		t.Error("unrelated viewer rule was deleted by filter")
+	}
+}
+
+// TestUpdateFilteredPolicies_AllEmpty_Rejected mirrors the
+// RemoveFilteredPolicy guard: a filter with no constraints would
+// "replace every row of this ptype with newRules", which is a
+// data-loss footgun. Refuse instead.
+func TestUpdateFilteredPolicies_AllEmpty_Rejected(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua := a.(persist.UpdatableAdapter)
+	if err := a.AddPolicy("p", "p", []string{"alice", "*", "task", "read"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ua.UpdateFilteredPolicies("p", "p",
+		[][]string{{"x", "*", "y", "z"}}, 0, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected refusal for all-empty fieldValues")
+	}
+	if !strings.Contains(err.Error(), "refusing to replace all rows") {
+		t.Fatalf("expected refusal message, got %v", err)
+	}
+	var count int64
+	if err := db.Model(&CasbinRule{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("guard violated: count = %d, want 1 (rejection must not have written or deleted)", count)
+	}
+}
+
+// TestRowToRule_TrimsTrailingEmpty pins the slice projection used by
+// LoadPolicy: stored CasbinRule values come back as a slice with
+// trailing empties elided so the in-memory model's policy section
+// matches the shape AddPolicy originally wrote (and what callers see
+// via GetPolicy / GetFilteredPolicy).
+func TestRowToRule_TrimsTrailingEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		row  CasbinRule
+		want []string
+	}{
+		{"all populated", CasbinRule{V0: "a", V1: "b", V2: "c", V3: "d"}, []string{"a", "b", "c", "d"}},
+		{"trailing empty trimmed", CasbinRule{V0: "a", V1: "b", V2: "", V3: ""}, []string{"a", "b"}},
+		{"empty middle preserved", CasbinRule{V0: "a", V1: "", V2: "c"}, []string{"a", "", "c"}},
+		{"completely empty", CasbinRule{}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rowToRule(tc.row)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len mismatch: got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -571,28 +929,56 @@ func TestWithAuditHook_AtomicSwap(t *testing.T) {
 	}
 }
 
-// TestFormatPolicyLine_TrimsTrailingEmpty covers the serialiser:
-// internal empty Vn must stay (Casbin treats them as explicit
-// fields), but trailing empty Vn must be elided so LoadPolicyLine
-// reads "p, alice, *, task, read" rather than
-// "p, alice, *, task, read, , ".
-func TestFormatPolicyLine_TrimsTrailingEmpty(t *testing.T) {
-	tests := []struct {
-		name string
-		row  CasbinRule
-		want string
-	}{
-		{"all populated", CasbinRule{Ptype: "p", V0: "alice", V1: "*", V2: "task", V3: "read"}, "p, alice, *, task, read"},
-		{"trailing empty", CasbinRule{Ptype: "p", V0: "alice", V1: "*", V2: "task", V3: "read", V4: "", V5: ""}, "p, alice, *, task, read"},
-		{"empty in middle preserved", CasbinRule{Ptype: "p", V0: "alice", V1: "", V2: "task"}, "p, alice, , task"},
-		{"only ptype", CasbinRule{Ptype: "p"}, "p"},
+// TestLoadPolicy_PreservesDelimiterCharsInFields pins the round-trip
+// invariant LoadPolicy MUST hold: any byte AddPolicy stored in v0..v5
+// must come back identical, regardless of whether it contains the
+// adapter's previous CSV delimiter (", "), an embedded quote, or
+// leading whitespace. The earlier impl rebuilt rows into a CSV string
+// and re-parsed via persist.LoadPolicyLine, so a subject like
+// "task,delete" was mis-split into two fields and the load either
+// corrupted the model or failed with an arity mismatch at startup.
+// Switching to persist.LoadPolicyArray (no parsing) eliminates the
+// failure mode; this test makes sure no future refactor reintroduces
+// CSV rebuild on the load path.
+func TestLoadPolicy_PreservesDelimiterCharsInFields(t *testing.T) {
+	db := newAdapterDB(t)
+	a, err := newGormAdapter(db)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := formatPolicyLine(tc.row)
-			if got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
+	rules := [][]string{
+		{`alice, bob`, "*", `task,delete`, `read"`},
+		{"  carol  ", "*", "task", " write "},
+		{"dave", "*", `obj"with"quotes`, "act"},
+	}
+	for _, r := range rules {
+		if err := a.AddPolicy("p", "p", r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := model.NewModel()
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.LoadPolicy(m); err != nil {
+		t.Fatal(err)
+	}
+	pol := m["p"]["p"].Policy
+	if len(pol) != len(rules) {
+		t.Fatalf("expected %d rules, got %d (CSV mis-split would inflate / arity-fail this): %v", len(rules), len(pol), pol)
+	}
+	// Order("id") in LoadPolicy preserves insertion order.
+	for i, want := range rules {
+		got := pol[i]
+		if len(got) != len(want) {
+			t.Errorf("rule %d field count: got %d (%v), want %d (%v)", i, len(got), got, len(want), want)
+			continue
+		}
+		for j := range want {
+			if got[j] != want[j] {
+				t.Errorf("rule %d field %d: got %q, want %q", i, j, got[j], want[j])
 			}
-		})
+		}
 	}
 }
