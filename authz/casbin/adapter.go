@@ -103,6 +103,16 @@ func (a *gormAdapter) LoadPolicy(m model.Model) error {
 		return fmt.Errorf("authz/casbin LoadPolicy: %w", err)
 	}
 	for _, r := range rules {
+		// Empty Ptype is never produced by AddPolicy / AddPolicies (Casbin
+		// always passes "p" / "g"), but the column has no NOT NULL —
+		// operator SQL or import from another store could leave one. Without
+		// this guard, persist.LoadPolicyArray panics with "slice bounds out
+		// of range" on `key[:1]`, which bricks app startup on a single bad
+		// row. Refuse with a row-id-bearing error instead so the operator
+		// can locate and clean the row.
+		if r.Ptype == "" {
+			return fmt.Errorf("authz/casbin LoadPolicy: row id=%d has empty Ptype; suspect manual SQL or non-Casbin import — clean the row before retrying", r.ID)
+		}
 		if err := persist.LoadPolicyArray(rowToLoadArray(r), m); err != nil {
 			return fmt.Errorf("authz/casbin LoadPolicy id=%d ptype=%s: %w", r.ID, r.Ptype, err)
 		}
@@ -205,16 +215,20 @@ func (a *gormAdapter) RemovePolicy(_, ptype string, rule []string) error {
 // wildcards (skipped from the WHERE clause), matching Casbin's
 // documented semantics.
 //
-// Safety guard: an all-empty fieldValues (or zero-length) reduces to
-// "DELETE every row of this ptype" because every column constraint
-// gets skipped. Casbin's RBAC API never legitimately calls in this
-// shape — even DeleteRolesForUser supplies the user as v0 — so we
-// reject it as a footgun rather than silently wipe a section. Code
-// that actually wants "clear all p-rules" should call SavePolicy
-// with an empty model, which is the documented bulk-replace path.
+// Safety guard: a filter that produces zero MAPPED non-empty
+// constraints reduces to "DELETE every row of this ptype" because
+// every column constraint gets skipped. The degenerate cases are
+// (a) all-empty fieldValues, (b) fieldIndex past V5 so no value
+// lands in a real column (the inner helper breaks immediately), and
+// (c) negative fieldIndex (would otherwise panic in cols[idx]).
+// Casbin's RBAC API never legitimately calls in this shape — even
+// DeleteRolesForUser supplies the user as v0 — so we reject as a
+// footgun rather than silently wipe a section. Code that actually
+// wants "clear all p-rules" should call SavePolicy with an empty
+// model, which is the documented bulk-replace path.
 func (a *gormAdapter) RemoveFilteredPolicy(_, ptype string, fieldIndex int, fieldValues ...string) error {
-	if !hasAnyConstraint(fieldValues) {
-		return fmt.Errorf("authz/casbin RemoveFilteredPolicy: refusing to delete all rows of ptype %q with empty fieldValues; use SavePolicy(emptyModel) for a bulk clear", ptype)
+	if !hasAnyMappedConstraint(fieldIndex, fieldValues) {
+		return fmt.Errorf("authz/casbin RemoveFilteredPolicy: refusing to delete all rows of ptype %q — no mapped non-empty constraint (all-empty fieldValues, fieldIndex past V5, or negative fieldIndex); use SavePolicy(emptyModel) for a bulk clear", ptype)
 	}
 	q := a.db.Where("ptype = ?", ptype)
 	q = applyValueColumnsFiltered(q, fieldIndex, fieldValues)
@@ -224,11 +238,24 @@ func (a *gormAdapter) RemoveFilteredPolicy(_, ptype string, fieldIndex int, fiel
 	return nil
 }
 
-// hasAnyConstraint reports whether at least one fieldValues entry is
-// non-empty. Used by the filtered-delete paths to refuse a
-// "wildcard-everywhere" call that would silently truncate a ptype.
-func hasAnyConstraint(fieldValues []string) bool {
-	for _, v := range fieldValues {
+// hasAnyMappedConstraint reports whether at least one fieldValues
+// entry both (a) maps to a real storage column V0..V5 (i.e.
+// fieldIndex+i is in [0, maxRuleColumns)) and (b) is non-empty.
+// Filtered-mutation paths use this to refuse calls that would
+// degenerate to a ptype-wide delete: a non-empty value alone is not
+// enough — fieldIndex=6 with fieldValues=["x"] looks "constrained"
+// but applyValueColumnsFiltered skips every column (idx >= 6 → break)
+// and the WHERE collapses to ptype=?. Negative fieldIndex is also
+// rejected here so the inner helper never indexes cols[-1].
+func hasAnyMappedConstraint(fieldIndex int, fieldValues []string) bool {
+	if fieldIndex < 0 {
+		return false
+	}
+	for i, v := range fieldValues {
+		idx := fieldIndex + i
+		if idx >= maxRuleColumns {
+			break
+		}
 		if v != "" {
 			return true
 		}
@@ -288,22 +315,40 @@ func (a *gormAdapter) RemovePolicies(_, ptype string, rules [][]string) error {
 // doesn't yet expose UpdatePolicy. Implementing it keeps the adapter
 // contract complete and matches gorm-adapter v3's surface.
 //
-// Atomic by transaction: the old row is deleted and the new row
-// inserted in one tx, so partial failure rolls back. Both writes
-// honour the composite unique index — re-inserting a tuple that
-// would collide with an unrelated existing row triggers an error
-// rather than silently dropping (Update is "replace this exact
-// rule", not "merge").
+// Exact-rule semantics: applyExactRule pins every storage column
+// V0..V5 (with "" for columns past the rule length). A prefix-only
+// WHERE — what the round-2 implementation did via applyValueColumns
+// — could match more rows than the rule represents, e.g. an
+// oldRule=["alice"] would have deleted every v0=alice row regardless
+// of v1..v5. Casbin's model.UpdatePolicy then performs an in-memory
+// exact-rule update and returns false on no match, leaving the DB
+// missing rules the model still believes are there: a silent
+// store/model divergence. RowsAffected==0 after the targeted Delete
+// means the oldRule wasn't present, so we abort before inserting
+// (no insert without a corresponding delete).
+//
+// Atomic by transaction: a partial failure (delete miss, insert
+// conflict against an unrelated row) rolls back. Insert deliberately
+// does NOT use OnConflict{DoNothing:true} — Update means replace,
+// not merge; a unique-index conflict against an unrelated tuple
+// must surface as an error so the caller can react.
 func (a *gormAdapter) UpdatePolicy(_, ptype string, oldRule, newRule []string) error {
+	if len(oldRule) > maxRuleColumns {
+		return fmt.Errorf("authz/casbin UpdatePolicy: oldRule has %d fields, max supported is %d", len(oldRule), maxRuleColumns)
+	}
 	newRow, err := ruleToRow(ptype, newRule)
 	if err != nil {
 		return fmt.Errorf("authz/casbin UpdatePolicy: %w", err)
 	}
 	return a.db.Transaction(func(tx *gorm.DB) error {
 		q := tx.Where("ptype = ?", ptype)
-		q = applyValueColumns(q, 0, oldRule)
-		if err := q.Delete(&CasbinRule{}).Error; err != nil {
+		q = applyExactRule(q, oldRule)
+		res := q.Delete(&CasbinRule{})
+		if err := res.Error; err != nil {
 			return fmt.Errorf("authz/casbin UpdatePolicy delete: %w", err)
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("authz/casbin UpdatePolicy: oldRule %v not found for ptype %q (would diverge from model.UpdatePolicy which also no-ops on no-match)", oldRule, ptype)
 		}
 		if err := tx.Create(&newRow).Error; err != nil {
 			return fmt.Errorf("authz/casbin UpdatePolicy insert: %w", err)
@@ -314,13 +359,27 @@ func (a *gormAdapter) UpdatePolicy(_, ptype string, oldRule, newRule []string) e
 
 // UpdatePolicies (UpdatableAdapter) replaces N old rules with N new
 // rules in a single transaction. Casbin guarantees len(oldRules) ==
-// len(newRules) before calling (internal_api.go:202-204).
+// len(newRules) before calling (internal_api.go:202-204) — we
+// re-check defensively so a future Casbin upgrade that drops the
+// pre-check still fails fast here.
+//
+// Same exact-rule + RowsAffected==0 contract as UpdatePolicy: any
+// oldRule that doesn't match an existing row aborts the whole
+// transaction, so a partial-miss batch leaves the store unchanged.
+// The alternative — best-effort delete-what-you-can — would diverge
+// from model.UpdatePolicies which only succeeds when every rule was
+// found.
 func (a *gormAdapter) UpdatePolicies(_, ptype string, oldRules, newRules [][]string) error {
 	if len(oldRules) != len(newRules) {
 		return fmt.Errorf("authz/casbin UpdatePolicies: oldRules length %d != newRules length %d", len(oldRules), len(newRules))
 	}
 	if len(oldRules) == 0 {
 		return nil
+	}
+	for i, r := range oldRules {
+		if len(r) > maxRuleColumns {
+			return fmt.Errorf("authz/casbin UpdatePolicies: oldRules[%d] has %d fields, max supported is %d", i, len(r), maxRuleColumns)
+		}
 	}
 	newRows := make([]CasbinRule, 0, len(newRules))
 	for _, r := range newRules {
@@ -331,11 +390,15 @@ func (a *gormAdapter) UpdatePolicies(_, ptype string, oldRules, newRules [][]str
 		newRows = append(newRows, row)
 	}
 	return a.db.Transaction(func(tx *gorm.DB) error {
-		for _, r := range oldRules {
+		for i, r := range oldRules {
 			q := tx.Where("ptype = ?", ptype)
-			q = applyValueColumns(q, 0, r)
-			if err := q.Delete(&CasbinRule{}).Error; err != nil {
-				return fmt.Errorf("authz/casbin UpdatePolicies delete: %w", err)
+			q = applyExactRule(q, r)
+			res := q.Delete(&CasbinRule{})
+			if err := res.Error; err != nil {
+				return fmt.Errorf("authz/casbin UpdatePolicies delete[%d]: %w", i, err)
+			}
+			if res.RowsAffected == 0 {
+				return fmt.Errorf("authz/casbin UpdatePolicies: oldRules[%d] %v not found for ptype %q (rolling back batch to keep store consistent with model)", i, r, ptype)
 			}
 		}
 		if err := tx.Create(&newRows).Error; err != nil {
@@ -347,13 +410,26 @@ func (a *gormAdapter) UpdatePolicies(_, ptype string, oldRules, newRules [][]str
 
 // UpdateFilteredPolicies (UpdatableAdapter) deletes rows matching the
 // filter and inserts newRules. Returns the deleted rows so Casbin's
-// in-memory model can surface them to the watcher path. The same
-// "all-empty fieldValues is a footgun" guard as RemoveFilteredPolicy
-// applies — this avoids "replace every row of this ptype with newRules"
-// being a single-line operator typo.
+// in-memory model can surface them to the watcher path. Two guards:
+//
+//  1. hasAnyMappedConstraint — refuses calls that would degenerate to
+//     "replace every row of this ptype with newRules" (all-empty
+//     fieldValues, fieldIndex past V5, negative fieldIndex).
+//
+//  2. zero-hit + non-empty newRules — refuses calls where the filter
+//     matched no existing rules but the caller still wants to insert
+//     N new ones. Casbin v3.10.0's enforcer.updateFilteredPolicies-
+//     WithoutNotify (internal_api.go:317-374) treats an empty
+//     oldRules return as "no rule changed" and skips watcher
+//     notification, but the upper-layer model.AddPolicies(newRules)
+//     still runs. If we ALSO inserted newRules here, the local
+//     store + model would hold them while peer instances never see
+//     the watcher event — silent multi-instance divergence. Forcing
+//     the caller to use AddPolicies for pure inserts keeps that path
+//     clean.
 func (a *gormAdapter) UpdateFilteredPolicies(_, ptype string, newRules [][]string, fieldIndex int, fieldValues ...string) ([][]string, error) {
-	if !hasAnyConstraint(fieldValues) {
-		return nil, fmt.Errorf("authz/casbin UpdateFilteredPolicies: refusing to replace all rows of ptype %q with empty fieldValues; supply at least one constraint or use SavePolicy for a bulk replace", ptype)
+	if !hasAnyMappedConstraint(fieldIndex, fieldValues) {
+		return nil, fmt.Errorf("authz/casbin UpdateFilteredPolicies: refusing to replace all rows of ptype %q — no mapped non-empty constraint (all-empty fieldValues, fieldIndex past V5, or negative fieldIndex); supply at least one constraint or use SavePolicy for a bulk replace", ptype)
 	}
 	newRows := make([]CasbinRule, 0, len(newRules))
 	for _, r := range newRules {
@@ -370,6 +446,9 @@ func (a *gormAdapter) UpdateFilteredPolicies(_, ptype string, newRules [][]strin
 		q = applyValueColumnsFiltered(q, fieldIndex, fieldValues)
 		if err := q.Find(&oldRows).Error; err != nil {
 			return fmt.Errorf("authz/casbin UpdateFilteredPolicies select: %w", err)
+		}
+		if len(oldRows) == 0 && len(newRows) > 0 {
+			return fmt.Errorf("authz/casbin UpdateFilteredPolicies: filter matched no rules of ptype %q but %d new rules supplied; use AddPolicies for a pure insert (avoids store/model divergence under Casbin's empty-oldRules quirk)", ptype, len(newRows))
 		}
 		// Re-build the WHERE chain on tx for the Delete: GORM consumes
 		// the chain on the Find above, so we need a fresh Where set.
@@ -439,6 +518,14 @@ func ruleToRow(ptype string, rule []string) (CasbinRule, error) {
 // applyValueColumns appends WHERE clauses for every supplied rule
 // value at columns v{startIdx}, v{startIdx+1}, .... Used by
 // RemovePolicy where every value is a hard match (no wildcards).
+//
+// NOTE: this is a PREFIX match — columns past len(rule) are left
+// unconstrained. UpdatePolicy / UpdatePolicies must NOT use this
+// helper; they need applyExactRule to honour Casbin's exact-rule
+// update contract. RemovePolicy keeps prefix semantics because
+// Casbin passes the full-arity rule there and trailing columns are
+// "" by convention, so prefix and exact behave identically for
+// well-formed input.
 func applyValueColumns(q *gorm.DB, startIdx int, rule []string) *gorm.DB {
 	cols := []string{"v0", "v1", "v2", "v3", "v4", "v5"}
 	for i, v := range rule {
@@ -447,6 +534,27 @@ func applyValueColumns(q *gorm.DB, startIdx int, rule []string) *gorm.DB {
 			break
 		}
 		q = q.Where(cols[idx]+" = ?", v)
+	}
+	return q
+}
+
+// applyExactRule appends WHERE clauses pinning every storage column
+// V0..V5 to rule's value (or "" when rule is shorter than 6). Used
+// by Update* paths because Casbin's UpdatePolicy contract is
+// "replace this exact rule": a prefix-only WHERE would silently
+// delete rows whose trailing v_n are non-empty but front prefix
+// matches, leaving model.UpdatePolicy (which only no-ops on no
+// match) inconsistent with the store. Callers must validate
+// len(rule) <= maxRuleColumns before invoking — applyExactRule does
+// not enforce that and would silently truncate to the first six.
+func applyExactRule(q *gorm.DB, rule []string) *gorm.DB {
+	cols := []string{"v0", "v1", "v2", "v3", "v4", "v5"}
+	for i, c := range cols {
+		if i < len(rule) {
+			q = q.Where(c+" = ?", rule[i])
+		} else {
+			q = q.Where(c+" = ?", "")
+		}
 	}
 	return q
 }
