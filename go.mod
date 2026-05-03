@@ -3,6 +3,7 @@ module github.com/zynthara/chok
 go 1.26.1
 
 require (
+	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/casbin/casbin/v3 v3.10.0
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/dgraph-io/badger/v4 v4.9.1
@@ -91,6 +92,7 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect

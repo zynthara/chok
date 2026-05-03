@@ -2,9 +2,11 @@ package casbin_test
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -12,20 +14,31 @@ import (
 	"github.com/zynthara/chok/authz"
 	"github.com/zynthara/chok/authz/casbin"
 	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/config"
 	"github.com/zynthara/chok/log"
 	"github.com/zynthara/chok/parts"
 )
 
-// fakeKernel is a single-component Kernel just for the casbin
-// Builder, which only ever asks for "db". Other Kernel methods are
-// stubs the Builder never calls.
+// fakeKernel is a small-component Kernel for the casbin Builder,
+// which asks for "db" (always) and "redis" (when RedisWatcher is on).
+// Other Kernel methods are stubs the Builder never calls.
 type fakeKernel struct {
-	db *parts.DBComponent
+	db    *parts.DBComponent
+	redis *parts.RedisComponent
 }
 
 func (k *fakeKernel) Get(name string) component.Component {
-	if name == "db" {
+	switch name {
+	case "db":
+		if k.db == nil {
+			return nil
+		}
 		return k.db
+	case "redis":
+		if k.redis == nil {
+			return nil
+		}
+		return k.redis
 	}
 	return nil
 }
@@ -276,7 +289,13 @@ func TestAuthorizer_Close(t *testing.T) {
 
 // --- Builder error paths --------------------------------------------
 
-func TestBuilder_RejectsRedisWatcherWithoutImpl(t *testing.T) {
+// TestBuilder_RedisWatcher_RequiresRedisComponent covers the
+// negative wiring path: enabling RedisWatcher in Options without
+// supplying a RedisComponent in the kernel must error with a
+// message that points the operator at the missing component.
+// Silent fallback to single-pod scope would mask multi-pod
+// misconfigs that only surface as "policy changes don't propagate".
+func TestBuilder_RedisWatcher_RequiresRedisComponent(t *testing.T) {
 	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
 		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
 	})
@@ -285,8 +304,67 @@ func TestBuilder_RejectsRedisWatcherWithoutImpl(t *testing.T) {
 	}
 
 	_, err := casbin.Builder(casbin.Options{RedisWatcher: true})(&fakeKernel{db: dbc})
-	if err == nil || !strings.Contains(err.Error(), "RedisWatcher=true") {
-		t.Fatalf("expected RedisWatcher fail-fast, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "RedisComponent not registered") {
+		t.Fatalf("expected RedisComponent missing error, got %v", err)
+	}
+}
+
+// TestBuilder_RedisWatcher_RequiresRedisClient covers the second
+// negative path: RedisComponent is registered but its Client() is
+// nil (resolver returned nil RedisOptions). Same fail-fast rationale
+// as the missing-component case.
+func TestBuilder_RedisWatcher_RequiresRedisClient(t *testing.T) {
+	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
+		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
+	})
+	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
+		t.Fatal(err)
+	}
+	rc := parts.NewRedisComponent(func(any) *config.RedisOptions { return nil })
+	if err := rc.Init(context.Background(), &fakeKernel{}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := casbin.Builder(casbin.Options{RedisWatcher: true})(&fakeKernel{db: dbc, redis: rc})
+	if err == nil || !strings.Contains(err.Error(), "Client() returned nil") {
+		t.Fatalf("expected nil-client error, got %v", err)
+	}
+}
+
+// TestBuilder_RedisWatcher_AttachesWatcher exercises the positive
+// wiring path against an in-process miniredis: Builder produces a
+// working Authorizer + Service + io.Closer with the watcher hooked
+// up, and Close releases everything cleanly. Pins the SPEC §9.3
+// "RedisWatcher 多实例同步" acceptance at the Builder layer (the
+// pub/sub round-trip itself is exercised in watcher_test.go).
+func TestBuilder_RedisWatcher_AttachesWatcher(t *testing.T) {
+	mr := miniredis.RunT(t)
+	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
+		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
+	})
+	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
+		t.Fatal(err)
+	}
+	rc := parts.NewRedisComponent(func(any) *config.RedisOptions {
+		return &config.RedisOptions{Enabled: true, Addr: mr.Addr()}
+	})
+	if err := rc.Init(context.Background(), &fakeKernel{}); err != nil {
+		t.Fatal(err)
+	}
+
+	az, err := casbin.Builder(casbin.Options{RedisWatcher: true})(&fakeKernel{db: dbc, redis: rc})
+	if err != nil {
+		t.Fatalf("Builder with wired RedisWatcher should succeed: %v", err)
+	}
+	if _, ok := az.(casbin.Service); !ok {
+		t.Fatalf("authorizer should also satisfy casbin.Service, got %T", az)
+	}
+	closer, ok := az.(io.Closer)
+	if !ok {
+		t.Fatal("authorizer should satisfy io.Closer for AuthzComponent.Close")
+	}
+	if err := closer.Close(); err != nil {
+		t.Errorf("Close should be clean, got %v", err)
 	}
 }
 
@@ -311,11 +389,18 @@ func TestBuilder_RejectsMissingDB(t *testing.T) {
 	}
 }
 
-// TestBuilder_FailFastBeforeAutoMigrate proves the Builder rejects
-// unsupported flags BEFORE touching the database. A misconfigured
-// startup must not leave a half-initialised casbin_rule table behind
-// when the same flag would have failed the eventual policy load.
-func TestBuilder_FailFastBeforeAutoMigrate(t *testing.T) {
+// TestBuilder_AuditEnabled_FailFastBeforeAutoMigrate proves the
+// AuditEnabled flag is checked BEFORE touching the database. A
+// misconfigured startup must not leave a half-initialised
+// casbin_rule table behind when the same flag would have failed
+// the eventual policy load.
+//
+// RedisWatcher does NOT have this property — its check needs the
+// Kernel-resolved RedisComponent so it runs after newGormAdapter.
+// That ordering is documented in builder.go: a stray casbin_rule
+// table from a failed RedisWatcher Build is harmless because the
+// next successful boot reuses the table.
+func TestBuilder_AuditEnabled_FailFastBeforeAutoMigrate(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
 	if err != nil {
 		t.Fatal(err)
@@ -327,22 +412,10 @@ func TestBuilder_FailFastBeforeAutoMigrate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cases := []struct {
-		name string
-		opts casbin.Options
-	}{
-		{"RedisWatcher", casbin.Options{RedisWatcher: true}},
-		{"AuditEnabled", casbin.Options{AuditEnabled: true}},
+	if _, err := casbin.Builder(casbin.Options{AuditEnabled: true})(&fakeKernel{db: dbc}); err == nil {
+		t.Fatal("expected fail-fast error")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := casbin.Builder(tc.opts)(&fakeKernel{db: dbc})
-			if err == nil {
-				t.Fatal("expected fail-fast error")
-			}
-			if db.Migrator().HasTable("casbin_rule") {
-				t.Errorf("Builder fail-fast on %s left casbin_rule table behind — schema should not be touched before flag check", tc.name)
-			}
-		})
+	if db.Migrator().HasTable("casbin_rule") {
+		t.Error("Builder AuditEnabled fail-fast left casbin_rule table behind — schema should not be touched before flag check")
 	}
 }

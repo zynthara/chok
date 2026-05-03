@@ -71,12 +71,14 @@ func newAuthorizer(modelText string, adapter persist.Adapter) (*casbinAuthorizer
 
 // withWatcher attaches the Casbin Watcher (Redis pub/sub or similar)
 // so policy changes broadcast to peer instances. Builder calls this
-// after enforcer construction; tests skip it for simplicity.
+// after enforcer construction; tests that don't exercise multi-pod
+// sync skip it.
 //
-// Phase 6 stub: the Builder rejects RedisWatcher=true so this is
-// currently unreachable. Kept as the wiring point for the watcher
-// follow-up PR.
-func (a *casbinAuthorizer) withWatcher(w persist.Watcher) error { //nolint:unused
+// SetWatcher overwrites any prior watcher inside the enforcer; we
+// stash a copy on the receiver so Close can release the subscriber
+// goroutine before the enforcer becomes unreachable. nil w is a
+// no-op so tests can swap watchers off without special-casing.
+func (a *casbinAuthorizer) withWatcher(w persist.Watcher) error {
 	if w == nil {
 		return nil
 	}

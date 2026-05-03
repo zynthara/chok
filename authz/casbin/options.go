@@ -30,14 +30,22 @@ type Options struct {
 	// hard-code the four-tuple.
 	Model string
 
-	// RedisWatcher enables the Casbin Redis Watcher: when policies
-	// change on instance A (Service writes), instance B's enforcer
-	// reloads them within ~50 ms. Required for multi-instance
-	// deployments — single-instance can leave it false.
+	// RedisWatcher enables the chok-shipped Casbin Watcher backed by
+	// the existing parts.RedisComponent: when policies change on
+	// instance A (Service writes), instance B's enforcer reloads
+	// them sub-second. Required for multi-instance deployments —
+	// single-instance can leave it false.
 	//
 	// When true, the Builder pulls the existing chok RedisComponent
-	// from the Kernel; a missing redis component is a fatal Build
-	// error so the operator notices the misconfig at startup.
+	// from the Kernel; a missing or unconfigured redis component is
+	// a fatal Build error so the operator notices the misconfig at
+	// startup rather than silently degrading to single-pod scope.
+	//
+	// The watcher only implements persist.Watcher (not WatcherEx /
+	// UpdatableWatcher), so peers full-reload on every event rather
+	// than apply incremental deltas. Policy mutation rates are low
+	// in typical RBAC use; full LoadPolicy is simpler to reason
+	// about and easier to keep race-free with shutdown.
 	RedisWatcher bool
 
 	// RedisWatcherChannel is the Redis pub/sub channel name used by
