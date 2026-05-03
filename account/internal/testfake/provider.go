@@ -19,11 +19,14 @@ import (
 // expected ProviderIdentity (or per-code map) and the BeginAuth
 // behaviour, then exercise Module's flow against the resulting handler.
 type Provider struct {
-	name    string
-	caps    account.ProviderCapabilities
-	mu      sync.Mutex
-	codes   map[string]*account.ProviderIdentity // code → identity to return on CompleteAuth
-	beginFn func(req *account.BeginRequest) (*account.BeginResponse, error)
+	name        string
+	caps        account.ProviderCapabilities
+	redirectURL string
+	mu          sync.Mutex
+	codes       map[string]*account.ProviderIdentity // code → identity to return on CompleteAuth
+	beginFn     func(req *account.BeginRequest) (*account.BeginResponse, error)
+	completeErr error // injected error for CompleteAuth — used by handleCallback fault tests
+	beginErr    error // injected error for BeginAuth — used by handleBegin rollback tests
 }
 
 // New returns a Provider with default OAuth2 capabilities (GET callback,
@@ -41,6 +44,36 @@ func (p *Provider) WithCapabilities(caps account.ProviderCapabilities) *Provider
 	p.caps = caps
 	return p
 }
+
+// WithRedirectURL configures the value the Provider returns from its
+// optional account.RedirectURLProvider implementation. Tests use this to
+// exercise CookieCarrier dev-mode auto-detect (HTTP-on-localhost flips
+// SameSite=Lax + !Secure).
+func (p *Provider) WithRedirectURL(u string) *Provider {
+	p.redirectURL = u
+	return p
+}
+
+// WithBeginAuthErr makes BeginAuth return the given error so tests can
+// drive handleBegin's rollback path (Save succeeded → Issue or BeginAuth
+// failed → roll back the just-saved sid via context.WithoutCancel).
+func (p *Provider) WithBeginAuthErr(err error) *Provider {
+	p.beginErr = err
+	return p
+}
+
+// WithCompleteAuthErr makes CompleteAuth return the given error,
+// covering the IdP-rejected-our-code branch.
+func (p *Provider) WithCompleteAuthErr(err error) *Provider {
+	p.completeErr = err
+	return p
+}
+
+// RedirectURL implements the optional account.RedirectURLProvider so
+// Module.RegisterProvider's dev-mode hint pickup is exercised. Empty
+// when never configured — Module treats that the same as a non-aware
+// provider.
+func (p *Provider) RedirectURL() string { return p.redirectURL }
 
 // WithBeginAuthFn lets the test control the redirect URL the provider
 // returns. Default behaviour returns a stub URL with the state echoed.
@@ -66,6 +99,9 @@ func (p *Provider) Capabilities() account.ProviderCapabilities { return p.caps }
 
 // BeginAuth implements AuthProvider.
 func (p *Provider) BeginAuth(_ context.Context, req *account.BeginRequest) (*account.BeginResponse, error) {
+	if p.beginErr != nil {
+		return nil, p.beginErr
+	}
 	if p.beginFn != nil {
 		return p.beginFn(req)
 	}
@@ -87,6 +123,9 @@ func (p *Provider) BeginAuth(_ context.Context, req *account.BeginRequest) (*acc
 // the given code; missing code yields ErrUnknownCode so a test of the
 // "real IdP rejected our code" branch is straightforward.
 func (p *Provider) CompleteAuth(_ context.Context, req *account.CompleteRequest) (*account.ProviderIdentity, error) {
+	if p.completeErr != nil {
+		return nil, p.completeErr
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ident, ok := p.codes[req.Code]

@@ -86,6 +86,31 @@ func (e *Error) WithHeader(k, v string) *Error {
 	return &cp
 }
 
+// HasCode reports whether err (or anything in its chain) is an *Error
+// whose HTTP status Code matches the supplied value. It's the right
+// classifier when an error has been refined via WithReason — that
+// breaks errors.Is(err, ErrInvalidArgument) by design (Reason no longer
+// matches the sentinel), but the caller still wants to know "is this a
+// 400-class error?". Example:
+//
+//	if apierr.HasCode(err, 400) { ... }   // matches OAUTH_EMAIL_REQUIRED
+//	                                      // even though it carries a refined Reason.
+//
+// Pair with errors.As when you also need the Metadata or Reason value:
+//
+//	var ae *apierr.Error
+//	if errors.As(err, &ae) && ae.Code == 400 { ... }
+func HasCode(err error, code int) bool {
+	if err == nil {
+		return false
+	}
+	var ae *Error
+	if !errors.As(err, &ae) {
+		return false
+	}
+	return ae.Code == code
+}
+
 // FromError converts any error to *Error.
 // Unwraps via errors.As; non-*Error defaults to 500 InternalError with
 // the original error attached as the Wrap cause so errors.Unwrap and

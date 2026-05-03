@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,8 +19,11 @@ import (
 
 	"github.com/zynthara/chok/account"
 	"github.com/zynthara/chok/account/internal/testfake"
+	"github.com/zynthara/chok/config"
 	"github.com/zynthara/chok/db"
 	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/store/where"
 )
 
 const e2eSigningKey = "this-is-a-test-signing-key-32bytes!"
@@ -69,7 +73,11 @@ func setupOAuthFixture(t *testing.T, providerName string, modOpts ...account.Opt
 		t.Fatal(err)
 	}
 	r := gin.New()
-	m.RegisterRoutes(r)
+	// Mount under /auth to match parts.NewDefaultAccountComponent's
+	// production wiring — Module.RegisterRoutes registers relative paths
+	// (/{name}/start, /exchange, /identities) that combine with the
+	// group prefix to yield the SPEC §7 absolute URLs.
+	m.RegisterRoutes(r.Group("/auth"))
 	return &e2eFixture{
 		m: m, r: r, p: p, mem: mem,
 		store: mem, authCS: account.NewMemoryAuthCodeStore(mem),
@@ -128,6 +136,28 @@ func sidFromCookies(cookies []*http.Cookie) string {
 	return ""
 }
 
+// hasCookie reports whether cookies contains a Set-Cookie write for the
+// given name with a non-empty value (i.e. an active issue, not a clear).
+func hasCookie(cookies []*http.Cookie, name string) bool {
+	for _, ck := range cookies {
+		if ck.Name == name && ck.Value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasClearedCookie reports whether cookies contains a Set-Cookie write
+// for the given name with MaxAge<=0 (delete-cookie response).
+func hasClearedCookie(cookies []*http.Cookie, name string) bool {
+	for _, ck := range cookies {
+		if ck.Name == name && ck.MaxAge < 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // --- Tests ---
 
 func TestOAuth_BeginCallbackExchange(t *testing.T) {
@@ -156,7 +186,14 @@ func TestOAuth_BeginCallbackExchange(t *testing.T) {
 		t.Fatal("no auth code")
 	}
 
-	w = sendJSON(fx.r, "POST", "/auth/exchange", map[string]string{"code": authCode}, nil)
+	// callback writes the exchange-binding cookie; forward it to the
+	// exchange request to prove the same-browser invariant.
+	xchgCookies := w.Result().Cookies()
+	if !hasCookie(xchgCookies, "_chok_oauth_xchg") {
+		t.Fatal("callback must Set-Cookie _chok_oauth_xchg")
+	}
+
+	w = sendJSON(fx.r, "POST", "/auth/exchange", map[string]string{"code": authCode}, xchgCookies)
 	if w.Code != http.StatusOK {
 		t.Fatalf("exchange: %d %s", w.Code, w.Body.String())
 	}
@@ -170,6 +207,53 @@ func TestOAuth_BeginCallbackExchange(t *testing.T) {
 	}
 	if resp.Token == "" || resp.RedirectBack != "/dashboard" {
 		t.Fatalf("bad exchange response: %+v", resp)
+	}
+	// Successful exchange clears the binding cookie so a leaked browser
+	// profile cannot replay it offline.
+	if !hasClearedCookie(w.Result().Cookies(), "_chok_oauth_xchg") {
+		t.Fatal("exchange must clear _chok_oauth_xchg on success")
+	}
+}
+
+// TestOAuth_Exchange_RejectsMissingBinding covers the High #2 regression:
+// an attacker who scrapes the auth_code from a redirect URL / Referer /
+// access log MUST NOT be able to exchange it for a JWT without also
+// possessing the HttpOnly _chok_oauth_xchg cookie that callback wrote.
+func TestOAuth_Exchange_RejectsMissingBinding(t *testing.T) {
+	fx := setupOAuthFixture(t, "fake")
+	fx.p.SeedIdentity("c", &account.ProviderIdentity{
+		Provider: "fake", ProviderAccountID: "x", Email: "x@idp.test", EmailVerified: true,
+	})
+	startResp := send(fx.r, "GET", "/auth/fake/start", nil)
+	state := extractStateFromIdPLoc(t, startResp.Header().Get("Location"))
+	cb := send(fx.r, "GET", "/auth/fake/callback?code=c&state="+url.QueryEscape(state), startResp.Result().Cookies())
+	authCode := extractCodeFromFEloc(t, cb.Header().Get("Location"))
+
+	// Submit exchange without forwarding the binding cookie: simulates a
+	// stolen-code attacker who lacks the legitimate browser's cookie jar.
+	w := sendJSON(fx.r, "POST", "/auth/exchange", map[string]string{"code": authCode}, nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 (missing binding), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestOAuth_Exchange_RejectsTamperedBinding covers a related vector:
+// attacker has BOTH the code AND a binding cookie value that doesn't
+// match (e.g. their own browser's previous session). 401, not 200.
+func TestOAuth_Exchange_RejectsTamperedBinding(t *testing.T) {
+	fx := setupOAuthFixture(t, "fake")
+	fx.p.SeedIdentity("c", &account.ProviderIdentity{
+		Provider: "fake", ProviderAccountID: "x", Email: "x@idp.test", EmailVerified: true,
+	})
+	startResp := send(fx.r, "GET", "/auth/fake/start", nil)
+	state := extractStateFromIdPLoc(t, startResp.Header().Get("Location"))
+	cb := send(fx.r, "GET", "/auth/fake/callback?code=c&state="+url.QueryEscape(state), startResp.Result().Cookies())
+	authCode := extractCodeFromFEloc(t, cb.Header().Get("Location"))
+
+	tampered := []*http.Cookie{{Name: "_chok_oauth_xchg", Value: "definitely-not-the-right-token"}}
+	w := sendJSON(fx.r, "POST", "/auth/exchange", map[string]string{"code": authCode}, tampered)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 (tampered binding), got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -257,16 +341,29 @@ func TestOAuth_AuthCodeReplay_410(t *testing.T) {
 	state := extractStateFromIdPLoc(t, startResp.Header().Get("Location"))
 	cb := send(fx.r, "GET", "/auth/fake/callback?code=c&state="+url.QueryEscape(state), cookies)
 	authCode := extractCodeFromFEloc(t, cb.Header().Get("Location"))
+	xchgCookies := cb.Result().Cookies()
 
-	if w := sendJSON(fx.r, "POST", "/auth/exchange", map[string]string{"code": authCode}, nil); w.Code != http.StatusOK {
+	// First exchange: succeed, code is consumed.
+	if w := sendJSON(fx.r, "POST", "/auth/exchange", map[string]string{"code": authCode}, xchgCookies); w.Code != http.StatusOK {
 		t.Fatalf("first exchange: %d %s", w.Code, w.Body.String())
 	}
-	if w := sendJSON(fx.r, "POST", "/auth/exchange", map[string]string{"code": authCode}, nil); w.Code != http.StatusGone {
+	// Second exchange with the same binding cookie: code already taken
+	// → 410 (regardless of whether the cookie is still valid). The
+	// AuthCodeStore.Take is the gate; binding-check happens before but
+	// for this scenario both are valid yet the code is already consumed.
+	if w := sendJSON(fx.r, "POST", "/auth/exchange", map[string]string{"code": authCode}, xchgCookies); w.Code != http.StatusGone {
 		t.Fatalf("replay: expected 410, got %d %s", w.Code, w.Body.String())
 	}
 }
 
-func TestOAuth_NoEmail_422(t *testing.T) {
+// TestOAuth_NoEmail_InvalidArg verifies SPEC §6.2 / §8.1 's OAuth-only
+// account creation gate: provider must supply non-empty + verified +
+// non-aliased email or the callback returns 400 InvalidArgument with
+// reason=OAUTH_EMAIL_REQUIRED. SPEC §8.1 originally documented 422
+// Unprocessable Entity, but §6.2's pseudocode (canonical) returns
+// ErrInvalidArgument(400) — the implementation follows §6.2 and the
+// SPEC §8.1 422 mention is a documentation residue from earlier drafts.
+func TestOAuth_NoEmail_InvalidArg(t *testing.T) {
 	fx := setupOAuthFixture(t, "fake")
 	fx.p.SeedIdentity("c", &account.ProviderIdentity{Provider: "fake", ProviderAccountID: "x", Email: ""})
 
@@ -404,7 +501,7 @@ func TestOAuthOnly_LoginRejected(t *testing.T) {
 		t.Fatalf("expected PV=0, got %d", user.PasswordVersion)
 	}
 
-	w := sendJSON(fx.r, "POST", "/login", map[string]string{
+	w := sendJSON(fx.r, "POST", "/auth/login", map[string]string{
 		"email":    "alice@idp.test",
 		"password": "anything-wrong",
 	}, nil)
@@ -453,5 +550,570 @@ func TestProviderRegistration_NilProviderRejected(t *testing.T) {
 	fx := setupOAuthFixture(t, "fake")
 	if err := fx.m.RegisterProvider(nil); err == nil {
 		t.Fatal("expected error for nil provider")
+	}
+}
+
+// TestOAuth_LinkFlow_BindsToCurrentUser proves High #3: when an
+// authenticated user calls POST /identities/link, the resulting Identity
+// row attaches to *that* user, even if the IdP returns a different
+// ProviderAccountID than any existing identity. Without the fix, the
+// callback would run ResolveOAuthIdentity (creating a new chok user
+// for the new IdP account) and exchange would issue a token for *that*
+// user — silently switching the browser to a different account.
+func TestOAuth_LinkFlow_BindsToCurrentUser(t *testing.T) {
+	fx := setupOAuthFixture(t, "fake")
+	ctx := context.Background()
+
+	// Bootstrap a password-mode user via /register and capture their token.
+	regResp := sendJSON(fx.r, "POST", "/auth/register", map[string]string{
+		"email":    "alice@local.test",
+		"password": "Password!23",
+		"name":     "Alice",
+	}, nil)
+	if regResp.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", regResp.Code, regResp.Body.String())
+	}
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(regResp.Body).Decode(&tok); err != nil {
+		t.Fatal(err)
+	}
+	aliceUser, err := fx.m.Store().Get(ctx, store.Where(where.WithFilter("email", "alice@local.test")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the IdP's response — note the email differs from alice's local
+	// email; without the fix the callback would create a new chok user
+	// "carol" and switch alice's browser to her token.
+	fx.p.SeedIdentity("idp-code", &account.ProviderIdentity{
+		Provider:          "fake",
+		ProviderAccountID: "remote-acc-99",
+		Email:             "carol@idp.test",
+		EmailVerified:     true,
+	})
+
+	// POST /auth/identities/link with alice's token. Returns redirect_to.
+	linkReq := httptest.NewRequest("POST", "/auth/identities/link",
+		bytes.NewReader([]byte(`{"provider":"fake","redirect_back":"/settings"}`)))
+	linkReq.Header.Set("Content-Type", "application/json")
+	linkReq.Header.Set("Authorization", "Bearer "+tok.Token)
+	linkW := httptest.NewRecorder()
+	fx.r.ServeHTTP(linkW, linkReq)
+	if linkW.Code != http.StatusOK {
+		t.Fatalf("link request: %d %s", linkW.Code, linkW.Body.String())
+	}
+	var linkResp struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	if err := json.NewDecoder(linkW.Body).Decode(&linkResp); err != nil {
+		t.Fatal(err)
+	}
+	startCookies := linkW.Result().Cookies()
+	state := extractStateFromIdPLoc(t, linkResp.RedirectTo)
+
+	// Browser bounces back to callback. Sid cookie set by /identities/link
+	// carries LinkUserID = alice; the callback path goes through
+	// LinkIdentity, NOT ResolveOAuthIdentity.
+	cb := send(fx.r, "GET", "/auth/fake/callback?code=idp-code&state="+url.QueryEscape(state), startCookies)
+	if cb.Code != http.StatusFound {
+		t.Fatalf("callback: %d %s", cb.Code, cb.Body.String())
+	}
+	// Link flow does NOT issue an auth_code (no token exchange). The 302
+	// goes to redirect_back (or frontend URL) with link_status=ok.
+	loc := cb.Header().Get("Location")
+	if !strings.Contains(loc, "link_status=ok") {
+		t.Fatalf("link flow must redirect with link_status=ok, got %q", loc)
+	}
+	if strings.Contains(loc, "code=") {
+		t.Fatalf("link flow must NOT mint an auth_code, got %q", loc)
+	}
+
+	// Verify the new Identity row is attached to alice, not to a brand
+	// new "carol" user.
+	idents, err := fx.m.ListIdentities(ctx, aliceUser.RID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idents) != 1 || idents[0].ProviderAccountID != "remote-acc-99" {
+		t.Fatalf("expected alice to have 1 identity (remote-acc-99), got %+v", idents)
+	}
+}
+
+// TestUnlinkIdentity_RaceLeavesOneMethod is the High #4 regression:
+// concurrent unlink calls on an OAuth-only user with two identities
+// must not both succeed. The transaction + row-level lock guarantees
+// at most one wins; the other returns FailedPrecondition.
+//
+// SQLite serializes writers within a transaction so on a single-
+// connection :memory: backend the test reliably exhibits the
+// serialization the production-grade lock provides on MySQL/PG.
+func TestUnlinkIdentity_RaceLeavesOneMethod(t *testing.T) {
+	fx := setupOAuthFixture(t, "fake")
+	ctx := context.Background()
+
+	// OAuth-only user (PV=0) with two identities.
+	user, _, err := fx.m.ResolveOAuthIdentity(ctx, &account.ProviderIdentity{
+		Provider: "fake", ProviderAccountID: "acc-1", Email: "alice@idp.test", EmailVerified: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.m.LinkIdentity(ctx, user.RID, &account.ProviderIdentity{
+		Provider: "fake", ProviderAccountID: "acc-2", Email: "alice@idp.test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	idents, _ := fx.m.ListIdentities(ctx, user.RID)
+	if len(idents) != 2 {
+		t.Fatalf("setup: expected 2 identities, got %d", len(idents))
+	}
+
+	// Concurrent unlinks: each goroutine targets a different identity.
+	// At most one should succeed; otherwise the user would end up with
+	// 0 login methods, an unrecoverable state.
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = fx.m.UnlinkIdentity(ctx, user.RID, idents[idx].RID)
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	for _, e := range errs {
+		if e == nil {
+			successes++
+		}
+	}
+	if successes > 1 {
+		t.Fatalf("UnlinkIdentity is not atomic: %d concurrent successes (expected ≤1)", successes)
+	}
+	final, _ := fx.m.ListIdentities(ctx, user.RID)
+	if len(final) < 1 {
+		t.Fatal("user left with 0 identities — last-method guard failed under concurrency")
+	}
+}
+
+// TestOAuth_DevModeAutoDetect covers High #6: when the first registered
+// AuthProvider implements RedirectURLProvider AND its URL is HTTP-on-
+// localhost, RegisterProvider must propagate the hint into the default
+// CookieCarrier so it picks SameSite=Lax / !Secure (otherwise browsers
+// drop the sid cookie on plaintext localhost callbacks).
+//
+// We only verify the side effect that's reachable through the public
+// API: a Set-Cookie header without "Secure" on the /auth/{name}/start
+// response. The carrier's internal devMode bool is a private field —
+// Set-Cookie attributes are the contract.
+func TestOAuth_DevModeAutoDetect(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(context.Background(), gdb, account.Table(), account.IdentityTable()); err != nil {
+		t.Fatal(err)
+	}
+	// Note: no WithSessionCarrier — Module derives its default carrier
+	// from signingKey + dev-mode flag from firstRedirectURL.
+	m, err := account.New(gdb, log.Empty(),
+		account.WithSigningKey(e2eSigningKey),
+		account.WithOAuthCallbackFrontendURL("http://localhost:3000/auth/finish"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := testfake.New("fake").WithRedirectURL("http://localhost:8080/auth/fake/callback")
+	if err := m.RegisterProvider(p); err != nil {
+		t.Fatal(err)
+	}
+	r := gin.New()
+	m.RegisterRoutes(r.Group("/auth"))
+
+	w := send(r, "GET", "/auth/fake/start", nil)
+	if w.Code != http.StatusFound {
+		t.Fatalf("start: %d", w.Code)
+	}
+	setCookie := w.Header().Get("Set-Cookie")
+	if strings.Contains(setCookie, "Secure") {
+		t.Fatalf("dev-mode auto-detect failed: cookie still has Secure attribute: %s", setCookie)
+	}
+	if !strings.Contains(setCookie, "SameSite=Lax") {
+		t.Fatalf("dev-mode auto-detect failed: cookie not SameSite=Lax: %s", setCookie)
+	}
+}
+
+// TestOAuth_F1_PasswordUserSurvivesLink proves the F1 regression: a
+// user who registered with /register MUST keep working with /login
+// after they later bind an OAuth identity. Pre-fix the call chain
+// `userHasPasswordHistory → PV>0 || len(idents)==0` flipped to false
+// once an Identity row existed, so /login returned 401
+// OAUTH_ONLY_ACCOUNT and ListLoginMethods dropped the password slot.
+//
+// User.HasPassword (set true at /register) is the explicit replacement
+// signal. Test asserts:
+//   - /login still returns 200 after link
+//   - ListLoginMethods still includes the password slot
+//   - UnlinkIdentity succeeds (last-method guard sees password + 0
+//     remaining idents = 1 method left)
+func TestOAuth_F1_PasswordUserSurvivesLink(t *testing.T) {
+	fx := setupOAuthFixture(t, "fake")
+	ctx := context.Background()
+
+	// Bootstrap a password user via /register so HasPassword is set
+	// through the public route, not via direct store writes.
+	regResp := sendJSON(fx.r, "POST", "/auth/register", map[string]string{
+		"email":    "alice@local.test",
+		"password": "Password!23",
+	}, nil)
+	if regResp.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", regResp.Code, regResp.Body.String())
+	}
+	user, err := fx.m.Store().Get(ctx, store.Where(where.WithFilter("email", "alice@local.test")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Baseline: /login works before any link.
+	loginPre := sendJSON(fx.r, "POST", "/auth/login", map[string]string{
+		"email": "alice@local.test", "password": "Password!23",
+	}, nil)
+	if loginPre.Code != http.StatusOK {
+		t.Fatalf("baseline /login pre-link: %d %s", loginPre.Code, loginPre.Body.String())
+	}
+
+	// Link an OAuth identity directly (covers the link flow's terminal
+	// effect; the start→callback dance is exercised separately).
+	if _, err := fx.m.LinkIdentity(ctx, user.RID, &account.ProviderIdentity{
+		Provider: "fake", ProviderAccountID: "remote-1", Email: "carol@idp.test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Post-link /login: still 200, NOT 401 OAUTH_ONLY_ACCOUNT.
+	loginPost := sendJSON(fx.r, "POST", "/auth/login", map[string]string{
+		"email": "alice@local.test", "password": "Password!23",
+	}, nil)
+	if loginPost.Code != http.StatusOK {
+		t.Fatalf("post-link /login broken: %d %s — F1 not fixed",
+			loginPost.Code, loginPost.Body.String())
+	}
+
+	// ListLoginMethods includes both password and OAuth.
+	methods, err := fx.m.ListLoginMethods(ctx, user.RID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasPassword := false
+	hasOAuth := false
+	for _, lm := range methods {
+		switch lm.Type {
+		case "password":
+			hasPassword = true
+		case "fake":
+			hasOAuth = true
+		}
+	}
+	if !hasPassword || !hasOAuth {
+		t.Fatalf("methods missing entries; got %+v", methods)
+	}
+
+	// Last-method guard sees 2 methods → unlink the OAuth one and
+	// the password slot is enough to keep the account recoverable.
+	idents, _ := fx.m.ListIdentities(ctx, user.RID)
+	if err := fx.m.UnlinkIdentity(ctx, user.RID, idents[0].RID); err != nil {
+		t.Fatalf("unlink should succeed because password slot remains: %v", err)
+	}
+	// And /login still works after the unlink (full circle).
+	loginAfter := sendJSON(fx.r, "POST", "/auth/login", map[string]string{
+		"email": "alice@local.test", "password": "Password!23",
+	}, nil)
+	if loginAfter.Code != http.StatusOK {
+		t.Fatalf("post-unlink /login: %d %s", loginAfter.Code, loginAfter.Body.String())
+	}
+}
+
+// TestOAuth_F1_BackfillRescuesLegacyRows covers AccountComponent.Migrate's
+// idempotent BackfillHasPassword: legacy rows that pre-date the
+// has_password column (default false) but have a real password_hash
+// and no Identity row must be flipped to has_password=true so they
+// keep authenticating after the upgrade.
+//
+// We simulate "legacy" by directly writing has_password=false on a
+// freshly-registered user, then call BackfillHasPassword and assert
+// /login resumes working.
+func TestOAuth_F1_BackfillRescuesLegacyRows(t *testing.T) {
+	fx := setupOAuthFixture(t, "fake")
+	ctx := context.Background()
+
+	// A normal /register sets has_password=true. Simulate "legacy"
+	// state by writing has_password=false directly via the store.
+	regResp := sendJSON(fx.r, "POST", "/auth/register", map[string]string{
+		"email":    "legacy@local.test",
+		"password": "Password!23",
+	}, nil)
+	if regResp.Code != http.StatusCreated {
+		t.Fatalf("register: %d", regResp.Code)
+	}
+	gdb := fx.m.Store().DB().WithContext(ctx)
+	if err := gdb.Exec(`UPDATE users SET has_password = FALSE WHERE email = ?`,
+		"legacy@local.test").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	user, _ := fx.m.Store().Get(ctx, store.Where(where.WithFilter("email", "legacy@local.test")))
+	if user.HasPassword {
+		t.Fatal("setup invalid: legacy row should have has_password=false before backfill")
+	}
+
+	// Run backfill (this is what AccountComponent.Migrate calls).
+	if err := account.BackfillHasPassword(ctx, fx.m.Store().DB()); err != nil {
+		t.Fatal(err)
+	}
+
+	user2, err := fx.m.Store().Get(ctx, store.Where(where.WithFilter("email", "legacy@local.test")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !user2.HasPassword {
+		t.Fatal("backfill failed: legacy password user not flipped to has_password=true")
+	}
+
+	// Idempotent: second call must not error.
+	if err := account.BackfillHasPassword(ctx, fx.m.Store().DB()); err != nil {
+		t.Fatal(err)
+	}
+
+	// And /login on the (now backfilled) legacy user works again.
+	w := sendJSON(fx.r, "POST", "/auth/login", map[string]string{
+		"email": "legacy@local.test", "password": "Password!23",
+	}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("post-backfill /login: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestOAuth_F1_BackfillSkipsOAuthOnlyUsers ensures the backfill does
+// NOT bless users who have an OAuth Identity row — those are
+// genuinely "no password history" accounts (or pre-fix linked
+// password users; ambiguous and conservatively left at false). They
+// recover via /forgot-password if needed.
+func TestOAuth_F1_BackfillSkipsOAuthOnlyUsers(t *testing.T) {
+	fx := setupOAuthFixture(t, "fake")
+	ctx := context.Background()
+
+	// Create an OAuth-only user.
+	user, _, err := fx.m.ResolveOAuthIdentity(ctx, &account.ProviderIdentity{
+		Provider: "fake", ProviderAccountID: "x", Email: "oauth@idp.test", EmailVerified: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.HasPassword {
+		t.Fatal("OAuth-only Create should leave HasPassword=false")
+	}
+
+	// Run backfill — it must NOT touch this user (Identity row exists).
+	if err := account.BackfillHasPassword(ctx, fx.m.Store().DB()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := fx.m.Store().Get(ctx, store.RID(user.RID))
+	if got.HasPassword {
+		t.Fatal("backfill incorrectly blessed OAuth-only user as having a password")
+	}
+}
+
+// TestSetup_MigratesIdentityAndBackfills proves the standalone
+// account.Setup entry runs the same migration path as
+// parts.AccountComponent.Migrate. Earlier versions migrated only the
+// User table, leaving the Identity table missing AND skipping the
+// has_password backfill — legacy password users on the Setup path
+// hit OAUTH_ONLY_ACCOUNT after upgrade. Both must now happen
+// regardless of which entry point the operator picked.
+func TestSetup_MigratesIdentityAndBackfills(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pre-create only the User table with a "legacy" password row that
+	// pre-dates has_password. We seed via raw SQL to bypass the new
+	// /register code path so has_password=0 (the legacy state).
+	if err := db.Migrate(context.Background(), gdb, account.Table()); err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec(`
+		INSERT INTO users (rid, email, password_hash, has_password, password_version, name, active, created_at, updated_at)
+		VALUES ('usr_legacy01', 'legacy@local.test', '$2a$10$abcdefghijklmnopqrstuv', 0, 0, 'Legacy', 1, datetime('now'), datetime('now'))
+	`).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Run Setup as a real caller would — it MUST migrate Identity AND
+	// flip has_password=true on the legacy row.
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	mod, err := account.Setup(gdb, log.Empty(),
+		&config.AccountOptions{Enabled: true, SigningKey: e2eSigningKey},
+		r.Group("/auth"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mod == nil {
+		t.Fatal("Setup returned nil module despite Enabled=true")
+	}
+
+	// Identity table must now exist — listing on a non-existent table
+	// errors out, so a successful (empty) list proves the migration ran.
+	if _, err := mod.ListIdentities(context.Background(), "usr_legacy01"); err != nil {
+		t.Fatalf("Identity table missing after Setup: %v", err)
+	}
+
+	// Legacy password row must be backfilled to has_password=true.
+	var got int
+	if err := gdb.Raw(`SELECT has_password FROM users WHERE rid = 'usr_legacy01'`).
+		Scan(&got).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got != 1 {
+		t.Fatalf("BackfillHasPassword skipped on Setup path: has_password=%d (expected 1)", got)
+	}
+}
+
+// TestOAuth_DevModeMirroredFromCustomCarrier covers F3: when the
+// caller supplies their own CookieCarrier with WithDevMode(), the
+// /auth/exchange browser-binding cookie must mirror that posture so
+// the cookie isn't dropped by browsers on HTTP localhost.
+func TestOAuth_DevModeMirroredFromCustomCarrier(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(context.Background(), gdb, account.Table(), account.IdentityTable()); err != nil {
+		t.Fatal(err)
+	}
+	mem := account.NewMemorySessionStore()
+	t.Cleanup(func() { _ = mem.Close() })
+	m, err := account.New(gdb, log.Empty(),
+		account.WithSigningKey(e2eSigningKey),
+		account.WithOAuthCallbackFrontendURL("http://localhost:3000/auth/finish"),
+		// Caller picks dev mode for the sid carrier; binding cookie
+		// must follow regardless of what isLocalDevRedirect deduces.
+		account.WithSessionCarrier(account.NewCookieCarrier(
+			[]byte("oauth-test-secret-32bytes-padded!!"), "_chok_oauth_sid", account.WithDevMode())),
+		account.WithOAuthSessionStore(mem),
+		account.WithAuthCodeStore(account.NewMemoryAuthCodeStore(mem)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := testfake.New("fake")
+	p.SeedIdentity("c", &account.ProviderIdentity{
+		Provider: "fake", ProviderAccountID: "x", Email: "x@idp.test", EmailVerified: true,
+	})
+	if err := m.RegisterProvider(p); err != nil {
+		t.Fatal(err)
+	}
+	r := gin.New()
+	m.RegisterRoutes(r.Group("/auth"))
+
+	// Drive a full start → callback so callback writes the binding cookie.
+	startW := send(r, "GET", "/auth/fake/start", nil)
+	startCookies := startW.Result().Cookies()
+	state := extractStateFromIdPLoc(t, startW.Header().Get("Location"))
+	cb := send(r, "GET", "/auth/fake/callback?code=c&state="+url.QueryEscape(state), startCookies)
+	if cb.Code != http.StatusFound {
+		t.Fatalf("callback: %d %s", cb.Code, cb.Body.String())
+	}
+
+	var bindingCookieFound bool
+	for _, h := range cb.Header().Values("Set-Cookie") {
+		if !strings.HasPrefix(h, "_chok_oauth_xchg=") {
+			continue
+		}
+		bindingCookieFound = true
+		if strings.Contains(h, "Secure") {
+			t.Errorf("dev-mode carrier set, but binding cookie still has Secure: %s", h)
+		}
+		if !strings.Contains(h, "SameSite=Lax") {
+			t.Errorf("dev-mode carrier set, but binding cookie not SameSite=Lax: %s", h)
+		}
+	}
+	if !bindingCookieFound {
+		t.Fatal("binding cookie not issued")
+	}
+}
+
+// TestModule_Close_ClosesAdapterStore covers Medium #1: when the user
+// supplies WithOAuthSessionStore but not WithAuthCodeStore, Module
+// constructs an internal MemorySessionStore behind a memoryAuthCodeAdapter.
+// Module.Close must reach through the adapter to stop the cleanup
+// goroutine, otherwise we leak one goroutine per Module instance.
+//
+// Calling Close twice asserts idempotency (sync.Once on the underlying
+// MemorySessionStore.Close).
+func TestModule_Close_ClosesAdapterStore(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(context.Background(), gdb, account.Table(), account.IdentityTable()); err != nil {
+		t.Fatal(err)
+	}
+	customStore := account.NewMemorySessionStore()
+	m, err := account.New(gdb, log.Empty(),
+		account.WithSigningKey(e2eSigningKey),
+		account.WithOAuthCallbackFrontendURL("https://app.example.test/auth/finish"),
+		account.WithOAuthSessionStore(customStore),
+		// no WithAuthCodeStore → Module wraps an internal MemorySessionStore
+		// in memoryAuthCodeAdapter; Close must reach it.
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RegisterProvider(testfake.New("fake")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Idempotent: second Close must not error.
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close (second): %v", err)
+	}
+	// Closing the externally-supplied store after Module.Close must also
+	// be safe (sync.Once guard inside MemorySessionStore.Close).
+	if err := customStore.Close(); err != nil {
+		t.Fatalf("custom store Close: %v", err)
+	}
+}
+
+// TestOAuth_EmailNormalized covers Medium #2: ResolveOAuthIdentity
+// normalizes (lower-case + trim) pi.Email so OAuth lookups share the
+// same casing rule as /login, /register, /forgot-password. Without
+// the fix, an IdP returning "Alice@idp.test" would create a chok user
+// whose email differs from the lower-case form login expects.
+func TestOAuth_EmailNormalized(t *testing.T) {
+	fx := setupOAuthFixture(t, "fake")
+	ctx := context.Background()
+
+	user, _, err := fx.m.ResolveOAuthIdentity(ctx, &account.ProviderIdentity{
+		Provider:          "fake",
+		ProviderAccountID: "acc-mixed",
+		Email:             "  Alice@IDP.test ",
+		EmailVerified:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Email != "alice@idp.test" {
+		t.Fatalf("expected normalized email, got %q", user.Email)
+	}
+	idents, _ := fx.m.ListIdentities(ctx, user.RID)
+	if len(idents) != 1 || idents[0].Email != "alice@idp.test" {
+		t.Fatalf("identity email not normalized: %+v", idents)
 	}
 }

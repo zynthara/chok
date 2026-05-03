@@ -41,6 +41,21 @@ type AuthProvider interface {
 	CompleteAuth(ctx context.Context, req *CompleteRequest) (*ProviderIdentity, error)
 }
 
+// RedirectURLProvider is an optional add-on to AuthProvider: implementations
+// that expose their configured RedirectURL surface it through this method
+// so the Module can auto-detect HTTP-on-localhost deployments and apply
+// CookieCarrier dev mode without an explicit option.
+//
+// Detection happens at the first RegisterProvider call: Module type-asserts
+// the new provider against this interface and feeds the URL into
+// isLocalDevRedirect. Providers that do not need the auto-detection (custom
+// in-process fakes, providers that don't carry a RedirectURL at all) simply
+// don't implement this method — Module falls back to the production cookie
+// defaults.
+type RedirectURLProvider interface {
+	RedirectURL() string
+}
+
 // ProviderCapabilities is provider-side static configuration the Module
 // consults to dispatch the OAuth flow correctly. Always returned by value
 // — providers should never mutate it after construction.

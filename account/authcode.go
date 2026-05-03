@@ -24,6 +24,18 @@ type AuthCodeData struct {
 	// knows where to navigate after token storage.
 	RedirectBack string
 
+	// BindingHash is the SHA-256 of a random "exchange-binding" token
+	// that handleCallback writes to a HttpOnly cookie alongside the
+	// 302 to oauthCallbackFrontendURL. /auth/exchange reads the cookie
+	// and recomputes SHA-256(cookie_value); a mismatch (or missing
+	// cookie) returns 401 Unauthenticated. This binds the auth-code to
+	// the same browser that initiated the OAuth flow, mitigating the
+	// "code leaked via Referer / browser history / front-end JS" attack.
+	//
+	// Hex-encoded for cheap comparison and stable serialization across
+	// in-memory and Redis backends.
+	BindingHash string
+
 	// CreatedAt records when the code was issued. Stores may use this
 	// for TTL bookkeeping; the recommended TTL is 5 seconds.
 	CreatedAt time.Time

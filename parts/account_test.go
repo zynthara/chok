@@ -90,6 +90,18 @@ func TestAccountComponent_Init_Migrate_Mount(t *testing.T) {
 		t.Fatal("POST /auth/register not registered after Mount")
 	}
 
+	// Make sure no route ever lands at /auth/auth/... — that's the
+	// double-prefix bug the High-#5 fix removed. RegisterRoutes uses
+	// relative paths; combined with group="/auth" on the router any
+	// "/auth/x" inside the registered handler would surface as
+	// "/auth/auth/x" here.
+	for _, info := range r.Routes() {
+		if len(info.Path) >= len("/auth/auth") && info.Path[:10] == "/auth/auth" {
+			t.Fatalf("double-prefixed route detected: %s %s — RegisterRoutes must use relative paths",
+				info.Method, info.Path)
+		}
+	}
+
 	if err := c.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}

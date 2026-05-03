@@ -3,6 +3,7 @@ package account
 import (
 	"container/list"
 	"context"
+	"io"
 	"sync"
 	"time"
 )
@@ -253,4 +254,22 @@ func (a *memoryAuthCodeAdapter) Take(ctx context.Context, code string) (*AuthCod
 	return a.store.TakeAuthCode(ctx, code)
 }
 
-var _ AuthCodeStore = (*memoryAuthCodeAdapter)(nil)
+// Close delegates to the wrapped *MemorySessionStore so Module.Close can
+// reach the cleanup goroutine when the adapter is the only handle pointing
+// at it. Module.Close walks sessionCarrier / sessionStore / authCodeStore
+// independently via io.Closer assertion; without this method, the
+// "WithOAuthSessionStore(custom) but no WithAuthCodeStore" path leaks a
+// goroutine because the freshly-constructed internal MemorySessionStore
+// is only reachable through the adapter.
+//
+// MemorySessionStore.Close is sync.Once-guarded so calling Close on the
+// adapter when the underlying store is also reachable via m.sessionStore
+// (the default-shared-backing case) is a safe no-op the second time.
+func (a *memoryAuthCodeAdapter) Close() error {
+	return a.store.Close()
+}
+
+var (
+	_ AuthCodeStore = (*memoryAuthCodeAdapter)(nil)
+	_ io.Closer     = (*memoryAuthCodeAdapter)(nil)
+)

@@ -15,6 +15,8 @@ import (
 
 	"golang.org/x/crypto/hkdf"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/zynthara/chok/apierr"
 	"github.com/zynthara/chok/auth"
@@ -69,6 +71,14 @@ func (m *Module) RegisterProvider(p AuthProvider) error {
 		if m.oauthCallbackFrontendURL == "" {
 			return errors.New("account: WithOAuthCallbackFrontendURL is required when any OAuth provider is registered")
 		}
+		// Pull the RedirectURL hint from the first provider (if it
+		// implements RedirectURLProvider) so ensureOAuthSessionPlumbing
+		// can flip dev mode for HTTP-on-localhost deployments. Without
+		// this hint the dev-mode auto-detect promised in SPEC §5.1
+		// v0.3.5 is dead code.
+		if rp, ok := p.(RedirectURLProvider); ok {
+			m.firstRedirectURL = rp.RedirectURL()
+		}
 		if err := m.ensureOAuthSessionPlumbing(); err != nil {
 			return err
 		}
@@ -103,15 +113,36 @@ func (m *Module) ProviderNames() []string {
 // authCodeStore on the Module if they were not explicitly injected via
 // WithXxx. Caller must hold m.oauthMu.
 func (m *Module) ensureOAuthSessionPlumbing() error {
+	// cookieDevMode must reflect the actual deployment posture so the
+	// /auth/exchange browser-binding cookie picks Secure / SameSite to
+	// match the sid cookie. The decision flow:
+	//   1. Caller-supplied *CookieCarrier — read its devMode field
+	//      (same package, direct access OK). Caller's WithDevMode()
+	//      choice wins.
+	//   2. Caller-supplied non-cookie carrier (header/query) — fall
+	//      back to firstRedirectURL HTTP-localhost detection. We have
+	//      no explicit signal, so the URL hint is the best guess.
+	//   3. No carrier supplied — same URL hint, then build the default
+	//      CookieCarrier with WithDevMode opt if applicable.
+	switch cc := m.sessionCarrier.(type) {
+	case *CookieCarrier:
+		m.cookieDevMode = cc.cfg.devMode
+	default:
+		_ = cc
+		m.cookieDevMode = isLocalDevRedirect(m.firstRedirectURL)
+	}
+
 	if m.sessionCarrier == nil {
 		secret, err := deriveOAuthSessionSecret(m.signingKey)
 		if err != nil {
 			return fmt.Errorf("account: derive cookie secret: %w", err)
 		}
 		opts := []CookieOption{}
-		if isLocalDevRedirect(m.firstRedirectURL) && m.logger != nil {
+		if m.cookieDevMode {
 			opts = append(opts, WithDevMode())
-			m.logger.Info("oauth cookie carrier in dev mode (HTTP localhost detected)")
+			if m.logger != nil {
+				m.logger.Info("oauth cookie carrier in dev mode (HTTP localhost detected)")
+			}
 		}
 		m.sessionCarrier = NewCookieCarrier(secret, "_chok_oauth_sid", opts...)
 	}
@@ -184,6 +215,14 @@ func (m *Module) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity)
 		return nil, nil, errors.New("account: ProviderIdentity missing Provider or ProviderAccountID")
 	}
 
+	// Normalize email so OAuth lookups / writes share the same casing rule
+	// as /login, /register, /forgot-password (account/handler.go normalizeEmail).
+	// Without this, an IdP returning "Alice@idp.test" would never match a
+	// local "alice@idp.test" user — squatting protection in §8 LinkByEmail
+	// would silently fall through, and OAuth-only-bootstrapped accounts
+	// could not later receive a /forgot-password link.
+	pi.Email = normalizeEmail(pi.Email)
+
 	// 1. Existing identity → just load the user.
 	existing, err := m.idStore.Get(ctx, store.Where(
 		where.WithFilter("provider", pi.Provider),
@@ -240,9 +279,13 @@ func (m *Module) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity)
 			}
 		}
 
-		// Create a new User. PV=0 marks "OAuth-only signal" (SPEC §4.1
-		// v0.3.5) — combined with no password identity row, /login
-		// rejects this user with the "use OAuth" message.
+		// Create a new OAuth-only User. HasPassword=false explicitly
+		// flags "user has not set a password" — /login rejects this
+		// account with the OAUTH_ONLY_ACCOUNT directing message until
+		// /forgot-password sets a real password (which flips HasPassword
+		// to true). PasswordHash is a random unguessable placeholder
+		// because the schema column is NOT NULL; the value is never
+		// actually compared against anything.
 		randomHash, err := auth.HashPassword(randomUnguessableSecret())
 		if err != nil {
 			return err
@@ -251,6 +294,7 @@ func (m *Module) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity)
 			Email:           pi.Email,
 			EmailVerified:   pi.EmailVerified && !pi.IsAliasedEmail,
 			PasswordHash:    randomHash,
+			HasPassword:     false,
 			PasswordVersion: 0,
 			Name:            firstNonEmpty(pi.Name, maskEmail(pi.Email)),
 			Active:          true,
@@ -305,7 +349,18 @@ func (m *Module) LinkIdentity(ctx context.Context, userID string, pi *ProviderId
 // Translates store.ErrDuplicate into the actionable "already bound to
 // another user" 409.
 func (m *Module) linkIdentityTx(ctx context.Context, userID string, pi *ProviderIdentity) (*Identity, error) {
-	raw, _ := json.Marshal(pi.Raw)
+	raw, marshalErr := json.Marshal(pi.Raw)
+	if marshalErr != nil && m.logger != nil {
+		// pi.Raw is map[string]any so a Marshal failure means the IdP
+		// payload contained an unsupported type (chan/func, cyclic
+		// pointer). Log and proceed with raw=nil — the Identity row is
+		// still useful without the audit blob, and the IdP-level fields
+		// (Email, Provider, ProviderAccountID) all live on the typed
+		// columns.
+		m.logger.Warn("oauth identity profile marshal failed; persisting without raw payload",
+			"provider", pi.Provider, "error", marshalErr)
+		raw = nil
+	}
 	ident := &Identity{
 		UserID:            userID,
 		Provider:          pi.Provider,
@@ -325,36 +380,73 @@ func (m *Module) linkIdentityTx(ctx context.Context, userID string, pi *Provider
 }
 
 // UnlinkIdentity removes an Identity row, refusing if it would leave the
-// user with no login method at all (SPEC §6.2). Performs an explicit
-// ownership check (Identity.UserID == userID) before deletion so a
-// malformed identityID cannot wipe another user's binding.
+// user with no login method at all (SPEC §6.2). The whole load + count +
+// delete sequence runs inside a transaction with a row-level lock on
+// the user record so two concurrent unlink calls cannot each see two
+// methods, both pass the guard, and both delete — leaving the account
+// with zero recoverable login methods.
+//
+// On SQLite the FOR UPDATE clause is silently dropped, but SQLite's tx
+// writer serialization yields the same outcome: only one goroutine
+// holds the write lock at a time, so the second one observes the
+// already-decremented count. On MySQL / PG / TiDB the lock makes the
+// guarantee explicit.
 func (m *Module) UnlinkIdentity(ctx context.Context, userID, identityID string) error {
 	if userID == "" || identityID == "" {
 		return apierr.ErrInvalidArgument.WithMessage("userID and identityID are required")
 	}
 
-	// Load + ownership check first. ErrNotFound for both "no such row"
-	// and "row belongs to a different user" — the latter must not
-	// expose existence to a probing attacker.
-	ident, err := m.idStore.Get(ctx, store.RID(identityID))
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return apierr.ErrNotFound.WithMessage("identity not found")
-		}
-		return err
-	}
-	if ident.UserID != userID {
-		return apierr.ErrNotFound.WithMessage("identity not found")
-	}
+	return db.RunInTx(ctx, m.idStore.DB(), func(txCtx context.Context) error {
+		txDB := db.DBFromContext(txCtx)
 
-	methods, err := m.ListLoginMethods(ctx, userID)
-	if err != nil {
-		return err
-	}
-	if len(methods) <= 1 {
-		return apierr.ErrFailedPrecondition.WithMessage("至少保留一种登录方式(密码或 OAuth)")
-	}
-	return m.idStore.Delete(ctx, store.RID(identityID))
+		// Row-lock the user; serializes concurrent unlinks on the same
+		// account so the subsequent count+delete is an atomic critical
+		// section with respect to other unlinks.
+		var u User
+		if err := txDB.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("rid = ? AND deleted_at IS NULL", userID).
+			Take(&u).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apierr.ErrNotFound.WithMessage("user not found")
+			}
+			return err
+		}
+
+		// Ownership + existence check inside the lock. ErrNotFound for
+		// both "no such row" and "row belongs to a different user" — the
+		// latter must not expose existence to a probing attacker.
+		var ident Identity
+		if err := txDB.Where("rid = ? AND user_id = ? AND deleted_at IS NULL", identityID, userID).
+			Take(&ident).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apierr.ErrNotFound.WithMessage("identity not found")
+			}
+			return err
+		}
+
+		// Method count = 1 (password slot, if user has set a password)
+		// + len(non-deleted identities). Compute under the same lock so
+		// no concurrent unlink can race the guard. user.HasPassword is
+		// the source of truth — set true at /register, flipped true by
+		// /reset-password / /change-password, left false for OAuth-only
+		// accounts (random unguessable PasswordHash placeholder).
+		var identCount int64
+		if err := txDB.Model(&Identity{}).
+			Where("user_id = ? AND deleted_at IS NULL", userID).
+			Count(&identCount).Error; err != nil {
+			return err
+		}
+		methodCount := int(identCount)
+		if u.HasPassword {
+			methodCount++
+		}
+		if methodCount <= 1 {
+			return apierr.ErrFailedPrecondition.WithMessage(
+				"至少保留一种登录方式(密码或 OAuth)")
+		}
+
+		return m.idStore.WithTx(txDB).Delete(txCtx, store.RID(identityID))
+	})
 }
 
 // ListIdentities returns every Identity bound to the given user.
@@ -370,15 +462,15 @@ func (m *Module) ListIdentities(ctx context.Context, userID string) ([]Identity,
 }
 
 // ListLoginMethods aggregates every authentication path available to a
-// user: a "password" virtual entry when the user has any password
-// activity (PV>0 or no OAuth identities), plus one entry per OAuth
-// Identity row.
+// user: a "password" virtual entry when User.HasPassword is true, plus
+// one entry per OAuth Identity row.
 //
-// The PV>0 heuristic distinguishes "OAuth-only" users (synthetic random
-// PasswordHash, PV=0) from "user who has set a password at least once"
-// (changePassword / resetPassword bumps PV>0). A pure-password user with
-// PV=0 (i.e. a freshly registered user who has never reset) still gets
-// the password method because they have no OAuth identities.
+// HasPassword is the explicit signal — set true by /register and by
+// changePassword/resetPassword, left false for OAuth-only-bootstrapped
+// accounts (whose PasswordHash is a random unguessable placeholder).
+// Earlier code derived "has password" from `PasswordVersion > 0 ||
+// len(idents) == 0`; that broke as soon as a regular password user
+// linked OAuth (PV stayed 0, idents=1, password slot disappeared).
 func (m *Module) ListLoginMethods(ctx context.Context, userID string) ([]LoginMethod, error) {
 	if userID == "" {
 		return nil, apierr.ErrInvalidArgument.WithMessage("userID is required")
@@ -393,8 +485,7 @@ func (m *Module) ListLoginMethods(ctx context.Context, userID string) ([]LoginMe
 	}
 
 	out := make([]LoginMethod, 0, 1+len(idents))
-	hasPassword := user.PasswordVersion > 0 || len(idents) == 0
-	if hasPassword {
+	if user.HasPassword {
 		out = append(out, LoginMethod{Type: "password", Email: user.Email})
 	}
 	for i := range idents {
@@ -407,25 +498,17 @@ func (m *Module) ListLoginMethods(ctx context.Context, userID string) ([]LoginMe
 	return out, nil
 }
 
-// userHasPasswordHistory returns true if the user has any
-// non-OAuth login history. Used by /login to reject PV=0 OAuth-only
-// accounts (SPEC §4.1 v0.3.5). The implementation is conservative:
-// PV>0 is sufficient (any password change bumps it). For PV=0 we
-// check whether ANY Identity rows exist — if zero, the account is a
-// regular freshly-registered password user (PV=0 baseline).
+// userHasPasswordHistory reports whether /login should accept a password
+// for this user. Returns user.HasPassword directly — the field tracks
+// "user has set a password" intent explicitly, replacing the earlier
+// `PV>0 || len(idents)==0` heuristic that was wrong for password users
+// who later linked OAuth.
 func (m *Module) userHasPasswordHistory(ctx context.Context, userID string) (bool, error) {
 	user, err := m.userStore.Get(ctx, store.RID(userID))
 	if err != nil {
 		return false, err
 	}
-	if user.PasswordVersion > 0 {
-		return true, nil
-	}
-	idents, err := m.ListIdentities(ctx, userID)
-	if err != nil {
-		return false, err
-	}
-	return len(idents) == 0, nil
+	return user.HasPassword, nil
 }
 
 // userByEmailVerified looks up a verified-email User by address. Used

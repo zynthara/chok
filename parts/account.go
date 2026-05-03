@@ -9,7 +9,6 @@ import (
 
 	"github.com/zynthara/chok/account"
 	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/db"
 )
 
 // AccountBuilder constructs the *account.Module given access to the
@@ -74,18 +73,24 @@ func (a *AccountComponent) Init(ctx context.Context, k component.Kernel) error {
 	return nil
 }
 
-// Migrate creates the User and Identity tables. Account drives its own
-// schema (separate from whatever tables the app declared on DBComponent).
+// Migrate creates the User and Identity tables and runs the has_password
+// backfill. Delegates to account.MigrateSchema so this path stays in
+// sync with the standalone account.Setup entry — earlier divergence
+// (Setup ran only AutoMigrate(Table())) silently broke legacy password
+// users on the standalone path while the component path kept working.
 //
 // IdentityTable is migrated regardless of whether OAuth providers are
 // registered — leaving an empty table costs nothing and lets a deployment
 // flip from password-only to OAuth-enabled by config without a separate
 // migration step. SPEC §4.3 documents this as the intended behaviour.
+//
+// The has_password backfill is idempotent (guards on `has_password = false`)
+// so calling Migrate on every startup is safe.
 func (a *AccountComponent) Migrate(ctx context.Context) error {
 	if a.module == nil {
 		return nil // disabled
 	}
-	return db.Migrate(ctx, a.db, account.Table(), account.IdentityTable())
+	return account.MigrateSchema(ctx, a.db)
 }
 
 // Close releases account.Module resources — currently the login rate

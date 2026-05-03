@@ -36,6 +36,15 @@ type OAuthSession struct {
 	// providers — the path /auth/{name}/callback must match Provider.
 	Provider string
 
+	// LinkUserID is the chok User RID that initiated a "bind another IdP
+	// to my account" flow via POST /identities/link. Empty for ordinary
+	// /auth/{name}/start logins. When non-empty, handleCallback skips
+	// ResolveOAuthIdentity (which would log the caller in as the IdP
+	// account's owner) and goes through LinkIdentity(LinkUserID, pi)
+	// instead — guaranteeing the resulting Identity row attaches to the
+	// authenticated user, not whoever the IdP returned.
+	LinkUserID string
+
 	// CreatedAt records when the session was issued. Stores may use this
 	// for TTL bookkeeping; the cleanup policy is store-defined.
 	CreatedAt time.Time

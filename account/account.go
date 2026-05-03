@@ -18,7 +18,6 @@ import (
 	"github.com/zynthara/chok/auth"
 	"github.com/zynthara/chok/auth/jwt"
 	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/db"
 	"github.com/zynthara/chok/handler"
 	"github.com/zynthara/chok/log"
 	"github.com/zynthara/chok/middleware"
@@ -74,10 +73,11 @@ type Module struct {
 	sessionCarrier           SessionCarrier
 	sessionStore             OAuthSessionStore
 	authCodeStore            AuthCodeStore
-	allowedRedirectBacks     []string // SPEC §6.1 absolute-URL prefixes
-	oauthCallbackFrontendURL string   // SPEC §7 fixed front-end landing URL
-	linkByEmail              bool     // SPEC §8 default false
-	firstRedirectURL         string   // first provider's RedirectURL — informs dev-mode auto-detect
+	cookieDevMode            bool              // mirrored from CookieCarrier so exchange-binding cookie picks the same Secure/SameSite
+	allowedRedirects         []allowedRedirect // SPEC §6.1 parsed absolute-URL allowlist (boundary-strict)
+	oauthCallbackFrontendURL string            // SPEC §7 fixed front-end landing URL
+	linkByEmail              bool              // SPEC §8 default false
+	firstRedirectURL         string            // first provider's RedirectURL — informs dev-mode auto-detect
 }
 
 // Option configures a Module.
@@ -246,7 +246,7 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 	// store layer.
 	userStore := store.New[User](gdb, logger,
 		store.WithQueryFields("id", "email", "name", "email_verified", "created_at"),
-		store.WithUpdateFields("name", "email", "email_verified", "password_hash", "password_version", "roles", "active"),
+		store.WithUpdateFields("name", "email", "email_verified", "password_hash", "has_password", "password_version", "roles", "active"),
 	)
 	// publicStore is what Module.Store() exposes. UpdateFields drops
 	// password_hash / password_version / roles / active / email_verified —
@@ -267,6 +267,22 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 		store.WithUpdateFields("email", "profile", "last_used_at"),
 	)
 
+	// Parse and validate the redirect_back allowlist once at startup so a
+	// malformed entry surfaces as a fail-fast error rather than letting a
+	// silent fall-through allow nothing (or worse, accidentally permit an
+	// open redirect through some other code path).
+	parsedAllow := make([]allowedRedirect, 0, len(cfg.allowedRedirectBacks))
+	for _, raw := range cfg.allowedRedirectBacks {
+		entry, err := parseAllowedRedirect(raw)
+		if err != nil {
+			return nil, fmt.Errorf("account: WithAllowedRedirectBacks %q: %w", raw, err)
+		}
+		if entry.scheme == "http" && logger != nil {
+			logger.Warn("account: redirect_back allowlist entry uses http (production should be https)", "url", raw)
+		}
+		parsedAllow = append(parsedAllow, entry)
+	}
+
 	m := &Module{
 		jwt:                      jwtMgr,
 		resetJWT:                 resetMgr,
@@ -281,7 +297,7 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 		sessionCarrier:           cfg.sessionCarrier,
 		sessionStore:             cfg.sessionStore,
 		authCodeStore:            cfg.authCodeStore,
-		allowedRedirectBacks:     append([]string(nil), cfg.allowedRedirectBacks...),
+		allowedRedirects:         parsedAllow,
 		oauthCallbackFrontendURL: cfg.oauthCallbackFrontendURL,
 		linkByEmail:              cfg.linkByEmail,
 	}
@@ -506,7 +522,14 @@ func Setup(gdb *gorm.DB, logger log.Logger, opts *config.AccountOptions, r Route
 	// registry ctx to Migrate. Here we fall back to context.Background
 	// so schema creation runs to completion even when Setup is called
 	// from a short-lived request context.
-	if err := db.Migrate(context.Background(), gdb, Table()); err != nil {
+	//
+	// MigrateSchema is the canonical migration path: it covers Table()
+	// + IdentityTable() AutoMigrate AND the has_password backfill that
+	// rescues legacy password rows whose has_password column defaults
+	// to false post-AutoMigrate. Earlier versions of Setup migrated
+	// only Table(), which left Identity-using callers without the
+	// table and legacy password users locked out as "OAuth-only".
+	if err := MigrateSchema(context.Background(), gdb); err != nil {
 		return nil, fmt.Errorf("account: migrate: %w", err)
 	}
 
@@ -573,18 +596,23 @@ func (m *Module) RegisterRoutes(r RouteGroup) {
 	hasOAuth := len(providerNames) > 0
 	m.oauthMu.Unlock()
 
+	// OAuth route paths are relative to the RouteGroup the caller mounts
+	// us on (typically srv.Group("/auth") via parts.AccountComponent). The
+	// public URLs the SPEC §7 documents (/auth/{name}/start, /auth/exchange,
+	// /auth/identities, ...) come from group prefix + relative path here —
+	// hardcoding "/auth/" again would double-prefix to /auth/auth/...
 	for _, name := range providerNames {
 		p := m.providers[name]
-		r.GET("/auth/"+name+"/start", m.handleBegin(p))
+		r.GET("/"+name+"/start", m.handleBegin(p))
 		switch providerHTTPMethodFor(p) {
 		case "POST":
-			r.POST("/auth/"+name+"/callback", m.handleCallback(p))
+			r.POST("/"+name+"/callback", m.handleCallback(p))
 		default:
-			r.GET("/auth/"+name+"/callback", m.handleCallback(p))
+			r.GET("/"+name+"/callback", m.handleCallback(p))
 		}
 	}
 	if hasOAuth {
-		r.POST("/auth/exchange", handler.HandleRequest(m.handleExchange))
+		r.POST("/exchange", m.handleExchange)
 	}
 
 	// Use AuthChain (Authn + ActiveCheck) rather than bare Authn so the
@@ -599,8 +627,11 @@ func (m *Module) RegisterRoutes(r RouteGroup) {
 	authed.POST("/refresh-token", handler.HandleRequest(m.refreshToken))
 	authed.PUT("/change-password", handler.HandleAction(m.changePassword))
 	if hasOAuth {
-		authed.GET("/auth/identities", handler.HandleRequest(m.handleListIdentities))
-		authed.POST("/auth/identities/link", handler.HandleRequest(m.handleLinkIdentity))
-		authed.DELETE("/auth/identities/:id", handler.HandleAction(m.handleUnlinkIdentity))
+		authed.GET("/identities", handler.HandleRequest(m.handleListIdentities))
+		// /identities/link is a raw gin handler because the link flow needs
+		// to write the same SessionCarrier cookie that /{name}/start does —
+		// HandleRequest's signature has no *gin.Context for cookie writes.
+		authed.POST("/identities/link", m.handleLinkIdentity)
+		authed.DELETE("/identities/:id", handler.HandleAction(m.handleUnlinkIdentity))
 	}
 }

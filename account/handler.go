@@ -87,8 +87,13 @@ func (m *Module) register(ctx context.Context, req *registerRequest) (*tokenResp
 	user := &User{
 		Email:        req.Email,
 		PasswordHash: hash,
-		Name:         name,
-		Active:       true,
+		// HasPassword=true marks "user has set a password" — primary
+		// authentication path is /login. ListLoginMethods returns the
+		// password slot for this account; userHasPasswordHistory keeps
+		// returning true even after the user later links OAuth.
+		HasPassword: true,
+		Name:        name,
+		Active:      true,
 	}
 	if err := m.userStore.Create(ctx, user); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
@@ -245,7 +250,9 @@ func (m *Module) changePassword(ctx context.Context, req *changePasswordRequest)
 	}
 	user.PasswordHash = hash
 	user.PasswordVersion++
-	return m.userStore.Update(ctx, store.RID(user.RID), store.Fields(user, "password_hash", "password_version"))
+	user.HasPassword = true
+	return m.userStore.Update(ctx, store.RID(user.RID),
+		store.Fields(user, "password_hash", "password_version", "has_password"))
 }
 
 func (m *Module) forgotPassword(ctx context.Context, req *forgotPasswordRequest) error {
@@ -341,7 +348,9 @@ func (m *Module) resetPassword(ctx context.Context, req *resetPasswordRequest) e
 	}
 	user.PasswordHash = hash
 	user.PasswordVersion++
-	return m.userStore.Update(ctx, store.RID(user.RID), store.Fields(user, "password_hash", "password_version"))
+	user.HasPassword = true
+	return m.userStore.Update(ctx, store.RID(user.RID),
+		store.Fields(user, "password_hash", "password_version", "has_password"))
 }
 
 // ---------------------------------------------------------------------------
