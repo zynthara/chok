@@ -568,9 +568,18 @@ func RegisterConfiguredProviders(m *Module, opts *config.AccountOptions) error {
 		}
 		factory, ok := LookupProviderFactory(name)
 		if !ok {
+			// chok pulls every blessed provider into the binary via
+			// the account/providers/blessed curator (imported from
+			// chok core), so reaching here typically means a typo in
+			// chok.yaml's `account.providers.<name>` — the registry
+			// holds the four blessed names (google / github /
+			// facebook / apple) plus anything the app registered
+			// itself. Less commonly: a fork of chok with the blessed
+			// import stripped that forgot to wire its own factory.
+			available := registeredProviderNames()
 			return fmt.Errorf("account: provider %q is enabled in config but no factory is registered "+
-				"(missing `_ \"github.com/zynthara/chok/account/providers/%s\"` import?)",
-				name, name)
+				"(typo in chok.yaml `account.providers`? available: %v)",
+				name, available)
 		}
 		provider, err := factory(&raw)
 		if err != nil {

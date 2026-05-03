@@ -825,15 +825,15 @@ parts.NewAccountComponent(
 
 #### 9.2.1 OAuth 配置驱动（v0.3.6 / Phase 3）
 
-OAuth provider 走 `chok.yaml` 启用,业务方仅需 **一行** blank import 让 provider 包的 `init()` 注册到全局 factory 表:
+OAuth provider 走 `chok.yaml` 启用,业务方**零额外 Go 代码** — chok 主包(`providers.go`)默认 import `account/providers/blessed/` curator,curator 通过 blank import 把所有 blessed provider 拉进依赖图,各 provider 包 `init()` 自动注册到全局 factory 表:
 
 ```go
-// main.go
-import (
-    _ "github.com/zynthara/chok/account/providers/google"   // Phase 4 起
-    _ "github.com/zynthara/chok/account/providers/github"
-    "github.com/zynthara/chok/chok"
-)
+// main.go — 不需要任何 import
+import "github.com/zynthara/chok/chok"
+
+func main() {
+    chok.New("myapp", chok.WithConfig(&MyConfig{})).Run()
+}
 ```
 
 ```yaml
@@ -857,7 +857,11 @@ account:
 
 1. yaml 字段映射成 `account.With*` Option(`LinkByEmail` / `AllowedRedirectBacks` / `OAuthCallbackFrontendURL`)
 2. 遍历 `opts.Providers`(sorted),`enabled=true` 项查 `account.LookupProviderFactory(name)` → factory(`*config.ProviderRawOptions`) → `m.RegisterProvider(p)`
-3. factory 不存在 → fail-fast 报"missing `_ \"github.com/.../providers/X\"` import"
+3. factory 不存在 → fail-fast,错误消息列出 registry 里全部已注册名字,绝大多数情形是 yaml 里的 provider name 写错(typo)
+
+**Bundle 决策代价**(darwin/arm64 stripped,实测):google+github+facebook 共享 `golang.org/x/oauth2`,边际 +0.1 MB;Apple 加 JWX 库 +1.8 MB。完整 chok app 二进制(`examples/blog`)从 37.88 MB → 39.30 MB,+3.8% 不可感知。"Rails for Go / 全家桶"定位下,功能开关属于 yaml 配置,不外推到 Go import。
+
+需要精简体积的特殊部署可 fork chok 删除 `providers.go` 的 blessed import,改为 main.go 自行 blank import 所需 provider 子集 — `account.RegisterProviderFactory` 仍是公开扩展点。
 
 环境变量可覆盖 yaml 任意子键(包括 provider 内部敏感字段):
 

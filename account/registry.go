@@ -63,6 +63,28 @@ func LookupProviderFactory(name string) (ProviderFactory, bool) {
 	return f, ok
 }
 
+// registeredProviderNames returns the sorted list of all currently-
+// registered provider names. Used by Phase 3's RegisterConfiguredProviders
+// fail-fast error to suggest the available alternatives when chok.yaml
+// references an unknown provider name.
+func registeredProviderNames() []string {
+	providerRegistryMu.RLock()
+	defer providerRegistryMu.RUnlock()
+	out := make([]string, 0, len(providerRegistry))
+	for name := range providerRegistry {
+		out = append(out, name)
+	}
+	// Sort for stable error message output.
+	for i := range len(out) {
+		for j := i + 1; j < len(out); j++ {
+			if out[j] < out[i] {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
 // resetProviderRegistry is the in-package test hook used by registry
 // tests. It is not exported because production code never needs to
 // rewind the registry — provider packages register exactly once per
