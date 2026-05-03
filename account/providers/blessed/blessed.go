@@ -31,8 +31,9 @@ package blessed
 // this package every blessed factory is reachable.
 //
 // Phase 4: google.
-// Phase 5 will add github / facebook / apple.
+// Phase 5: github (this commit) / facebook / apple.
 
 import (
+	_ "github.com/zynthara/chok/account/providers/github"
 	_ "github.com/zynthara/chok/account/providers/google"
 )
