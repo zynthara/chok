@@ -386,6 +386,7 @@ var knownOptionsTypes = []reflect.Type{
 	reflect.TypeFor[config.CacheFileOptions](),
 	reflect.TypeFor[config.SwaggerOptions](),
 	reflect.TypeFor[config.AccountOptions](),
+	reflect.TypeFor[config.AuthzOptions](),
 	reflect.TypeFor[config.HealthOptions](),
 	reflect.TypeFor[config.MetricsOptions](),
 	reflect.TypeFor[config.DebugOptions](),

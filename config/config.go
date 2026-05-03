@@ -515,6 +515,52 @@ func (o *CacheFileOptions) Validate() error {
 	return nil
 }
 
+// AuthzOptions controls the authorization layer.
+//
+// When Enabled is true, autoregister attaches a parts.AuthzComponent
+// using the blessed implementation named by Driver (currently always
+// "casbin"). Driver is reserved for forward compatibility with future
+// alternatives; Validate refuses anything else so a typo doesn't
+// silently disable authorization.
+//
+// Casbin sub-options live under .Casbin so a future second driver
+// can land alongside without polluting the top-level shape.
+type AuthzOptions struct {
+	Enabled bool          `mapstructure:"enabled"  default:"false"`
+	Driver  string        `mapstructure:"driver"   default:"casbin"`
+	Casbin  CasbinOptions `mapstructure:"casbin"`
+}
+
+// CasbinOptions configures the authz/casbin Authorizer when
+// AuthzOptions.Driver = "casbin".
+//
+// BootstrapAdminUserID is sensitive: chok.config.Redact + the
+// AccountOptions GoString-style heuristic both mask it on diagnostic
+// dumps via the `*secret*` / `*password*` / `*signing_key*` /
+// `*api_key*` / `*token*` substring rules. The "user_id" name doesn't
+// match those, so we add the explicit `sensitive` tag — leaking the
+// admin-bootstrap user id is low risk but principled to redact
+// alongside other identity-shaped values.
+type CasbinOptions struct {
+	RedisWatcher         bool   `mapstructure:"redis_watcher"`
+	RedisWatcherChannel  string `mapstructure:"redis_watcher_channel" default:"chok:authz:policy"`
+	AuditEnabled         bool   `mapstructure:"audit_enabled"`
+	BootstrapAdminUserID string `mapstructure:"bootstrap_admin_user_id"   sensitive:"true"`
+	Model                string `mapstructure:"model"`
+}
+
+// Validate enforces the SPEC §6.1 invariants. Disabled bypasses;
+// enabled requires a recognised driver string.
+func (o *AuthzOptions) Validate() error {
+	if !o.Enabled {
+		return nil
+	}
+	if o.Driver != "" && o.Driver != "casbin" {
+		return fmt.Errorf("authz: driver %q not supported (only %q)", o.Driver, "casbin")
+	}
+	return nil
+}
+
 // HealthOptions configures the /healthz endpoint.
 // When Enabled is true and an HTTP server exists, the HealthComponent
 // is auto-registered. Enabled defaults to true so health is available

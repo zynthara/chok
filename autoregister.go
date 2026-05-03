@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/zynthara/chok/apierr"
+	"github.com/zynthara/chok/authz/casbin"
 	"github.com/zynthara/chok/cache"
 	"github.com/zynthara/chok/component"
 	"github.com/zynthara/chok/config"
@@ -47,6 +48,7 @@ func (a *App) autoRegisterComponents() error {
 		a.autoRegisterDB,
 		a.autoRegisterRedis,
 		a.autoRegisterAccount,
+		a.autoRegisterAuthz,
 		a.autoRegisterSwagger,
 		a.autoRegisterHealth,
 		a.autoRegisterMetrics,
@@ -169,6 +171,58 @@ func (a *App) autoRegisterAccount() error {
 	comp := parts.NewDefaultAccountComponent(opts)
 	if comp != nil {
 		a.Register(comp)
+	}
+	return nil
+}
+
+// autoRegisterAuthz wires the chok-blessed authz/casbin Authorizer
+// when chok.yaml has `authz.enabled: true`. Skipped when:
+//   - the user has self-registered an "authz" Component (high-level
+//     override),
+//   - there's no AuthzOptions in the config struct, or
+//   - opts.Enabled is false (the default).
+//
+// Hard dep on "db" + soft deps on "redis" + "audit" mirror the SPEC
+// §7.4 declaration; the dependency planner uses them to schedule
+// Init in the right order.
+//
+// Bootstrap admin seeding piggybacks on EventAfterStart so it runs
+// once all components have Init'd successfully — earlier hooks would
+// race against authz.Init.
+func (a *App) autoRegisterAuthz() error {
+	if a.hasComponent("authz") {
+		return nil
+	}
+	opts, err := discoverOne[config.AuthzOptions](a.configPtr)
+	if err != nil {
+		return fmt.Errorf("auto-register authz: %w", err)
+	}
+	if opts == nil || !opts.Enabled {
+		return nil
+	}
+	builder := casbin.Builder(casbin.Options{
+		Model:               opts.Casbin.Model,
+		RedisWatcher:        opts.Casbin.RedisWatcher,
+		RedisWatcherChannel: opts.Casbin.RedisWatcherChannel,
+		AuditEnabled:        opts.Casbin.AuditEnabled,
+	})
+	a.Register(parts.NewAuthzComponent(builder).
+		WithDependencies("db").
+		WithOptionalDependencies("redis", "audit"))
+
+	if opts.Casbin.BootstrapAdminUserID != "" {
+		adminID := opts.Casbin.BootstrapAdminUserID
+		a.On(component.EventAfterStart, func(ctx context.Context) error {
+			ac, ok := a.registry.Get("authz").(*parts.AuthzComponent)
+			if !ok || ac == nil {
+				return fmt.Errorf("auto-register authz: AuthzComponent not registered")
+			}
+			svc, ok := ac.Authorizer().(casbin.Service)
+			if !ok {
+				return fmt.Errorf("auto-register authz: Authorizer does not implement casbin.Service")
+			}
+			return casbin.Bootstrap(ctx, svc, casbin.BootstrapConfig{AdminUserID: adminID})
+		})
 	}
 	return nil
 }

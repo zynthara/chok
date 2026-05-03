@@ -62,10 +62,11 @@ func (h *HTTPComponent) Name() string { return "http" }
 // ConfigKey implements component.Component.
 func (h *HTTPComponent) ConfigKey() string { return "http" }
 
-// OptionalDependencies declares soft ordering constraints so metrics and
-// log components Init before HTTP when they exist. HTTP works without them.
+// OptionalDependencies declares soft ordering constraints so metrics,
+// log, tracing, and authz components Init before HTTP when they
+// exist. HTTP works without any of them.
 func (h *HTTPComponent) OptionalDependencies() []string {
-	return []string{"metrics", "log", "tracing"}
+	return []string{"metrics", "log", "tracing", "authz"}
 }
 
 // Init builds the gin.Engine and applies the default middleware stack:
@@ -131,6 +132,16 @@ func (h *HTTPComponent) Init(ctx context.Context, k component.Kernel) error {
 			}
 		}
 		mws = append(mws, middleware.AccessLog(accessLogger))
+	}
+	// Authz: when an AuthzComponent is registered AND its builder
+	// produced a non-nil Authorizer, install AttachAuthz so per-route
+	// RequireAuthz / RequireAuthzInDomain middleware can find the
+	// engine via gin.Context. Captured by reference; AuthzComponent
+	// has no reload path.
+	if ac := optionalComponent[*AuthzComponent](k, "authz"); ac != nil {
+		if az := ac.Authorizer(); az != nil {
+			mws = append(mws, middleware.AttachAuthz(az))
+		}
 	}
 	mws = append(mws, h.extraMw...)
 	h.srv.Use(mws...)

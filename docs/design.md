@@ -1034,13 +1034,45 @@ sub, claims, _ := mgr.Parse(token)
 
 ### 11.4 authz
 
-单个接口 + 函数适配器：
+两个接口 + 一个 blessed 实现:
 
 ```go
+// authz/authz.go
 type Authorizer interface {
     Authorize(ctx, subject, object, action string) (bool, error)
 }
+
+// 多租户扩展 — DomainAuthorizer
+type DomainAuthorizer interface {
+    Authorizer
+    AuthorizeInDomain(ctx, subject, domain, object, action string) (bool, error)
+}
 ```
+
+**Blessed 实现:`authz/casbin`**(Phase 6,RBAC-with-domains)
+- model:`g = _, _, _`(user, role, domain),支持"A workspace 是 admin、B workspace 是 member"
+- matcher 包含三条 OR 子句:`r.sub == p.sub`(GrantUser 直接授权)/ `g(r.sub, p.sub, r.dom)`(domain 内角色)/ `g(r.sub, p.sub, "*")`(全局角色穿透)
+- domain 规范化:输入 `""` → `"*"`(API 友好别名);拒绝业务方把 `"*"` 当租户 ID(SPEC §7.7 v0.3.4)
+- `*casbinAuthorizer` 同时实现 `Authorizer` / `DomainAuthorizer` / `Service`(GrantRole / RevokeUser / Bootstrap 等管理 API)/ `io.Closer`
+- 通过 `parts.AuthzComponent.WithDependencies("db").WithOptionalDependencies("redis", "audit")` 接入
+
+**Middleware 收敛**(SPEC §7.2 v0.3,删除路由模式):
+- `middleware.RequireAuthz(obj, act)` — 单租户 / 全局
+- `middleware.RequireAuthzInDomain(obj, act, domainParam)` — 多租户,从 URL `c.Param(domainParam)` 取 domain;Authorizer 不实现 `DomainAuthorizer` 时**fail-closed 500**(SPEC §7.2 v0.3.2,绝不静默降级)
+- `middleware.AttachAuthz(az)` — HTTPComponent 通过 `OptionalDependencies + ["authz"]` 在 Init 时自动注入
+
+**配置驱动**(yaml):
+```yaml
+authz:
+  enabled: true
+  driver: casbin                    # 单一 blessed
+  casbin:
+    bootstrap_admin_user_id: "..."  # 启动期幂等播种 (`*`/`*`)
+    redis_watcher: false            # 多实例策略同步,Phase 6 后续 PR 落地
+    audit_enabled: false            # 同上
+```
+
+**Bundle 代价**(darwin/arm64 stripped,实测):启用 Casbin Authorizer 让 `examples/blog` binary 从 38.29 MB → 47.81 MB(+9.5 MB / +25%)。Casbin + gorm-adapter v3 拉 postgres / sqlserver / modernc-sqlite 整套 driver,即使应用只跑 SQLite。authz 默认 `enabled: false`,未启用部署不付任何运行成本(但仍付二进制成本 — Casbin 的成本比 OAuth 大一个数量级,这是单一实现路线对二进制的代价)。
 
 ### 11.5 account
 
