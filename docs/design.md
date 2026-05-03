@@ -825,7 +825,15 @@ parts.NewAccountComponent(
 
 #### 9.2.1 OAuth 配置驱动（v0.3.6 / Phase 3）
 
-OAuth provider 走 `chok.yaml` 启用,业务方**零额外 Go 代码** — chok 主包(`providers.go`)默认 import `account/providers/blessed/` curator,curator 通过 blank import 把所有 blessed provider 拉进依赖图,各 provider 包 `init()` 自动注册到全局 factory 表:
+OAuth provider 走 `chok.yaml` 启用,业务方**零额外 Go 代码** — chok 主包(`providers.go`)默认 import `account/providers/blessed/` curator,curator 通过 blank import 把所有 blessed provider 拉进依赖图,各 provider 包 `init()` 自动注册到全局 factory 表。
+
+**官方 blessed provider 清单**(随 Phase 4-5 逐步落地):
+- ✅ `account/providers/google` — OIDC + ID Token 验签 via `coreos/go-oidc/v3`(Phase 4)
+- 🚧 `account/providers/github` — Phase 5
+- 🚧 `account/providers/facebook` — Phase 5
+- 🚧 `account/providers/apple` — Phase 5(ES256 client_secret + JWK rotation)
+
+每个 provider 自身实现 `account.AuthProvider`(`Name`/`Capabilities`/`BeginAuth`/`CompleteAuth`)以及可选 `account.RedirectURLProvider`(让 Module dev-mode auto-detect 拿到 RedirectURL hint)。
 
 ```go
 // main.go — 不需要任何 import

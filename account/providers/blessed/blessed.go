@@ -26,10 +26,13 @@
 // blessed set.
 package blessed
 
-// Phase 4 will add:
-//   _ "github.com/zynthara/chok/account/providers/google"
+// Each provider package's init() registers its factory against
+// account.providerRegistry, so the moment chok core blank-imports
+// this package every blessed factory is reachable.
 //
-// Phase 5 will add:
-//   _ "github.com/zynthara/chok/account/providers/github"
-//   _ "github.com/zynthara/chok/account/providers/facebook"
-//   _ "github.com/zynthara/chok/account/providers/apple"
+// Phase 4: google.
+// Phase 5 will add github / facebook / apple.
+
+import (
+	_ "github.com/zynthara/chok/account/providers/google"
+)
