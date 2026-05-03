@@ -30,10 +30,13 @@ package blessed
 // account.providerRegistry, so the moment chok core blank-imports
 // this package every blessed factory is reachable.
 //
-// Phase 4: google.
-// Phase 5: github / facebook (this commit) / apple.
+// All four blessed providers ship as of Phase 5c. Adding a new
+// provider in the future is one blank-import line below — the rest of
+// chok already routes ProviderFactory lookup through
+// account.providerRegistry.
 
 import (
+	_ "github.com/zynthara/chok/account/providers/apple"
 	_ "github.com/zynthara/chok/account/providers/facebook"
 	_ "github.com/zynthara/chok/account/providers/github"
 	_ "github.com/zynthara/chok/account/providers/google"

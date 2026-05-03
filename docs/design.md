@@ -831,7 +831,7 @@ OAuth provider 走 `chok.yaml` 启用,业务方**零额外 Go 代码** — chok 
 - ✅ `account/providers/google` — OIDC + ID Token 验签 via `coreos/go-oidc/v3`(Phase 4)
 - ✅ `account/providers/github` — REST `/user` + `/user/emails`,数字 ID 作 ProviderAccountID,Enterprise URL 可配置(Phase 5a)
 - ✅ `account/providers/facebook` — Graph API `/v{X}/me?fields=...`,无 `email_verified` 字段 → Email 非空视为已验证(Phase 5b)
-- 🚧 `account/providers/apple` — Phase 5c(ES256 client_secret + JWK rotation)
+- ✅ `account/providers/apple` — ES256 客户端动态签 JWT 作 client_secret(并发缓存,180d 上限);form_post 模式;`is_private_email` → IsAliasedEmail(Phase 5c)
 
 每个 provider 自身实现 `account.AuthProvider`(`Name`/`Capabilities`/`BeginAuth`/`CompleteAuth`)以及可选 `account.RedirectURLProvider`(让 Module dev-mode auto-detect 拿到 RedirectURL hint)。
 
