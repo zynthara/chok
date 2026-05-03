@@ -1072,7 +1072,9 @@ authz:
     audit_enabled: false            # 同上
 ```
 
-**Bundle 代价**(darwin/arm64 stripped,实测):启用 Casbin Authorizer 让 `examples/blog` binary 从 38.29 MB → 47.81 MB(+9.5 MB / +25%)。Casbin + gorm-adapter v3 拉 postgres / sqlserver / modernc-sqlite 整套 driver,即使应用只跑 SQLite。authz 默认 `enabled: false`,未启用部署不付任何运行成本(但仍付二进制成本 — Casbin 的成本比 OAuth 大一个数量级,这是单一实现路线对二进制的代价)。
+**Bundle 代价**(darwin/arm64 stripped,实测):chok 自带 Casbin adapter(`authz/casbin/adapter.go`),启用让 `examples/blog` binary 从 37.88 MB → 39.09 MB(**+1.21 MB / +3.2%**)。早期版本依赖第三方 `gorm-adapter v3`,后者会自动拉入 `postgres / sqlserver / glebarez-sqlite / modernc-sqlite / pgx-v5 / mssqldb` 全套 driver(+9.93 MB),chok 自写 adapter 复用应用已配置的 GORM driver,**砍掉 8.72 MB**。
+
+authz 默认 `enabled: false`,未启用部署不付运行成本,但 Casbin 引擎本身仍链入二进制 — 这是单一 blessed 实现路线的固有代价。
 
 ### 11.5 account
 
