@@ -72,3 +72,16 @@ func resetProviderRegistry() {
 	defer providerRegistryMu.Unlock()
 	providerRegistry = map[string]ProviderFactory{}
 }
+
+// ResetProviderRegistryForTest clears the global provider factory
+// registry. Intended for tests that need a clean slate before
+// registering a fixture factory; production code never calls this.
+//
+// Pair with t.Cleanup so a test failure mid-flow doesn't leak a
+// registered factory into the next test:
+//
+//	t.Cleanup(account.ResetProviderRegistryForTest)
+//	account.RegisterProviderFactory("fake", testfake.Factory)
+func ResetProviderRegistryForTest() {
+	resetProviderRegistry()
+}

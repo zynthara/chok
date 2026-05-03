@@ -8,6 +8,7 @@ package testfake
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"sync"
@@ -150,6 +151,71 @@ func (p *Provider) CompleteAuth(_ context.Context, req *account.CompleteRequest)
 // ErrUnknownCode is returned by CompleteAuth when the test did not seed
 // the code. Equivalent to a real IdP rejecting the exchange.
 var ErrUnknownCode = errors.New("testfake: unknown code")
+
+// FactoryOptions decodes the yaml shape testfake supports. Mirrors a
+// real provider's Options struct so the Phase 3 yaml-driven assembly
+// path can be exercised end-to-end without pulling in an external IdP.
+type FactoryOptions struct {
+	// Name overrides the provider name reported by Name(). Defaults
+	// to "fake" — most tests pin a single name.
+	Name string `mapstructure:"name"`
+	// RedirectURL fed to RedirectURLProvider so the dev-mode auto-
+	// detect path is exercised when the URL is HTTP-on-localhost.
+	RedirectURL string `mapstructure:"redirect_url"`
+	// CallbackMethod / RequiresNonce / SupportsPKCE / RequiresFormPost
+	// surface as ProviderCapabilities. CallbackMethod defaults to "GET"
+	// when empty.
+	CallbackMethod   string `mapstructure:"callback_method"`
+	RequiresNonce    bool   `mapstructure:"requires_nonce"`
+	SupportsPKCE     bool   `mapstructure:"supports_pkce"`
+	RequiresFormPost bool   `mapstructure:"requires_form_post"`
+}
+
+// Factory adapts testfake to the account.ProviderFactory contract used
+// by parts.DefaultAccountBuilder's yaml-driven assembly. Tests register
+// it before launching chok with:
+//
+//	account.RegisterProviderFactory("fake", testfake.Factory)
+//
+// rawCfg is the *config.ProviderRawOptions the builder forwards. We
+// import config inside this leaf package — provider packages are the
+// natural junction of account + config.
+func Factory(rawCfg any) (account.AuthProvider, error) {
+	r, ok := rawCfg.(rawDecoder)
+	if !ok {
+		return nil, fmt.Errorf("testfake.Factory: expected rawDecoder, got %T", rawCfg)
+	}
+	var opts FactoryOptions
+	if err := r.Decode(&opts); err != nil {
+		return nil, fmt.Errorf("testfake.Factory: decode: %w", err)
+	}
+	name := opts.Name
+	if name == "" {
+		name = "fake"
+	}
+	caps := account.ProviderCapabilities{
+		CallbackMethod:   opts.CallbackMethod,
+		RequiresNonce:    opts.RequiresNonce,
+		SupportsPKCE:     opts.SupportsPKCE,
+		RequiresFormPost: opts.RequiresFormPost,
+	}
+	if caps.CallbackMethod == "" {
+		caps.CallbackMethod = "GET"
+	}
+	p := New(name).WithCapabilities(caps)
+	if opts.RedirectURL != "" {
+		p = p.WithRedirectURL(opts.RedirectURL)
+	}
+	return p, nil
+}
+
+// rawDecoder is the subset of config.ProviderRawOptions Factory needs.
+// Defining it as an interface here keeps testfake importable from any
+// test (it could otherwise pull in a config dependency cycle when used
+// by config tests themselves).
+type rawDecoder interface {
+	Decode(out any) error
+}
 
 // EncodedState is a small helper for tests that need to scrape the
 // state parameter out of the IdP redirect URL.

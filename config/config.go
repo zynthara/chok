@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/go-viper/mapstructure/v2"
 )
 
 // Validatable is implemented by config structs that need validation.
@@ -375,6 +377,84 @@ type AccountOptions struct {
 	// change-password、reset-password 等已认证路径；公开注册路径不注册，
 	// 直接访问返回 404。适合"内部使用 / 仅 admin 创建账号"的场景。
 	DisableRegister bool `mapstructure:"disable_register" default:"false"`
+
+	// LinkByEmail enables the SPEC §8 LinkByEmail auto-merge path. The
+	// account module enforces additional double-checks (IdP-side
+	// EmailVerified=true, !IsAliasedEmail, local-side EmailVerified=true)
+	// even with this flag on, so default-off is safe; turn on only after
+	// the application has wired its own email-verification UI.
+	LinkByEmail bool `mapstructure:"link_by_email" default:"false"`
+
+	// AllowedRedirectBacks lists absolute URL prefixes that
+	// /auth/{name}/start will accept on its ?redirect_back parameter.
+	// Empty (the default) means relative paths only — the strictest
+	// posture. Each entry must be a fully-qualified https:// URL with
+	// no userinfo / query / fragment; account.Module rejects malformed
+	// entries at startup. See SPEC §6.1.
+	AllowedRedirectBacks []string `mapstructure:"allowed_redirect_backs"`
+
+	// OAuthCallbackFrontendURL is the fixed front-end landing URL the
+	// OAuth callback flow redirects to after issuing the one-shot auth
+	// code. The SPA there calls POST /auth/exchange to swap the code
+	// for a JWT (which never appears in the URL). REQUIRED whenever any
+	// provider in Providers has enabled=true.
+	OAuthCallbackFrontendURL string `mapstructure:"oauth_callback_frontend_url"`
+
+	// Providers maps provider name → raw config. Each entry is decoded
+	// by the provider package's factory (registered via
+	// account.RegisterProviderFactory in init()). Unknown provider
+	// names cause the builder to fail-fast at startup so a typo doesn't
+	// silently disable an IdP. SPEC §10.3.
+	Providers map[string]ProviderRawOptions `mapstructure:"providers"`
+}
+
+// ProviderRawOptions is the yaml-side representation of a single
+// provider's configuration. Concrete shape (client_id, client_secret,
+// scopes, …) varies per provider, so the typed fields here are minimal
+// (just Enabled) and provider-specific keys land in Raw via
+// mapstructure's `,remain` mechanism. The provider package then calls
+// Decode to convert Raw into its own typed Options struct.
+//
+// This lets config.AccountOptions stay independent of the provider
+// packages — no circular import: account/providers/google imports
+// config, not the other way round.
+type ProviderRawOptions struct {
+	// Enabled is the master switch. The builder skips entries with
+	// Enabled=false even if they appear in yaml.
+	Enabled bool `mapstructure:"enabled"`
+	// Raw collects every key under the provider entry that isn't
+	// `enabled`. mapstructure routes unknown keys here when the
+	// `,remain` tag is present.
+	Raw map[string]any `mapstructure:",remain"`
+}
+
+// Decode converts the provider-specific Raw map into a typed Options
+// struct. Provider factories use it to extract their config:
+//
+//	var opts google.Options
+//	if err := raw.Decode(&opts); err != nil { return nil, err }
+//
+// The `mapstructure` tags on the target struct drive the field mapping.
+// time.Duration and similar string-like types are honoured via the
+// default decoder hooks chok already wires for viper.Unmarshal.
+func (r *ProviderRawOptions) Decode(out any) error {
+	if r == nil {
+		return fmt.Errorf("ProviderRawOptions: nil receiver")
+	}
+	cfg := &mapstructure.DecoderConfig{
+		Result:           out,
+		TagName:          "mapstructure",
+		WeaklyTypedInput: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(","),
+		),
+	}
+	dec, err := mapstructure.NewDecoder(cfg)
+	if err != nil {
+		return err
+	}
+	return dec.Decode(r.Raw)
 }
 
 func (o *AccountOptions) Validate() error {
@@ -401,6 +481,20 @@ func (o *AccountOptions) Validate() error {
 	// disabling. Either both > 0 (limiter on) or both == 0 (off).
 	if (o.LoginRateWindow > 0) != (o.LoginRateLimit > 0) {
 		return fmt.Errorf("account: login_rate_window and login_rate_limit must both be set or both be zero")
+	}
+	// SPEC §10.3: any enabled provider requires the front-end landing
+	// URL because the callback 302 ends in `?code=…` and the SPA there
+	// is the one running /auth/exchange. Without it the OAuth round
+	// trip can't complete.
+	hasEnabledProvider := false
+	for _, p := range o.Providers {
+		if p.Enabled {
+			hasEnabledProvider = true
+			break
+		}
+	}
+	if hasEnabledProvider && o.OAuthCallbackFrontendURL == "" {
+		return fmt.Errorf("account: oauth_callback_frontend_url is required when any provider is enabled")
 	}
 	return nil
 }

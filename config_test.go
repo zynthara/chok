@@ -128,6 +128,87 @@ func TestConfig_DefaultPathNotFound_Skip(t *testing.T) {
 	}
 }
 
+// TestConfig_AccountProvidersFromYAML covers Phase 3's contract:
+// `account.providers.<name>.enabled` plus arbitrary provider-specific
+// keys round-trip through viper into config.AccountOptions. Provider
+// keys land in ProviderRawOptions.Raw thanks to mapstructure's
+// `,remain` tag, so each provider package can later Decode them into
+// its own typed Options.
+func TestConfig_AccountProvidersFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "providers.yaml")
+	yaml := `
+account:
+  enabled: true
+  signing_key: "this-is-a-test-signing-key-32bytes!"
+  link_by_email: true
+  oauth_callback_frontend_url: "https://app.example.com/auth/finish"
+  allowed_redirect_backs:
+    - "https://app.example.com/"
+  providers:
+    google:
+      enabled: true
+      client_id: "abc"
+      client_secret: "shh"
+      scopes:
+        - openid
+        - email
+    apple:
+      enabled: false
+      service_id: "com.example.svc"
+`
+	if err := os.WriteFile(cfgFile, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	type cfgT struct {
+		Account config.AccountOptions `mapstructure:"account"`
+	}
+	var cfg cfgT
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	app := New("testcfg",
+		WithLogger(log.Empty()),
+		WithConfig(&cfg, cfgFile),
+	)
+	_ = app.Run(ctx)
+
+	if !cfg.Account.Enabled {
+		t.Fatal("account not enabled")
+	}
+	if !cfg.Account.LinkByEmail {
+		t.Fatal("link_by_email not decoded")
+	}
+	if cfg.Account.OAuthCallbackFrontendURL != "https://app.example.com/auth/finish" {
+		t.Fatalf("oauth_callback_frontend_url wrong: %q", cfg.Account.OAuthCallbackFrontendURL)
+	}
+	if len(cfg.Account.AllowedRedirectBacks) != 1 {
+		t.Fatalf("allowed_redirect_backs wrong: %v", cfg.Account.AllowedRedirectBacks)
+	}
+
+	google, ok := cfg.Account.Providers["google"]
+	if !ok {
+		t.Fatal("google provider missing")
+	}
+	if !google.Enabled {
+		t.Fatal("google.enabled not decoded")
+	}
+	if got, _ := google.Raw["client_id"].(string); got != "abc" {
+		t.Fatalf("google.client_id wrong: %v", google.Raw["client_id"])
+	}
+
+	// Apple is disabled but present — important: yaml-disabled
+	// provider must still appear in the map (otherwise re-enabling at
+	// runtime would require a yaml round-trip).
+	apple, ok := cfg.Account.Providers["apple"]
+	if !ok {
+		t.Fatal("apple provider missing from map")
+	}
+	if apple.Enabled {
+		t.Fatal("apple.enabled should be false")
+	}
+}
+
 func TestConfig_PrefixEnvBootstrap(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "bootstrap.yaml")

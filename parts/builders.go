@@ -1,6 +1,9 @@
 package parts
 
 import (
+	"fmt"
+	"sort"
+
 	"gorm.io/gorm"
 
 	"github.com/zynthara/chok/account"
@@ -37,6 +40,15 @@ func MySQLBuilder(opts *config.MySQLOptions) DBBuilder {
 // account.WithLoginRateLimit when both are positive. The pair-or-zero
 // invariant is enforced upstream by AccountOptions.Validate so this
 // builder can rely on the values being internally consistent.
+//
+// OAuth wiring (Phase 3): every entry in opts.Providers with
+// enabled=true triggers a lookup in account's global provider factory
+// registry (populated by provider packages' init() via
+// account.RegisterProviderFactory). Unknown provider names cause a
+// fail-fast error at builder time so a typo in chok.yaml doesn't
+// silently disable an IdP. The factory receives the entry's
+// *config.ProviderRawOptions so it can decode provider-specific keys
+// from Raw via raw.Decode(&typedOpts).
 func DefaultAccountBuilder(opts *config.AccountOptions) AccountBuilder {
 	return func(k component.Kernel, gdb *gorm.DB) (*account.Module, error) {
 		if opts == nil || !opts.Enabled {
@@ -57,7 +69,49 @@ func DefaultAccountBuilder(opts *config.AccountOptions) AccountBuilder {
 		if opts.DisableRegister {
 			aopts = append(aopts, account.WithoutPublicRegister())
 		}
-		return account.New(gdb, k.Logger(), aopts...)
+		if opts.LinkByEmail {
+			aopts = append(aopts, account.WithLinkByEmail(true))
+		}
+		if len(opts.AllowedRedirectBacks) > 0 {
+			aopts = append(aopts, account.WithAllowedRedirectBacks(opts.AllowedRedirectBacks...))
+		}
+		if opts.OAuthCallbackFrontendURL != "" {
+			aopts = append(aopts, account.WithOAuthCallbackFrontendURL(opts.OAuthCallbackFrontendURL))
+		}
+
+		m, err := account.New(gdb, k.Logger(), aopts...)
+		if err != nil {
+			return nil, err
+		}
+
+		// Provider auto-registration. Iterate in sorted order so the
+		// resulting Set-Cookie / route order is deterministic across
+		// runs (map iteration is randomized).
+		names := make([]string, 0, len(opts.Providers))
+		for name := range opts.Providers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			raw := opts.Providers[name]
+			if !raw.Enabled {
+				continue
+			}
+			factory, ok := account.LookupProviderFactory(name)
+			if !ok {
+				return nil, fmt.Errorf("account: provider %q is enabled in config but no factory is registered "+
+					"(missing `_ \"github.com/zynthara/chok/account/providers/%s\"` import?)",
+					name, name)
+			}
+			provider, err := factory(&raw)
+			if err != nil {
+				return nil, fmt.Errorf("account: build provider %q: %w", name, err)
+			}
+			if err := m.RegisterProvider(provider); err != nil {
+				return nil, fmt.Errorf("account: register provider %q: %w", name, err)
+			}
+		}
+		return m, nil
 	}
 }
 
