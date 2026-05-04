@@ -12,6 +12,7 @@ import (
 	"github.com/casbin/casbin/v3/persist"
 
 	"github.com/zynthara/chok/authz"
+	"github.com/zynthara/chok/log"
 )
 
 // auditHook wraps the per-policy-change callback so it can live behind
@@ -41,13 +42,18 @@ type casbinAuthorizer struct {
 	adapter  persist.Adapter
 	watcher  persist.Watcher // nil when RedisWatcher disabled
 	auditFn  atomic.Pointer[auditHook]
+	logger   log.Logger // never nil; defaults to log.Empty()
 	mu       sync.Mutex // serialises Close
 }
 
 // newAuthorizer constructs the runtime *casbinAuthorizer from a
 // pre-loaded model + adapter. Builder owns the wiring; this helper
 // keeps the construction sequence factor-out-able for tests.
-func newAuthorizer(modelText string, adapter persist.Adapter) (*casbinAuthorizer, error) {
+//
+// logger is used for peer-triggered LoadPolicy failures (see
+// withWatcher) and any future best-effort paths. nil collapses to
+// log.Empty() so test callers don't have to thread a logger.
+func newAuthorizer(modelText string, adapter persist.Adapter, logger log.Logger) (*casbinAuthorizer, error) {
 	m, err := model.NewModelFromString(modelText)
 	if err != nil {
 		return nil, fmt.Errorf("casbin: parse model: %w", err)
@@ -63,9 +69,13 @@ func newAuthorizer(modelText string, adapter persist.Adapter) (*casbinAuthorizer
 	if err := enf.LoadPolicy(); err != nil {
 		return nil, fmt.Errorf("casbin: load policy: %w", err)
 	}
+	if logger == nil {
+		logger = log.Empty()
+	}
 	return &casbinAuthorizer{
 		enforcer: enf,
 		adapter:  adapter,
+		logger:   logger,
 	}, nil
 }
 
@@ -78,12 +88,53 @@ func newAuthorizer(modelText string, adapter persist.Adapter) (*casbinAuthorizer
 // stash a copy on the receiver so Close can release the subscriber
 // goroutine before the enforcer becomes unreachable. nil w is a
 // no-op so tests can swap watchers off without special-casing.
+//
+// Casbin v3 SetWatcher injects a default callback (enforcer.go:252)
+// of the form `func(string) { _ = e.LoadPolicy() }` which silently
+// discards reload errors. We immediately overwrite it with a chok-
+// owned wrapper so a peer-triggered LoadPolicy failure (DB blip,
+// adapter parse error) shows up in the operator's log instead of
+// vanishing. Without this, a watcher fan-out where every peer
+// LoadPolicy fails would look identical to a healthy system from
+// the publish side.
 func (a *casbinAuthorizer) withWatcher(w persist.Watcher) error {
 	if w == nil {
 		return nil
 	}
 	a.watcher = w
-	return a.enforcer.SetWatcher(w)
+	if err := a.enforcer.SetWatcher(w); err != nil {
+		return err
+	}
+	// Best-effort: if the concrete watcher exposes a reload-failure
+	// counter (chok's *redisWatcher does), bump it inside the
+	// wrapper so a third-party Service-level dashboard can observe
+	// the same number the watcher reports via Stats().
+	type reloadFailureRecorder interface{ recordReloadFailure() }
+	rec, _ := w.(reloadFailureRecorder)
+	return w.SetUpdateCallback(func(payload string) {
+		if err := a.enforcer.LoadPolicy(); err != nil {
+			if rec != nil {
+				rec.recordReloadFailure()
+			}
+			a.logger.Error("authz/casbin: peer-triggered LoadPolicy failed",
+				"payload", payload,
+				"error", err.Error(),
+			)
+		}
+	})
+}
+
+// WatcherStats returns a snapshot of the underlying watcher's
+// best-effort counters, or zero-value when no watcher is attached
+// (RedisWatcher disabled). Service callers can use this to surface
+// pub/sub health on /healthz or scrape into Prometheus without
+// reaching into the casbin package internals.
+func (a *casbinAuthorizer) WatcherStats() WatcherStats {
+	rw, ok := a.watcher.(*redisWatcher)
+	if !ok || rw == nil {
+		return WatcherStats{}
+	}
+	return rw.Stats()
 }
 
 // withAuditHook attaches a per-policy-change callback. Builder wires

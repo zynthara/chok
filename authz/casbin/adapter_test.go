@@ -1147,7 +1147,7 @@ func TestAdapter_MultiInstance_BootstrapIdempotent(t *testing.T) {
 		if aerr != nil {
 			t.Fatal(aerr)
 		}
-		auth, aerr := newAuthorizer(rbacWithDomainsModel, adapter)
+		auth, aerr := newAuthorizer(rbacWithDomainsModel, adapter, nil)
 		if aerr != nil {
 			t.Fatal(aerr)
 		}
@@ -1202,7 +1202,7 @@ func TestBootstrap_BatchPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := newAuthorizer(rbacWithDomainsModel, adapter)
+	auth, err := newAuthorizer(rbacWithDomainsModel, adapter, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1254,7 +1254,7 @@ func TestWithAuditHook_AtomicSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := newAuthorizer(rbacWithDomainsModel, adapter)
+	auth, err := newAuthorizer(rbacWithDomainsModel, adapter, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

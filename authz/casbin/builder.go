@@ -70,7 +70,16 @@ func Builder(opts Options) parts.AuthzBuilder {
 			return nil, fmt.Errorf("authz/casbin: %w", err)
 		}
 
-		auth, err := newAuthorizer(opts.modelOrDefault(), adapter)
+		// Per-component logger so peer-triggered LoadPolicy failures
+		// and best-effort publish drops carry the right "component"
+		// attribute in chok's structured log output. nil collapses
+		// to log.Empty inside the constructors.
+		logger := k.Logger()
+		if logger != nil {
+			logger = logger.With("component", "authz/casbin")
+		}
+
+		auth, err := newAuthorizer(opts.modelOrDefault(), adapter, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +89,7 @@ func Builder(opts Options) parts.AuthzBuilder {
 			if err != nil {
 				return nil, fmt.Errorf("authz/casbin RedisWatcher: %w", err)
 			}
-			w, err := newRedisWatcher(context.Background(), rc, opts.defaultedChannel())
+			w, err := newRedisWatcher(context.Background(), rc, opts.defaultedChannel(), withWatcherLogger(logger))
 			if err != nil {
 				return nil, fmt.Errorf("authz/casbin RedisWatcher: %w", err)
 			}

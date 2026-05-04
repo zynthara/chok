@@ -5,8 +5,10 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -335,8 +337,14 @@ func TestBuilder_RedisWatcher_RequiresRedisClient(t *testing.T) {
 // wiring path against an in-process miniredis: Builder produces a
 // working Authorizer + Service + io.Closer with the watcher hooked
 // up, and Close releases everything cleanly. Pins the SPEC §9.3
-// "RedisWatcher 多实例同步" acceptance at the Builder layer (the
-// pub/sub round-trip itself is exercised in watcher_test.go).
+// "RedisWatcher 多实例同步" acceptance at the Builder layer.
+//
+// Round-1 review extension: the original test only verified type
+// shape and Close cleanliness — a regression where withWatcher
+// silently dropped its argument or SetWatcher was never called
+// would still pass. We now also subscribe an independent client
+// to the channel and assert that a Service-level mutation
+// (GrantRole) drives a real PUBLISH, proving end-to-end wiring.
 func TestBuilder_RedisWatcher_AttachesWatcher(t *testing.T) {
 	mr := miniredis.RunT(t)
 	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
@@ -356,15 +364,115 @@ func TestBuilder_RedisWatcher_AttachesWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Builder with wired RedisWatcher should succeed: %v", err)
 	}
-	if _, ok := az.(casbin.Service); !ok {
+	svc, ok := az.(casbin.Service)
+	if !ok {
 		t.Fatalf("authorizer should also satisfy casbin.Service, got %T", az)
 	}
+
+	// Independent subscriber on the same channel: proves the watcher
+	// actually publishes when the Builder-built Service mutates.
+	spy := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = spy.Close() })
+	pubsub := spy.Subscribe(context.Background(), "chok:authz:policy")
+	t.Cleanup(func() { _ = pubsub.Close() })
+	if _, err := pubsub.Receive(context.Background()); err != nil {
+		t.Fatalf("spy subscribe handshake: %v", err)
+	}
+	msgCh := pubsub.Channel()
+
+	if err := svc.GrantRole(context.Background(), "admin", "task", "read"); err != nil {
+		t.Fatalf("GrantRole: %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		// Payload is the chok watcher instance ID (rid prefix "ciw_").
+		if !strings.HasPrefix(msg.Payload, "ciw_") {
+			t.Errorf("expected ciw_-prefixed instance ID payload, got %q", msg.Payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher never published on Service mutation — withWatcher / SetWatcher wiring broken")
+	}
+
 	closer, ok := az.(io.Closer)
 	if !ok {
 		t.Fatal("authorizer should satisfy io.Closer for AuthzComponent.Close")
 	}
 	if err := closer.Close(); err != nil {
 		t.Errorf("Close should be clean, got %v", err)
+	}
+}
+
+// TestBuilder_RedisWatcher_StatsExposed proves the Service-level
+// WatcherStats() escape hatch returns live counters from the
+// underlying *redisWatcher. Allows operators / future Prometheus
+// integration to scrape pub/sub failure rates without reaching into
+// the package internals.
+func TestBuilder_RedisWatcher_StatsExposed(t *testing.T) {
+	mr := miniredis.RunT(t)
+	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
+		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
+	})
+	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
+		t.Fatal(err)
+	}
+	rc := parts.NewRedisComponent(func(any) *config.RedisOptions {
+		return &config.RedisOptions{Enabled: true, Addr: mr.Addr()}
+	})
+	if err := rc.Init(context.Background(), &fakeKernel{}); err != nil {
+		t.Fatal(err)
+	}
+
+	az, err := casbin.Builder(casbin.Options{RedisWatcher: true})(&fakeKernel{db: dbc, redis: rc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = az.(io.Closer).Close() })
+
+	statser, ok := az.(interface{ WatcherStats() casbin.WatcherStats })
+	if !ok {
+		t.Fatalf("authorizer should expose WatcherStats(), got %T", az)
+	}
+	if got := statser.WatcherStats(); got.PublishFailures != 0 || got.ReloadFailures != 0 {
+		t.Errorf("baseline stats non-zero: %+v", got)
+	}
+
+	// Forcing publish failures: kill miniredis backend, then issue
+	// a Service mutation. The mutation succeeds (DB commit); the
+	// watcher publish silently fails and bumps the counter.
+	mr.Close()
+	if err := az.(casbin.Service).GrantRole(context.Background(), "admin", "task", "read"); err != nil {
+		t.Fatalf("GrantRole should succeed even when publish fails (best-effort), got %v", err)
+	}
+	if got := statser.WatcherStats(); got.PublishFailures < 1 {
+		t.Errorf("after publish failure, PublishFailures = %d, want >=1", got.PublishFailures)
+	}
+}
+
+// TestBuilder_RedisWatcher_NoStatsWithoutWatcher pins the zero-value
+// behaviour: when RedisWatcher is disabled the stats accessor still
+// works (empty value) so callers don't need to special-case the
+// "no watcher" path.
+func TestBuilder_RedisWatcher_NoStatsWithoutWatcher(t *testing.T) {
+	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
+		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
+	})
+	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
+		t.Fatal(err)
+	}
+
+	az, err := casbin.Builder(casbin.Options{})(&fakeKernel{db: dbc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = az.(io.Closer).Close() })
+
+	statser, ok := az.(interface{ WatcherStats() casbin.WatcherStats })
+	if !ok {
+		t.Fatal("WatcherStats accessor should exist regardless of RedisWatcher flag")
+	}
+	if got := statser.WatcherStats(); got != (casbin.WatcherStats{}) {
+		t.Errorf("disabled-watcher stats should be zero value, got %+v", got)
 	}
 }
 
