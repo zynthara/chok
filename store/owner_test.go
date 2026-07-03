@@ -26,7 +26,7 @@ func (Product) RIDPrefix() string { return "prd" }
 func setupProductStore(t *testing.T, scopes ...ScopeFunc) *Store[Product] {
 	t.Helper()
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Product{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Product{})); err != nil {
 		t.Fatal(err)
 	}
 	opts := []StoreOption{
@@ -36,7 +36,7 @@ func setupProductStore(t *testing.T, scopes ...ScopeFunc) *Store[Product] {
 	for _, s := range scopes {
 		opts = append(opts, WithScope(s))
 	}
-	return New[Product](db.Wrap(gdb), log.Empty(), opts...)
+	return New[Product](gdb, log.Empty(), opts...)
 }
 
 func userCtx(subject string, roles ...string) context.Context {
@@ -287,9 +287,9 @@ func TestCreate_NoAuth_OwnerIDEmpty(t *testing.T) {
 	if dbtest.Driver() == "postgres" {
 		idCol = "BIGSERIAL PRIMARY KEY"
 	}
-	gdb.Exec("CREATE TABLE products (id " + idCol + ", rid TEXT UNIQUE, version INTEGER DEFAULT 1, created_at TIMESTAMP, updated_at TIMESTAMP, owner_id TEXT, name TEXT)")
+	gdb.Unsafe(context.Background()).Exec("CREATE TABLE products (id " + idCol + ", rid TEXT UNIQUE, version INTEGER DEFAULT 1, created_at TIMESTAMP, updated_at TIMESTAMP, owner_id TEXT, name TEXT)")
 
-	s := New[Product](db.Wrap(gdb), log.Empty(), WithQueryFields("id", "name"))
+	s := New[Product](gdb, log.Empty(), WithQueryFields("id", "name"))
 
 	p := &Product{Name: "orphan"}
 	if err := s.Create(context.Background(), p); err != nil {

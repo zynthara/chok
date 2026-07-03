@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v2/db/dbtest"
+	"github.com/zynthara/chok/v2/db/internal/testlane"
 	"github.com/zynthara/chok/v2/rid"
 )
 
@@ -46,8 +46,7 @@ func softDelete(t *testing.T, h *DB, id uint) {
 }
 
 func TestSoftUnique_Behaviour(t *testing.T) {
-	gdb := dbtest.Open(t)
-	h := Wrap(gdb)
+	h := openTestHandle(t)
 	ctx := context.Background()
 
 	if err := h.Migrate(ctx, Table(&SoftUniqueDoc{}, SoftUnique("uk_sud_code", "code"))); err != nil {
@@ -91,11 +90,10 @@ func TestSoftUnique_Behaviour(t *testing.T) {
 // columns with WHERE deleted_at IS NULL, and delete_token is NOT part
 // of the key.
 func TestSoftUnique_PostgresPartialIndexShape(t *testing.T) {
-	if dbtest.Driver() != "postgres" {
+	if testlane.Driver() != "postgres" {
 		t.Skip("postgres-lane only (CHOK_TEST_DRIVER=postgres)")
 	}
-	gdb := dbtest.Open(t)
-	h := Wrap(gdb)
+	h := openTestHandle(t)
 	ctx := context.Background()
 
 	if err := h.Migrate(ctx, Table(&SoftUniqueDoc{}, SoftUnique("uk_sud_code", "code"))); err != nil {

@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v2/db/dbtest"
+	"github.com/zynthara/chok/v2/db/internal/testlane"
 )
 
 // --- test models ---
@@ -49,11 +49,34 @@ func (MissingNotNull) RIDPrefix() string { return "mis" }
 
 // --- helpers ---
 
-// openTestDB rides the dbtest lane switch: SQLite by default,
-// Postgres under CHOK_TEST_DRIVER=postgres (M3 dual-run).
+// openTestHandle rides the shared lane switch (SQLite by default,
+// Postgres under CHOK_TEST_DRIVER=postgres — M3 dual-run) through the
+// public Open path. Internal tests cannot use dbtest: it imports this
+// package, and an internal test closing that loop is an import cycle.
+func openTestHandle(t *testing.T) *DB {
+	t.Helper()
+	var (
+		h   *DB
+		err error
+	)
+	switch testlane.Driver() {
+	case "postgres":
+		h, err = Open(Options{Driver: "postgres", Postgres: PostgresOptions{DSN: testlane.PostgresDSN(t)}})
+	default:
+		h, err = Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: ":memory:"}})
+	}
+	if err != nil {
+		t.Fatalf("open %s lane: %v", testlane.Driver(), err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
+
+// openTestDB exposes the raw gorm handle for the historical
+// gorm-shaped assertions below (package-internal access).
 func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	return dbtest.Open(t)
+	return openTestHandle(t).gdb
 }
 
 // --- tests ---
@@ -376,3 +399,9 @@ func TestMigrate_UniqueIndexOnAnonymousEmbedField_Allowed(t *testing.T) {
 		t.Fatalf("uniqueIndex on embedded field in SoftDeleteModel should be allowed: %v", err)
 	}
 }
+
+// wrapForTest adopts a raw gorm handle for package-internal tests that
+// construct exotic connections (recording drivers, tmp files) the
+// public Open path can't express. The v1 public db.Wrap shim is gone;
+// this is its test-only descendant.
+func wrapForTest(gdb *gorm.DB) *DB { return &DB{gdb: gdb} }

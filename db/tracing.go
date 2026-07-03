@@ -21,7 +21,7 @@ const tracerName = "github.com/zynthara/chok/v2/db"
 //
 // Call after *gorm.DB is opened:
 //
-//	gdb, _ := db.NewSQLite(opts)
+//	h, _ := db.Open(opts)
 //	db.EnableTracing(gdb)
 func EnableTracing(gdb *gorm.DB) {
 	tracer := otel.Tracer(tracerName)

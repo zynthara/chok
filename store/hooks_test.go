@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gorm.io/gorm"
 
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/dbtest"
@@ -21,7 +20,7 @@ import (
 
 // setupHookDB rides the dbtest lane switch (SQLite default,
 // Postgres under CHOK_TEST_DRIVER=postgres — M3 dual-run).
-func setupHookDB(t *testing.T) *gorm.DB {
+func setupHookDB(t *testing.T) *db.DB {
 	t.Helper()
 	return dbtest.Open(t)
 }
@@ -32,12 +31,12 @@ func setupHookDB(t *testing.T) *gorm.DB {
 
 func TestBeforeCreate_Fires(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 
 	var called atomic.Int32
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithBeforeCreate(func(ctx context.Context, obj *Item) error {
 			called.Add(1)
@@ -55,12 +54,12 @@ func TestBeforeCreate_Fires(t *testing.T) {
 
 func TestBeforeCreate_AbortsPreventsRow(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 
 	hookErr := errors.New("validation failed")
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithBeforeCreate(func(ctx context.Context, obj *Item) error {
 			return hookErr
@@ -75,7 +74,7 @@ func TestBeforeCreate_AbortsPreventsRow(t *testing.T) {
 
 	// Row should NOT exist — before-hook aborted the write.
 	var count int64
-	gdb.Model(&Item{}).Count(&count)
+	gdb.Unsafe(context.Background()).Model(&Item{}).Count(&count)
 	if count != 0 {
 		t.Fatalf("before-hook abort should prevent row insertion, got %d rows", count)
 	}
@@ -87,12 +86,12 @@ func TestBeforeCreate_AbortsPreventsRow(t *testing.T) {
 
 func TestBeforeUpdate_AbortsUpdate(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 
 	hookErr := errors.New("update rejected")
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithUpdateFields("code"),
 		WithBeforeUpdate(func(ctx context.Context, loc Locator, changes Changes) error {
@@ -126,12 +125,12 @@ func TestBeforeUpdate_AbortsUpdate(t *testing.T) {
 
 func TestBeforeDelete_AbortsDelete(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 
 	hookErr := errors.New("delete rejected")
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithBeforeDelete(func(ctx context.Context, loc Locator) error {
 			return hookErr
@@ -184,11 +183,11 @@ func busAndLog(t *testing.T) (*event.Bus, *[]itemEvent) {
 func setupBusItemStore(t *testing.T) (*Store[Item], *[]itemEvent) {
 	t.Helper()
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 	bus, seen := busAndLog(t)
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithUpdateFields("code"),
 		WithBus(bus),
@@ -273,7 +272,7 @@ func TestWithBus_DeletePublishes_NotOnIdempotentNoop(t *testing.T) {
 
 func TestWithBus_SoftDeletePublishes(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
 	bus := event.NewBus()
@@ -283,7 +282,7 @@ func TestWithBus_SoftDeletePublishes(t *testing.T) {
 		seen = append(seen, ev)
 	}, event.WithSync())
 
-	s := New[User](db.Wrap(gdb), log.Empty(),
+	s := New[User](gdb, log.Empty(),
 		WithQueryFields("id", "name", "email"),
 		WithUpdateFields("name"),
 		WithBus(bus),
@@ -404,11 +403,11 @@ func TestWithBus_TxRollbackDropsEvents(t *testing.T) {
 // Tx clone: staging must anchor via the context alone.
 func TestWithBus_RunInTxContextPropagation(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 	bus, seen := busAndLog(t)
-	h := db.Wrap(gdb)
+	h := gdb
 	s := New[Item](h, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithBus(bus),
@@ -434,10 +433,10 @@ func TestWithBus_RunInTxContextPropagation(t *testing.T) {
 // Without WithBus the store publishes nothing — opt-in means opt-in.
 func TestWithBus_NotConfigured_NoPublish(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
-	s := New[Item](db.Wrap(gdb), log.Empty(), WithQueryFields("id", "code"))
+	s := New[Item](gdb, log.Empty(), WithQueryFields("id", "code"))
 	if err := s.Create(context.Background(), &Item{Code: "SILENT"}); err != nil {
 		t.Fatal(err)
 	}
@@ -449,13 +448,13 @@ func TestWithBus_NotConfigured_NoPublish(t *testing.T) {
 // regression guard — v1 round-7 caught a field drop here).
 func TestWithBus_And_BeforeHooks_PreservedAcrossTxClone(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 	bus, seen := busAndLog(t)
 
 	var beforeCalled atomic.Int32
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithBus(bus),
 		WithBeforeCreate(func(ctx context.Context, obj *Item) error {
@@ -485,11 +484,11 @@ func TestWithBus_And_BeforeHooks_PreservedAcrossTxClone(t *testing.T) {
 
 func TestListWithCursor_FirstPage(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 	)
 
@@ -519,11 +518,11 @@ func TestListWithCursor_FirstPage(t *testing.T) {
 
 func TestListWithCursor_LastPage_NoCursor(t *testing.T) {
 	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 	)
 

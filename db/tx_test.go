@@ -33,7 +33,7 @@ func TestAfterCommit_FlushesInOrderAfterCommit(t *testing.T) {
 	var flushCtxVal string
 	var committedAtFlush bool
 
-	err := RunInTx(parent, Wrap(gdb), func(txCtx context.Context) error {
+	err := RunInTx(parent, wrapForTest(gdb), func(txCtx context.Context) error {
 		if !AfterCommit(txCtx, func(ctx context.Context) {
 			order = append(order, 1)
 			flushCtxVal, _ = ctx.Value(ctxKey("k")).(string)
@@ -68,7 +68,7 @@ func TestAfterCommit_DroppedOnRollback(t *testing.T) {
 	}
 
 	ran := false
-	err := RunInTx(context.Background(), Wrap(gdb), func(txCtx context.Context) error {
+	err := RunInTx(context.Background(), wrapForTest(gdb), func(txCtx context.Context) error {
 		AfterCommit(txCtx, func(context.Context) { ran = true })
 		if err := DBFromContext(txCtx).Create(&TestItem{Code: "AC2"}).Error; err != nil {
 			return err
@@ -96,7 +96,7 @@ func TestAfterCommit_DroppedOnPanic(t *testing.T) {
 				t.Fatal("panic must propagate")
 			}
 		}()
-		_ = RunInTx(context.Background(), Wrap(gdb), func(txCtx context.Context) error {
+		_ = RunInTx(context.Background(), wrapForTest(gdb), func(txCtx context.Context) error {
 			AfterCommit(txCtx, func(context.Context) { ran = true })
 			panic("boom")
 		})
@@ -113,9 +113,9 @@ func TestAfterCommit_NestedTxFlushesOnceAtOuterCommit(t *testing.T) {
 	}
 
 	var order []string
-	err := RunInTx(context.Background(), Wrap(gdb), func(outerCtx context.Context) error {
+	err := RunInTx(context.Background(), wrapForTest(gdb), func(outerCtx context.Context) error {
 		AfterCommit(outerCtx, func(context.Context) { order = append(order, "outer") })
-		innerErr := RunInTx(outerCtx, Wrap(gdb), func(innerCtx context.Context) error {
+		innerErr := RunInTx(outerCtx, wrapForTest(gdb), func(innerCtx context.Context) error {
 			AfterCommit(innerCtx, func(context.Context) { order = append(order, "inner") })
 			return nil
 		})
@@ -140,7 +140,7 @@ func TestHandle_RunInTx_JoinsSameMachinery(t *testing.T) {
 	if err := Migrate(context.Background(), gdb, Table(&TestItem{})); err != nil {
 		t.Fatal(err)
 	}
-	h := Wrap(gdb)
+	h := wrapForTest(gdb)
 
 	ran := false
 	err := h.RunInTx(context.Background(), func(txCtx context.Context) error {

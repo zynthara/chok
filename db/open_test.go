@@ -153,11 +153,3 @@ func TestOpen_ValidatesFirst(t *testing.T) {
 	}
 }
 
-func TestWrap_NilPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("Wrap(nil) must panic")
-		}
-	}()
-	Wrap(nil)
-}

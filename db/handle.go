@@ -41,19 +41,6 @@ func Open(opts Options) (*DB, error) {
 	return &DB{gdb: gdb}, nil
 }
 
-// Wrap adopts an existing gorm handle.
-//
-// Transition shim (M3-M4): it exists so v1-residue batteries (account,
-// parts glue) can hand their *gorm.DB to the v2 store signature. New
-// code uses db.Module + db.From, or db.Open. Removed when the last
-// battery migrates (M4/M5).
-func Wrap(gdb *gorm.DB) *DB {
-	if gdb == nil {
-		panic("db.Wrap: nil *gorm.DB")
-	}
-	return &DB{gdb: gdb}
-}
-
 // Unsafe returns the effective raw gorm handle: the context's
 // transaction when one is active (RunInTx), the root pool otherwise,
 // WithContext applied either way. It is the only sanctioned way to

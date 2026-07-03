@@ -37,20 +37,20 @@ func (Item) RIDPrefix() string { return "itm" }
 
 // setupDB rides the dbtest lane switch: SQLite by default, Postgres
 // under CHOK_TEST_DRIVER=postgres — the M3 dual-run for the store
-// safety rails. Raw asserts keep using the returned *gorm.DB; stores
-// are built over db.Wrap of the same connection.
-func setupDB(t *testing.T) *gorm.DB {
+// safety rails. Raw asserts ride gdb.Unsafe(ctx); stores
+// are built over the same thin handle.
+func setupDB(t *testing.T) *db.DB {
 	t.Helper()
 	return dbtest.Open(t)
 }
 
-func setupUserStore(t *testing.T) (*Store[User], *gorm.DB) {
+func setupUserStore(t *testing.T) (*Store[User], *db.DB) {
 	t.Helper()
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
-	s := New[User](db.Wrap(gdb), log.Empty(),
+	s := New[User](gdb, log.Empty(),
 		WithQueryFields("id", "name", "email", "created_at"),
 		WithUpdateFields("name", "email"),
 	)
@@ -60,10 +60,10 @@ func setupUserStore(t *testing.T) (*Store[User], *gorm.DB) {
 func setupItemStore(t *testing.T) *Store[Item] {
 	t.Helper()
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
-	return New[Item](db.Wrap(gdb), log.Empty(),
+	return New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 	)
 }
@@ -591,7 +591,7 @@ func TestDeleteByID_SoftDelete(t *testing.T) {
 	}
 
 	var token string
-	gdb.Raw("SELECT delete_token FROM users WHERE id = ?", u.ID).Scan(&token)
+	gdb.Unsafe(context.Background()).Raw("SELECT delete_token FROM users WHERE id = ?", u.ID).Scan(&token)
 	if token == "" {
 		t.Fatal("delete_token should be set after soft delete")
 	}
@@ -634,7 +634,7 @@ func TestDeleteByRID_SoftDelete(t *testing.T) {
 	}
 
 	var token string
-	gdb.Raw("SELECT delete_token FROM users WHERE rid = ?", u.RID).Scan(&token)
+	gdb.Unsafe(context.Background()).Raw("SELECT delete_token FROM users WHERE rid = ?", u.RID).Scan(&token)
 	if token == "" {
 		t.Fatal("delete_token should be set after soft delete")
 	}
@@ -697,7 +697,7 @@ func TestDeleteMany_SoftDelete_SetsDeleteToken(t *testing.T) {
 
 	// Check delete_token is set via raw query.
 	var token string
-	gdb.Raw("SELECT delete_token FROM users WHERE rid = ?", u.RID).Scan(&token)
+	gdb.Unsafe(context.Background()).Raw("SELECT delete_token FROM users WHERE rid = ?", u.RID).Scan(&token)
 	if token == "" {
 		t.Fatal("delete_token should be set after soft delete")
 	}
@@ -744,8 +744,8 @@ func TestWithQueryFields_MapsCorrectly(t *testing.T) {
 
 func TestWithQueryFields_NotConfigured_Rejects(t *testing.T) {
 	gdb := setupDB(t)
-	db.Migrate(context.Background(), gdb, db.Table(&Item{}))
-	s := New[Item](db.Wrap(gdb), log.Empty()) // no WithQueryFields
+	gdb.Migrate(context.Background(), db.Table(&Item{}))
+	s := New[Item](gdb, log.Empty()) // no WithQueryFields
 
 	_, err := s.Get(context.Background(), Where(where.WithFilter("code", "ABC")))
 	if err == nil {
@@ -765,8 +765,8 @@ func TestWithColumnAlias_UndeclaredField_Panics(t *testing.T) {
 		}
 	}()
 	gdb := setupDB(t)
-	db.Migrate(context.Background(), gdb, db.Table(&Item{}))
-	New[Item](db.Wrap(gdb), log.Empty(),
+	gdb.Migrate(context.Background(), db.Table(&Item{}))
+	New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithColumnAlias("unknown", "some_col"),
 	)
@@ -774,9 +774,9 @@ func TestWithColumnAlias_UndeclaredField_Panics(t *testing.T) {
 
 func TestWithColumnAlias_BeforeFields_WorksCorrectly(t *testing.T) {
 	gdb := setupDB(t)
-	db.Migrate(context.Background(), gdb, db.Table(&Item{}))
+	gdb.Migrate(context.Background(), db.Table(&Item{}))
 	// Alias declared before fields — order should not matter.
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithColumnAlias("id", "rid"),
 		WithQueryFields("id", "code"),
 	)
@@ -907,10 +907,10 @@ func (IndirectUser) RIDPrefix() string { return "inu" }
 
 func TestStore_IndirectSoftDelete(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&IndirectUser{}, db.SoftUnique("uk_inu_email", "email"))); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&IndirectUser{}, db.SoftUnique("uk_inu_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
-	s := New[IndirectUser](db.Wrap(gdb), log.Empty(),
+	s := New[IndirectUser](gdb, log.Empty(),
 		WithQueryFields("id", "email"),
 	)
 
@@ -926,14 +926,14 @@ func TestStore_IndirectSoftDelete(t *testing.T) {
 
 	// Row must still exist (soft-deleted).
 	var count int64
-	gdb.Raw("SELECT COUNT(*) FROM indirect_users WHERE rid = ?", u.RID).Scan(&count)
+	gdb.Unsafe(context.Background()).Raw("SELECT COUNT(*) FROM indirect_users WHERE rid = ?", u.RID).Scan(&count)
 	if count != 1 {
 		t.Fatal("indirect SoftDeleteModel should use soft delete, not physical delete")
 	}
 
 	// delete_token must be set.
 	var token string
-	gdb.Raw("SELECT delete_token FROM indirect_users WHERE rid = ?", u.RID).Scan(&token)
+	gdb.Unsafe(context.Background()).Raw("SELECT delete_token FROM indirect_users WHERE rid = ?", u.RID).Scan(&token)
 	if token == "" {
 		t.Fatal("delete_token should be set after soft delete")
 	}
@@ -1002,9 +1002,9 @@ func TestWithUpdateFields_UnknownField_Rejected(t *testing.T) {
 
 func TestDefaultAutoDiscoverUpdateFields(t *testing.T) {
 	gdb := setupDB(t)
-	db.Migrate(context.Background(), gdb, db.Table(&Item{}))
+	gdb.Migrate(context.Background(), db.Table(&Item{}))
 	// No WithUpdateFields — auto-discover from JSON tags.
-	s := New[Item](db.Wrap(gdb), log.Empty())
+	s := New[Item](gdb, log.Empty())
 
 	item := &Item{Code: "ABC"}
 	if err := s.Create(context.Background(), item); err != nil {
@@ -1096,7 +1096,7 @@ func TestDeleteOne_SoftDelete_SetsDeleteToken(t *testing.T) {
 
 	// delete_token must be set.
 	var token string
-	gdb.Raw("SELECT delete_token FROM users WHERE rid = ?", u.RID).Scan(&token)
+	gdb.Unsafe(context.Background()).Raw("SELECT delete_token FROM users WHERE rid = ?", u.RID).Scan(&token)
 	if token == "" {
 		t.Fatal("delete_token should be set after soft DeleteOne")
 	}
@@ -1123,10 +1123,10 @@ func TestDeleteOne_PhysicalDelete(t *testing.T) {
 
 func TestAutoDiscoverUpdateFields_ExcludesBaseModel(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
-	s := New[Item](db.Wrap(gdb), log.Empty())
+	s := New[Item](gdb, log.Empty())
 
 	item := &Item{Code: "UPD"}
 	if err := s.Create(context.Background(), item); err != nil {
@@ -1141,10 +1141,10 @@ func TestAutoDiscoverUpdateFields_ExcludesBaseModel(t *testing.T) {
 
 func TestResolveUpdateColumn_UnknownField_ErrUnknownUpdateField(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
-	s := New[User](db.Wrap(gdb), log.Empty(),
+	s := New[User](gdb, log.Empty(),
 		WithQueryFields("id", "name"),
 		WithUpdateFields("name", "email"),
 	)
@@ -1178,11 +1178,11 @@ func TestWhereErrUnknownField(t *testing.T) {
 
 func TestDefaultAutoDiscoverQueryFields(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 	// No WithQueryFields — auto-discover from JSON tags.
-	s := New[Item](db.Wrap(gdb), log.Empty())
+	s := New[Item](gdb, log.Empty())
 
 	// "code" (json:"code") should be auto-discovered and queryable.
 	item := &Item{Code: "ABC"}
@@ -1249,11 +1249,11 @@ func TestMapError_UnknownError_Nil(t *testing.T) {
 
 func TestScope_GetOne_Filtered(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
 	// Scope filters by name="alice" (simulating tenant).
-	s := New[User](db.Wrap(gdb), log.Empty(),
+	s := New[User](gdb, log.Empty(),
 		WithQueryFields("id", "name"),
 		WithScope(func(_ context.Context, q *gorm.DB) (*gorm.DB, error) {
 			return q.Where("name = ?", "alice"), nil
@@ -1262,7 +1262,7 @@ func TestScope_GetOne_Filtered(t *testing.T) {
 	alice := createUser(t, s, "alice", "alice@test.com")
 
 	// Create bob via a no-scope store (simulates different tenant).
-	sAll := New[User](db.Wrap(gdb), log.Empty(), WithQueryFields("id", "name"))
+	sAll := New[User](gdb, log.Empty(), WithQueryFields("id", "name"))
 	bob := createUser(t, sAll, "bob", "bob@test.com")
 
 	// GetOne alice — should work.
@@ -1280,10 +1280,10 @@ func TestScope_GetOne_Filtered(t *testing.T) {
 
 func TestScope_List_Filtered(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
-	s := New[User](db.Wrap(gdb), log.Empty(),
+	s := New[User](gdb, log.Empty(),
 		WithQueryFields("id", "name"),
 		WithScope(func(_ context.Context, q *gorm.DB) (*gorm.DB, error) {
 			return q.Where("name = ?", "alice"), nil
@@ -1291,7 +1291,7 @@ func TestScope_List_Filtered(t *testing.T) {
 	)
 	createUser(t, s, "alice", "alice@test.com")
 
-	sAll := New[User](db.Wrap(gdb), log.Empty(), WithQueryFields("id", "name"))
+	sAll := New[User](gdb, log.Empty(), WithQueryFields("id", "name"))
 	createUser(t, sAll, "bob", "bob@test.com")
 
 	page, err := s.List(context.Background())
@@ -1305,17 +1305,17 @@ func TestScope_List_Filtered(t *testing.T) {
 
 func TestScope_UpdateOne_Blocked(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
-	sAll := New[User](db.Wrap(gdb), log.Empty(),
+	sAll := New[User](gdb, log.Empty(),
 		WithQueryFields("id", "name"),
 		WithUpdateFields("name"),
 	)
 	bob := createUser(t, sAll, "bob", "bob@test.com")
 
 	// Scoped store can't see bob.
-	s := New[User](db.Wrap(gdb), log.Empty(),
+	s := New[User](gdb, log.Empty(),
 		WithQueryFields("id", "name"),
 		WithUpdateFields("name"),
 		WithScope(func(_ context.Context, q *gorm.DB) (*gorm.DB, error) {
@@ -1331,16 +1331,16 @@ func TestScope_UpdateOne_Blocked(t *testing.T) {
 
 func TestScope_DeleteOne_Blocked(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
-	sAll := New[Item](db.Wrap(gdb), log.Empty(), WithQueryFields("id", "code"))
+	sAll := New[Item](gdb, log.Empty(), WithQueryFields("id", "code"))
 	item := &Item{Code: "X"}
 	if err := sAll.Create(context.Background(), item); err != nil {
 		t.Fatal(err)
 	}
 
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithScope(func(_ context.Context, q *gorm.DB) (*gorm.DB, error) {
 			return q.Where("code = ?", "NOPE"), nil
@@ -1361,11 +1361,11 @@ func TestScope_DeleteOne_Blocked(t *testing.T) {
 
 func TestScope_Error_FailClosed(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
 	scopeErr := fmt.Errorf("scope: unauthenticated")
-	s := New[Item](db.Wrap(gdb), log.Empty(),
+	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithUpdateFields("code"),
 		WithScope(func(_ context.Context, _ *gorm.DB) (*gorm.DB, error) {
@@ -1403,11 +1403,11 @@ func TestScope_Error_FailClosed(t *testing.T) {
 
 func TestScope_UpdateOne_ScopeError_VersionNotIncremented(t *testing.T) {
 	gdb := setupDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
+	if err := gdb.Migrate(context.Background(), db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
 	scopeErr := fmt.Errorf("scope: blocked")
-	s := New[User](db.Wrap(gdb), log.Empty(),
+	s := New[User](gdb, log.Empty(),
 		WithQueryFields("id", "name"),
 		WithUpdateFields("name"),
 		WithScope(func(_ context.Context, _ *gorm.DB) (*gorm.DB, error) {
@@ -1415,7 +1415,7 @@ func TestScope_UpdateOne_ScopeError_VersionNotIncremented(t *testing.T) {
 		}),
 	)
 	// Create via unscoped store.
-	sAll := New[User](db.Wrap(gdb), log.Empty(), WithQueryFields("id"), WithUpdateFields("name"))
+	sAll := New[User](gdb, log.Empty(), WithQueryFields("id"), WithUpdateFields("name"))
 	u := createUser(t, sAll, "alice", "alice@test.com")
 	origVersion := u.Version
 

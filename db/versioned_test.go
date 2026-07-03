@@ -8,7 +8,7 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/zynthara/chok/v2/db/dbtest"
+	"github.com/zynthara/chok/v2/db/internal/testlane"
 )
 
 func migFS(files map[string]string) fstest.MapFS {
@@ -66,7 +66,7 @@ func TestLoadMigrations_DuplicateVersion(t *testing.T) {
 // --- ApplyMigrations / MigrationsStatus -------------------------------
 
 func TestApplyMigrations_AppliesOnceAndLedgers(t *testing.T) {
-	h := Wrap(openTestDB(t))
+	h := wrapForTest(openTestDB(t))
 	ctx := context.Background()
 	fsys := migFS(map[string]string{
 		"0001_users.sql": `
@@ -116,7 +116,7 @@ func TestApplyMigrations_AppliesOnceAndLedgers(t *testing.T) {
 }
 
 func TestApplyMigrations_NewFileAppliesIncrementally(t *testing.T) {
-	h := Wrap(openTestDB(t))
+	h := wrapForTest(openTestDB(t))
 	ctx := context.Background()
 	v1 := migFS(map[string]string{"0001_a.sql": "CREATE TABLE inc_a (id BIGINT PRIMARY KEY);"})
 	if _, err := ApplyMigrations(ctx, h, v1); err != nil {
@@ -136,7 +136,7 @@ func TestApplyMigrations_NewFileAppliesIncrementally(t *testing.T) {
 }
 
 func TestApplyMigrations_DriftedLedgerRefuses(t *testing.T) {
-	h := Wrap(openTestDB(t))
+	h := wrapForTest(openTestDB(t))
 	ctx := context.Background()
 	if _, err := ApplyMigrations(ctx, h, migFS(map[string]string{
 		"0001_a.sql": "CREATE TABLE drift_a (id BIGINT PRIMARY KEY);",
@@ -153,7 +153,7 @@ func TestApplyMigrations_DriftedLedgerRefuses(t *testing.T) {
 }
 
 func TestApplyMigrations_FailureStopsAndKeepsLedgerConsistent(t *testing.T) {
-	h := Wrap(openTestDB(t))
+	h := wrapForTest(openTestDB(t))
 	ctx := context.Background()
 	fsys := migFS(map[string]string{
 		"0001_ok.sql":  "CREATE TABLE fail_ok (id BIGINT PRIMARY KEY);",
@@ -180,7 +180,7 @@ func TestApplyMigrations_FailureStopsAndKeepsLedgerConsistent(t *testing.T) {
 }
 
 func TestApplyMigrations_EmptyFileErrors(t *testing.T) {
-	h := Wrap(openTestDB(t))
+	h := wrapForTest(openTestDB(t))
 	_, err := ApplyMigrations(context.Background(), h, migFS(map[string]string{
 		"0001_empty.sql": "-- only a comment\n",
 	}))
@@ -190,7 +190,7 @@ func TestApplyMigrations_EmptyFileErrors(t *testing.T) {
 }
 
 func TestMigrationsStatus_NoLedgerReadsAllPending(t *testing.T) {
-	h := Wrap(openTestDB(t))
+	h := wrapForTest(openTestDB(t))
 	st, err := MigrationsStatus(context.Background(), h, migFS(map[string]string{
 		"0001_a.sql": "SELECT 1;",
 	}))
@@ -256,11 +256,11 @@ $$ LANGUAGE plpgsql; SELECT 1;`, 2, func(t *testing.T, s []string) {
 // exclusion: while one session holds the advisory lock, a second
 // ApplyMigrations blocks until release (postgres lane only).
 func TestMigrationLock_PostgresAdvisory(t *testing.T) {
-	if dbtest.Driver() != "postgres" {
+	if testlane.Driver() != "postgres" {
 		t.Skip("postgres-lane only (CHOK_TEST_DRIVER=postgres)")
 	}
 	gdb := openTestDB(t)
-	h := Wrap(gdb)
+	h := wrapForTest(gdb)
 	ctx := context.Background()
 
 	sqlDB, err := gdb.DB()
@@ -319,7 +319,7 @@ func TestMigrationLock_PostgresAdvisory(t *testing.T) {
 // lock is a documented no-op — acquire and release must both succeed
 // instantly with no side effects.
 func TestMigrationLock_SQLiteNoop(t *testing.T) {
-	if dbtest.Driver() != "sqlite" {
+	if testlane.Driver() != "sqlite" {
 		t.Skip("sqlite-lane only")
 	}
 	gdb := openTestDB(t)
