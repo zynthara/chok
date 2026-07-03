@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"gorm.io/gorm"
+
+	"github.com/zynthara/chok/v2/internal/txctx"
 )
 
 // Close closes the underlying connection pool ((*DB).Close is the
@@ -67,8 +69,6 @@ func runTransaction(ctx context.Context, gdb *gorm.DB, fn func(tx *gorm.DB) erro
 
 // --- Context-scoped transaction propagation ----------------------------------
 
-type txCtxKey struct{}
-
 // RunInTx begins a transaction on h, stores it in the derived context,
 // and passes that context to fn. Code inside fn — including Store
 // methods — automatically detects and joins the transaction. If fn
@@ -98,13 +98,13 @@ func RunInTx(ctx context.Context, h *DB, fn func(txCtx context.Context) error) e
 func runInTxGorm(ctx context.Context, gdb *gorm.DB, fn func(txCtx context.Context) error) error {
 	// If there's already a transaction in context, reuse it — including
 	// its staging buffer, so events flush only at the outermost commit.
-	if _, ok := ctx.Value(txCtxKey{}).(*gorm.DB); ok {
+	if txctx.DB(ctx) != nil {
 		return fn(ctx)
 	}
 
 	pending := &txPending{}
 	err := runTransaction(ctx, gdb, func(tx *gorm.DB) error {
-		txCtx := context.WithValue(ctx, txCtxKey{}, tx)
+		txCtx := txctx.WithDB(ctx, tx)
 		txCtx = context.WithValue(txCtx, txPendingKey{}, pending)
 		return fn(txCtx)
 	})
@@ -115,12 +115,12 @@ func runInTxGorm(ctx context.Context, gdb *gorm.DB, fn func(txCtx context.Contex
 	return nil
 }
 
-// DBFromContext returns the *gorm.DB stored in ctx by RunInTx, or nil
-// if no transaction is active. Store uses this to automatically
-// participate in a context-scoped transaction.
-func DBFromContext(ctx context.Context) *gorm.DB {
-	if tx, ok := ctx.Value(txCtxKey{}).(*gorm.DB); ok {
-		return tx
-	}
-	return nil
+// InTx reports whether ctx carries an active RunInTx transaction.
+// It is the introspection face ("assert this helper runs
+// transactionally") of the transaction context, deliberately without
+// the raw handle: code that needs SQL against the transaction goes
+// through the tx-aware escape hatches — Store.Unsafe (scopes applied)
+// or DB.Unsafe (raw) — the only public gorm doors (M5 §5.2 verdict).
+func InTx(ctx context.Context) bool {
+	return txctx.DB(ctx) != nil
 }

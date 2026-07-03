@@ -20,7 +20,6 @@ import (
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/auth"
-	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/store"
 	"github.com/zynthara/chok/v2/store/where"
 )
@@ -300,7 +299,7 @@ func (m *Service) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity
 			Active:          true,
 		}
 		// txCtx carries the transaction — the store joins it via context
-		// propagation (the v1 WithTx(DBFromContext) wiring collapsed).
+		// propagation (the v1 WithTx wiring collapsed into RunInTx).
 		if err := m.userStore.Create(txCtx, newUser); err != nil {
 			if errors.Is(err, store.ErrDuplicate) {
 				return apierr.ErrConflict.WithMessage(
@@ -397,7 +396,10 @@ func (m *Service) UnlinkIdentity(ctx context.Context, userID, identityID string)
 	}
 
 	return m.h.RunInTx(ctx, func(txCtx context.Context) error {
-		txDB := db.DBFromContext(txCtx)
+		// Unsafe is tx-aware: inside RunInTx it returns the context's
+		// transaction, so the lock below joins this transaction (the
+		// blessed raw-SQL door since the M5 §5.2 narrowing).
+		txDB := m.h.Unsafe(txCtx)
 
 		// Row-lock the user; serializes concurrent unlinks on the same
 		// account so the subsequent count+delete is an atomic critical

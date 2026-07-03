@@ -33,7 +33,8 @@ func TestAfterCommit_FlushesInOrderAfterCommit(t *testing.T) {
 	var flushCtxVal string
 	var committedAtFlush bool
 
-	err := RunInTx(parent, wrapForTest(gdb), func(txCtx context.Context) error {
+	h := wrapForTest(gdb)
+	err := RunInTx(parent, h, func(txCtx context.Context) error {
 		if !AfterCommit(txCtx, func(ctx context.Context) {
 			order = append(order, 1)
 			flushCtxVal, _ = ctx.Value(ctxKey("k")).(string)
@@ -45,7 +46,7 @@ func TestAfterCommit_FlushesInOrderAfterCommit(t *testing.T) {
 			t.Error("AfterCommit inside tx must stage")
 		}
 		AfterCommit(txCtx, func(context.Context) { order = append(order, 2) })
-		return DBFromContext(txCtx).Create(&TestItem{Code: "AC1"}).Error
+		return h.Unsafe(txCtx).Create(&TestItem{Code: "AC1"}).Error
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -68,9 +69,10 @@ func TestAfterCommit_DroppedOnRollback(t *testing.T) {
 	}
 
 	ran := false
-	err := RunInTx(context.Background(), wrapForTest(gdb), func(txCtx context.Context) error {
+	h := wrapForTest(gdb)
+	err := RunInTx(context.Background(), h, func(txCtx context.Context) error {
 		AfterCommit(txCtx, func(context.Context) { ran = true })
-		if err := DBFromContext(txCtx).Create(&TestItem{Code: "AC2"}).Error; err != nil {
+		if err := h.Unsafe(txCtx).Create(&TestItem{Code: "AC2"}).Error; err != nil {
 			return err
 		}
 		return errors.New("boom")
@@ -144,7 +146,7 @@ func TestHandle_RunInTx_JoinsSameMachinery(t *testing.T) {
 
 	ran := false
 	err := h.RunInTx(context.Background(), func(txCtx context.Context) error {
-		if DBFromContext(txCtx) == nil {
+		if !InTx(txCtx) {
 			t.Error("handle RunInTx must put the tx into the context")
 		}
 		AfterCommit(txCtx, func(context.Context) { ran = true })
@@ -155,5 +157,48 @@ func TestHandle_RunInTx_JoinsSameMachinery(t *testing.T) {
 	}
 	if !ran {
 		t.Fatal("handle RunInTx commit must flush staged callbacks")
+	}
+}
+
+// TestInTx_IntrospectionOnly pins the M5 §5.2 narrowing: InTx answers
+// "is a transaction active" without handing out the raw handle, and
+// the tx-aware Unsafe door observes the same transaction.
+func TestInTx_IntrospectionOnly(t *testing.T) {
+	gdb := openTestDB(t)
+	if err := Migrate(context.Background(), gdb, Table(&TestItem{})); err != nil {
+		t.Fatal(err)
+	}
+	h := wrapForTest(gdb)
+
+	if InTx(context.Background()) {
+		t.Fatal("InTx must be false outside RunInTx")
+	}
+	err := h.RunInTx(context.Background(), func(txCtx context.Context) error {
+		if !InTx(txCtx) {
+			t.Error("InTx must be true inside RunInTx")
+		}
+		// The write goes through the tx: visible inside, and rolled
+		// back with it when fn errors below.
+		if err := h.Unsafe(txCtx).Create(&TestItem{Code: "ITX"}).Error; err != nil {
+			return err
+		}
+		var n int64
+		if err := h.Unsafe(txCtx).Model(&TestItem{}).Count(&n).Error; err != nil {
+			return err
+		}
+		if n != 1 {
+			t.Errorf("tx-aware Unsafe must see the uncommitted write, count=%d", n)
+		}
+		return errors.New("force rollback")
+	})
+	if err == nil {
+		t.Fatal("expected forced rollback error")
+	}
+	var n int64
+	if err := h.Unsafe(context.Background()).Model(&TestItem{}).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("rollback must discard the write observed through Unsafe, count=%d", n)
 	}
 }

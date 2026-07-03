@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"gorm.io/gorm"
+
+	"github.com/zynthara/chok/v2/internal/txctx"
 )
 
 // DB is the chok-owned thin handle over the connection pool — the
@@ -48,7 +50,7 @@ func Open(opts Options) (*DB, error) {
 // above this line (whitelists, scopes, owner enforcement) applies to
 // what you do with it.
 func (h *DB) Unsafe(ctx context.Context) *gorm.DB {
-	if tx := DBFromContext(ctx); tx != nil {
+	if tx := txctx.DB(ctx); tx != nil {
 		return tx.WithContext(ctx)
 	}
 	return h.gdb.WithContext(ctx)

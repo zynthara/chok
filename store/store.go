@@ -16,6 +16,7 @@ import (
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/internal/txctx"
 	"github.com/zynthara/chok/v2/kernel/event"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store/where"
@@ -636,7 +637,7 @@ func (s *Store[T]) BatchCreate(ctx context.Context, objs []*T) error {
 	// transaction. Otherwise open one so a mid-batch failure rolls the
 	// whole batch back (v1 semantics).
 	var err error
-	if db.DBFromContext(ctx) != nil || s.txDB != nil {
+	if txctx.DB(ctx) != nil || s.txDB != nil {
 		err = s.effectiveDB(ctx).CreateInBatches(objs, 100).Error
 	} else {
 		err = s.h.RunInTx(ctx, func(txCtx context.Context) error {
@@ -884,7 +885,7 @@ func (s *Store[T]) Unsafe(ctx context.Context) (*gorm.DB, error) {
 // requirePrincipal was one such drift bug in v1 review round 6).
 func (s *Store[T]) txClone(txCtx context.Context) *Store[T] {
 	cp := *s
-	cp.txDB = db.DBFromContext(txCtx)
+	cp.txDB = txctx.DB(txCtx)
 	cp.txCtx = txCtx
 	return &cp
 }
@@ -895,7 +896,7 @@ func (s *Store[T]) txClone(txCtx context.Context) *Store[T] {
 // the root pool. The ordering matches v1: an explicit transactional
 // context always wins.
 func (s *Store[T]) effectiveDB(ctx context.Context) *gorm.DB {
-	if tx := db.DBFromContext(ctx); tx != nil {
+	if tx := txctx.DB(ctx); tx != nil {
 		return tx.WithContext(ctx)
 	}
 	if s.txDB != nil {
