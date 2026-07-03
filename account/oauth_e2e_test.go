@@ -949,7 +949,10 @@ func TestOAuth_F1_BackfillRescuesLegacyRows(t *testing.T) {
 	if regResp.Code != http.StatusCreated {
 		t.Fatalf("register: %d", regResp.Code)
 	}
-	gdb := fx.m.Store().DB().WithContext(ctx)
+	gdb, err := fx.m.Store().Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := gdb.Exec(`UPDATE users SET has_password = FALSE WHERE email = ?`,
 		"legacy@local.test").Error; err != nil {
 		t.Fatal(err)
@@ -961,7 +964,9 @@ func TestOAuth_F1_BackfillRescuesLegacyRows(t *testing.T) {
 	}
 
 	// Run backfill (this is what AccountComponent.Migrate calls).
-	if err := account.BackfillHasPassword(ctx, fx.m.Store().DB()); err != nil {
+	if backfillDB, err := fx.m.Store().Unsafe(ctx); err != nil {
+		t.Fatal(err)
+	} else if err := account.BackfillHasPassword(ctx, backfillDB); err != nil {
 		t.Fatal(err)
 	}
 
@@ -974,7 +979,9 @@ func TestOAuth_F1_BackfillRescuesLegacyRows(t *testing.T) {
 	}
 
 	// Idempotent: second call must not error.
-	if err := account.BackfillHasPassword(ctx, fx.m.Store().DB()); err != nil {
+	if backfillDB, err := fx.m.Store().Unsafe(ctx); err != nil {
+		t.Fatal(err)
+	} else if err := account.BackfillHasPassword(ctx, backfillDB); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1008,7 +1015,9 @@ func TestOAuth_F1_BackfillSkipsOAuthOnlyUsers(t *testing.T) {
 	}
 
 	// Run backfill — it must NOT touch this user (Identity row exists).
-	if err := account.BackfillHasPassword(ctx, fx.m.Store().DB()); err != nil {
+	if backfillDB, err := fx.m.Store().Unsafe(ctx); err != nil {
+		t.Fatal(err)
+	} else if err := account.BackfillHasPassword(ctx, backfillDB); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := fx.m.Store().Get(ctx, store.RID(user.RID))

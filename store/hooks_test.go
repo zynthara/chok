@@ -6,11 +6,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 
 	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/db/dbtest"
+	"github.com/zynthara/chok/v2/kernel/event"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store/where"
 )
@@ -19,15 +19,11 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
+// setupHookDB rides the dbtest lane switch (SQLite default,
+// Postgres under CHOK_TEST_DRIVER=postgres — M3 dual-run).
 func setupHookDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
-		Logger: logger.Discard,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return gdb
+	return dbtest.Open(t)
 }
 
 // ---------------------------------------------------------------------------
@@ -41,7 +37,7 @@ func TestBeforeCreate_Fires(t *testing.T) {
 	}
 
 	var called atomic.Int32
-	s := New[Item](gdb, log.Empty(),
+	s := New[Item](db.Wrap(gdb), log.Empty(),
 		WithQueryFields("id", "code"),
 		WithBeforeCreate(func(ctx context.Context, obj *Item) error {
 			called.Add(1)
@@ -64,7 +60,7 @@ func TestBeforeCreate_AbortsPreventsRow(t *testing.T) {
 	}
 
 	hookErr := errors.New("validation failed")
-	s := New[Item](gdb, log.Empty(),
+	s := New[Item](db.Wrap(gdb), log.Empty(),
 		WithQueryFields("id", "code"),
 		WithBeforeCreate(func(ctx context.Context, obj *Item) error {
 			return hookErr
@@ -96,7 +92,7 @@ func TestBeforeUpdate_AbortsUpdate(t *testing.T) {
 	}
 
 	hookErr := errors.New("update rejected")
-	s := New[Item](gdb, log.Empty(),
+	s := New[Item](db.Wrap(gdb), log.Empty(),
 		WithQueryFields("id", "code"),
 		WithUpdateFields("code"),
 		WithBeforeUpdate(func(ctx context.Context, loc Locator, changes Changes) error {
@@ -135,7 +131,7 @@ func TestBeforeDelete_AbortsDelete(t *testing.T) {
 	}
 
 	hookErr := errors.New("delete rejected")
-	s := New[Item](gdb, log.Empty(),
+	s := New[Item](db.Wrap(gdb), log.Empty(),
 		WithQueryFields("id", "code"),
 		WithBeforeDelete(func(ctx context.Context, loc Locator) error {
 			return hookErr
@@ -163,241 +159,325 @@ func TestBeforeDelete_AbortsDelete(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AfterCreate hook (fire-and-forget, no error return)
+// WithBus — EntityChanged publication (replaces v1 after-hooks, SPEC §3.5)
+//
+// Subscribers use WithSync so delivery happens inline at publish/flush
+// time — assertions need no async waiting. The three commit-anchoring
+// branches (non-tx immediate / commit flush / rollback drop) are the
+// M3 DoD tests.
 // ---------------------------------------------------------------------------
 
-func TestAfterCreate_Fires(t *testing.T) {
+type itemEvent = EntityChanged[Item]
+
+// busAndLog subscribes a synchronous recorder for Item events.
+func busAndLog(t *testing.T) (*event.Bus, *[]itemEvent) {
+	t.Helper()
+	bus := event.NewBus()
+	t.Cleanup(func() { bus.Close(context.Background()) })
+	var seen []itemEvent
+	event.Subscribe(bus, func(_ context.Context, ev itemEvent) {
+		seen = append(seen, ev)
+	}, event.WithSync())
+	return bus, &seen
+}
+
+func setupBusItemStore(t *testing.T) (*Store[Item], *[]itemEvent) {
+	t.Helper()
 	gdb := setupHookDB(t)
 	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
 		t.Fatal(err)
 	}
-
-	var called atomic.Int32
-	var capturedCode string
-
-	s := New[Item](gdb, log.Empty(),
+	bus, seen := busAndLog(t)
+	s := New[Item](db.Wrap(gdb), log.Empty(),
 		WithQueryFields("id", "code"),
-		WithAfterCreate(func(ctx context.Context, obj *Item) {
-			called.Add(1)
-			capturedCode = obj.Code
-		}),
+		WithUpdateFields("code"),
+		WithBus(bus),
 	)
+	return s, seen
+}
 
-	item := &Item{Code: "HOOK1"}
+func TestWithBus_CreatePublishesImmediately_NonTx(t *testing.T) {
+	s, seen := setupBusItemStore(t)
+
+	item := &Item{Code: "EV1"}
 	if err := s.Create(context.Background(), item); err != nil {
 		t.Fatal(err)
 	}
 
-	if called.Load() != 1 {
-		t.Fatalf("AfterCreate should fire once, got %d", called.Load())
+	if len(*seen) != 1 {
+		t.Fatalf("non-transactional create must publish immediately, got %d events", len(*seen))
 	}
-	if capturedCode != "HOOK1" {
-		t.Fatalf("AfterCreate should see the created object, got code=%s", capturedCode)
+	ev := (*seen)[0]
+	if ev.Op != OpCreate || ev.Object == nil || ev.Object.Code != "EV1" {
+		t.Fatalf("unexpected event %+v", ev)
 	}
-}
-
-func TestAfterCreate_MultipleHooks(t *testing.T) {
-	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
-		t.Fatal(err)
-	}
-
-	var order []string
-	s := New[Item](gdb, log.Empty(),
-		WithQueryFields("id", "code"),
-		WithAfterCreate(func(ctx context.Context, obj *Item) {
-			order = append(order, "first")
-		}),
-		WithAfterCreate(func(ctx context.Context, obj *Item) {
-			order = append(order, "second")
-		}),
-	)
-
-	if err := s.Create(context.Background(), &Item{Code: "MULTI"}); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(order) != 2 || order[0] != "first" || order[1] != "second" {
-		t.Fatalf("hooks should fire in registration order, got %v", order)
+	// The event carries a copy — asynchronous consumers must never race
+	// the caller's continued use of the original.
+	if ev.Object == item {
+		t.Fatal("event must carry a shallow copy, not the caller's pointer")
 	}
 }
 
-// ---------------------------------------------------------------------------
-// AfterUpdate hook (fire-and-forget)
-// ---------------------------------------------------------------------------
+func TestWithBus_UpdatePublishes_GatedOnRowsAffected(t *testing.T) {
+	s, seen := setupBusItemStore(t)
 
-func TestAfterUpdate_Fires(t *testing.T) {
-	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
-		t.Fatal(err)
-	}
-
-	var called atomic.Int32
-	s := New[Item](gdb, log.Empty(),
-		WithQueryFields("id", "code"),
-		WithUpdateFields("code"),
-		WithAfterUpdate(func(ctx context.Context, loc Locator, changes Changes) {
-			called.Add(1)
-		}),
-	)
-
-	item := &Item{Code: "UPD1"}
+	item := &Item{Code: "EV2"}
 	if err := s.Create(context.Background(), item); err != nil {
 		t.Fatal(err)
 	}
+	*seen = (*seen)[:0]
 
-	if err := s.Update(context.Background(), RID(item.RID), Set(map[string]any{"code": "UPD2"})); err != nil {
+	if err := s.Update(context.Background(), RID(item.RID), Set(map[string]any{"code": "EV2b"})); err != nil {
 		t.Fatal(err)
 	}
-
-	if called.Load() != 1 {
-		t.Fatalf("AfterUpdate should fire once, got %d", called.Load())
-	}
-}
-
-func TestAfterUpdate_NotFiredOnNotFound(t *testing.T) {
-	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
-		t.Fatal(err)
+	if len(*seen) != 1 || (*seen)[0].Op != OpUpdate || (*seen)[0].Locator == nil || (*seen)[0].Changes == nil {
+		t.Fatalf("update must publish OpUpdate with locator+changes, got %+v", *seen)
 	}
 
-	var called atomic.Int32
-	s := New[Item](gdb, log.Empty(),
-		WithQueryFields("id", "code"),
-		WithUpdateFields("code"),
-		WithAfterUpdate(func(ctx context.Context, loc Locator, changes Changes) {
-			called.Add(1)
-		}),
-	)
-
+	// Not-found update: no event (v1 after-hook gate carried over).
+	*seen = (*seen)[:0]
 	err := s.Update(context.Background(), RID("itm_nonexistent"), Set(map[string]any{"code": "X"}))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
-	if called.Load() != 0 {
-		t.Fatal("AfterUpdate should not fire on not-found update")
+	if len(*seen) != 0 {
+		t.Fatal("no event may fire for a write that touched zero rows")
 	}
 }
 
-// ---------------------------------------------------------------------------
-// AfterDelete hook (fire-and-forget)
-// ---------------------------------------------------------------------------
+func TestWithBus_DeletePublishes_NotOnIdempotentNoop(t *testing.T) {
+	s, seen := setupBusItemStore(t)
 
-func TestAfterDelete_Fires(t *testing.T) {
-	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
-		t.Fatal(err)
-	}
-
-	var called atomic.Int32
-	s := New[Item](gdb, log.Empty(),
-		WithQueryFields("id", "code"),
-		WithAfterDelete(func(ctx context.Context, loc Locator) {
-			called.Add(1)
-		}),
-	)
-
-	item := &Item{Code: "DEL1"}
+	item := &Item{Code: "EV3"}
 	if err := s.Create(context.Background(), item); err != nil {
 		t.Fatal(err)
 	}
+	*seen = (*seen)[:0]
 
 	if err := s.Delete(context.Background(), RID(item.RID)); err != nil {
 		t.Fatal(err)
 	}
-
-	if called.Load() != 1 {
-		t.Fatalf("AfterDelete should fire once, got %d", called.Load())
-	}
-}
-
-func TestAfterDelete_FiredOnIdempotentNoop(t *testing.T) {
-	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
-		t.Fatal(err)
+	if len(*seen) != 1 || (*seen)[0].Op != OpDelete || (*seen)[0].Locator == nil {
+		t.Fatalf("delete must publish OpDelete with locator, got %+v", *seen)
 	}
 
-	var called atomic.Int32
-	s := New[Item](gdb, log.Empty(),
-		WithQueryFields("id", "code"),
-		WithAfterDelete(func(ctx context.Context, loc Locator) {
-			called.Add(1)
-		}),
-	)
-
-	// Delete non-existent item (idempotent, no WithVersion → returns nil).
-	// Hook must NOT fire when no row was actually deleted (RowsAffected == 0).
-	err := s.Delete(context.Background(), RID("itm_nonexistent"))
-	if err != nil {
+	// Idempotent no-op delete (no row, no WithVersion): nil error, no event.
+	*seen = (*seen)[:0]
+	if err := s.Delete(context.Background(), RID("itm_nonexistent")); err != nil {
 		t.Fatalf("idempotent delete should not error, got %v", err)
 	}
-	if called.Load() != 0 {
-		t.Fatalf("AfterDelete should not fire on idempotent no-op, got %d calls", called.Load())
+	if len(*seen) != 0 {
+		t.Fatal("idempotent no-op delete must not publish — phantom deletion")
 	}
 }
 
-// ---------------------------------------------------------------------------
-// AfterDelete with soft-delete model
-// ---------------------------------------------------------------------------
-
-func TestAfterDelete_SoftDelete_Fires(t *testing.T) {
+func TestWithBus_SoftDeletePublishes(t *testing.T) {
 	gdb := setupHookDB(t)
 	if err := db.Migrate(context.Background(), gdb, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
 		t.Fatal(err)
 	}
+	bus := event.NewBus()
+	t.Cleanup(func() { bus.Close(context.Background()) })
+	var seen []EntityChanged[User]
+	event.Subscribe(bus, func(_ context.Context, ev EntityChanged[User]) {
+		seen = append(seen, ev)
+	}, event.WithSync())
 
-	var called atomic.Int32
-	s := New[User](gdb, log.Empty(),
+	s := New[User](db.Wrap(gdb), log.Empty(),
 		WithQueryFields("id", "name", "email"),
 		WithUpdateFields("name"),
-		WithAfterDelete(func(ctx context.Context, loc Locator) {
-			called.Add(1)
-		}),
+		WithBus(bus),
 	)
 
 	u := &User{Name: "alice", Email: "alice@test.com"}
 	if err := s.Create(context.Background(), u); err != nil {
 		t.Fatal(err)
 	}
+	seen = seen[:0]
 
 	if err := s.Delete(context.Background(), RID(u.RID)); err != nil {
 		t.Fatal(err)
 	}
-
-	if called.Load() != 1 {
-		t.Fatalf("AfterDelete should fire on soft delete, got %d calls", called.Load())
+	if len(seen) != 1 || seen[0].Op != OpDelete {
+		t.Fatalf("soft delete must publish OpDelete, got %+v", seen)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Hooks survive WithTx / withDB
-// ---------------------------------------------------------------------------
+func TestWithBus_UpsertPublishesOpCreate(t *testing.T) {
+	s, seen := setupBusItemStore(t)
 
-func TestHooks_PreservedAcrossWithTx(t *testing.T) {
-	gdb := setupHookDB(t)
-	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+	obj := &Item{Code: "EVUP"}
+	if err := s.Upsert(context.Background(), obj, []string{"code"}); err != nil {
+		t.Fatal(err)
+	}
+	// Conflict path: same code again.
+	again := &Item{Code: "EVUP"}
+	if err := s.Upsert(context.Background(), again, []string{"code"}); err != nil {
 		t.Fatal(err)
 	}
 
-	var called atomic.Int32
-	s := New[Item](gdb, log.Empty(),
-		WithQueryFields("id", "code"),
-		WithAfterCreate(func(ctx context.Context, obj *Item) {
-			called.Add(1)
-		}),
-	)
+	if len(*seen) != 2 {
+		t.Fatalf("both upsert paths must publish, got %d", len(*seen))
+	}
+	for i, ev := range *seen {
+		if ev.Op != OpCreate {
+			t.Fatalf("upsert event #%d must be OpCreate (v1 after-create parity), got %s", i, ev.Op)
+		}
+	}
+}
 
-	err := s.Tx(context.Background(), func(tx *Store[Item]) error {
-		return tx.Create(context.Background(), &Item{Code: "TX1"})
+func TestWithBus_BatchCreatePublishesPerObjectInOrder(t *testing.T) {
+	s, seen := setupBusItemStore(t)
+
+	items := []*Item{{Code: "B1"}, {Code: "B2"}, {Code: "B3"}}
+	if err := s.BatchCreate(context.Background(), items); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(*seen) != 3 {
+		t.Fatalf("batch create must publish one event per object, got %d", len(*seen))
+	}
+	for i, want := range []string{"B1", "B2", "B3"} {
+		if (*seen)[i].Object.Code != want {
+			t.Fatalf("event #%d out of order: want %s got %s", i, want, (*seen)[i].Object.Code)
+		}
+	}
+}
+
+// TestWithBus_TxCommitFlushesInOrder is the commit branch of the M3
+// DoD trio: writes inside Store.Tx stage their events — nothing is
+// visible mid-transaction, everything flushes in write order after
+// COMMIT. The tx clone is driven with the caller's outer ctx on
+// purpose: that is the v1 Store.Tx calling convention, and it proves
+// the clone's captured txCtx anchors staging (not just ctx
+// propagation).
+func TestWithBus_TxCommitFlushesInOrder(t *testing.T) {
+	s, seen := setupBusItemStore(t)
+	ctx := context.Background()
+
+	err := s.Tx(ctx, func(tx *Store[Item]) error {
+		if err := tx.Create(ctx, &Item{Code: "T1"}); err != nil {
+			return err
+		}
+		if err := tx.Create(ctx, &Item{Code: "T2"}); err != nil {
+			return err
+		}
+		if len(*seen) != 0 {
+			t.Error("events must not be visible before COMMIT")
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if called.Load() != 1 {
-		t.Fatalf("hook should fire inside transaction, got %d", called.Load())
+	if len(*seen) != 2 || (*seen)[0].Object.Code != "T1" || (*seen)[1].Object.Code != "T2" {
+		t.Fatalf("commit must flush staged events in write order, got %+v", *seen)
 	}
 }
+
+// TestWithBus_TxRollbackDropsEvents is the rollback branch: a failed
+// transaction must not leak a single event — subscribers recording a
+// write that never committed is exactly the phantom v1's in-tx hooks
+// allowed and v2 forbids.
+func TestWithBus_TxRollbackDropsEvents(t *testing.T) {
+	s, seen := setupBusItemStore(t)
+	ctx := context.Background()
+
+	boom := errors.New("boom")
+	err := s.Tx(ctx, func(tx *Store[Item]) error {
+		if err := tx.Create(ctx, &Item{Code: "RB1"}); err != nil {
+			return err
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected rollback error, got %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("rollback must drop staged events wholesale, got %+v", *seen)
+	}
+}
+
+// TestWithBus_RunInTxContextPropagation drives the same store through
+// db.RunInTx + txCtx (the cross-store transaction idiom) instead of a
+// Tx clone: staging must anchor via the context alone.
+func TestWithBus_RunInTxContextPropagation(t *testing.T) {
+	gdb := setupHookDB(t)
+	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+	bus, seen := busAndLog(t)
+	h := db.Wrap(gdb)
+	s := New[Item](h, log.Empty(),
+		WithQueryFields("id", "code"),
+		WithBus(bus),
+	)
+
+	err := h.RunInTx(context.Background(), func(txCtx context.Context) error {
+		if err := s.Create(txCtx, &Item{Code: "CTX1"}); err != nil {
+			return err
+		}
+		if len(*seen) != 0 {
+			t.Error("txCtx write must stage, not publish")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 1 || (*seen)[0].Object.Code != "CTX1" {
+		t.Fatalf("commit must flush the staged event, got %+v", *seen)
+	}
+}
+
+// Without WithBus the store publishes nothing — opt-in means opt-in.
+func TestWithBus_NotConfigured_NoPublish(t *testing.T) {
+	gdb := setupHookDB(t)
+	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[Item](db.Wrap(gdb), log.Empty(), WithQueryFields("id", "code"))
+	if err := s.Create(context.Background(), &Item{Code: "SILENT"}); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing to assert beyond "no panic without a bus" — publishChanged
+	// must be nil-safe.
+}
+
+// Before-hooks and the bus survive the Tx clone (struct-copy clone
+// regression guard — v1 round-7 caught a field drop here).
+func TestWithBus_And_BeforeHooks_PreservedAcrossTxClone(t *testing.T) {
+	gdb := setupHookDB(t)
+	if err := db.Migrate(context.Background(), gdb, db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+	bus, seen := busAndLog(t)
+
+	var beforeCalled atomic.Int32
+	s := New[Item](db.Wrap(gdb), log.Empty(),
+		WithQueryFields("id", "code"),
+		WithBus(bus),
+		WithBeforeCreate(func(ctx context.Context, obj *Item) error {
+			beforeCalled.Add(1)
+			return nil
+		}),
+	)
+
+	err := s.Tx(context.Background(), func(tx *Store[Item]) error {
+		return tx.Create(context.Background(), &Item{Code: "TXKEEP"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeCalled.Load() != 1 {
+		t.Fatalf("before-hook must run inside transaction, got %d", beforeCalled.Load())
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("bus must survive the Tx clone, got %d events", len(*seen))
+	}
+}
+
 
 // ---------------------------------------------------------------------------
 // ListWithCursor basic test
@@ -409,7 +489,7 @@ func TestListWithCursor_FirstPage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := New[Item](gdb, log.Empty(),
+	s := New[Item](db.Wrap(gdb), log.Empty(),
 		WithQueryFields("id", "code"),
 	)
 
@@ -443,7 +523,7 @@ func TestListWithCursor_LastPage_NoCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := New[Item](gdb, log.Empty(),
+	s := New[Item](db.Wrap(gdb), log.Empty(),
 		WithQueryFields("id", "code"),
 	)
 

@@ -58,12 +58,12 @@ func openTestDB(t *testing.T) *gorm.DB {
 
 // --- tests ---
 
-func TestTransaction_CommitOnSuccess(t *testing.T) {
+func TestRunTransaction_CommitOnSuccess(t *testing.T) {
 	gdb := openTestDB(t)
 	Migrate(context.Background(), gdb, Table(&TestItem{}))
 
 	ctx := context.Background()
-	err := Transaction(ctx, gdb, func(tx *gorm.DB) error {
+	err := runTransaction(ctx, gdb, func(tx *gorm.DB) error {
 		return tx.Create(&TestItem{Code: "A"}).Error
 	})
 	if err != nil {
@@ -77,12 +77,12 @@ func TestTransaction_CommitOnSuccess(t *testing.T) {
 	}
 }
 
-func TestTransaction_RollbackOnError(t *testing.T) {
+func TestRunTransaction_RollbackOnError(t *testing.T) {
 	gdb := openTestDB(t)
 	Migrate(context.Background(), gdb, Table(&TestItem{}))
 
 	ctx := context.Background()
-	err := Transaction(ctx, gdb, func(tx *gorm.DB) error {
+	err := runTransaction(ctx, gdb, func(tx *gorm.DB) error {
 		tx.Create(&TestItem{Code: "A"})
 		return errors.New("rollback")
 	})
@@ -97,7 +97,7 @@ func TestTransaction_RollbackOnError(t *testing.T) {
 	}
 }
 
-func TestTransaction_CtxPropagation(t *testing.T) {
+func TestRunTransaction_CtxPropagation(t *testing.T) {
 	gdb := openTestDB(t)
 	Migrate(context.Background(), gdb, Table(&TestItem{}))
 
@@ -105,7 +105,7 @@ func TestTransaction_CtxPropagation(t *testing.T) {
 	ctx := context.WithValue(context.Background(), ctxKey("k"), "v")
 
 	var got string
-	Transaction(ctx, gdb, func(tx *gorm.DB) error {
+	runTransaction(ctx, gdb, func(tx *gorm.DB) error {
 		stmt := tx.Statement
 		if stmt != nil && stmt.Context != nil {
 			if v, ok := stmt.Context.Value(ctxKey("k")).(string); ok {

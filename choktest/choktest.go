@@ -4,18 +4,15 @@
 // and stores that recurs in every test file. Typical usage:
 //
 //	func TestMyFeature(t *testing.T) {
-//	    gdb := choktest.NewTestDB(t, &model.User{}, &model.Post{})
-//	    s := store.New[model.Post](gdb, choktest.NopLogger())
+//	    h := choktest.NewTestDB(t, &model.User{}, &model.Post{})
+//	    s := store.New[model.Post](h, choktest.NopLogger())
 //	    // ... test against s ...
 //	}
 package choktest
 
 import (
+	"context"
 	"testing"
-
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/log"
@@ -25,21 +22,27 @@ import (
 // NewTestDB opens an in-memory SQLite database, auto-migrates all
 // provided models, and registers a cleanup that closes the DB when the
 // test finishes. Fails the test on any error.
-func NewTestDB(t *testing.T, models ...any) *gorm.DB {
+//
+// v2 returns the thin *db.DB handle (the store.New input); raw gorm
+// access, when a test truly needs it, is h.Unsafe(ctx).
+func NewTestDB(t *testing.T, models ...any) *db.DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
-		Logger: logger.Discard,
+	h, err := db.Open(db.Options{
+		Driver: "sqlite",
+		SQLite: db.SQLiteOptions{Path: ":memory:"},
 	})
 	if err != nil {
 		t.Fatalf("choktest: open sqlite: %v", err)
 	}
 	if len(models) > 0 {
-		if err := gdb.AutoMigrate(models...); err != nil {
+		// Raw AutoMigrate (not db.Table specs): test models aren't
+		// required to satisfy the framework's model validation.
+		if err := h.Unsafe(context.Background()).AutoMigrate(models...); err != nil {
 			t.Fatalf("choktest: auto migrate: %v", err)
 		}
 	}
-	t.Cleanup(func() { db.Close(gdb) })
-	return gdb
+	t.Cleanup(func() { _ = h.Close() })
+	return h
 }
 
 // NopLogger returns a no-op logger suitable for test usage where log
@@ -52,6 +55,6 @@ func NopLogger() log.Logger { return log.Empty() }
 func NewTestStore[T db.Modeler](t *testing.T, opts ...store.StoreOption) *store.Store[T] {
 	t.Helper()
 	var zero T
-	gdb := NewTestDB(t, zero)
-	return store.New[T](gdb, NopLogger(), opts...)
+	h := NewTestDB(t, zero)
+	return store.New[T](h, NopLogger(), opts...)
 }

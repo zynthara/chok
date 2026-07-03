@@ -18,16 +18,17 @@ func (testModel) RIDPrefix() string { return "tst" }
 func (testModel) TableName() string { return "test_models" }
 
 func TestNewTestDB_CreatesAndMigrates(t *testing.T) {
-	gdb := NewTestDB(t, &testModel{})
+	h := NewTestDB(t, &testModel{})
 
-	// Verify table exists by inserting a record.
-	result := gdb.Create(&testModel{Name: "hello"})
-	if result.Error != nil {
-		t.Fatalf("insert failed: %v", result.Error)
+	// Verify table exists by inserting a record — raw access goes
+	// through the handle's escape hatch (v2: NewTestDB returns *db.DB).
+	ctx := context.Background()
+	if err := h.Unsafe(ctx).Create(&testModel{Name: "hello"}).Error; err != nil {
+		t.Fatalf("insert failed: %v", err)
 	}
 
 	var count int64
-	gdb.Model(&testModel{}).Count(&count)
+	h.Unsafe(ctx).Model(&testModel{}).Count(&count)
 	if count != 1 {
 		t.Fatalf("expected 1 row, got %d", count)
 	}

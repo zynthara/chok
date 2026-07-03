@@ -262,7 +262,7 @@ func (m *Module) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity)
 	// does not leave a dangling User row (SPEC §6.2).
 	var resultUser *User
 	var resultIdent *Identity
-	err = db.RunInTx(ctx, m.userStore.DB(), func(txCtx context.Context) error {
+	err = m.h.RunInTx(ctx, func(txCtx context.Context) error {
 		canAutoLink := m.linkByEmail && pi.EmailVerified && !pi.IsAliasedEmail
 		if canAutoLink {
 			user, lookupErr := m.userByEmailVerified(txCtx, pi.Email)
@@ -299,8 +299,9 @@ func (m *Module) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity)
 			Name:            firstNonEmpty(pi.Name, maskEmail(pi.Email)),
 			Active:          true,
 		}
-		txDB := db.DBFromContext(txCtx)
-		if err := m.userStore.WithTx(txDB).Create(txCtx, newUser); err != nil {
+		// txCtx carries the transaction — the store joins it via context
+		// propagation (the v1 WithTx(DBFromContext) wiring collapsed).
+		if err := m.userStore.Create(txCtx, newUser); err != nil {
 			if errors.Is(err, store.ErrDuplicate) {
 				return apierr.ErrConflict.WithMessage(
 					"该邮箱已被使用,请先用密码登录后到设置页绑定 " + pi.Provider)
@@ -331,7 +332,7 @@ func (m *Module) LinkIdentity(ctx context.Context, userID string, pi *ProviderId
 		return nil, apierr.ErrInvalidArgument.WithMessage("ProviderIdentity must include Provider and ProviderAccountID")
 	}
 	var ident *Identity
-	err := db.RunInTx(ctx, m.idStore.DB(), func(txCtx context.Context) error {
+	err := m.h.RunInTx(ctx, func(txCtx context.Context) error {
 		i, err := m.linkIdentityTx(txCtx, userID, pi)
 		if err != nil {
 			return err
@@ -369,8 +370,7 @@ func (m *Module) linkIdentityTx(ctx context.Context, userID string, pi *Provider
 		Profile:           datatypes.JSON(raw),
 		LastUsedAt:        time.Now(),
 	}
-	txDB := db.DBFromContext(ctx)
-	if err := m.idStore.WithTx(txDB).Create(ctx, ident); err != nil {
+	if err := m.idStore.Create(ctx, ident); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
 			return nil, apierr.ErrConflict.WithMessage("该 OAuth 账号已绑定到另一个用户")
 		}
@@ -396,7 +396,7 @@ func (m *Module) UnlinkIdentity(ctx context.Context, userID, identityID string) 
 		return apierr.ErrInvalidArgument.WithMessage("userID and identityID are required")
 	}
 
-	return db.RunInTx(ctx, m.idStore.DB(), func(txCtx context.Context) error {
+	return m.h.RunInTx(ctx, func(txCtx context.Context) error {
 		txDB := db.DBFromContext(txCtx)
 
 		// Row-lock the user; serializes concurrent unlinks on the same
@@ -445,7 +445,7 @@ func (m *Module) UnlinkIdentity(ctx context.Context, userID, identityID string) 
 				"至少保留一种登录方式(密码或 OAuth)")
 		}
 
-		return m.idStore.WithTx(txDB).Delete(txCtx, store.RID(identityID))
+		return m.idStore.Delete(txCtx, store.RID(identityID))
 	})
 }
 

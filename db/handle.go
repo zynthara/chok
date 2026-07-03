@@ -72,7 +72,7 @@ func (h *DB) Unsafe(ctx context.Context) *gorm.DB {
 // operations called with txCtx join automatically; nested calls reuse
 // the outer transaction. See the package-level RunInTx for details.
 func (h *DB) RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error {
-	return RunInTx(ctx, h.gdb, fn)
+	return RunInTx(ctx, h, fn)
 }
 
 // Migrate runs gorm AutoMigrate plus SoftUnique index creation over

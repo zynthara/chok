@@ -8,6 +8,7 @@ import (
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/auth"
 	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/db/dbtest"
 	"github.com/zynthara/chok/v2/log"
 )
 
@@ -35,7 +36,7 @@ func setupProductStore(t *testing.T, scopes ...ScopeFunc) *Store[Product] {
 	for _, s := range scopes {
 		opts = append(opts, WithScope(s))
 	}
-	return New[Product](gdb, log.Empty(), opts...)
+	return New[Product](db.Wrap(gdb), log.Empty(), opts...)
 }
 
 func userCtx(subject string, roles ...string) context.Context {
@@ -279,9 +280,16 @@ func TestCreate_NoAuth_OwnerIDEmpty(t *testing.T) {
 	// This will fail on DB NOT NULL — that's correct (fail-closed at DB level).
 	gdb := setupDB(t)
 	// Use a table without NOT NULL to test the fill logic in isolation.
-	gdb.Exec("CREATE TABLE products (id INTEGER PRIMARY KEY, rid TEXT UNIQUE, version INTEGER DEFAULT 1, created_at DATETIME, updated_at DATETIME, owner_id TEXT, name TEXT)")
+	// Hand-rolled DDL needs a per-dialect autoincrement PK (SQLite's
+	// INTEGER PRIMARY KEY rowid vs Postgres BIGSERIAL) and TIMESTAMP
+	// instead of sqlite's DATETIME.
+	idCol := "INTEGER PRIMARY KEY"
+	if dbtest.Driver() == "postgres" {
+		idCol = "BIGSERIAL PRIMARY KEY"
+	}
+	gdb.Exec("CREATE TABLE products (id " + idCol + ", rid TEXT UNIQUE, version INTEGER DEFAULT 1, created_at TIMESTAMP, updated_at TIMESTAMP, owner_id TEXT, name TEXT)")
 
-	s := New[Product](gdb, log.Empty(), WithQueryFields("id", "name"))
+	s := New[Product](db.Wrap(gdb), log.Empty(), WithQueryFields("id", "name"))
 
 	p := &Product{Name: "orphan"}
 	if err := s.Create(context.Background(), p); err != nil {
@@ -320,7 +328,7 @@ func TestScopedDB_AppliesOwnerScope(t *testing.T) {
 	}
 
 	// Alice's ScopedDB should only see her record.
-	q, err := s.ScopedDB(aliceCtx)
+	q, err := s.Unsafe(aliceCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +344,7 @@ func TestScopedDB_AppliesOwnerScope(t *testing.T) {
 func TestScopedDB_UnauthenticatedFailsClosed(t *testing.T) {
 	s := setupProductStore(t)
 
-	_, err := s.ScopedDB(context.Background())
+	_, err := s.Unsafe(context.Background())
 	if err == nil {
 		t.Fatal("expected ScopedDB to fail without principal in ctx")
 	}
@@ -349,7 +357,7 @@ func TestScopedDB_UnauthenticatedFailsClosed(t *testing.T) {
 func TestScopedDB_NonOwnedModel_NoError(t *testing.T) {
 	// Item has no OwnerScope — ScopedDB works without auth.
 	s := setupItemStore(t)
-	q, err := s.ScopedDB(context.Background())
+	q, err := s.Unsafe(context.Background())
 	if err != nil {
 		t.Fatalf("non-owned model ScopedDB should not require auth: %v", err)
 	}

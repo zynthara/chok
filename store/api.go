@@ -330,14 +330,12 @@ func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption)
 		}
 		return newVersionConflictError(by, cfg.version)
 	}
-	// Only fire after-hooks when a row was actually deleted. A no-op
-	// idempotent delete (RowsAffected==0 without version) should not
-	// trigger audit/cache hooks.
+	// Only publish when a row was actually deleted. A no-op idempotent
+	// delete (RowsAffected==0 without version) must not emit an event —
+	// audit/cache subscribers would record a deletion that never
+	// happened (v1's after-hook gate, carried over).
 	if result.RowsAffected > 0 {
-		for _, h := range s.hooks.afterDelete {
-			h := h
-			s.safeAfterHook(func() { h(ctx, by) })
-		}
+		s.publishChanged(ctx, EntityChanged[T]{Op: OpDelete, Locator: by})
 	}
 	return nil
 }
@@ -412,10 +410,10 @@ func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflictColumns []string,
 	}).Create(obj).Error; err != nil {
 		return mapError(err)
 	}
-	for _, h := range s.hooks.afterCreate {
-		h := h
-		s.safeAfterHook(func() { h(ctx, obj) })
-	}
+	// OpCreate regardless of which conflict path ran — v1 fired the
+	// after-create hooks for upserts, and the SQL doesn't report which
+	// branch was taken.
+	s.publishChanged(ctx, createdEvent(obj))
 	return nil
 }
 
@@ -442,10 +440,7 @@ func (s *Store[T]) finalizeUpdate(ctx context.Context, by Locator, result *gorm.
 		}
 		return newNotFoundError(by)
 	}
-	for _, h := range s.hooks.afterUpdate {
-		h := h
-		s.safeAfterHook(func() { h(ctx, by, changes) })
-	}
+	s.publishChanged(ctx, EntityChanged[T]{Op: OpUpdate, Locator: by, Changes: changes})
 	return nil
 }
 

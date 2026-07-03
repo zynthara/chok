@@ -19,6 +19,7 @@ import (
 	"github.com/zynthara/chok/v2/auth"
 	"github.com/zynthara/chok/v2/auth/jwt"
 	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/db"
 	handler "github.com/zynthara/chok/v2/internal/ginresidue"
 	"github.com/zynthara/chok/v2/log"
 	middleware "github.com/zynthara/chok/v2/internal/ginresidue"
@@ -58,6 +59,7 @@ type Sender interface {
 type Module struct {
 	jwt             *jwt.Manager
 	resetJWT        *jwt.Manager // short-lived tokens for password reset
+	h               *db.DB       // v2 thin handle wrapping the gdb New received; tx root for OAuth flows
 	userStore       *store.Store[User]
 	publicStore     *store.Store[User]
 	idStore         *store.Store[Identity] // OAuth identities; populated regardless of provider count
@@ -241,11 +243,17 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 		return nil, err
 	}
 
+	// h bridges this v1-residue module onto the v2 data layer: stores
+	// take the thin handle, and OAuth flows use it as the RunInTx root.
+	// account keeps its *gorm.DB constructor signature until its own M4
+	// migration; db.Wrap is the sanctioned transition shim.
+	h := db.Wrap(gdb)
+
 	// userStore is Module-private: full UpdateFields whitelist so internal
 	// flows (changePassword, resetPassword, UpdateUserRoles, ...) can write
 	// every column. Sensitive writes are gated by Module methods, not by the
 	// store layer.
-	userStore := store.New[User](gdb, logger,
+	userStore := store.New[User](h, logger,
 		store.WithQueryFields("id", "email", "name", "email_verified", "created_at"),
 		store.WithUpdateFields("name", "email", "email_verified", "password_hash", "has_password", "password_version", "roles", "active"),
 	)
@@ -255,7 +263,7 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 	// store.ErrUnknownUpdateField. This is store-API-level enforcement;
 	// raw gorm via Module.Store().DB() remains an escape hatch (see
 	// Module struct doc).
-	publicStore := store.New[User](gdb, logger,
+	publicStore := store.New[User](h, logger,
 		store.WithQueryFields("id", "email", "name", "email_verified", "created_at"),
 		store.WithUpdateFields("name", "email"),
 	)
@@ -263,7 +271,7 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 	// flows, but having the store ready means switching deployments from
 	// password-only to OAuth at runtime needs no Module surgery. Schema
 	// is created by parts.AccountComponent.Migrate (Phase 2 update).
-	idStore := store.New[Identity](gdb, logger,
+	idStore := store.New[Identity](h, logger,
 		store.WithQueryFields("id", "user_id", "provider", "provider_account_id", "email", "last_used_at"),
 		store.WithUpdateFields("email", "profile", "last_used_at"),
 	)
@@ -285,6 +293,7 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 	}
 
 	m := &Module{
+		h:                        h,
 		jwt:                      jwtMgr,
 		resetJWT:                 resetMgr,
 		userStore:                userStore,

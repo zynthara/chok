@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"reflect"
-	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +15,7 @@ import (
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/kernel/event"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store/where"
 )
@@ -140,8 +139,18 @@ type ScopeFunc func(ctx context.Context, db *gorm.DB) (*gorm.DB, error)
 
 // Store is a generic CRUD store for models embedding db.Model.
 type Store[T db.Modeler] struct {
-	db               *gorm.DB
-	logger           log.Logger
+	h      *db.DB
+	logger log.Logger
+
+	// txDB pins a transaction clone (see Tx) to that transaction's
+	// handle; txCtx is the RunInTx context that created the clone, kept
+	// so event publication through the clone still stages on the
+	// transaction's after-commit buffer even when callers pass their
+	// own outer context. Both are nil on a root Store.
+	txDB  *gorm.DB
+	txCtx context.Context
+
+	bus              *event.Bus // nil unless WithBus was given
 	queryFieldMap    map[string]string // filter + order
 	updateFieldMap   map[string]string // update SET columns
 	soft             bool              // true if T embeds SoftDeleteModel
@@ -153,22 +162,20 @@ type Store[T db.Modeler] struct {
 	hooks            hooks[T]
 }
 
-// hooks holds the registered lifecycle callbacks.
+// hooks holds the registered before-callbacks.
 //
 // Before-hooks run inside the operation, before the DB write. Returning an
 // error aborts the operation — the caller sees the hook's error, no row is
 // written.
 //
-// After-hooks are fire-and-forget notifications: they run after a successful
-// DB write and cannot affect the caller's result. Typical uses: audit
-// logging, cache invalidation, async event publishing.
+// v1's after-hooks are gone (SPEC §3.5): post-write notification is the
+// event bus via WithBus — asynchronous, anchored to transaction commit.
+// Logic that must run synchronously inside the write path belongs in
+// before-hooks or explicit code around the call.
 type hooks[T any] struct {
 	beforeCreate []func(ctx context.Context, obj *T) error
 	beforeUpdate []func(ctx context.Context, loc Locator, changes Changes) error
 	beforeDelete []func(ctx context.Context, loc Locator) error
-	afterCreate  []func(ctx context.Context, obj *T)
-	afterUpdate  []func(ctx context.Context, loc Locator, changes Changes)
-	afterDelete  []func(ctx context.Context, loc Locator)
 }
 
 // StoreOption configures a Store.
@@ -179,6 +186,7 @@ type storeConfig struct {
 	updateFields        []string
 	aliases             map[string]string
 	scopes              []ScopeFunc
+	bus                 *event.Bus
 	defaultPageSize     int
 	maxPageSize         int // 0 = unlimited
 	autoQueryFields     bool
@@ -191,9 +199,6 @@ type storeConfig struct {
 	beforeCreate        []any // []func(ctx, *T) error — stored as any to avoid generic storeConfig
 	beforeUpdate        []any // []func(ctx, Locator, Changes) error
 	beforeDelete        []any // []func(ctx, Locator) error
-	afterCreate         []any // []func(ctx, *T) — fire-and-forget, no error return
-	afterUpdate         []any // []func(ctx, Locator, Changes)
-	afterDelete         []any // []func(ctx, Locator)
 }
 
 // WithScope registers a scope function applied to every read/update/delete
@@ -339,84 +344,39 @@ func WithBeforeDelete(fn func(ctx context.Context, loc Locator) error) StoreOpti
 	}
 }
 
-// WithAfterCreate registers a fire-and-forget callback that runs after a
-// successful Create. The row is already committed — the callback cannot
-// affect the caller's result. Multiple callbacks run in registration order.
+// WithBus opts the Store into publishing EntityChanged[T] events on the
+// given bus after successful writes (SPEC §3.5). Publication is anchored
+// to transaction commit: a write inside Store.Tx / db.RunInTx stages its
+// event on the transaction's after-commit buffer — flushed in write
+// order when COMMIT succeeds, discarded wholesale on rollback — while a
+// non-transactional write publishes as soon as the operation returns
+// success. Delivery to subscribers is asynchronous (bus semantics);
+// logic that must run synchronously inside the write path belongs in
+// before-hooks.
 //
-// Typical uses: audit logging, cache invalidation, async event publishing.
-func WithAfterCreate[T db.Modeler](fn func(ctx context.Context, obj *T)) StoreOption {
-	return func(c *storeConfig) {
-		c.afterCreate = append(c.afterCreate, any(fn))
+// The bus is injected explicitly — never discovered from ctx or the DB
+// handle — keeping this the store package's single kernel touch point:
+//
+//	posts := store.New[Post](db.From(k), k.Logger(),
+//	    store.WithQueryFields(...), store.WithBus(k.Bus()))
+func WithBus(b *event.Bus) StoreOption {
+	if b == nil {
+		panic("store: WithBus bus must not be nil")
 	}
+	return func(c *storeConfig) { c.bus = b }
 }
 
-// WithAfterUpdate registers a fire-and-forget callback that runs after a
-// successful Update. The row is already committed.
-func WithAfterUpdate(fn func(ctx context.Context, loc Locator, changes Changes)) StoreOption {
-	return func(c *storeConfig) {
-		c.afterUpdate = append(c.afterUpdate, any(fn))
+// New creates a Store bound to the given database handle. T must be a
+// struct type (not a pointer). Panics if T is a pointer type or has an
+// invalid RIDPrefix.
+//
+// The first parameter is the v2 thin handle — obtain it from the db
+// module (db.From(k)) or db.Open; this is the only store signature
+// change from v1 (SPEC §5.1).
+func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[T] {
+	if h == nil {
+		panic("store.New: nil *db.DB handle (use db.From(k) or db.Open)")
 	}
-}
-
-// WithAfterDelete registers a fire-and-forget callback that runs after a
-// successful Delete. The row is already committed.
-func WithAfterDelete(fn func(ctx context.Context, loc Locator)) StoreOption {
-	return func(c *storeConfig) {
-		c.afterDelete = append(c.afterDelete, any(fn))
-	}
-}
-
-// Submitter is the interface for async task dispatch (satisfied by
-// *scheduler.Pool). Kept minimal to avoid importing the scheduler package.
-type Submitter interface {
-	SubmitFunc(ctx context.Context, name string, fn func(context.Context) error) error
-}
-
-// WithAsyncAfterCreate wraps fn in a Pool.SubmitFunc call so the hook runs
-// asynchronously in the Pool's worker goroutines instead of blocking the
-// request. The pool must be initialized before the Store is used.
-func WithAsyncAfterCreate[T db.Modeler](pool Submitter, fn func(ctx context.Context, obj *T)) StoreOption {
-	syncFn := func(ctx context.Context, obj *T) {
-		objCopy := *obj // shallow copy to avoid data race
-		_ = pool.SubmitFunc(ctx, "after_create", func(taskCtx context.Context) error {
-			fn(taskCtx, &objCopy)
-			return nil
-		})
-	}
-	return func(c *storeConfig) {
-		c.afterCreate = append(c.afterCreate, any(syncFn))
-	}
-}
-
-// WithAsyncAfterUpdate wraps fn in a Pool.SubmitFunc call.
-func WithAsyncAfterUpdate(pool Submitter, fn func(ctx context.Context, loc Locator, changes Changes)) StoreOption {
-	syncFn := func(ctx context.Context, loc Locator, changes Changes) {
-		_ = pool.SubmitFunc(ctx, "after_update", func(taskCtx context.Context) error {
-			fn(taskCtx, loc, changes)
-			return nil
-		})
-	}
-	return func(c *storeConfig) {
-		c.afterUpdate = append(c.afterUpdate, any(syncFn))
-	}
-}
-
-// WithAsyncAfterDelete wraps fn in a Pool.SubmitFunc call.
-func WithAsyncAfterDelete(pool Submitter, fn func(ctx context.Context, loc Locator)) StoreOption {
-	syncFn := func(ctx context.Context, loc Locator) {
-		_ = pool.SubmitFunc(ctx, "after_delete", func(taskCtx context.Context) error {
-			fn(taskCtx, loc)
-			return nil
-		})
-	}
-	return func(c *storeConfig) {
-		c.afterDelete = append(c.afterDelete, any(syncFn))
-	}
-}
-
-// New creates a Store. T must be a struct type (not a pointer).
-// Panics if T is a pointer type or has an invalid RIDPrefix.
-func New[T db.Modeler](gdb *gorm.DB, logger log.Logger, opts ...StoreOption) *Store[T] {
 	t := reflect.TypeOf((*T)(nil)).Elem()
 
 	// Reject pointer types: store.New[*User] is a programming error.
@@ -571,8 +531,9 @@ func New[T db.Modeler](gdb *gorm.DB, logger log.Logger, opts ...StoreOption) *St
 	}
 
 	s := &Store[T]{
-		db:               gdb,
+		h:                h,
 		logger:           logger,
+		bus:              cfg.bus,
 		queryFieldMap:    queryFieldMap,
 		updateFieldMap:   updateFieldMap,
 		soft:             db.IsSoftDeleteModel(model),
@@ -607,48 +568,7 @@ func New[T db.Modeler](gdb *gorm.DB, logger log.Logger, opts ...StoreOption) *St
 		}
 		s.hooks.beforeDelete = append(s.hooks.beforeDelete, h)
 	}
-	for i, fn := range cfg.afterCreate {
-		h, ok := fn.(func(context.Context, *T))
-		if !ok {
-			panic(fmt.Sprintf("store: afterCreate hook #%d has wrong type %T, expected func(context.Context, *%s)", i, fn, t.Name()))
-		}
-		s.hooks.afterCreate = append(s.hooks.afterCreate, h)
-	}
-	for i, fn := range cfg.afterUpdate {
-		h, ok := fn.(func(context.Context, Locator, Changes))
-		if !ok {
-			panic(fmt.Sprintf("store: afterUpdate hook #%d has wrong type %T", i, fn))
-		}
-		s.hooks.afterUpdate = append(s.hooks.afterUpdate, h)
-	}
-	for i, fn := range cfg.afterDelete {
-		h, ok := fn.(func(context.Context, Locator))
-		if !ok {
-			panic(fmt.Sprintf("store: afterDelete hook #%d has wrong type %T", i, fn))
-		}
-		s.hooks.afterDelete = append(s.hooks.afterDelete, h)
-	}
-
 	return s
-}
-
-// safeAfterHook calls fn with panic recovery. After-hooks are
-// fire-and-forget; a panic in a hook must not crash the request handler.
-// Panics are logged through the Store's logger when present; otherwise
-// they are reported to stderr so they never vanish into silence.
-func (s *Store[T]) safeAfterHook(fn func()) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			return
-		}
-		if s.logger != nil {
-			s.logger.Error("store: after-hook panicked", "panic", r, "stack", string(debug.Stack()))
-			return
-		}
-		fmt.Fprintf(os.Stderr, "store: after-hook panicked: %v\n%s\n", r, debug.Stack())
-	}()
-	fn()
 }
 
 // Create inserts a new record.
@@ -667,10 +587,7 @@ func (s *Store[T]) Create(ctx context.Context, obj *T) error {
 	if err := s.effectiveDB(ctx).Create(obj).Error; err != nil {
 		return mapError(err)
 	}
-	for _, h := range s.hooks.afterCreate {
-		h := h
-		s.safeAfterHook(func() { h(ctx, obj) })
-	}
+	s.publishChanged(ctx, createdEvent(obj))
 	return nil
 }
 
@@ -713,29 +630,23 @@ func (s *Store[T]) BatchCreate(ctx context.Context, objs []*T) error {
 			}
 		}
 	}
-	baseDB := s.effectiveDB(ctx)
-	// If already inside a context-scoped transaction, skip wrapping in a
-	// new one — effectiveDB returns the tx handle directly.
-	doCreate := func(gdb *gorm.DB) error {
-		return gdb.CreateInBatches(objs, 100).Error
-	}
+	// Already inside a transaction (context-scoped or a Tx clone):
+	// write directly so the batch stays atomic with the caller's
+	// transaction. Otherwise open one so a mid-batch failure rolls the
+	// whole batch back (v1 semantics).
 	var err error
-	if db.DBFromContext(ctx) != nil {
-		err = doCreate(baseDB)
+	if db.DBFromContext(ctx) != nil || s.txDB != nil {
+		err = s.effectiveDB(ctx).CreateInBatches(objs, 100).Error
 	} else {
-		err = db.Transaction(ctx, baseDB, func(tx *gorm.DB) error {
-			return doCreate(tx)
+		err = s.h.RunInTx(ctx, func(txCtx context.Context) error {
+			return s.effectiveDB(txCtx).CreateInBatches(objs, 100).Error
 		})
 	}
 	if err != nil {
 		return mapError(err)
 	}
 	for _, obj := range objs {
-		for _, h := range s.hooks.afterCreate {
-			h := h
-			obj := obj
-			s.safeAfterHook(func() { h(ctx, obj) })
-		}
+		s.publishChanged(ctx, createdEvent(obj))
 	}
 	return nil
 }
@@ -928,72 +839,68 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	return page, nil
 }
 
-// Tx runs fn inside a transaction scoped to this Store. fn receives
-// a Store bound to the transaction's DB handle.
+// Tx runs fn inside a transaction scoped to this Store. fn receives a
+// Store clone bound to the transaction — its operations hit the
+// transaction no matter which context they are called with, and its
+// WithBus events stage on the transaction's after-commit buffer.
 //
 // If a context-scoped transaction is already active (via db.RunInTx),
-// Tx reuses it instead of opening a nested transaction. The txCtx is
-// threaded through db.RunInTx so that any other Store / helper called
-// with txCtx inside fn will also join the same transaction — matching
-// the contract of db.RunInTx.
+// Tx reuses it instead of opening a nested transaction. Cross-store
+// atomic writes are context propagation's job: inside a db.RunInTx
+// callback, call any store with txCtx and it joins the same
+// transaction — v1's WithTx wiring is gone (SPEC §5.1).
 func (s *Store[T]) Tx(ctx context.Context, fn func(tx *Store[T]) error) error {
-	return db.RunInTx(ctx, s.db, func(txCtx context.Context) error {
-		tx := db.DBFromContext(txCtx)
-		return fn(s.withDB(tx))
+	return db.RunInTx(ctx, s.h, func(txCtx context.Context) error {
+		return fn(s.txClone(txCtx))
 	})
 }
 
-// WithTx creates a new Store sharing config but using an external transaction.
-// Useful for cross-Store transactions.
-func (s *Store[T]) WithTx(tx *gorm.DB) *Store[T] {
-	return s.withDB(tx)
-}
-
-// DB returns the underlying *gorm.DB as an escape hatch for complex queries.
-// The returned handle has NO scopes applied — use ScopedDB when you need
-// OwnerScope / custom scopes to remain in force.
-func (s *Store[T]) DB() *gorm.DB {
-	return s.db
-}
-
-// ScopedDB returns a *gorm.DB with WithContext(ctx) applied and all registered
-// scopes (including auto-detected OwnerScope) evaluated.
-//
-// Use this when writing custom queries on an extended Store wrapper — e.g.:
+// Unsafe returns a raw *gorm.DB — transaction-aware (context
+// transaction first, then a Tx clone's binding, then the root pool)
+// with WithContext(ctx) and every registered scope (auto-detected
+// OwnerScope included) applied. It replaces v1's DB()/ScopedDB() pair
+// as the single escape hatch (SPEC §5.2); the name is the warning:
+// the update whitelist, owner enforcement and optimistic locking do
+// NOT apply to what you run on it.
 //
 //	func (s *BookshelfStore) FindByBookID(ctx context.Context, id uint) (*Item, error) {
-//	    q, err := s.ScopedDB(ctx)
+//	    q, err := s.Unsafe(ctx)
 //	    if err != nil { return nil, err }
 //	    var item Item
 //	    return &item, q.Where("book_id = ?", id).First(&item).Error
 //	}
 //
-// Scope errors (e.g. ErrUnauthenticated from OwnerScope with no principal in
-// ctx) are returned to the caller; do NOT fall back to s.DB() on error — that
-// would leak cross-tenant data.
-func (s *Store[T]) ScopedDB(ctx context.Context) (*gorm.DB, error) {
+// Scope errors (e.g. ErrUnauthenticated from OwnerScope with no
+// principal in ctx) are returned; do NOT fall back to a scope-free
+// handle on error — that would leak cross-tenant data.
+func (s *Store[T]) Unsafe(ctx context.Context) (*gorm.DB, error) {
 	return s.applyScopes(ctx, s.effectiveDB(ctx))
 }
 
-// withDB returns a clone of s bound to a different *gorm.DB (used for
-// transactional scopes). Implemented via struct-copy so future Store
-// fields are automatically preserved in the clone — an explicit field
-// list would silently drop new state (requirePrincipal was one such
-// drift bug introduced in round-6 and caught in round-7).
-func (s *Store[T]) withDB(gdb *gorm.DB) *Store[T] {
+// txClone returns a copy of s pinned to the transaction carried by
+// txCtx. Struct-copy so future Store fields are automatically
+// preserved (an explicit field list would silently drop new state —
+// requirePrincipal was one such drift bug in v1 review round 6).
+func (s *Store[T]) txClone(txCtx context.Context) *Store[T] {
 	cp := *s
-	cp.db = gdb
+	cp.txDB = db.DBFromContext(txCtx)
+	cp.txCtx = txCtx
 	return &cp
 }
 
-// effectiveDB returns the *gorm.DB for the current operation. If a
-// context-scoped transaction was started via db.RunInTx, the transaction
-// handle is used; otherwise the Store's own connection is used.
+// effectiveDB returns the *gorm.DB for the current operation:
+// the context's transaction when one is active (db.RunInTx
+// propagation), else the clone's pinned transaction (Store.Tx), else
+// the root pool. The ordering matches v1: an explicit transactional
+// context always wins.
 func (s *Store[T]) effectiveDB(ctx context.Context) *gorm.DB {
 	if tx := db.DBFromContext(ctx); tx != nil {
 		return tx.WithContext(ctx)
 	}
-	return s.db.WithContext(ctx)
+	if s.txDB != nil {
+		return s.txDB.WithContext(ctx)
+	}
+	return s.h.Unsafe(ctx)
 }
 
 // applyScopes runs all registered ScopeFuncs against the given DB.

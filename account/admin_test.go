@@ -98,7 +98,7 @@ func TestMarkEmailVerified_NotFound(t *testing.T) {
 // no-op UPDATE path is still hit on the second call).
 func TestMarkEmailVerified_ConcurrentDoesNotSpurious404(t *testing.T) {
 	m, r := setupModule(t)
-	sqlDB, err := m.userStore.DB().DB()
+	sqlDB, err := m.h.Unsafe(context.Background()).DB()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestBumpPasswordVersion_Concurrent(t *testing.T) {
 	// NOT exercise true parallelism; it is a smoke test that the API
 	// path stays correct under repeated invocation. Real concurrency
 	// validation belongs in a MySQL/Postgres integration test.
-	sqlDB, err := m.userStore.DB().DB()
+	sqlDB, err := m.h.Unsafe(context.Background()).DB()
 	if err != nil {
 		t.Fatal(err)
 	}

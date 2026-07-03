@@ -73,15 +73,19 @@ func Close(gdb *gorm.DB) error {
 	return sqlDB.Close()
 }
 
-// Transaction wraps fn in Begin/Commit/Rollback.
+// runTransaction wraps fn in Begin/Commit/Rollback.
 // ctx is propagated to all DB operations inside fn.
+//
+// Internal since v2: the public transaction model is RunInTx's context
+// propagation — a second bare Begin/Commit surface was exactly the
+// v1 ambiguity SPEC §5.1 removes.
 //
 // On panic, the transaction is rolled back before re-raising. A failure
 // of the rollback itself (e.g. driver hung, connection already torn) is
 // surfaced through gorm's logger so the panic frame still reaches the
 // caller intact — wrapping the error into the panic would change the
 // observable type and confuse recover() handlers upstream.
-func Transaction(ctx context.Context, gdb *gorm.DB, fn func(tx *gorm.DB) error) error {
+func runTransaction(ctx context.Context, gdb *gorm.DB, fn func(tx *gorm.DB) error) error {
 	tx := gdb.WithContext(ctx).Begin(&sql.TxOptions{})
 	if tx.Error != nil {
 		return tx.Error
@@ -120,15 +124,15 @@ func Transaction(ctx context.Context, gdb *gorm.DB, fn func(tx *gorm.DB) error) 
 
 type txCtxKey struct{}
 
-// RunInTx begins a transaction on gdb, stores the *gorm.DB in ctx, and
-// passes the enriched context to fn. Code inside fn — including Store
-// methods — automatically detects and uses the transaction via
-// DBFromContext. If fn returns an error or panics, the transaction is
-// rolled back; otherwise it is committed.
+// RunInTx begins a transaction on h, stores it in the derived context,
+// and passes that context to fn. Code inside fn — including Store
+// methods — automatically detects and joins the transaction. If fn
+// returns an error or panics, the transaction is rolled back;
+// otherwise it is committed. This context propagation is the only v2
+// transaction model (SPEC §5.1); cross-store atomic writes need no
+// wiring beyond passing txCtx:
 //
-// RunInTx enables cross-Store transactions without manual WithTx wiring:
-//
-//	db.RunInTx(ctx, gdb, func(txCtx context.Context) error {
+//	db.RunInTx(ctx, h, func(txCtx context.Context) error {
 //	    userStore.Create(txCtx, &user)   // uses tx from txCtx
 //	    orderStore.Create(txCtx, &order) // same transaction
 //	    return nil
@@ -140,7 +144,13 @@ type txCtxKey struct{}
 // AfterCommit): callbacks staged inside fn run — in order, with the
 // parent ctx — only after COMMIT succeeds, and are discarded wholesale
 // on rollback or panic.
-func RunInTx(ctx context.Context, gdb *gorm.DB, fn func(txCtx context.Context) error) error {
+func RunInTx(ctx context.Context, h *DB, fn func(txCtx context.Context) error) error {
+	return runInTxGorm(ctx, h.gdb, fn)
+}
+
+// runInTxGorm is RunInTx over a raw handle — shared by the public
+// entrypoint and in-package callers that predate the thin handle.
+func runInTxGorm(ctx context.Context, gdb *gorm.DB, fn func(txCtx context.Context) error) error {
 	// If there's already a transaction in context, reuse it — including
 	// its staging buffer, so events flush only at the outermost commit.
 	if _, ok := ctx.Value(txCtxKey{}).(*gorm.DB); ok {
@@ -148,7 +158,7 @@ func RunInTx(ctx context.Context, gdb *gorm.DB, fn func(txCtx context.Context) e
 	}
 
 	pending := &txPending{}
-	err := Transaction(ctx, gdb, func(tx *gorm.DB) error {
+	err := runTransaction(ctx, gdb, func(tx *gorm.DB) error {
 		txCtx := context.WithValue(ctx, txCtxKey{}, tx)
 		txCtx = context.WithValue(txCtx, txPendingKey{}, pending)
 		return fn(txCtx)
