@@ -66,7 +66,18 @@ func (r *RedisComponent) Init(ctx context.Context, k component.Kernel) error {
 	if opts == nil {
 		return nil
 	}
-	client, err := redis.New(opts)
+	// v1→v2 shim: the redis package's constructor takes its own Options
+	// type since the M4 module migration. This glue dies with parts/.
+	client, err := redis.New(redis.Options{
+		Addr:         opts.Addr,
+		Password:     opts.Password,
+		DB:           opts.DB,
+		DialTimeout:  opts.DialTimeout,
+		ReadTimeout:  opts.ReadTimeout,
+		WriteTimeout: opts.WriteTimeout,
+		PoolTimeout:  opts.PoolTimeout,
+		PoolSize:     opts.PoolSize,
+	})
 	if err != nil {
 		return fmt.Errorf("redis init: %w", err)
 	}
