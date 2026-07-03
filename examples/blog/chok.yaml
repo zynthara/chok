@@ -1,0 +1,33 @@
+# blog — the chok v2 quickstart example.
+#
+# Sections present here are what the binary assembles (chok sync keeps
+# chok_modules_gen.go in step); `enabled` inside a section is the
+# runtime switch. Every leaf is env-overridable: BLOG_HTTP_ADDR,
+# BLOG_DB_SQLITE_PATH, BLOG_LOG_LEVEL, ...
+
+log:
+  level: info
+  format: json
+
+http:
+  addr: ":8080"
+
+db:
+  driver: sqlite
+  migrate: auto
+  sqlite:
+    path: blog.db
+
+health:
+  path: /healthz
+
+metrics:
+  path: /metrics
+
+swagger:
+  title: "Blog API"
+
+account:
+  # Example-only key (32+ bytes). Real deployments inject
+  # BLOG_ACCOUNT_SIGNING_KEY instead of committing a secret.
+  signing_key: blog-example-signing-key-32-bytes-min!

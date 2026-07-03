@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/log"
 )
@@ -433,4 +434,42 @@ func TestWithConfigWatch_NoPath_IsNoOp(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	cancel()
 	awaitNil(t, done)
+}
+
+// --- WithErrorMapper handshake ----------------------------------------------
+
+// mapperSink is an assembled component that consumes the per-App
+// error-mapper registry (the web module's role in production).
+type mapperSink struct {
+	testComp
+	got *apierr.MapperRegistry
+}
+
+func (m *mapperSink) AttachErrorMappers(reg *apierr.MapperRegistry) { m.got = reg }
+
+// TestWithErrorMapper_ReachesAttachConsumer pins the assembly
+// handshake the blog rebuild exposed as missing: WithErrorMapper was
+// a silent no-op because nothing ever called AttachErrorMappers on
+// the assembled components. Regression for the M5 fix.
+func TestWithErrorMapper_ReachesAttachConsumer(t *testing.T) {
+	sink := &mapperSink{testComp: testComp{kind: "mapper-sink"}}
+	mapped := apierr.ErrConflict.WithMessage("mapped")
+	app := New("mapper-test",
+		Use(sink),
+		WithErrorMapper(func(err error) *apierr.Error { return mapped }),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(ctx) }()
+	waitTrue(t, func() bool { return sink.got != nil }, "AttachErrorMappers never called during assembly")
+
+	if got := sink.got.Resolve(errors.New("anything")); got == nil || got.Message != "mapped" {
+		t.Fatalf("attached registry must carry the WithErrorMapper mapper, got %v", got)
+	}
+
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 }

@@ -313,6 +313,18 @@ func (a *App) assemble() error {
 		return err
 	}
 
+	// Hand the per-App error-mapper registry to whichever assembled
+	// component consumes it (the web module's middleware stack) — a
+	// structural handshake, so the kernel keeps knowing no names and
+	// WithErrorMapper works for any RouterProvider implementation.
+	if a.errorMappers != nil {
+		for _, c := range comps {
+			if am, ok := c.(interface{ AttachErrorMappers(*apierr.MapperRegistry) }); ok {
+				am.AttachErrorMappers(a.errorMappers)
+			}
+		}
+	}
+
 	loader := conf.NewLoader(a.name, a.envPrefix)
 	if a.configFile != "" {
 		loader.SetPath(a.configFile)

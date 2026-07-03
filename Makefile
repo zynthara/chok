@@ -60,12 +60,30 @@ cover: ## Generate a coverage report at _output/coverage.html
 	$(GO) tool cover -html=$(OUTPUT_DIR)/coverage.out -o $(OUTPUT_DIR)/coverage.html
 	@echo "==> Coverage report: $(OUTPUT_DIR)/coverage.html"
 
+# Build first, then signal the binary directly: `go run ... & kill -INT $$!`
+# signals the go-run wrapper and orphans the app (M4 verification bite).
 .PHONY: smoke
-smoke: ## Boot the current milestone fixture as a self-check (blog returns in M5)
-	@echo "==> Smoke testing internal/fixture/m4..."
-	@( $(GO) run ./internal/fixture/m4 & \
-	   PID=$$!; sleep 3; kill -INT $$PID 2>/dev/null; wait $$PID 2>/dev/null; \
-	   echo "==> m4 fixture start-up smoke OK" )
+smoke: ## Boot examples/blog briefly as a self-check
+	@echo "==> Smoke testing examples/blog..."
+	@mkdir -p $(BIN_DIR)
+	@$(GO) build $(GOFLAGS) -o $(BIN_DIR)/blog-smoke ./examples/blog
+	@( BLOG_CONFIG=examples/blog/chok.yaml \
+	   BLOG_HTTP_ADDR=127.0.0.1:18080 \
+	   BLOG_HTTP_DRAIN_DELAY=100ms \
+	   BLOG_DB_SQLITE_PATH=$(OUTPUT_DIR)/blog-smoke.db \
+	   $(BIN_DIR)/blog-smoke & \
+	   PID=$$!; ok=0; \
+	   for i in $$(seq 1 30); do \
+	     curl -sf -m 1 http://127.0.0.1:18080/healthz >/dev/null 2>&1 && { ok=1; break; }; \
+	     sleep 0.5; \
+	   done; \
+	   kill -INT $$PID 2>/dev/null; wait $$PID; rc=$$?; \
+	   rm -f $(OUTPUT_DIR)/blog-smoke.db; \
+	   if [ $$ok -eq 1 ] && [ $$rc -eq 0 ]; then \
+	     echo "==> blog smoke OK (healthz 200, clean SIGINT exit)"; \
+	   else \
+	     echo "==> blog smoke FAILED (healthz_ok=$$ok exit=$$rc)"; exit 1; \
+	   fi )
 
 ##@ Lint & Format
 

@@ -12,6 +12,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"os"
 
 	"github.com/zynthara/chok/v2"
 	"github.com/zynthara/chok/v2/db"
@@ -40,11 +41,16 @@ func (Note) RIDPrefix() string { return "note" }
 var migrationsRaw embed.FS
 
 func main() {
+	// chok resolves {{.NameUpper}}_CONFIG → ./{{.Name}}.yaml → ./configs/…;
+	// default the env slot to the branded chok.yaml so `go run .` works
+	// while operators keep the override.
+	if os.Getenv("{{.NameUpper}}_CONFIG") == "" {
+		_ = os.Setenv("{{.NameUpper}}_CONFIG", "chok.yaml")
+	}
 	migrations, _ := fs.Sub(migrationsRaw, "migrations")
 
 	chok.New("{{.Name}}",
 		chokModules(), // generated from chok.yaml — rerun `chok sync` after editing it
-		chok.WithConfigFile("chok.yaml"),
 		// Override replaces the generated db entry with one that knows
 		// your tables — the pattern for customizing any synced module.
 		chok.Override(db.Module(

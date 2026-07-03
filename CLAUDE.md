@@ -103,14 +103,13 @@ blessed implementation per capability, configuration over code.
 - Run `go test ./... && go vet ./...` before committing
 - For review-driven fixes, name tests after the issue:
   `TestX_RoundNDescription` or `TestFix_RoundNX_<issue>`
-- The full suite must pass; during the v2 transition (M1-M4) the
-  **current milestone's fixture app** must start cleanly instead of
-  the blog smoke test (`examples/blog` is archived as
-  `examples/_v1_blog`, build-ignored; blog is rebuilt on the v2 API
-  in M5 and the smoke discipline returns then).
-  Current fixture: `go run ./internal/fixture/m4` (from the repo
-  root) and Ctrl-C; store/db changes also run the Postgres lane
+- The full suite must pass, and **`examples/blog` must start cleanly**
+  after framework-level changes — `make smoke` boots it, waits for
+  `/healthz` and SIGINTs (the blog acceptance test walks the full
+  README path in CI too). store/db changes also run the Postgres lane
   (`make test-pg` with `CHOK_TEST_PG_DSN`, or let CI's service run it).
+  `internal/fixture/m1-m4` stay as milestone regression tests; they
+  are no longer the smoke vehicle.
 
 ## Where things live
 
@@ -118,8 +117,7 @@ blessed implementation per capability, configuration over code.
 |---|---|
 | `chok.go` | v2 App thin shell: New / Use / Routes / Section / Run |
 | `options.go` | `WithXxx` constructors |
-| `config.go` | config loading + validation (`SelfValidating` recursion stop) |
-| `kernel/` + `conf/` | v2 control plane: Descriptor / actor Registry / RCU config |
+| `kernel/` + `conf/` | v2 control plane: Descriptor / actor Registry / RCU config (`SelfValidating` recursion stop lives in `conf/validate.go`) |
 | `db/` | v2 data module: Module/From + `*db.DB` thin handle + versioned migration engine |
 | `store/` | generic CRUD; locator + changes + scopes; opt-in `WithBus` events |
 | `store/where/` | query DSL (`resolveField` does identifier validation) |
@@ -130,8 +128,9 @@ blessed implementation per capability, configuration over code.
 | `account/` | ready-to-use user module (Module/Service/Authn) + login rate limiter |
 | `authz/` `audit/` `scheduler/` `redis/` | v2 battery modules (casbin engine room under `authz/casbin/`) |
 | `cache/` | memory + redis Chain + circuit Breaker |
-| `examples/_v1_blog/` | archived v1 example (build-ignored); blog returns on the v2 API in M5 |
+| `examples/blog/` | v2 quickstart (acceptance test = README path); smoke vehicle |
 | `examples/tasker/` | (planned) full-coverage example |
+| `cmd/chok/` + `internal/blessed/` | CLI (init/sync/migrate/docs/openapi) + the module inventory its generators consume |
 | `docs/design.md` | architecture source of truth |
 
 ## Documentation conventions
@@ -148,10 +147,9 @@ blessed implementation per capability, configuration over code.
   *"Does an external user reading this learn something they can
   act on?"* If no, it goes in `.private/`.
 - Code comments are English; design docs are Chinese (team preference)
-- New public APIs must have godoc; example-app coverage
-  (`examples/blog` quickstart / `examples/tasker` advanced) resumes
-  when the examples are rebuilt on the v2 API in M5 — during M1-M4,
-  cover new surface in the milestone fixture app instead
+- New public APIs must have godoc and, when they touch the quickstart
+  surface, coverage in `examples/blog` (advanced surface goes to
+  `examples/tasker` once it exists)
 
 ## Commit message style
 

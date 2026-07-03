@@ -17,7 +17,8 @@ differs.
 ## What chok Is
 
 chok is a Go web framework that bundles HTTP, DB, cache, auth, scheduler, and
-observability behind one config-driven application model.
+observability behind one config-driven application model. `main` is the v2
+line (module path `github.com/zynthara/chok/v2`); v1 is sealed at `v0.1.4`.
 
 The three product constraints are:
 
@@ -25,50 +26,57 @@ The three product constraints are:
 - One blessed implementation per capability.
 - Internally complex, externally trivial APIs.
 
-The blessed stack is gin, gorm, otter+badger+redis, robfig-cron, golang-jwt,
-Prometheus, and OpenTelemetry.
+The blessed stack is stdlib `http.ServeMux`, gorm, otter+redis, robfig-cron,
+golang-jwt, casbin, Prometheus, and OpenTelemetry.
 
 ## Hard Invariants
 
 - `App` is single-use: `Run` / `Execute` may be called at most once.
-- Lock order is always `reloadMu -> mu`; never acquire `mu` before
-  `reloadMu`.
+- All lifecycle transitions go through the kernel's single control
+  goroutine; reads (`Get` / `Health` / `Ready`) use the atomic view.
+  Never add locks or a second lifecycle writer.
+- Reload coalesces: overlapping triggers get `ErrReloadInProgress`.
+  Do not queue reloads.
 - Reload does not run migrations. Schema changes require restart and
   documentation.
 - Shutdown paths must preserve correlation context. Prefer
   `context.WithoutCancel(parent)` over `context.Background()`.
 - Components close in reverse topological order. Same-level components may
   close in parallel.
-- `AddCleanup` callbacks run after `registry.Stop`; they must not access
-  components.
-- Never call `k.Get(peer)` inside `Component.Close`; peer components may
-  already be unavailable.
+- Never call `k.Get(peer)` inside `Component.Close`; the kernel view has
+  already shrunk by then.
 
 ## Component Rules
 
-- Every subsystem is a Component with mandatory `Init` / `Close`.
-- Optional capabilities are narrow interfaces such as `Reloadable`,
-  `Healther`, `Router`, `Migratable`, and `ReadyChecker`.
-- New Components must declare `Dependencies` / `OptionalDependencies` when
-  they read peers during `Init`.
-- Avoid new framework-wide optional interfaces unless there is a clear,
-  repeated need.
+- Every subsystem is a Component: `Describe() Descriptor` + mandatory
+  `Init` / `Close`.
+- Optional capabilities are the kernel behavior interfaces —
+  `Reloader`, `Healther`, `Mounter`, `Migrator`, `Readier`, `Server`,
+  `Drainer` — discovered by type assertion. Add new ones in
+  `kernel/component.go` only for a clear, repeated need.
+- Declare dependencies in `Descriptor.Needs` (soft edges use
+  `Optional: true`); discover peers via `kernel.Get[T]` during `Init`.
 
 ## Config Rules
 
-- New `*Options` types must implement `config.Validatable`.
-- Discriminator config types must implement `config.SelfValidating` so the
-  recursive validator stops descending into inactive branches.
-- Avoid pointer fields in `*Options`; reload copies values onto the live
-  config and pointer fields can become stale.
+- New `*Options` types implement `conf.Validatable`; discriminator
+  types (one of N branches selected by a field) also implement
+  `conf.SelfValidating` so the recursive walker stops descending.
+- Mark secrets `sensitive:"true"`; mark hot-reloadable fields
+  `reload:"hot"` (default is restart-only).
+- Avoid pointer fields in `*Options` types.
 - Prefer config switches over Go-code switches for feature enablement.
+- After changing a module's yaml section shape, regenerate docs and
+  schema (`chok docs gen`) — CI fails on drift.
 
 ## Store And API Rules
 
 - Use `rid.New(prefix)` for externally exposed IDs. Do not leak internal
   numeric primary keys in API responses.
-- Do not bypass Store with raw `*gorm.DB` unless intentionally using
-  `s.Unsafe(ctx)` — the single escape hatch (tx-aware, scopes applied).
+- Raw gorm has exactly two doors, both named for the risk:
+  `Store.Unsafe(ctx)` (tx-aware, scopes applied, fail-closed) and
+  `(*db.DB).Unsafe(ctx)` (tx-aware, no scopes). `db.InTx(ctx)` answers
+  "am I in a transaction" without the handle.
 - Declare `WithQueryFields` / `WithUpdateFields` explicitly for production
   Stores; do not rely on fragile field auto-discovery.
 - Use `store.Fields(&obj)` when optimistic locking matters.
@@ -83,10 +91,9 @@ Prometheus, and OpenTelemetry.
 - Do not revert user changes in a dirty worktree unless explicitly asked.
 - Keep edits scoped to the requested behavior and nearby ownership boundary.
 - Follow existing package patterns before introducing new abstractions.
-- Public APIs need godoc. Example-app coverage (`examples/blog`
-  quickstart / `examples/tasker` advanced) resumes when the examples
-  are rebuilt on the v2 API in M5; during M1-M4 cover new surface in
-  the milestone fixture app.
+- Public APIs need godoc; quickstart-surface changes get coverage in
+  `examples/blog` (advanced demonstrations go to `examples/tasker`
+  once it exists).
 
 ## Testing
 
@@ -99,10 +106,11 @@ go test ./...
 go vet ./...
 ```
 
-- The full suite should pass. During the v2 transition (M1-M4) the
-  current milestone's **fixture app** must start cleanly after
-  framework-level changes; the `examples/blog` smoke test is archived
-  (`examples/_v1_blog`, build-ignored) and returns in M5.
+- The full suite should pass, and `examples/blog` must start cleanly
+  after framework-level changes (`make smoke`). The blog acceptance
+  test (`examples/blog/blog_test.go`) walks the README quickstart over
+  real HTTP. `internal/fixture/m1-m4` remain as milestone regression
+  tests, not smoke vehicles.
 
 ## Documentation
 
@@ -113,9 +121,9 @@ go vet ./...
   names because their loaders require the exact spelling.
 - Internal planning / agent SPEC drafts that should not ship to the
   public repo live under `.private/` (gitignored).
-- `examples/_v1_blog` is a frozen v1 reference — do not edit it. When
-  blog is rebuilt in M5, keep it quickstart-grade and put advanced
-  demonstrations in `examples/tasker`.
+- Generated blocks (`<!-- gen:components -->` in the READMEs and
+  design.md, `docs/config.md`, `docs/chok.schema.json`) come from
+  `chok docs gen` — edit the Descriptor/Options source, not the output.
 
 ## Review Reports
 
