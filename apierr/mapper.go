@@ -60,9 +60,26 @@ func ResetMappersForTest() {
 // for parallel tests and multi-App scenarios — each App gets its own
 // registry that doesn't interfere with other instances.
 type MapperRegistry struct {
-	mu      sync.RWMutex
-	mappers []ErrorMapper
+	mu          sync.RWMutex
+	mappers     []ErrorMapper
+	renderHooks []RenderHook
 }
+
+// RenderHook is invoked just before the handler serializes an
+// *Error to the response body. Hooks may mutate the *Error in place
+// (typically to fill ae.Message via i18n) but MUST NOT replace it.
+// Multiple hooks run in registration order; the first one to set
+// ae.Message wins by convention (later hooks check before writing).
+//
+// RenderHooks have access to the request context, so they can read
+// the current language, principal, request ID, etc. — anything the
+// app stamps onto ctx via middleware.
+//
+// The handler layer hands hooks a per-response shallow copy of the
+// resolved error, never a shared sentinel — mutations affect only the
+// response being rendered. Hooks that touch Metadata/Headers must
+// replace the map on the copy rather than writing into the shared one.
+type RenderHook func(ctx context.Context, ae *Error)
 
 // NewMapperRegistry creates an empty MapperRegistry.
 func NewMapperRegistry() *MapperRegistry {
@@ -91,6 +108,31 @@ func (r *MapperRegistry) Resolve(err error) *Error {
 	return nil
 }
 
+// RegisterRenderHook adds a render hook to this registry. Thread-safe.
+// Components that want to mutate every outgoing *Error (i18n message
+// localization, ...) register here.
+func (r *MapperRegistry) RegisterRenderHook(h RenderHook) {
+	if h == nil {
+		panic("apierr: render hook must not be nil")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.renderHooks = append(r.renderHooks, h)
+}
+
+// Render invokes every registered hook in order. Nil ae is a no-op.
+func (r *MapperRegistry) Render(ctx context.Context, ae *Error) {
+	if ae == nil {
+		return
+	}
+	r.mu.RLock()
+	hooks := append([]RenderHook(nil), r.renderHooks...)
+	r.mu.RUnlock()
+	for _, h := range hooks {
+		h(ctx, ae)
+	}
+}
+
 // --- Context-scoped mapper resolution ----------------------------------------
 
 type mapperRegistryCtxKey struct{}
@@ -117,4 +159,15 @@ func ResolveWithContext(ctx context.Context, err error) *Error {
 		}
 	}
 	return Resolve(err)
+}
+
+// RenderWithContext invokes every render hook registered on the
+// context-scoped MapperRegistry. No-op when ctx has no registry
+// (e.g. during package-level tests). Handlers call this immediately
+// before serializing *Error so hooks can fill in localized fields
+// from the request envelope.
+func RenderWithContext(ctx context.Context, ae *Error) {
+	if r := MapperRegistryFrom(ctx); r != nil {
+		r.Render(ctx, ae)
+	}
 }
