@@ -10,6 +10,40 @@ This file is maintained automatically by
 release-PR workflow is in motion. For design-level release notes (the
 *why* behind each version), see [`docs/changelog.md`](docs/changelog.md).
 
+## [0.1.4](https://github.com/zynthara/chok/compare/v0.1.3...v0.1.4) (2026-07-03)
+
+> v1 feature-freeze release. After this tag the v0.1.x line receives
+> security fixes only; `main` moves to the v2 rewrite
+> (`github.com/zynthara/chok/v2`). See
+> [`docs/changelog.md`](docs/changelog.md) for the design notes.
+
+### Features
+
+* **account:** split userStore vs publicStore + add admin APIs + AuthChain ([82e1751](https://github.com/zynthara/chok/commit/82e17519b2b4db8618d44064b6beb522405be0f8))
+* **account:** Phase 2 OAuth abstraction layer + fake-provider e2e ([9fb5de6](https://github.com/zynthara/chok/commit/9fb5de67b2d626b95665eafcf48220171f71e316))
+* **account:** Phase 3 — config-driven OAuth provider assembly ([bc14b35](https://github.com/zynthara/chok/commit/bc14b35052ae1655e66e2f9371a92a99aafad5fd))
+* **account:** bundle blessed OAuth providers by default ([26231fe](https://github.com/zynthara/chok/commit/26231fe9fb58849c1c167831ee49c32e644faebd))
+* **account:** Phase 4 — Google OAuth provider ([818a3f6](https://github.com/zynthara/chok/commit/818a3f6a6b2761a08608f25ae1dff57febba1af2))
+* **account:** Phase 5a — GitHub OAuth provider ([156e4e2](https://github.com/zynthara/chok/commit/156e4e228039827bff570d5e358e0b4ce995e662))
+* **account:** Phase 5b — Facebook OAuth provider ([2ed822f](https://github.com/zynthara/chok/commit/2ed822fbeb23e708ebc40ecd29d7fb055bc3ff3c))
+* **account:** Phase 5c — Apple Sign-In provider ([25b870a](https://github.com/zynthara/chok/commit/25b870a40710b5baa2be6c643a08fc87de809ddd))
+* **audit:** Phase 7.A — base types + config.AuditOptions ([e63ebf6](https://github.com/zynthara/chok/commit/e63ebf6fdaa2b1ad061f519ad779d71a699d48de))
+* **audit:** Phase 7.B — async DB sink + parts.AuditComponent ([1bbc812](https://github.com/zynthara/chok/commit/1bbc8123c4b047a226ea1dd26b6dd7a3462ec07c))
+* **authz:** Phase 6 — Casbin authorizer + multi-tenant middleware ([d6cd7ca](https://github.com/zynthara/chok/commit/d6cd7ca4bb1f86568c2d55b231a8ef786333b509))
+* **authz/casbin:** Phase 6 follow-up — Redis Watcher ([14e3cf3](https://github.com/zynthara/chok/commit/14e3cf36f49ae79addea3a6ac0b942b5b077159a))
+
+
+### Bug Fixes
+
+* round-1 review — Phase 1 account hardening ([244d1f1](https://github.com/zynthara/chok/commit/244d1f1b670ad15cff5df26afb980318d9ce2ea2))
+* round-2 review — Phase 2 OAuth hardening ([4ec383f](https://github.com/zynthara/chok/commit/4ec383f3261027628a99ebb0517e61cc35b1791f))
+* round-3 review — Phase 3 hardening ([1539093](https://github.com/zynthara/chok/commit/15390932dba6d5009684719a828f56f637f335bb))
+* **authz/casbin:** self-shipped GORM adapter, drop gorm-adapter v3 ([2ebbf88](https://github.com/zynthara/chok/commit/2ebbf886e6d71e20b8dfeac3d61462ab2a7f4f6b))
+* **authz/casbin:** round-1 review — adapter wire-compat + bootstrap batch ([8b64d6b](https://github.com/zynthara/chok/commit/8b64d6b5730cc7bc3e413e9e6ee52b13bb5b3b7d))
+* **authz/casbin:** round-2 review — UpdatableAdapter + LoadPolicy CSV-safe ([d4f7fc7](https://github.com/zynthara/chok/commit/d4f7fc7226cfe21df20dcdab3e78ebab5a2acafe))
+* **authz/casbin:** round-3 review — Update* exact-rule + guard mapped + LoadPolicy fail-fast ([036b7d2](https://github.com/zynthara/chok/commit/036b7d27432a91b07c958a861f9873196654ca6e))
+* **authz/casbin:** round-1 review — Watcher contract hardening ([1b7da18](https://github.com/zynthara/chok/commit/1b7da1854515ab06820532bdd94e6c943568ce60))
+
 ## [0.1.3](https://github.com/zynthara/chok/compare/v0.1.2...v0.1.3) (2026-04-21)
 
 

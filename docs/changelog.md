@@ -11,6 +11,153 @@
 
 ---
 
+## 0.1.4 — v1 封版：account 多 provider / authz(Casbin) / audit 落地
+
+> **本版本是 v1 功能线的封版（feature freeze）**：此后 v0.1.x 只接收
+> 安全修复；`main` 转入 v2 重构，module path 升级为
+> `github.com/zynthara/chok/v2`。v1 用户请锁定 `v0.1.4`。
+
+### account：多登录方式体系（密码 + OAuth）
+
+- **User Store 双面化**：`Module.Store()` 返回的公开 store 白名单收窄
+  到 `name` / `email`；`password_hash` / `password_version` / `roles` /
+  `active` / `email_verified` 等敏感列只能经 Module 的管理 API 写入
+  （store API 层强制，raw `*gorm.DB` 逃生舱不在此列，见 design.md）。
+- **管理 API**：`UpdateUserRoles` / `SetUserActive` /
+  `BumpPasswordVersion` / `MarkEmailVerified` —— 前三者以单条原子
+  UPDATE 实现并递增 password_version（任何隔离级别下无丢失更新），
+  使被禁用/改权用户的存量 access token 在下一次请求即失效。
+- **AuthChain()**：返回 blessed 的 `[Authn, ActiveCheck]` 中间件对；
+  裸 `middleware.Authn` 不查库，无法感知 PV bump —— 业务受保护路由
+  应一律挂 AuthChain。
+- **OAuth 抽象层**：`AuthProvider` 接口 + `ProviderCapabilities`
+  能力声明（回调方法 / nonce / PKCE / form_post）；`Identity` 表以
+  `(provider, provider_account_id)` 唯一化；OAuth 会话与一次性
+  auth code 各自独立存储（默认内存 LRU + TTL，**多副本部署必须注入
+  Redis 后端**）；sid 走 HMAC-SHA256 签名 HttpOnly cookie，密钥由
+  SigningKey 经 HKDF 派生（与 JWT 签名材料密码学隔离）。
+- **登录路由**：`GET /auth/{name}/start` →（IdP）→
+  `GET|POST /auth/{name}/callback` → 302 前端 `?code=…` →
+  `POST /auth/exchange` 用一次性 code 换 JWT（token 永不进 URL）；
+  `redirect_back` 仅允许相对路径或显式 allowlist 前缀。
+- **配置驱动装配**：`AccountOptions` 新增 `LinkByEmail` /
+  `AllowedRedirectBacks` / `OAuthCallbackFrontendURL` /
+  `Providers map[string]ProviderRawOptions`（`,remain` 捕获 provider
+  专有键）；启用任一 provider 而缺 frontend URL 启动即 fail-fast；
+  未知 provider 名 fail-fast 并列出可用名单；`enabled: false` 即
+  kill switch。
+- **blessed provider 全家桶**：chok 核心默认 blank-import
+  `account/providers/blessed`，google / github / facebook / apple
+  四个 provider 零 Go 代码即可用（yaml 开关）。Apple 处理 form_post
+  回调、ES256 client_secret（golang-jwt）与 go-oidc id_token 校验。
+  精简构建的逃生舱：fork 掉 providers.go 的一行 import。
+- **/login 语义**：OAuth-only 账号（PV=0 且仅有 Identity 记录）用
+  密码登录返回 401 + reason `OAUTH_ONLY_ACCOUNT`，不计入登录限速。
+- **可选关闭公开注册**沿 0.1.3 的 `DisableRegister` 继续有效，与
+  admin provisioning 流程配合。
+- apierr 新增 `ErrGone`(410) / `ErrFailedPrecondition`(412) 与
+  `WithReason` / `WithDetails`。
+
+### authz：Casbin 授权器 + 多租户中间件
+
+- `authz.DomainAuthorizer` 子接口（`AuthorizeInDomain`）与
+  `DomainAuthorizerFunc` 适配器。
+- 中间件面改版（**不兼容变更**）：URL 模式的 `Authz(az)` 移除，代之
+  `RequireAuthz(obj, act)` / `RequireAuthzInDomain(obj, act,
+  domainParam)` / `AttachAuthz(az)`；租户中间件遇到非
+  DomainAuthorizer **fail-closed 返回 500**（静默降级会放行跨租户
+  请求）。HTTPComponent 经 optional dependency 自动注入 AttachAuthz。
+- `authz/casbin` 新包：RBAC-with-domains 内置模型（直接授权 / 域内
+  角色 / `*` 全局角色三段 matcher）、`SyncedEnforcer`、Service 管理
+  面（域名归一化、拒绝 `*` 伪装租户）、幂等 admin bootstrap。
+- **自研 GORM adapter**：与 gorm-adapter v3 的 `casbin_rule` schema
+  线上兼容（存量部署无迁移），但把 pgx / go-mssqldb / 纯 Go SQLite
+  等十余个传递驱动依赖挡在直接依赖之外；examples/blog 全量构建的
+  Casbin 增量从 +9.93 MB（gorm-adapter v3）降到 +1.21 MB。
+- **自研 Redis Watcher**：骑 `parts/redis` 做多实例策略同步（仅
+  `persist.Watcher` 契约；实例 ID 抑制自发布；Close 与
+  AuthzComponent 的关停顺序有保证）。`redis_watcher: true` 而 redis
+  组件缺失时 Build fail-fast。
+- `config.AuthzOptions`（driver 仅 `casbin`）+ autoregister 接线
+  （硬依赖 db，软依赖 redis / audit）。`audit_enabled: true` 当前
+  fail-fast（audit 集成随 v2 里程碑补齐）。
+- 三轮评审加固：adapter 线上兼容细节、LoadPolicy CSV 安全解析与
+  fail-fast、`Update*` 精确规则匹配、Watcher 生命周期契约。
+
+### audit：审计数据面 + 异步 DB sink（Phase 7.A/7.B）
+
+- `audit` 包：`Log` 模型（表名钉死 `audit_logs`，三组按
+  actor / resource / action × time 的组合索引）、`Entry` / `Query` /
+  `Logger`（`LogSync` / `Log` / `Query`）契约、`FromContext` /
+  `MergeContext`（自动提取 Principal / ClientIP / TraceID /
+  RequestID，全部可缺省）、`Stats` / `Statser` 观测逃生舱。
+- `config.AuditOptions`：`Enabled` / `AsyncBufferSize` / `DropOnFull` /
+  `RetentionDays` / `PurgeInterval` / `PurgeBatchSize` /
+  `EnableAdminAPI`；reload 语义已注记（Retention/Purge* 热更，
+  Buffer/DropOnFull 需重启）。
+- `parts.AuditComponent` + 异步批量 DB sink（单 worker，批 100 条或
+  1s flush；`DropOnFull` 决定满载丢弃计数或阻塞含 ctx 取消）。
+- **已知限制**：Phase 7.C/7.D（admin 查询 API、retention purge cron、
+  autoregister 接线）未落地 —— `EnableAdminAPI` / `Purge*` 字段当前
+  无消费者，组件需经 `WithSetup` 手动装配。该欠账转入 v2 电池迁移
+  里程碑补齐。
+
+### 依赖面
+
+- 新增直接依赖：`casbin/v3`、`coreos/go-oidc/v3`、`golang.org/x/oauth2`、
+  `go-viper/mapstructure/v2`（转正）、`gorm.io/datatypes`；
+  测试依赖 `miniredis/v2`。
+- 移除：`casbin/gorm-adapter/v3` 及其带入的全部驱动直接依赖。
+
+---
+
+## 0.1.3 — account 管理面 + 嵌套配置发现
+
+- **account**：`Module.Store()` 暴露 User store（继承 New 时配置的
+  查询/更新白名单，调用方绕不过 schema 限制）；`ActiveCheck` 增加
+  pv claim 校验 —— 管理操作 bump PasswordVersion 后，存量 access
+  token 下一次请求即失效，不再等刷新；新增
+  `AccountOptions.DisableRegister` / `account.WithoutPublicRegister()`
+  关闭公开注册（`POST /register` 返回 404），适配「管理员预置账号」
+  部署。
+- **config**：auto-register 的 `discoverOne` 从只扫顶层字段升级为
+  全树 DFS —— 业务 Config 可以用 `cache: { memory, file }` 这类自然
+  嵌套组织内置 Options。六条扫描规则（指针字段整棵跳过、命中 `*T`
+  停止下降、`SelfValidating` 是不透明边界、`time.Time` 类原子结构体
+  跳过等）与 `validateNoPointerOptions` 的递归保持对称。
+- **apierr**：`RegisterMapper`（进程级全局）弃用，脚手架与示例切换
+  到 per-App 的 `chok.WithErrorMapper` —— 全局 mapper 在多 App /
+  并行测试场景下互相踩踏。解析顺序、nil-panic 语义不变。
+
+---
+
+## 0.1.2 — release 构建的版本语义修正
+
+- **`chok version` 的 dirty 位语义**（对外可见的行为契约）：一旦
+  ldflags 注入了显式版本（release tag / `make build` / goreleaser），
+  `debug.ReadBuildInfo` 的 `vcs.modified` 即被忽略 —— release runner
+  的 worktree 噪声（merge commit、构建缓存、go.sum touch）不再产出
+  `+dirty` 后缀；dev 构建（`go run` / `go test` / `go install @latest`）
+  保留实时 dirty 位，那里它才与"用户改没改代码"相关。
+- **release 流水线**：release-please 工作流内联 goreleaser ——
+  GITHUB_TOKEN 创建的 tag 因 GitHub 反循环策略不会触发跨 workflow，
+  独立的 goreleaser.yml 永远看不到 release-please 打的 tag。
+  goreleaser.yml 保留为开发机手动 push tag 的 fallback（幂等，
+  `mode: replace`）。
+- 无 Go API 变更。
+
+---
+
+## 0.1.1 — release 流水线修复
+
+- goreleaser before-hook 移除冗余 `go mod tidy`：它会把 release
+  runner 的 worktree 弄成 git 眼中的 modified 状态，导致干净的
+  release tag 构建出 `0.1.0+dirty` 版本串。CI 已在每次 push 时跑
+  tidy，release 阶段无需重复。
+- 无 Go API 变更。
+
+---
+
 ## 0.1.0 — Initial public release
 
 chok 的首个公开版本。提供「配置驱动的 Go Web 全家桶」的完整骨架：
