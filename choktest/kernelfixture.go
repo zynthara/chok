@@ -115,7 +115,22 @@ type TestKernel struct {
 // NewTestKernel builds a conf store from the yaml literal (may be
 // empty), assembles the components plus a TestRouter provider, starts
 // the registry and returns it. Stop is registered as test cleanup.
+// Any assembly or startup error fails the test — use StartKernel for
+// fail-fast-path assertions.
 func NewTestKernel(t testing.TB, yaml string, comps ...kernel.Component) *TestKernel {
+	t.Helper()
+	tk, err := StartKernel(t, yaml, comps...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tk
+}
+
+// StartKernel is the non-fatal variant of NewTestKernel: it hands the
+// assembly/startup error back so fail-fast paths (misconfiguration,
+// unsatisfied explicit dependencies) are assertable. On success the
+// registry Stop is registered as test cleanup, same as NewTestKernel.
+func StartKernel(t testing.TB, yaml string, comps ...kernel.Component) (*TestKernel, error) {
 	t.Helper()
 
 	loader := conf.NewLoader("choktest", "CHOKTEST")
@@ -137,18 +152,18 @@ func NewTestKernel(t testing.TB, yaml string, comps ...kernel.Component) *TestKe
 	}
 	store, err := conf.NewStore(loader)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 
 	router := NewTestRouter()
 	all := append([]kernel.Component{NewRouterProviderComponent(router)}, comps...)
 	reg, err := kernel.New(kernel.Config{Store: store, Components: all})
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	if err := reg.Start(context.Background()); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	t.Cleanup(func() { _ = reg.Stop(context.Background()) })
-	return &TestKernel{Registry: reg, Router: router}
+	return &TestKernel{Registry: reg, Router: router}, nil
 }

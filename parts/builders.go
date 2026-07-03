@@ -66,23 +66,18 @@ func DefaultRedisResolver(opts *config.RedisOptions) RedisResolver {
 }
 
 // DefaultCacheBuilder returns a CacheBuilder that constructs a multi-layer
-// cache (memory → file → Redis) from discovered config. Redis is added only
+// cache (memory → Redis) from discovered config. Redis is added only
 // when a RedisComponent is available in the registry at Init time.
-func DefaultCacheBuilder(memOpts *config.CacheMemoryOptions, fileOpts *config.CacheFileOptions) CacheBuilder {
+// The badger file layer is gone since the M4 migration (SPEC §2.4);
+// this v1-residue glue dies with parts/.
+func DefaultCacheBuilder(memOpts *config.CacheMemoryOptions) CacheBuilder {
 	return func(k component.Kernel) (cache.Cache, error) {
 		var bopts cache.BuildOptions
-		bopts.Logger = k.Logger()
 
 		if memOpts != nil && memOpts.Enabled {
 			bopts.Memory = &cache.MemoryOptions{
 				Capacity: memOpts.Capacity,
 				TTL:      memOpts.TTL,
-			}
-		}
-		if fileOpts != nil && fileOpts.Enabled {
-			bopts.File = &cache.FileOptions{
-				Path: fileOpts.Path,
-				TTL:  fileOpts.TTL,
 			}
 		}
 		if rc, ok := k.Get("redis").(*RedisComponent); ok && rc != nil {

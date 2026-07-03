@@ -1,34 +1,31 @@
 package cache
 
 import (
-	"github.com/redis/go-redis/v9"
+	"time"
 
-	"github.com/zynthara/chok/v2/log"
+	"github.com/redis/go-redis/v9"
 )
 
 // BuildOptions configures which cache layers to create.
 // Nil or zero-value options skip that layer.
+//
+// The badger file layer was removed in v2 (SPEC §2.4): the layer
+// composition below (memory → Redis, chained) is the extension slot —
+// a future persistent layer slots back in as another Cache in the
+// chain, without a heavyweight dependency riding every build.
 type BuildOptions struct {
-	Memory  *MemoryOptions  // nil = skip memory layer
-	File    *FileOptions    // nil = skip file layer
-	Redis   *redis.Client   // nil = skip Redis layer
-	Breaker *BreakerOptions // nil = no circuit breaker on Redis layer
-	Logger  log.Logger      // optional, used for file cache (badger) logging
+	Memory   *MemoryOptions  // nil = skip memory layer
+	Redis    *redis.Client   // nil = skip Redis layer
+	RedisTTL time.Duration   // 0 = the redis layer's default (10m)
+	Breaker  *BreakerOptions // nil = no circuit breaker on Redis layer
 }
 
 // Build creates a multi-level Cache from the given options.
-// Layers are added in order: memory → file → Redis.
+// Layers are added in order: memory → Redis.
 // Only enabled layers (non-nil options) are included.
 // Returns nil if no layers are configured.
 func Build(opts BuildOptions) (Cache, error) {
 	var layers []Cache
-
-	// closeLayers cleans up already-created layers on partial failure.
-	closeLayers := func() {
-		for _, l := range layers {
-			_ = l.Close()
-		}
-	}
 
 	if opts.Memory != nil && opts.Memory.Capacity > 0 {
 		m, err := NewMemory(opts.Memory)
@@ -38,21 +35,13 @@ func Build(opts BuildOptions) (Cache, error) {
 		layers = append(layers, m)
 	}
 
-	if opts.File != nil && opts.File.Path != "" {
-		args := []log.Logger{}
-		if opts.Logger != nil {
-			args = append(args, opts.Logger)
-		}
-		f, err := NewFile(opts.File, args...)
-		if err != nil {
-			closeLayers()
-			return nil, err
-		}
-		layers = append(layers, f)
-	}
-
 	if opts.Redis != nil {
-		var rc Cache = NewRedis(opts.Redis)
+		var rc Cache
+		if opts.RedisTTL > 0 {
+			rc = NewRedisWithTTL(opts.Redis, opts.RedisTTL)
+		} else {
+			rc = NewRedis(opts.Redis)
+		}
 		if opts.Breaker != nil {
 			rc = WithBreaker(rc, *opts.Breaker)
 		}
