@@ -30,13 +30,20 @@ blessed implementation per capability, configuration over code.
 
 ## Architecture invariants — do not violate
 
+> Since M1 the control plane is the v2 kernel (`kernel/` + `conf/`):
+> single-actor lifecycle, RCU config snapshots, Descriptor-declared
+> components. The lock-order / TryLock / lazy-scrub bullets below
+> survive ONLY inside the v1 transition residue (`component/` +
+> `parts/`, used by the 12 not-yet-migrated batteries, M2-M4).
+
 - `App` is single-use: `Run` / `Execute` may be called at most once
-- Lock order is `reloadMu → mu` everywhere; never acquire `mu` then
-  `reloadMu` (would deadlock the Stop / Reload paths)
-- `registry.Get` during `phaseStopping` returns only entries still in
-  `available`; `Stop` scrubs lazily as each `Close` completes
-- `App.Reload` uses `TryLock`; concurrent triggers coalesce via
-  `ErrReloadInProgress` — do not queue
+- v2 kernel: all lifecycle transitions go through the control
+  goroutine; reads (`Lookup`/`Health`/`Ready`) use the atomic view —
+  never add locks or a second lifecycle writer
+- Reload coalesces: overlapping triggers get `ErrReloadInProgress`
+  (CAS gate in v2) — do not queue
+- [v1 residue] lock order `reloadMu → mu`; `registry.Get` during
+  `phaseStopping` returns only still-`available` entries
 - Reload does **NOT** trigger `Migrate`. Schema changes require a
   restart. Document this if you add migration-adjacent features.
 - Shutdown contexts use `context.WithoutCancel(parent)` so trace_id /
@@ -100,7 +107,8 @@ blessed implementation per capability, configuration over code.
   **current milestone's fixture app** must start cleanly instead of
   the blog smoke test (`examples/blog` is archived as
   `examples/_v1_blog`, build-ignored; blog is rebuilt on the v2 API
-  in M5 and the smoke discipline returns then)
+  in M5 and the smoke discipline returns then).
+  Current fixture: `go run ./internal/fixture/m1` and Ctrl-C.
 
 ## Where things live
 
