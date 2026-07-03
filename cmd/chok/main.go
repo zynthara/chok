@@ -19,6 +19,7 @@ func main() {
 	root.SetVersionTemplate("{{.Version}}\n")
 
 	root.AddCommand(initCmd())
+	root.AddCommand(syncCmd())
 	root.AddCommand(versionCmd())
 	root.AddCommand(updateCmd())
 	root.AddCommand(migrateCmd())
