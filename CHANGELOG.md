@@ -35,6 +35,7 @@ release-PR workflow is in motion. For design-level release notes (the
 
 ### Bug Fixes
 
+* **examples/blog:** race-free startup barrier in NewTestRouter ([19086e6](https://github.com/zynthara/chok/commit/19086e6d9cf327ee6510ddb9792c1a8d21d2c71d))
 * round-1 review — Phase 1 account hardening ([244d1f1](https://github.com/zynthara/chok/commit/244d1f1b670ad15cff5df26afb980318d9ce2ea2))
 * round-2 review — Phase 2 OAuth hardening ([4ec383f](https://github.com/zynthara/chok/commit/4ec383f3261027628a99ebb0517e61cc35b1791f))
 * round-3 review — Phase 3 hardening ([1539093](https://github.com/zynthara/chok/commit/15390932dba6d5009684719a828f56f637f335bb))
