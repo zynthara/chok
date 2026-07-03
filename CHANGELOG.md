@@ -10,6 +10,13 @@ This file is maintained automatically by
 release-PR workflow is in motion. For design-level release notes (the
 *why* behind each version), see [`docs/changelog.md`](docs/changelog.md).
 
+## [0.1.5](https://github.com/zynthara/chok/compare/v0.1.4...v0.1.5) (2026-07-03)
+
+
+### Documentation
+
+* mark v2 development status; move agent discipline to fixture wording ([0322948](https://github.com/zynthara/chok/commit/03229488ef7b08e46fd3fa6f16b4374a817a3704))
+
 ## [0.1.4](https://github.com/zynthara/chok/compare/v0.1.3...v0.1.4) (2026-07-03)
 
 > v1 feature-freeze release. After this tag the v0.1.x line receives
