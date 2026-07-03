@@ -21,6 +21,7 @@ func main() {
 	root.AddCommand(initCmd())
 	root.AddCommand(versionCmd())
 	root.AddCommand(updateCmd())
+	root.AddCommand(migrateCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
