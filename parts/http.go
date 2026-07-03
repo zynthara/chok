@@ -111,27 +111,13 @@ func (h *HTTPComponent) Init(ctx context.Context, k component.Kernel) error {
 	if opts.RequestTimeout > 0 {
 		mws = append(mws, middleware.Timeout(opts.RequestTimeout))
 	}
-	// HTTP RED metrics: inject early so all requests (including
-	// errored ones) are counted. Uses MetricsComponent's registry
-	// when available, otherwise creates a standalone registry.
-	if h.httpMetrics {
-		if mc := optionalComponent[*MetricsComponent](k, "metrics"); mc != nil {
-			mws = append(mws, middleware.Metrics(mc.PrometheusRegistry()))
-		}
-	}
+	// Transition note (M1): the RED-metrics and dedicated access-log
+	// integrations pulled from MetricsComponent / LoggerComponent were
+	// removed together with those parts — the v2 metrics/log modules
+	// restore them through the web module in M2. Access logging falls
+	// back to the main logger meanwhile.
 	if h.accessLog {
-		// Access logger: use the LoggerComponent's access logger when
-		// available, otherwise fall back to the main logger. Captured
-		// by reference; LoggerComponent.Reload only mutates level
-		// (documented restart-required for routing changes), so the
-		// reference stays valid for the App's lifetime.
-		accessLogger := k.Logger()
-		if lc := optionalComponent[*LoggerComponent](k, "log"); lc != nil {
-			if al := lc.AccessLogger(); al != nil {
-				accessLogger = al
-			}
-		}
-		mws = append(mws, middleware.AccessLog(accessLogger))
+		mws = append(mws, middleware.AccessLog(k.Logger()))
 	}
 	// Authz: when an AuthzComponent is registered AND its builder
 	// produced a non-nil Authorizer, install AttachAuthz so per-route

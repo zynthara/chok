@@ -11,7 +11,6 @@ import (
 
 	"github.com/zynthara/chok/v2/conf"
 	"github.com/zynthara/chok/v2/kernel/event"
-	"github.com/zynthara/chok/v2/log"
 )
 
 // Default lifecycle budgets (mini-SPEC §3.4); Config.Defaults
@@ -29,7 +28,7 @@ const (
 
 // Config assembles a Registry.
 type Config struct {
-	Logger     log.Logger
+	Logger     Logger
 	Store      *conf.Store
 	Bus        *event.Bus
 	Components []Component
@@ -45,7 +44,7 @@ type Config struct {
 // atomically-published immutable view. There is no lock order to
 // memorize because there are no competing writers (SPEC §3.3).
 type Registry struct {
-	logger     log.Logger
+	logger     Logger
 	store      *conf.Store
 	bus        *event.Bus
 	routes     RoutesFunc
@@ -140,7 +139,7 @@ type viewEntry struct {
 // the Registry sees the list.
 func New(cfg Config) (*Registry, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = log.Empty()
+		cfg.Logger = nopLogger{}
 	}
 	if cfg.Bus == nil {
 		cfg.Bus = event.NewBus(event.WithLogger(cfg.Logger))
@@ -246,7 +245,7 @@ func (r *Registry) loop() {
 func (r *Registry) Config() *conf.Snapshot { return r.store.Snapshot() }
 
 // Logger implements Kernel.
-func (r *Registry) Logger() log.Logger { return r.logger }
+func (r *Registry) Logger() Logger { return r.logger }
 
 // Bus implements Kernel.
 func (r *Registry) Bus() *event.Bus { return r.bus }

@@ -73,9 +73,7 @@ func TestPhase3_FullRegistry(t *testing.T) {
 	reg.Register(NewJWTComponent("jwt", func(component.Kernel) (*jwt.Manager, error) {
 		return jwt.NewManager(jwt.Options{SigningKey: accountTestKey})
 	}))
-	reg.Register(NewLoggerComponent(func(a any) *config.SlogOptions {
-		return a.(*integrationCfg).Log
-	}))
+	reg.Register(stubLogComponent{})
 	reg.Register(NewRedisComponent(func(a any) *config.RedisOptions {
 		return a.(*integrationCfg).Redis
 	}))
@@ -132,7 +130,7 @@ func TestPhase3_AccountInitFailsWithoutDB(t *testing.T) {
 	// Construct a registry where account declares "db, log" but we
 	// register only log. Registry.Start should fail with unknown-dep.
 	reg := component.New(nil, log.Empty())
-	reg.Register(NewLoggerComponent(func(any) *config.SlogOptions { return nil }))
+	reg.Register(stubLogComponent{})
 	reg.Register(NewAccountComponent(accountBuilder(), "/auth"))
 
 	err := reg.Start(context.Background())

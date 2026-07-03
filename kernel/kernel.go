@@ -6,7 +6,6 @@ import (
 
 	"github.com/zynthara/chok/v2/conf"
 	"github.com/zynthara/chok/v2/kernel/event"
-	"github.com/zynthara/chok/v2/log"
 )
 
 // Kernel is what a component sees in Init: configuration, logging,
@@ -21,7 +20,7 @@ type Kernel interface {
 
 	// Logger returns the root logger (owned by the App, alive strictly
 	// longer than every component).
-	Logger() log.Logger
+	Logger() Logger
 
 	// Bus returns the process event bus.
 	Bus() *event.Bus
@@ -31,6 +30,19 @@ type Kernel interface {
 	// closed). Disabled, failed and closed components return false —
 	// callers can never observe a half-initialized object.
 	Lookup(kind string, instance ...string) (Component, bool)
+
+	// Health probes every Healther (parallel, panic-isolated) and
+	// aggregates; disabled entries appear as informational. Read
+	// path — never enters the control actor.
+	Health(ctx context.Context) HealthReport
+
+	// Ready aggregates readiness: ErrDraining during the draining
+	// phase, then required-component state plus every Readier.
+	Ready(ctx context.Context) error
+
+	// Components lists every assembled component's observable status
+	// (Descriptor-sourced; disabled included) in assembly order.
+	Components() []ComponentStatus
 }
 
 // Get is the typed dependency accessor (SPEC §3.1 definition 2):

@@ -10,15 +10,26 @@ import (
 	"reflect"
 	"sync"
 	"time"
-
-	"github.com/zynthara/chok/v2/log"
 )
+
+// Logger is the bus's consumer-side logging contract (overflow warns,
+// subscriber panics). The chok log.Logger satisfies it structurally —
+// defined here so this package stays a leaf under the kernel.
+type Logger interface {
+	Warn(msg string, keysAndValues ...any)
+	Error(msg string, keysAndValues ...any)
+}
+
+type nopLogger struct{}
+
+func (nopLogger) Warn(string, ...any)  {}
+func (nopLogger) Error(string, ...any) {}
 
 // Bus routes published values to subscribers registered for the
 // value's concrete type. The zero value is not usable; construct with
 // NewBus.
 type Bus struct {
-	logger log.Logger
+	logger Logger
 
 	mu     sync.RWMutex
 	subs   map[reflect.Type][]*subscription
@@ -30,7 +41,7 @@ type BusOpt func(*Bus)
 
 // WithLogger routes overflow warnings and subscriber panics to l.
 // Without it the bus stays silent (events are still counted).
-func WithLogger(l log.Logger) BusOpt {
+func WithLogger(l Logger) BusOpt {
 	return func(b *Bus) { b.logger = l }
 }
 
@@ -41,7 +52,7 @@ func NewBus(opts ...BusOpt) *Bus {
 		o(b)
 	}
 	if b.logger == nil {
-		b.logger = log.Empty()
+		b.logger = nopLogger{}
 	}
 	return b
 }
