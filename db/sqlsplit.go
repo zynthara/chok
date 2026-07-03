@@ -15,20 +15,22 @@ import "strings"
 // belongs in application tooling, not a migration file.
 func splitSQLStatements(script string) []string {
 	var (
-		out  []string
-		buf  strings.Builder
-		i    = 0
-		n    = len(script)
-		mode = modeNormal
-		tag  string // active dollar-quote tag, delimiters included
+		out        []string
+		buf        strings.Builder
+		i          = 0
+		n          = len(script)
+		mode       = modeNormal
+		tag        string // active dollar-quote tag, delimiters included
+		meaningful bool   // statement content beyond comments/whitespace seen
 	)
 
 	flush := func() {
 		stmt := strings.TrimSpace(buf.String())
 		buf.Reset()
-		if stmt != "" {
+		if stmt != "" && meaningful {
 			out = append(out, stmt)
 		}
+		meaningful = false
 	}
 
 	for i < n {
@@ -44,25 +46,33 @@ func splitSQLStatements(script string) []string {
 				buf.WriteByte(c)
 			case c == '\'':
 				mode = modeSingleQuote
+				meaningful = true
 				buf.WriteByte(c)
 			case c == '"':
 				mode = modeDoubleQuote
+				meaningful = true
 				buf.WriteByte(c)
 			case c == '`':
 				mode = modeBacktick
+				meaningful = true
 				buf.WriteByte(c)
 			case c == '$':
 				if t, ok := dollarTagAt(script[i:]); ok {
 					mode = modeDollar
+					meaningful = true
 					tag = t
 					buf.WriteString(t)
 					i += len(t)
 					continue
 				}
+				meaningful = true
 				buf.WriteByte(c)
 			case c == ';':
 				flush()
 			default:
+				if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+					meaningful = true
+				}
 				buf.WriteByte(c)
 			}
 		case modeLineComment:

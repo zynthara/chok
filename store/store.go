@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/zynthara/chok/v2/apierr"
@@ -1177,12 +1178,15 @@ type DuplicateError interface {
 	IsDuplicate() bool
 }
 
-// isDuplicateError detects duplicate key errors using a three-tier strategy:
+// isDuplicateError detects duplicate key errors using a tiered strategy:
 //
 //  1. DuplicateError interface — most reliable, no string dependency.
-//  2. GORM's ErrDuplicatedKey (v1.25.0+) — covers drivers that translate
+//  2. Typed pgx error — SQLSTATE 23505 (unique_violation) is Postgres's
+//     authoritative signal; any other PG code is authoritatively NOT a
+//     duplicate (M3, SPEC §5.3 error-mapping acceptance).
+//  3. GORM's ErrDuplicatedKey (v1.25.0+) — covers drivers that translate
 //     into GORM's sentinel via translate plugin.
-//  3. String matching fallback — catches MySQL, SQLite, PostgreSQL error
+//  4. String matching fallback — catches MySQL and SQLite error
 //     messages without importing driver packages.
 func isDuplicateError(err error) bool {
 	if err == nil {
@@ -1193,14 +1197,22 @@ func isDuplicateError(err error) bool {
 	if errors.As(err, &de) {
 		return de.IsDuplicate()
 	}
-	// Tier 2: GORM sentinel.
+	// Tier 2: pgx SQLSTATE.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == pgUniqueViolation
+	}
+	// Tier 3: GORM sentinel.
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return true
 	}
-	// Tier 3: string heuristic (backward compatibility).
+	// Tier 4: string heuristic (backward compatibility).
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "duplicate") ||
 		strings.Contains(msg, "unique constraint") ||
 		strings.Contains(msg, "unique_violation") ||
 		strings.Contains(msg, "constraint failed")
 }
+
+// pgUniqueViolation is SQLSTATE class 23, unique_violation.
+const pgUniqueViolation = "23505"
