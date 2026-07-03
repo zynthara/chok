@@ -27,25 +27,29 @@ func newAdapterDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Schema creation moved out of the adapter constructor (M4: the
+	// authz module's Migrate owns it) — tests ensure it here, playing
+	// the module's role.
+	if err := db.AutoMigrate(&CasbinRule{}); err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 
-// TestNewGormAdapter_AutoMigratesTable verifies the adapter creates
-// casbin_rule on first construction. Subsequent Init runs against the
-// same DB must be idempotent (gorm.AutoMigrate handles that, but
-// we pin the contract here so a future refactor doesn't accidentally
-// move the migrate call out of newGormAdapter).
-func TestNewGormAdapter_AutoMigratesTable(t *testing.T) {
-	db := newAdapterDB(t)
+// TestNewGormAdapter_RunsNoDDL pins the M4 contract inversion: the
+// constructor must NOT create casbin_rule — schema creation belongs
+// to the authz module's Migrate phase so the framework migrate mode
+// (auto/versioned/off, SPEC §5.3) governs battery tables uniformly.
+func TestNewGormAdapter_RunsNoDDL(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := newGormAdapter(db); err != nil {
 		t.Fatal(err)
 	}
-	if !db.Migrator().HasTable("casbin_rule") {
-		t.Fatal("newGormAdapter must AutoMigrate casbin_rule")
-	}
-	// Idempotent re-construction.
-	if _, err := newGormAdapter(db); err != nil {
-		t.Fatalf("re-construction should be idempotent, got %v", err)
+	if db.Migrator().HasTable("casbin_rule") {
+		t.Fatal("newGormAdapter must not run DDL — table creation belongs to the module Migrate phase")
 	}
 }
 
@@ -1142,6 +1146,11 @@ func TestAdapter_MultiInstance_BootstrapIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Schema up-front: the adapter no longer runs DDL (module Migrate
+	// owns it), so the test ensures the shared table before the race.
+	if err := db.AutoMigrate(&CasbinRule{}); err != nil {
+		t.Fatal(err)
+	}
 	build := func() Service {
 		adapter, aerr := newGormAdapter(db)
 		if aerr != nil {
@@ -1190,7 +1199,7 @@ func TestAdapter_MultiInstance_BootstrapIdempotent(t *testing.T) {
 	}
 }
 
-// TestBootstrap_BatchPath verifies the *casbinAuthorizer.grantRoleBatch
+// TestBootstrap_BatchPath verifies the *Engine.grantRoleBatch
 // fast path is exercised when Bootstrap's Service argument satisfies
 // batchGranter (the chok-shipped enforcer does). The functional check
 // is "all perms persisted in one go"; we can't directly count round-
@@ -1207,7 +1216,7 @@ func TestBootstrap_BatchPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok := Service(auth).(batchGranter); !ok {
-		t.Fatal("*casbinAuthorizer must satisfy batchGranter for Bootstrap fast path")
+		t.Fatal("*Engine must satisfy batchGranter for Bootstrap fast path")
 	}
 	cfg := BootstrapConfig{
 		AdminUserID: "usr_root",
@@ -1245,9 +1254,8 @@ func TestBootstrap_BatchPath(t *testing.T) {
 
 // TestWithAuditHook_AtomicSwap exercises the atomic.Pointer auditFn:
 // installing a hook fires it once per mutation; clearing it stops
-// further events. Phase 6 doesn't wire a real audit producer (the
-// Builder rejects AuditEnabled=true), but the storage primitive is
-// the eventual integration point and must be race-free.
+// further events. The authz module is the real producer (M4 7.E);
+// the storage primitive must stay race-free regardless.
 func TestWithAuditHook_AtomicSwap(t *testing.T) {
 	db := newAdapterDB(t)
 	adapter, err := newGormAdapter(db)
@@ -1259,14 +1267,14 @@ func TestWithAuditHook_AtomicSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fired int
-	auth.withAuditHook(func(_, _, _, _ string) { fired++ })
+	auth.AttachAuditHook(func(_ context.Context, _, _, _, _ string) { fired++ })
 	if err := auth.GrantRole(context.Background(), "admin", "task", "read"); err != nil {
 		t.Fatal(err)
 	}
 	if fired != 1 {
 		t.Errorf("after GrantRole, fired = %d, want 1", fired)
 	}
-	auth.withAuditHook(nil)
+	auth.AttachAuditHook(nil)
 	if err := auth.GrantRole(context.Background(), "admin", "task", "write"); err != nil {
 		t.Fatal(err)
 	}

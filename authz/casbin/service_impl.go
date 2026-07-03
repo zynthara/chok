@@ -6,7 +6,7 @@ import (
 )
 
 // This file implements the Service interface methods on
-// *casbinAuthorizer. Two patterns dominate:
+// *Engine. Two patterns dominate:
 //
 //   - normalizeDomain on every domain input so storage uses a single
 //     vocabulary (incoming "" → "*"). Reads use the same
@@ -33,36 +33,36 @@ import (
 // through the underlying Casbin primitive directly keeps the rule
 // "operators never pass `*` as a tenant" enforceable on the
 // *InDomain methods without breaking the global ones.
-func (a *casbinAuthorizer) AddUserToRole(ctx context.Context, userID, role string) error {
+func (a *Engine) AddUserToRole(ctx context.Context, userID, role string) error {
 	added, err := a.enforcer.AddRoleForUserInDomain(userID, role, globalDomain)
 	if err != nil {
 		return err
 	}
 	if added {
-		a.fireAudit("AddUserToRole", role, userID, globalDomain)
+		a.fireAudit(ctx, "AddUserToRole", role, userID, globalDomain)
 	}
 	return nil
 }
 
 // RemoveUserFromRole implements Service.
-func (a *casbinAuthorizer) RemoveUserFromRole(ctx context.Context, userID, role string) error {
+func (a *Engine) RemoveUserFromRole(ctx context.Context, userID, role string) error {
 	removed, err := a.enforcer.DeleteRoleForUserInDomain(userID, role, globalDomain)
 	if err != nil {
 		return err
 	}
 	if removed {
-		a.fireAudit("RemoveUserFromRole", role, userID, globalDomain)
+		a.fireAudit(ctx, "RemoveUserFromRole", role, userID, globalDomain)
 	}
 	return nil
 }
 
 // UserRoles implements Service.
-func (a *casbinAuthorizer) UserRoles(ctx context.Context, userID string) ([]string, error) {
+func (a *Engine) UserRoles(ctx context.Context, userID string) ([]string, error) {
 	return a.enforcer.GetRolesForUserInDomain(userID, globalDomain), nil
 }
 
 // AddUserToRoleInDomain implements Service.
-func (a *casbinAuthorizer) AddUserToRoleInDomain(ctx context.Context, userID, role, domain string) error {
+func (a *Engine) AddUserToRoleInDomain(ctx context.Context, userID, role, domain string) error {
 	if err := rejectGlobalAsTenant(domain, "AddUserToRoleInDomain"); err != nil {
 		return err
 	}
@@ -72,13 +72,13 @@ func (a *casbinAuthorizer) AddUserToRoleInDomain(ctx context.Context, userID, ro
 		return err
 	}
 	if added {
-		a.fireAudit("AddUserToRoleInDomain", role, userID, dom)
+		a.fireAudit(ctx, "AddUserToRoleInDomain", role, userID, dom)
 	}
 	return nil
 }
 
 // RemoveUserFromRoleInDomain implements Service.
-func (a *casbinAuthorizer) RemoveUserFromRoleInDomain(ctx context.Context, userID, role, domain string) error {
+func (a *Engine) RemoveUserFromRoleInDomain(ctx context.Context, userID, role, domain string) error {
 	if err := rejectGlobalAsTenant(domain, "RemoveUserFromRoleInDomain"); err != nil {
 		return err
 	}
@@ -88,13 +88,13 @@ func (a *casbinAuthorizer) RemoveUserFromRoleInDomain(ctx context.Context, userI
 		return err
 	}
 	if removed {
-		a.fireAudit("RemoveUserFromRoleInDomain", role, userID, dom)
+		a.fireAudit(ctx, "RemoveUserFromRoleInDomain", role, userID, dom)
 	}
 	return nil
 }
 
 // UserRolesInDomain implements Service.
-func (a *casbinAuthorizer) UserRolesInDomain(ctx context.Context, userID, domain string) ([]string, error) {
+func (a *Engine) UserRolesInDomain(ctx context.Context, userID, domain string) ([]string, error) {
 	if err := rejectGlobalAsTenant(domain, "UserRolesInDomain"); err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func (a *casbinAuthorizer) UserRolesInDomain(ctx context.Context, userID, domain
 // extracts the third column (domain) where the first column matches
 // the user. Casbin doesn't expose this directly so we filter
 // GetGroupingPolicy ourselves.
-func (a *casbinAuthorizer) DomainsForUser(ctx context.Context, userID string) ([]string, error) {
+func (a *Engine) DomainsForUser(ctx context.Context, userID string) ([]string, error) {
 	policies, err := a.enforcer.GetGroupingPolicy()
 	if err != nil {
 		return nil, fmt.Errorf("DomainsForUser: %w", err)
@@ -128,31 +128,31 @@ func (a *casbinAuthorizer) DomainsForUser(ctx context.Context, userID string) ([
 // GrantRole implements Service. Writes a global role permission.
 // Bypasses the *InDomain "no `*` as tenant" guard for the same
 // reason as AddUserToRole.
-func (a *casbinAuthorizer) GrantRole(ctx context.Context, role, obj, act string) error {
+func (a *Engine) GrantRole(ctx context.Context, role, obj, act string) error {
 	added, err := a.enforcer.AddPolicy(role, globalDomain, obj, act)
 	if err != nil {
 		return err
 	}
 	if added {
-		a.fireAudit("GrantRole", role, obj, act)
+		a.fireAudit(ctx, "GrantRole", role, obj, act)
 	}
 	return nil
 }
 
 // RevokeRole implements Service.
-func (a *casbinAuthorizer) RevokeRole(ctx context.Context, role, obj, act string) error {
+func (a *Engine) RevokeRole(ctx context.Context, role, obj, act string) error {
 	removed, err := a.enforcer.RemovePolicy(role, globalDomain, obj, act)
 	if err != nil {
 		return err
 	}
 	if removed {
-		a.fireAudit("RevokeRole", role, obj, act)
+		a.fireAudit(ctx, "RevokeRole", role, obj, act)
 	}
 	return nil
 }
 
 // RolePermissions implements Service.
-func (a *casbinAuthorizer) RolePermissions(ctx context.Context, role string) ([]Permission, error) {
+func (a *Engine) RolePermissions(ctx context.Context, role string) ([]Permission, error) {
 	rows, err := a.enforcer.GetFilteredPolicy(0, role, globalDomain)
 	if err != nil {
 		return nil, fmt.Errorf("RolePermissions: %w", err)
@@ -168,7 +168,7 @@ func (a *casbinAuthorizer) RolePermissions(ctx context.Context, role string) ([]
 }
 
 // GrantRoleInDomain implements Service.
-func (a *casbinAuthorizer) GrantRoleInDomain(ctx context.Context, role, obj, act, domain string) error {
+func (a *Engine) GrantRoleInDomain(ctx context.Context, role, obj, act, domain string) error {
 	if err := rejectGlobalAsTenant(domain, "GrantRoleInDomain"); err != nil {
 		return err
 	}
@@ -178,13 +178,13 @@ func (a *casbinAuthorizer) GrantRoleInDomain(ctx context.Context, role, obj, act
 		return err
 	}
 	if added {
-		a.fireAudit("GrantRoleInDomain", role, obj, act)
+		a.fireAudit(ctx, "GrantRoleInDomain", role, obj, act)
 	}
 	return nil
 }
 
 // RevokeRoleInDomain implements Service.
-func (a *casbinAuthorizer) RevokeRoleInDomain(ctx context.Context, role, obj, act, domain string) error {
+func (a *Engine) RevokeRoleInDomain(ctx context.Context, role, obj, act, domain string) error {
 	if err := rejectGlobalAsTenant(domain, "RevokeRoleInDomain"); err != nil {
 		return err
 	}
@@ -194,13 +194,13 @@ func (a *casbinAuthorizer) RevokeRoleInDomain(ctx context.Context, role, obj, ac
 		return err
 	}
 	if removed {
-		a.fireAudit("RevokeRoleInDomain", role, obj, act)
+		a.fireAudit(ctx, "RevokeRoleInDomain", role, obj, act)
 	}
 	return nil
 }
 
 // RolePermissionsInDomain implements Service.
-func (a *casbinAuthorizer) RolePermissionsInDomain(ctx context.Context, role, domain string) ([]Permission, error) {
+func (a *Engine) RolePermissionsInDomain(ctx context.Context, role, domain string) ([]Permission, error) {
 	if err := rejectGlobalAsTenant(domain, "RolePermissionsInDomain"); err != nil {
 		return nil, err
 	}
@@ -224,25 +224,25 @@ func (a *casbinAuthorizer) RolePermissionsInDomain(ctx context.Context, role, do
 // the matcher's r.sub == p.sub clause picks it up without a role
 // binding. SPEC §7.7 v0.3.4 added that clause specifically so direct
 // user grants work.
-func (a *casbinAuthorizer) GrantUser(ctx context.Context, userID, obj, act string) error {
+func (a *Engine) GrantUser(ctx context.Context, userID, obj, act string) error {
 	added, err := a.enforcer.AddPolicy(userID, globalDomain, obj, act)
 	if err != nil {
 		return err
 	}
 	if added {
-		a.fireAudit("GrantUser", "(direct)", userID, obj+"/"+act)
+		a.fireAudit(ctx, "GrantUser", "(direct)", userID, obj+"/"+act)
 	}
 	return nil
 }
 
 // RevokeUser implements Service.
-func (a *casbinAuthorizer) RevokeUser(ctx context.Context, userID, obj, act string) error {
+func (a *Engine) RevokeUser(ctx context.Context, userID, obj, act string) error {
 	removed, err := a.enforcer.RemovePolicy(userID, globalDomain, obj, act)
 	if err != nil {
 		return err
 	}
 	if removed {
-		a.fireAudit("RevokeUser", "(direct)", userID, obj+"/"+act)
+		a.fireAudit(ctx, "RevokeUser", "(direct)", userID, obj+"/"+act)
 	}
 	return nil
 }
@@ -250,14 +250,14 @@ func (a *casbinAuthorizer) RevokeUser(ctx context.Context, userID, obj, act stri
 // HasPermission implements Service. Goes through Authorize so global
 // queries get the same matcher (`p.dom == "*"` passthrough) without
 // the *InDomain rejection of "*".
-func (a *casbinAuthorizer) HasPermission(ctx context.Context, userID, obj, act string) (bool, error) {
+func (a *Engine) HasPermission(ctx context.Context, userID, obj, act string) (bool, error) {
 	return a.Authorize(ctx, userID, obj, act)
 }
 
 // HasPermissionInDomain implements Service. The reject check happens
 // here; AuthorizeInDomain already normalises the domain on its own,
 // so we pass the raw input through.
-func (a *casbinAuthorizer) HasPermissionInDomain(ctx context.Context, userID, obj, act, domain string) (bool, error) {
+func (a *Engine) HasPermissionInDomain(ctx context.Context, userID, obj, act, domain string) (bool, error) {
 	if err := rejectGlobalAsTenant(domain, "HasPermissionInDomain"); err != nil {
 		return false, err
 	}
@@ -265,6 +265,6 @@ func (a *casbinAuthorizer) HasPermissionInDomain(ctx context.Context, userID, ob
 }
 
 // ReloadPolicy implements Service.
-func (a *casbinAuthorizer) ReloadPolicy(ctx context.Context) error {
+func (a *Engine) ReloadPolicy(ctx context.Context) error {
 	return a.enforcer.LoadPolicy()
 }

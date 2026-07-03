@@ -15,72 +15,45 @@ import (
 
 	"github.com/zynthara/chok/v2/authz"
 	"github.com/zynthara/chok/v2/authz/casbin"
-	"github.com/zynthara/chok/v2/component"
-	"github.com/zynthara/chok/v2/config"
-	"github.com/zynthara/chok/v2/log"
-	"github.com/zynthara/chok/v2/parts"
 )
 
-// fakeKernel is a small-component Kernel for the casbin Builder,
-// which asks for "db" (always) and "redis" (when RedisWatcher is on).
-// Other Kernel methods are stubs the Builder never calls.
-type fakeKernel struct {
-	db    *parts.DBComponent
-	redis *parts.RedisComponent
-}
-
-func (k *fakeKernel) Get(name string) component.Component {
-	switch name {
-	case "db":
-		if k.db == nil {
-			return nil
-		}
-		return k.db
-	case "redis":
-		if k.redis == nil {
-			return nil
-		}
-		return k.redis
-	}
-	return nil
-}
-
-func (k *fakeKernel) Config() any                        { return nil }
-func (k *fakeKernel) ConfigSnapshot() any                { return nil }
-func (k *fakeKernel) Logger() log.Logger                 { return log.Empty() }
-func (k *fakeKernel) On(component.Event, component.Hook) {}
-func (k *fakeKernel) Health(context.Context) component.HealthReport {
-	return component.HealthReport{Status: component.HealthOK}
-}
-func (k *fakeKernel) ReadyCheck(context.Context) error { return nil }
-
-// newTestSvc spins up a Casbin Service backed by an in-memory SQLite
-// DBComponent. The DBComponent is constructed/Init'd against a fresh
-// database for each test so policy state is isolated.
-func newTestSvc(t *testing.T) (casbin.Service, *parts.DBComponent) {
+// newTestDB opens a fresh in-memory SQLite with the casbin_rule table
+// pre-created — tests play the authz module's Migrate role, since the
+// adapter itself no longer runs DDL (M4 / SPEC §5.3).
+func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
-		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
-	})
-	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-
-	az, err := casbin.Builder(casbin.Options{})(&fakeKernel{db: dbc})
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, ok := az.(casbin.Service)
-	if !ok {
-		t.Fatalf("authorizer does not implement casbin.Service: %T", az)
+	if err := gdb.AutoMigrate(&casbin.CasbinRule{}); err != nil {
+		t.Fatal(err)
 	}
-	return svc, dbc
+	return gdb
+}
+
+// newTestEngine builds the blessed engine (default model) against an
+// isolated database — the kernel-less construction path NewEngine
+// exists for.
+func newTestEngine(t *testing.T) *casbin.Engine {
+	t.Helper()
+	eng, err := casbin.NewEngine(casbin.Options{}.ModelOrDefault(), newTestDB(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return eng
+}
+
+// newTestSvc narrows the engine to the Service management face.
+func newTestSvc(t *testing.T) casbin.Service {
+	t.Helper()
+	return newTestEngine(t)
 }
 
 // --- Service basic round-trip ----------------------------------------
 
 func TestService_GrantRoleAndAuthorize(t *testing.T) {
-	svc, _ := newTestSvc(t)
+	svc := newTestSvc(t)
 	ctx := context.Background()
 
 	if err := svc.AddUserToRole(ctx, "usr_alice", "admin"); err != nil {
@@ -107,7 +80,7 @@ func TestService_GrantRoleAndAuthorize(t *testing.T) {
 // --- Domain semantics ------------------------------------------------
 
 func TestService_DomainScopedRoles(t *testing.T) {
-	svc, _ := newTestSvc(t)
+	svc := newTestSvc(t)
 	ctx := context.Background()
 
 	// alice is admin in workspace ws_abc only.
@@ -134,7 +107,7 @@ func TestService_DomainScopedRoles(t *testing.T) {
 // matcher passthrough: a global role (g(usr, role, "*")) with a
 // global policy (p(role, "*", "*", "*")) authorises in any domain.
 func TestService_GlobalAdminPasses_ThroughDomain(t *testing.T) {
-	svc, _ := newTestSvc(t)
+	svc := newTestSvc(t)
 	ctx := context.Background()
 
 	if err := svc.AddUserToRole(ctx, "usr_admin", "superadmin"); err != nil {
@@ -159,7 +132,7 @@ func TestService_GlobalAdminPasses_ThroughDomain(t *testing.T) {
 // `r.sub == p.sub` matcher clause: direct user grants (no role
 // mediation) authorize.
 func TestService_GrantUser_DirectAuthorize(t *testing.T) {
-	svc, _ := newTestSvc(t)
+	svc := newTestSvc(t)
 	ctx := context.Background()
 
 	if err := svc.GrantUser(ctx, "usr_bob", "task", "read"); err != nil {
@@ -175,7 +148,7 @@ func TestService_GrantUser_DirectAuthorize(t *testing.T) {
 // "*" as a tenant id is a structured error rather than a silent
 // global grant.
 func TestService_RejectsGlobalAsTenant(t *testing.T) {
-	svc, _ := newTestSvc(t)
+	svc := newTestSvc(t)
 	ctx := context.Background()
 
 	cases := []struct {
@@ -210,7 +183,7 @@ func TestService_RejectsGlobalAsTenant(t *testing.T) {
 // string in InDomain methods normalizes to "*" so callers can use
 // "" as a global shorthand.
 func TestService_NormalizeEmptyDomain(t *testing.T) {
-	svc, _ := newTestSvc(t)
+	svc := newTestSvc(t)
 	ctx := context.Background()
 
 	if err := svc.AddUserToRoleInDomain(ctx, "usr_x", "admin", ""); err != nil {
@@ -234,7 +207,7 @@ func TestService_NormalizeEmptyDomain(t *testing.T) {
 // --- Bootstrap ------------------------------------------------------
 
 func TestBootstrap_IdempotentSeeding(t *testing.T) {
-	svc, _ := newTestSvc(t)
+	svc := newTestSvc(t)
 	ctx := context.Background()
 
 	cfg := casbin.BootstrapConfig{AdminUserID: "usr_root"}
@@ -254,7 +227,7 @@ func TestBootstrap_IdempotentSeeding(t *testing.T) {
 }
 
 func TestBootstrap_RejectsEmptyAdminID(t *testing.T) {
-	svc, _ := newTestSvc(t)
+	svc := newTestSvc(t)
 	if err := casbin.Bootstrap(context.Background(), svc, casbin.BootstrapConfig{}); err == nil {
 		t.Fatal("expected error on empty AdminUserID")
 	}
@@ -263,114 +236,68 @@ func TestBootstrap_RejectsEmptyAdminID(t *testing.T) {
 // --- Authorizer interface contract ----------------------------------
 
 func TestAuthorizer_SatisfiesDomainAuthorizer(t *testing.T) {
-	svc, _ := newTestSvc(t)
-	az, ok := svc.(authz.DomainAuthorizer)
+	var eng any = newTestEngine(t)
+	az, ok := eng.(authz.DomainAuthorizer)
 	if !ok {
-		t.Fatal("Casbin Authorizer should implement DomainAuthorizer")
+		t.Fatal("Casbin Engine should implement DomainAuthorizer")
 	}
 	// And of course Authorizer (the supertype).
 	var _ authz.Authorizer = az
 }
 
 // TestAuthorizer_Close releases the watcher / audit hook. Without a
-// watcher attached the test only validates Close returns nil; future
-// PR with redis-watcher will extend this to assert subscriber tear-
-// down.
+// watcher attached the test only validates Close returns nil; the
+// watcher tear-down is asserted in TestEngine_RedisWatcher_*.
 func TestAuthorizer_Close(t *testing.T) {
-	svc, _ := newTestSvc(t)
-	closer, ok := svc.(interface {
-		Close() error
-	})
-	if !ok {
-		t.Fatal("authorizer should be io.Closer")
-	}
+	eng := newTestEngine(t)
+	var closer io.Closer = eng
 	if err := closer.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// --- Builder error paths --------------------------------------------
+// --- Engine construction error paths ---------------------------------
 
-// TestBuilder_RedisWatcher_RequiresRedisComponent covers the
-// negative wiring path: enabling RedisWatcher in Options without
-// supplying a RedisComponent in the kernel must error with a
-// message that points the operator at the missing component.
-// Silent fallback to single-pod scope would mask multi-pod
-// misconfigs that only surface as "policy changes don't propagate".
-func TestBuilder_RedisWatcher_RequiresRedisComponent(t *testing.T) {
-	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
-		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
-	})
-	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := casbin.Builder(casbin.Options{RedisWatcher: true})(&fakeKernel{db: dbc})
-	if err == nil || !strings.Contains(err.Error(), "RedisComponent not registered") {
-		t.Fatalf("expected RedisComponent missing error, got %v", err)
+func TestNewEngine_RejectsNilDB(t *testing.T) {
+	if _, err := casbin.NewEngine(casbin.Options{}.ModelOrDefault(), nil, nil); err == nil {
+		t.Fatal("expected error on nil *gorm.DB")
 	}
 }
 
-// TestBuilder_RedisWatcher_RequiresRedisClient covers the second
-// negative path: RedisComponent is registered but its Client() is
-// nil (resolver returned nil RedisOptions). Same fail-fast rationale
-// as the missing-component case.
-func TestBuilder_RedisWatcher_RequiresRedisClient(t *testing.T) {
-	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
-		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
-	})
-	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-	rc := parts.NewRedisComponent(func(any) *config.RedisOptions { return nil })
-	if err := rc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := casbin.Builder(casbin.Options{RedisWatcher: true})(&fakeKernel{db: dbc, redis: rc})
-	if err == nil || !strings.Contains(err.Error(), "Client() returned nil") {
-		t.Fatalf("expected nil-client error, got %v", err)
-	}
-}
-
-// TestBuilder_RedisWatcher_AttachesWatcher exercises the positive
-// wiring path against an in-process miniredis: Builder produces a
-// working Authorizer + Service + io.Closer with the watcher hooked
-// up, and Close releases everything cleanly. Pins the SPEC §9.3
-// "RedisWatcher 多实例同步" acceptance at the Builder layer.
-//
-// Round-1 review extension: the original test only verified type
-// shape and Close cleanliness — a regression where withWatcher
-// silently dropped its argument or SetWatcher was never called
-// would still pass. We now also subscribe an independent client
-// to the channel and assert that a Service-level mutation
-// (GrantRole) drives a real PUBLISH, proving end-to-end wiring.
-func TestBuilder_RedisWatcher_AttachesWatcher(t *testing.T) {
-	mr := miniredis.RunT(t)
-	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
-		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
-	})
-	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-	rc := parts.NewRedisComponent(func(any) *config.RedisOptions {
-		return &config.RedisOptions{Enabled: true, Addr: mr.Addr()}
-	})
-	if err := rc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-
-	az, err := casbin.Builder(casbin.Options{RedisWatcher: true})(&fakeKernel{db: dbc, redis: rc})
+// TestNewEngine_MissingTable_FailsAtLoad pins the fail-closed surface
+// after the DDL split: constructing against a database without
+// casbin_rule must error at the eager LoadPolicy — never silently
+// produce an engine with no policies.
+func TestNewEngine_MissingTable_FailsAtLoad(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
 	if err != nil {
-		t.Fatalf("Builder with wired RedisWatcher should succeed: %v", err)
+		t.Fatal(err)
 	}
-	svc, ok := az.(casbin.Service)
-	if !ok {
-		t.Fatalf("authorizer should also satisfy casbin.Service, got %T", az)
+	if _, err := casbin.NewEngine(casbin.Options{}.ModelOrDefault(), gdb, nil); err == nil {
+		t.Fatal("expected LoadPolicy failure when casbin_rule is missing")
+	}
+}
+
+// --- Redis watcher wiring (engine layer) ------------------------------
+
+// TestEngine_RedisWatcher_PublishesOnMutation exercises the positive
+// wiring path against an in-process miniredis: an engine with the
+// watcher attached drives a real PUBLISH on Service mutations, and an
+// independent subscriber sees it. (Successor of the v1 Builder-layer
+// test — the plumbing now lives in Engine.AttachRedisWatcher; the
+// module-layer wiring is covered in authz's module tests.)
+func TestEngine_RedisWatcher_PublishesOnMutation(t *testing.T) {
+	mr := miniredis.RunT(t)
+	eng := newTestEngine(t)
+
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	if err := eng.AttachRedisWatcher(context.Background(), client, "chok:authz:policy"); err != nil {
+		t.Fatal(err)
 	}
 
 	// Independent subscriber on the same channel: proves the watcher
-	// actually publishes when the Builder-built Service mutates.
+	// actually publishes when the Service mutates.
 	spy := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = spy.Close() })
 	pubsub := spy.Subscribe(context.Background(), "chok:authz:policy")
@@ -380,7 +307,7 @@ func TestBuilder_RedisWatcher_AttachesWatcher(t *testing.T) {
 	}
 	msgCh := pubsub.Channel()
 
-	if err := svc.GrantRole(context.Background(), "admin", "task", "read"); err != nil {
+	if err := eng.GrantRole(context.Background(), "admin", "task", "read"); err != nil {
 		t.Fatalf("GrantRole: %v", err)
 	}
 
@@ -391,49 +318,28 @@ func TestBuilder_RedisWatcher_AttachesWatcher(t *testing.T) {
 			t.Errorf("expected ciw_-prefixed instance ID payload, got %q", msg.Payload)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("watcher never published on Service mutation — withWatcher / SetWatcher wiring broken")
+		t.Fatal("watcher never published on Service mutation — AttachRedisWatcher / SetWatcher wiring broken")
 	}
 
-	closer, ok := az.(io.Closer)
-	if !ok {
-		t.Fatal("authorizer should satisfy io.Closer for AuthzComponent.Close")
-	}
-	if err := closer.Close(); err != nil {
+	if err := eng.Close(); err != nil {
 		t.Errorf("Close should be clean, got %v", err)
 	}
 }
 
-// TestBuilder_RedisWatcher_StatsExposed proves the Service-level
-// WatcherStats() escape hatch returns live counters from the
-// underlying *redisWatcher. Allows operators / future Prometheus
-// integration to scrape pub/sub failure rates without reaching into
-// the package internals.
-func TestBuilder_RedisWatcher_StatsExposed(t *testing.T) {
+// TestEngine_RedisWatcher_StatsExposed proves the WatcherStats()
+// escape hatch returns live counters from the underlying watcher.
+func TestEngine_RedisWatcher_StatsExposed(t *testing.T) {
 	mr := miniredis.RunT(t)
-	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
-		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
-	})
-	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-	rc := parts.NewRedisComponent(func(any) *config.RedisOptions {
-		return &config.RedisOptions{Enabled: true, Addr: mr.Addr()}
-	})
-	if err := rc.Init(context.Background(), &fakeKernel{}); err != nil {
+	eng := newTestEngine(t)
+	t.Cleanup(func() { _ = eng.Close() })
+
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	if err := eng.AttachRedisWatcher(context.Background(), client, "chok:authz:policy"); err != nil {
 		t.Fatal(err)
 	}
 
-	az, err := casbin.Builder(casbin.Options{RedisWatcher: true})(&fakeKernel{db: dbc, redis: rc})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = az.(io.Closer).Close() })
-
-	statser, ok := az.(interface{ WatcherStats() casbin.WatcherStats })
-	if !ok {
-		t.Fatalf("authorizer should expose WatcherStats(), got %T", az)
-	}
-	if got := statser.WatcherStats(); got.PublishFailures != 0 || got.ReloadFailures != 0 {
+	if got := eng.WatcherStats(); got.PublishFailures != 0 || got.ReloadFailures != 0 {
 		t.Errorf("baseline stats non-zero: %+v", got)
 	}
 
@@ -441,89 +347,22 @@ func TestBuilder_RedisWatcher_StatsExposed(t *testing.T) {
 	// a Service mutation. The mutation succeeds (DB commit); the
 	// watcher publish silently fails and bumps the counter.
 	mr.Close()
-	if err := az.(casbin.Service).GrantRole(context.Background(), "admin", "task", "read"); err != nil {
+	if err := eng.GrantRole(context.Background(), "admin", "task", "read"); err != nil {
 		t.Fatalf("GrantRole should succeed even when publish fails (best-effort), got %v", err)
 	}
-	if got := statser.WatcherStats(); got.PublishFailures < 1 {
+	if got := eng.WatcherStats(); got.PublishFailures < 1 {
 		t.Errorf("after publish failure, PublishFailures = %d, want >=1", got.PublishFailures)
 	}
 }
 
-// TestBuilder_RedisWatcher_NoStatsWithoutWatcher pins the zero-value
-// behaviour: when RedisWatcher is disabled the stats accessor still
-// works (empty value) so callers don't need to special-case the
-// "no watcher" path.
-func TestBuilder_RedisWatcher_NoStatsWithoutWatcher(t *testing.T) {
-	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
-		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
-	})
-	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
+// TestEngine_NoStatsWithoutWatcher pins the zero-value behaviour:
+// without a watcher the stats accessor still works (empty value) so
+// callers don't need to special-case the "no watcher" path.
+func TestEngine_NoStatsWithoutWatcher(t *testing.T) {
+	eng := newTestEngine(t)
+	t.Cleanup(func() { _ = eng.Close() })
 
-	az, err := casbin.Builder(casbin.Options{})(&fakeKernel{db: dbc})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = az.(io.Closer).Close() })
-
-	statser, ok := az.(interface{ WatcherStats() casbin.WatcherStats })
-	if !ok {
-		t.Fatal("WatcherStats accessor should exist regardless of RedisWatcher flag")
-	}
-	if got := statser.WatcherStats(); got != (casbin.WatcherStats{}) {
+	if got := eng.WatcherStats(); got != (casbin.WatcherStats{}) {
 		t.Errorf("disabled-watcher stats should be zero value, got %+v", got)
-	}
-}
-
-func TestBuilder_RejectsAuditEnabledWithoutImpl(t *testing.T) {
-	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
-		return gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
-	})
-	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := casbin.Builder(casbin.Options{AuditEnabled: true})(&fakeKernel{db: dbc})
-	if err == nil || !strings.Contains(err.Error(), "AuditEnabled=true") {
-		t.Fatalf("expected AuditEnabled fail-fast, got %v", err)
-	}
-}
-
-func TestBuilder_RejectsMissingDB(t *testing.T) {
-	_, err := casbin.Builder(casbin.Options{})(&fakeKernel{db: nil})
-	if err == nil {
-		t.Fatal("expected error when DB component absent")
-	}
-}
-
-// TestBuilder_AuditEnabled_FailFastBeforeAutoMigrate proves the
-// AuditEnabled flag is checked BEFORE touching the database. A
-// misconfigured startup must not leave a half-initialised
-// casbin_rule table behind when the same flag would have failed
-// the eventual policy load.
-//
-// RedisWatcher does NOT have this property — its check needs the
-// Kernel-resolved RedisComponent so it runs after newGormAdapter.
-// That ordering is documented in builder.go: a stray casbin_rule
-// table from a failed RedisWatcher Build is harmless because the
-// next successful boot reuses the table.
-func TestBuilder_AuditEnabled_FailFastBeforeAutoMigrate(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbc := parts.NewDBComponent(func(component.Kernel) (*gorm.DB, error) {
-		return db, nil
-	})
-	if err := dbc.Init(context.Background(), &fakeKernel{}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := casbin.Builder(casbin.Options{AuditEnabled: true})(&fakeKernel{db: dbc}); err == nil {
-		t.Fatal("expected fail-fast error")
-	}
-	if db.Migrator().HasTable("casbin_rule") {
-		t.Error("Builder AuditEnabled fail-fast left casbin_rule table behind — schema should not be touched before flag check")
 	}
 }

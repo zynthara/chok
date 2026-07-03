@@ -43,7 +43,7 @@ type BootstrapConfig struct {
 }
 
 // batchGranter is an internal capability interface satisfied by
-// chok's *casbinAuthorizer. Bootstrap uses it to issue a single
+// chok's *Engine. Bootstrap uses it to issue a single
 // AddPolicies (and therefore a single INSERT round-trip) for many
 // permissions instead of N AddPolicy calls. Service implementations
 // that don't satisfy it fall back to the per-perm GrantRole loop.
@@ -66,7 +66,7 @@ type batchGranter interface {
 // useful when the AdminUserID changes or when an operator widens
 // AdminPerms.
 //
-// When the supplied Service is the chok-shipped *casbinAuthorizer,
+// When the supplied Service is the chok-shipped *Engine,
 // Bootstrap routes through grantRoleBatch so 100 permissions become a
 // single INSERT instead of 100 round-trips. Custom Service
 // implementations fall back to the per-perm GrantRole loop.

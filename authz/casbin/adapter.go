@@ -69,15 +69,15 @@ type gormAdapter struct {
 	db *gorm.DB
 }
 
-// newGormAdapter constructs the adapter and runs AutoMigrate so the
-// casbin_rule table exists. AutoMigrate is idempotent: subsequent
-// startups see the table and no-op.
+// newGormAdapter constructs the adapter. It runs no DDL: casbin_rule
+// creation moved into the authz module's Migrate phase (SPEC §5.3 —
+// battery tables follow the framework migrate mode; off means the
+// framework touches no schema, this table included). Construction
+// against a database without the table succeeds; the first LoadPolicy
+// fails instead, which is the fail-closed startup surface.
 func newGormAdapter(db *gorm.DB) (persist.Adapter, error) {
 	if db == nil {
 		return nil, errors.New("authz/casbin: nil *gorm.DB")
-	}
-	if err := db.AutoMigrate(&CasbinRule{}); err != nil {
-		return nil, fmt.Errorf("authz/casbin: AutoMigrate casbin_rule: %w", err)
 	}
 	return &gormAdapter{db: db}, nil
 }

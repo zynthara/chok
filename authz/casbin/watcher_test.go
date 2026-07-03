@@ -127,7 +127,7 @@ func TestRedisWatcher_MultipleSubscribersAllReceive(t *testing.T) {
 // TestRedisWatcher_CloseStopsCallback covers the SPEC §7.4 shutdown
 // contract: after Close returns the subscriber goroutine has exited
 // and the callback can no longer fire. Without this guarantee the
-// *casbinAuthorizer would still be reachable through the
+// *Engine would still be reachable through the
 // goroutine's closure and never get GC'd, and a late peer publish
 // arriving mid-shutdown could call LoadPolicy on a torn-down
 // enforcer.

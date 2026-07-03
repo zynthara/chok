@@ -370,7 +370,7 @@ func (w *redisWatcher) recordReloadFailure() {
 // receiveLoop if it's parked on the receive case, then wait for
 // receiveLoop exit (no more reload signals will be sent) THEN
 // reloadLoop exit (any in-flight callback has returned), then
-// clear the callback. After this returns *casbinAuthorizer can be
+// clear the callback. After this returns *Engine can be
 // GC'd safely.
 //
 // persist.Watcher.Close has a void signature, so any pubsub.Close

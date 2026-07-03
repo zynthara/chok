@@ -128,6 +128,14 @@ func (c *Component) Describe() kernel.Descriptor {
 // Close). db.From is the panicking convenience wrapper over this.
 func (c *Component) Handle() *DB { return c.handle.Load() }
 
+// MigrateMode reports this instance's schema strategy (MigrateAuto /
+// MigrateVersioned / MigrateOff) once Init has decoded the section.
+// Battery modules consult it from their own Migrators to honour the
+// SPEC §5.3 whitelist semantics uniformly: battery tables AutoMigrate
+// in auto and versioned modes; in off mode the framework — battery
+// tables included — touches no schema.
+func (c *Component) MigrateMode() string { return c.opts.Migrate }
+
 // Init decodes the instance's section, opens the pool and verifies
 // connectivity — a wrong DSN must fail startup, not the first query.
 func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
