@@ -15,14 +15,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/auth/jwt"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/handler"
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/middleware"
-	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/auth/jwt"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/handler"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/middleware"
+	"github.com/zynthara/chok/v2/store"
 )
 
 // Sender delivers a password-reset code to the user (email, SMS, etc.).

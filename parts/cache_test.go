@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/cache"
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/cache"
+	"github.com/zynthara/chok/v2/component"
 )
 
 func TestCacheComponent_Init_NilCache(t *testing.T) {

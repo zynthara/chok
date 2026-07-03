@@ -6,9 +6,9 @@
 //     by goreleaser / Makefile):
 //
 //     go build -ldflags "
-//       -X github.com/zynthara/chok/version.version=v1.0.0
-//       -X github.com/zynthara/chok/version.gitHash=abc1234
-//       -X github.com/zynthara/chok/version.buildTime=2024-01-01T00:00:00Z"
+//       -X github.com/zynthara/chok/v2/version.version=v1.0.0
+//       -X github.com/zynthara/chok/v2/version.gitHash=abc1234
+//       -X github.com/zynthara/chok/v2/version.buildTime=2024-01-01T00:00:00Z"
 //
 //  2. Go's debug.ReadBuildInfo (Go 1.18+) — populated automatically
 //     for any binary built from a module, including those installed

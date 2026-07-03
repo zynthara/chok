@@ -9,9 +9,9 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
-	"github.com/zynthara/chok/audit"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
+	"github.com/zynthara/chok/v2/audit"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
 )
 
 type auditTestCfg struct {

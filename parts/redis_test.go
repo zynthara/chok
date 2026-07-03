@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
 )
 
 type redisTestCfg struct {

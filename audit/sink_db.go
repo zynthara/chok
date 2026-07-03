@@ -12,8 +12,8 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/rid"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/rid"
 )
 
 // marshalJSON wraps json.Marshal + datatypes.JSON conversion. Kept

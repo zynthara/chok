@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const tracerName = "github.com/zynthara/chok/db"
+const tracerName = "github.com/zynthara/chok/v2/db"
 
 // EnableTracing registers GORM callbacks that create OpenTelemetry spans
 // for every query. Each span records the SQL operation (CREATE, QUERY,

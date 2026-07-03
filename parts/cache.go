@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/zynthara/chok/cache"
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/cache"
+	"github.com/zynthara/chok/v2/component"
 )
 
 // CacheBuilder constructs the application's Cache, typically by calling

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/zynthara/chok/account"
+	"github.com/zynthara/chok/v2/account"
 )
 
 // Provider is a configurable fake AuthProvider. Tests pre-seed the

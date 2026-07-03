@@ -36,8 +36,8 @@ package blessed
 // account.providerRegistry.
 
 import (
-	_ "github.com/zynthara/chok/account/providers/apple"
-	_ "github.com/zynthara/chok/account/providers/facebook"
-	_ "github.com/zynthara/chok/account/providers/github"
-	_ "github.com/zynthara/chok/account/providers/google"
+	_ "github.com/zynthara/chok/v2/account/providers/apple"
+	_ "github.com/zynthara/chok/v2/account/providers/facebook"
+	_ "github.com/zynthara/chok/v2/account/providers/github"
+	_ "github.com/zynthara/chok/v2/account/providers/google"
 )

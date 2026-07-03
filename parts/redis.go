@@ -7,9 +7,9 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/redis"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/redis"
 )
 
 // RedisResolver extracts the Redis configuration from the app config.

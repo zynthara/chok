@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/zynthara/chok/authz"
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/authz"
+	"github.com/zynthara/chok/v2/component"
 )
 
 func TestAuthzComponent_Init_ExposesAuthorizer(t *testing.T) {

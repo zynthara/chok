@@ -11,7 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // configFileWatcher watches the configuration file at path and emits a

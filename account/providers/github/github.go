@@ -12,7 +12,7 @@ import (
 	"golang.org/x/oauth2"
 	githubendpoint "golang.org/x/oauth2/github"
 
-	"github.com/zynthara/chok/account"
+	"github.com/zynthara/chok/v2/account"
 )
 
 // provider is the runtime github.AuthProvider. Holds the oauth2 config

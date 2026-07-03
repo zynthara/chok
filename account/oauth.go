@@ -18,11 +18,11 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/store"
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/store"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 // LoginMethod is one row of "how can this user authenticate" — returned

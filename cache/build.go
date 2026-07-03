@@ -3,7 +3,7 @@ package cache
 import (
 	"github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // BuildOptions configures which cache layers to create.

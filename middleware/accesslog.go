@@ -6,8 +6,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/zynthara/chok/internal/ctxval"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/internal/ctxval"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // AccessLog logs request method, path, status, and latency.

@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 // Locator identifies which record(s) a Get/Update/Delete operation targets.

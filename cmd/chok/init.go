@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/zynthara/chok/version"
+	"github.com/zynthara/chok/v2/version"
 )
 
 //go:embed templates/*
@@ -154,6 +154,13 @@ func renderTemplate(baseDir, tmplPath, outPath string, data projectData) error {
 	return t.Execute(f, data)
 }
 
+// chokModule is the module line a *v1* chok checkout declares. The
+// scaffold templates emit v1 projects until M5 (`require
+// github.com/zynthara/chok ...`), so only a genuine v1 checkout can
+// serve as a local `replace` target. This repository itself is now the
+// /v2 module and must NOT match — hence the exact-line comparison in
+// isChokRoot rather than a substring test (the v1 path is a prefix of
+// the v2 one).
 const chokModule = "module github.com/zynthara/chok"
 
 func detectChokVersion() string {
@@ -207,7 +214,12 @@ func isChokRoot(dir string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(data), chokModule)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == chokModule {
+			return true
+		}
+	}
+	return false
 }
 
 func isDirEmpty(dir string) bool {

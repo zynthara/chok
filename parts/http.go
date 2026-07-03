@@ -5,10 +5,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/middleware"
-	"github.com/zynthara/chok/server"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/middleware"
+	"github.com/zynthara/chok/v2/server"
 )
 
 // HTTPResolver extracts HTTPOptions from the app config. Returning nil

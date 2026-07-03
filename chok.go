@@ -12,14 +12,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/cache"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/parts"
-	"github.com/zynthara/chok/version"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/cache"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/parts"
+	"github.com/zynthara/chok/v2/version"
 )
 
 // Server is the interface all managed servers must implement.

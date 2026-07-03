@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
-	"github.com/zynthara/chok/audit"
+	"github.com/zynthara/chok/v2/audit"
 )
 
 // TestLog_TableName pins the storage table name. Auditors and

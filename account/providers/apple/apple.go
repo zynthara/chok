@@ -11,7 +11,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/zynthara/chok/account"
+	"github.com/zynthara/chok/v2/account"
 )
 
 // provider is the runtime apple.AuthProvider. It owns the

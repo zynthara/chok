@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // Registry sequences the lifecycle of a set of Components according to

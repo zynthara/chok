@@ -9,7 +9,7 @@ import (
 	"golang.org/x/oauth2"
 	gendpoint "golang.org/x/oauth2/google"
 
-	"github.com/zynthara/chok/account"
+	"github.com/zynthara/chok/v2/account"
 )
 
 // provider is the runtime google.AuthProvider. Holds the oauth2 config

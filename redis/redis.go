@@ -3,7 +3,7 @@ package redis
 import (
 	"github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/config"
+	"github.com/zynthara/chok/v2/config"
 )
 
 // New creates a Redis client from config options.

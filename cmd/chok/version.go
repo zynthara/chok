@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/zynthara/chok/version"
+	"github.com/zynthara/chok/v2/version"
 )
 
 func versionCmd() *cobra.Command {

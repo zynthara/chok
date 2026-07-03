@@ -15,10 +15,10 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 // Sentinel errors — business code uses these without importing GORM.

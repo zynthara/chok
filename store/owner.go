@@ -6,9 +6,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/db"
 )
 
 // defaultAdminRoles is the global default admin role list for OwnerScope

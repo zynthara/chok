@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // --- test model with Owned mixin ---

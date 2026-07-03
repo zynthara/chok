@@ -17,8 +17,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
-	"github.com/zynthara/chok/account"
-	"github.com/zynthara/chok/account/providers/google"
+	"github.com/zynthara/chok/v2/account"
+	"github.com/zynthara/chok/v2/account/providers/google"
 )
 
 // mockIdP is a stripped-down Google OIDC stand-in. It serves:

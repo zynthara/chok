@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // --- helpers ---

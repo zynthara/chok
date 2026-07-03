@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/url"
 
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 // Reader is a read-only view of a Store. Business code that only queries

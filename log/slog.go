@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/internal/ctxval"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/internal/ctxval"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 

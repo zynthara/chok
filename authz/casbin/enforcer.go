@@ -11,8 +11,8 @@ import (
 	"github.com/casbin/casbin/v3/model"
 	"github.com/casbin/casbin/v3/persist"
 
-	"github.com/zynthara/chok/authz"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/authz"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // auditHook wraps the per-policy-change callback so it can live behind

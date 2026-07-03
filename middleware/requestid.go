@@ -9,7 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/internal/ctxval"
+	"github.com/zynthara/chok/v2/internal/ctxval"
 )
 
 // fallbackCounter is bumped on every generateID call that falls back to

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/log"
 )
 
 type testConfig struct {

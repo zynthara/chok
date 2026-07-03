@@ -11,9 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/auth/jwt"
-	"github.com/zynthara/chok/handler"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/auth/jwt"
+	"github.com/zynthara/chok/v2/handler"
 )
 
 const testKey = "test-key-that-is-exactly-32-byte"

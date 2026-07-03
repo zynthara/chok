@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/component"
 )
 
 // HealthComponent exposes three Kubernetes-style health endpoints:

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/scheduler"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/scheduler"
 )
 
 // testJob is a trivial Job implementation for scheduler tests.

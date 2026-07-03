@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/zynthara/chok/auth/jwt"
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/auth/jwt"
+	"github.com/zynthara/chok/v2/component"
 )
 
 // JWTBuilder constructs a *jwt.Manager from the app config. Typically

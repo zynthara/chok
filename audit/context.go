@@ -5,8 +5,8 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/internal/ctxval"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/internal/ctxval"
 )
 
 // FromContext returns an Entry pre-populated with framework-derived

@@ -15,12 +15,12 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/middleware"
-	"github.com/zynthara/chok/store"
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/middleware"
+	"github.com/zynthara/chok/v2/store"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 const testSigningKey = "this-is-a-test-signing-key-32bytes!"

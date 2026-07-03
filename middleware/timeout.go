@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/internal/ctxval"
+	"github.com/zynthara/chok/v2/internal/ctxval"
 )
 
 // Timeout returns a middleware that injects a context deadline into each

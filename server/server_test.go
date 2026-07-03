@@ -12,7 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/config"
+	"github.com/zynthara/chok/v2/config"
 )
 
 func init() {

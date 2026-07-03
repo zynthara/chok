@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // Component is the mandatory interface every subsystem implements.

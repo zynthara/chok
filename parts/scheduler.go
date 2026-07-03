@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/scheduler"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/scheduler"
 )
 
 // SchedulerComponent owns a *scheduler.Scheduler and wires its

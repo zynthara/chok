@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/account"
-	"github.com/zynthara/chok/account/providers/facebook"
+	"github.com/zynthara/chok/v2/account"
+	"github.com/zynthara/chok/v2/account/providers/facebook"
 )
 
 // mockGraph stands in for Facebook's Graph API + OAuth endpoint pair.

@@ -9,8 +9,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // healthKernel is a mock Kernel returning a configurable HealthReport.

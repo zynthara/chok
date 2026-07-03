@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/zynthara/chok/authz"
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/authz"
+	"github.com/zynthara/chok/v2/component"
 )
 
 // AuthzBuilder constructs the application's Authorizer. Typical impls:

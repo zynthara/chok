@@ -6,11 +6,11 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/version"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/version"
 )
 
 // Option configures an App.

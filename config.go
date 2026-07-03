@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
-	"github.com/zynthara/chok/config"
+	"github.com/zynthara/chok/v2/config"
 )
 
 // loadConfig loads configuration: default tags → file → env → unmarshal → validate.

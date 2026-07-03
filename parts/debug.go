@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/component"
 )
 
 // DebugComponent exposes a /componentz endpoint that returns structured

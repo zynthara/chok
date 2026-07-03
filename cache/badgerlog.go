@@ -3,7 +3,7 @@ package cache
 import (
 	"fmt"
 
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // badgerLogger adapts chok's log.Logger to badger's Logger interface.

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"regexp"
 
-	"github.com/zynthara/chok/apierr"
+	"github.com/zynthara/chok/v2/apierr"
 )
 
 // MapError maps store sentinel errors to *apierr.Error.

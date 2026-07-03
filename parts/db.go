@@ -8,8 +8,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/db"
 )
 
 // DBBuilder opens a *gorm.DB, typically by calling db.NewMySQL or

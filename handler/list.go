@@ -9,7 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 // QueryLister is implemented by store.Store[T] (and wrappers that embed it).

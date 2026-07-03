@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // mockKernel is a minimal Kernel for testing Components in isolation.

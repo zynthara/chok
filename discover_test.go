@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/cache"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/cache"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // TestDiscoverOne_FlatStillWorks documents that the original flat layout

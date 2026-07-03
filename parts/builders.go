@@ -3,11 +3,11 @@ package parts
 import (
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/account"
-	"github.com/zynthara/chok/cache"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/v2/account"
+	"github.com/zynthara/chok/v2/cache"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/db"
 )
 
 // SQLiteBuilder returns a DBBuilder that opens a SQLite connection from

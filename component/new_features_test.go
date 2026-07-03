@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // ---------------------------------------------------------------------------

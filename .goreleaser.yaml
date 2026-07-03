@@ -37,9 +37,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/zynthara/chok/version.version={{.Version}}
-      - -X github.com/zynthara/chok/version.gitHash={{.ShortCommit}}
-      - -X github.com/zynthara/chok/version.buildTime={{.Date}}
+      - -X github.com/zynthara/chok/v2/version.version={{.Version}}
+      - -X github.com/zynthara/chok/v2/version.gitHash={{.ShortCommit}}
+      - -X github.com/zynthara/chok/v2/version.buildTime={{.Date}}
 
 archives:
   - id: chok
@@ -86,7 +86,7 @@ release:
     Install via Go toolchain:
 
     ```
-    go install github.com/zynthara/chok/cmd/chok@{{ .Tag }}
+    go install github.com/zynthara/chok/v2/cmd/chok@{{ .Tag }}
     ```
 
     Or download the binary for your platform below.

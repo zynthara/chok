@@ -9,12 +9,12 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"github.com/zynthara/chok/auth/jwt"
-	"github.com/zynthara/chok/authz"
-	"github.com/zynthara/chok/cache"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/auth/jwt"
+	"github.com/zynthara/chok/v2/authz"
+	"github.com/zynthara/chok/v2/cache"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // integrationCfg is a minimal app-wide config used by the full-Registry

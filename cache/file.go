@@ -7,7 +7,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/log"
 )
 
 type fileCache struct {

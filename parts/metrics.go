@@ -10,7 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/component"
 )
 
 // MetricsComponent owns a Prometheus registry, pre-populated with the

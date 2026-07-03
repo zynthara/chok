@@ -14,10 +14,10 @@ import (
 	"github.com/gin-gonic/gin/binding"
 	"github.com/go-playground/validator/v10"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/internal/ctxval"
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/validate"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/internal/ctxval"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/validate"
 )
 
 // HandlerFunc is a typed handler that returns a response and error.

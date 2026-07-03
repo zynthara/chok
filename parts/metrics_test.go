@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/component"
 )
 
 func TestMetricsComponent_DefaultPath(t *testing.T) {

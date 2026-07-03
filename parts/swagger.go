@@ -6,8 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/swagger"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/swagger"
 )
 
 // SwaggerResolver extracts title, version, mount prefix, and a bearer-auth

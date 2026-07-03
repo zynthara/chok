@@ -6,8 +6,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/zynthara/chok/internal/ctxval"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/internal/ctxval"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // Logger injects the given logger into the request context. The logger is

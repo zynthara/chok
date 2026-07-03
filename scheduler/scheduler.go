@@ -10,7 +10,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // Scheduler runs registered Jobs on their cron schedules.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/store"
 )
 
 // testModel is a minimal model for testing the test helpers.

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 // ---------------------------------------------------------------------------

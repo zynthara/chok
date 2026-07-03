@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/v2/db"
 )
 
 // Changes describes what to update on matched rows. It is the "what" axis of

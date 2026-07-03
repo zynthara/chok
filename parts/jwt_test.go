@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/zynthara/chok/auth/jwt"
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/auth/jwt"
+	"github.com/zynthara/chok/v2/component"
 )
 
 func TestJWTComponent_Init_ExposesManager(t *testing.T) {

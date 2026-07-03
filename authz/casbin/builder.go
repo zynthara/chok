@@ -8,9 +8,9 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/authz"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/parts"
+	"github.com/zynthara/chok/v2/authz"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/parts"
 )
 
 // Builder returns a parts.AuthzBuilder that constructs a

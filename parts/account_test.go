@@ -10,9 +10,9 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"github.com/zynthara/chok/account"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
+	"github.com/zynthara/chok/v2/account"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
 )
 
 const accountTestKey = "this-is-a-test-signing-key-32byt"

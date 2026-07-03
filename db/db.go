@@ -12,7 +12,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"github.com/zynthara/chok/config"
+	"github.com/zynthara/chok/v2/config"
 )
 
 // NewMySQL creates a GORM DB connected to MySQL.

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/account"
-	"github.com/zynthara/chok/account/providers/github"
+	"github.com/zynthara/chok/v2/account"
+	"github.com/zynthara/chok/v2/account/providers/github"
 )
 
 // mockGitHub stands in for both the OAuth endpoint pair (authorize +

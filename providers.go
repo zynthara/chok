@@ -23,4 +23,4 @@ package chok
 // only mounts /auth/{name}/* for providers actually registered via
 // m.RegisterProvider, which the parts.DefaultAccountBuilder /
 // account.Setup paths gate on `enabled=true` in yaml.
-import _ "github.com/zynthara/chok/account/providers/blessed"
+import _ "github.com/zynthara/chok/v2/account/providers/blessed"

@@ -3,7 +3,7 @@ package github
 import (
 	"fmt"
 
-	"github.com/zynthara/chok/account"
+	"github.com/zynthara/chok/v2/account"
 )
 
 // rawDecoder is the subset of config.ProviderRawOptions Factory needs.

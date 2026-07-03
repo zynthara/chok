@@ -8,8 +8,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/db"
 )
 
 type dbTestUser struct {

@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/handler"
+	"github.com/zynthara/chok/v2/handler"
 )
 
 // Post registers a POST route and adds it to the OpenAPI spec.

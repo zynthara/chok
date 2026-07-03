@@ -7,10 +7,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/handler"
-	"github.com/zynthara/chok/internal/ctxval"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/handler"
+	"github.com/zynthara/chok/v2/internal/ctxval"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // Recovery returns a middleware that recovers from panics and returns 500.

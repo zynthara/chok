@@ -7,8 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/account"
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/account"
+	"github.com/zynthara/chok/v2/component"
 )
 
 // AccountBuilder constructs the *account.Module given access to the

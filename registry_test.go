@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/parts"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/parts"
 )
 
 // recordingComponent captures Init/Close invocations so tests can

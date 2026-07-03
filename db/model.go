@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/rid"
+	"github.com/zynthara/chok/v2/rid"
 )
 
 // RIDPrefixer — models implementing this get auto-generated prefixed RIDs.

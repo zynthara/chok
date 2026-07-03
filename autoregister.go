@@ -15,14 +15,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/authz/casbin"
-	"github.com/zynthara/chok/cache"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/middleware"
-	"github.com/zynthara/chok/parts"
-	"github.com/zynthara/chok/server"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/authz/casbin"
+	"github.com/zynthara/chok/v2/cache"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/middleware"
+	"github.com/zynthara/chok/v2/parts"
+	"github.com/zynthara/chok/v2/server"
 )
 
 // ---------------------------------------------------------------------------

@@ -9,8 +9,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/zynthara/chok/db"
-	"github.com/zynthara/chok/rid"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/rid"
 )
 
 // --- Options (shared by Update and Delete) ---------------------------------

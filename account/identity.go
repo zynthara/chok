@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/datatypes"
 
-	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/v2/db"
 )
 
 // Identity is the OAuth-only join row between a chok User and an external

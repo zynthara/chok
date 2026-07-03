@@ -9,9 +9,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/handler"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/handler"
 )
 
 // HTTPServer implements the chok.Server interface using Gin.

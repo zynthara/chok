@@ -12,7 +12,7 @@ import (
 	"golang.org/x/oauth2"
 	fbendpoint "golang.org/x/oauth2/facebook"
 
-	"github.com/zynthara/chok/account"
+	"github.com/zynthara/chok/v2/account"
 )
 
 // provider is the runtime facebook.AuthProvider. Holds the oauth2

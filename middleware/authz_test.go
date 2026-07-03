@@ -10,9 +10,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/authz"
-	"github.com/zynthara/chok/handler"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/authz"
+	"github.com/zynthara/chok/v2/handler"
 )
 
 // authzRouter wires AttachAuthz + RequireAuthz against a stub

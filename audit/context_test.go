@@ -7,9 +7,9 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/zynthara/chok/audit"
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/internal/ctxval"
+	"github.com/zynthara/chok/v2/audit"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/internal/ctxval"
 )
 
 // TestFromContext_NilCtx pins the defensive guard: FromContext must

@@ -8,8 +8,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/store"
 )
 
 // Role naming constraints for UpdateUserRoles. The User.Roles column is a

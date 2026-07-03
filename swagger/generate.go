@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/handler"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/handler"
 )
 
 // Generate walks the gin engine's registered routes, looks up handler

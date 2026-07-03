@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/zynthara/chok/rid"
+	"github.com/zynthara/chok/v2/rid"
 )
 
 // ValidateModel checks model metadata:

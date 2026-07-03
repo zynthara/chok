@@ -21,8 +21,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
-	"github.com/zynthara/chok/account"
-	"github.com/zynthara/chok/account/providers/apple"
+	"github.com/zynthara/chok/v2/account"
+	"github.com/zynthara/chok/v2/account/providers/apple"
 )
 
 // generateTestPEM produces a fresh PKCS8-wrapped P-256 ECDSA key in

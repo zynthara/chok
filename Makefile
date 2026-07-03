@@ -19,9 +19,9 @@ GIT_HASH   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 LDFLAGS    := -s -w \
-	-X github.com/zynthara/chok/version.version=$(VERSION) \
-	-X github.com/zynthara/chok/version.gitHash=$(GIT_HASH) \
-	-X github.com/zynthara/chok/version.buildTime=$(BUILD_TIME)
+	-X github.com/zynthara/chok/v2/version.version=$(VERSION) \
+	-X github.com/zynthara/chok/v2/version.gitHash=$(GIT_HASH) \
+	-X github.com/zynthara/chok/v2/version.buildTime=$(BUILD_TIME)
 
 # ==============================================================================
 # Targets

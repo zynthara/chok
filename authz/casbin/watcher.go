@@ -11,8 +11,8 @@ import (
 	"github.com/casbin/casbin/v3/persist"
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/rid"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/rid"
 )
 
 // redisWatcher is chok's persist.Watcher implementation over the

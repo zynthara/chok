@@ -8,10 +8,10 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/audit"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/log"
+	"github.com/zynthara/chok/v2/audit"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/log"
 )
 
 // AuditResolver extracts AuditOptions from the application config.

@@ -11,9 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/store"
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/store"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 // --- helper: create a registered user and return their RID + initial PV ---

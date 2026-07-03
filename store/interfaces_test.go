@@ -1,6 +1,6 @@
 package store
 
-import "github.com/zynthara/chok/db"
+import "github.com/zynthara/chok/v2/db"
 
 // Compile-time assertions that *Store[T] satisfies the narrow interfaces.
 

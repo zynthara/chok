@@ -13,12 +13,12 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
-	"github.com/zynthara/chok/authz"
-	"github.com/zynthara/chok/authz/casbin"
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/config"
-	"github.com/zynthara/chok/log"
-	"github.com/zynthara/chok/parts"
+	"github.com/zynthara/chok/v2/authz"
+	"github.com/zynthara/chok/v2/authz/casbin"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/parts"
 )
 
 // fakeKernel is a small-component Kernel for the casbin Builder,

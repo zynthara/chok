@@ -3,8 +3,8 @@ package parts
 import (
 	"context"
 
-	"github.com/zynthara/chok/component"
-	"github.com/zynthara/chok/scheduler"
+	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/scheduler"
 )
 
 // PoolComponent wraps a scheduler.Pool as a Component so its lifecycle

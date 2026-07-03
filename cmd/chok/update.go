@@ -11,10 +11,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/zynthara/chok/version"
+	"github.com/zynthara/chok/v2/version"
 )
 
 const (
+	// Deliberately the v1 module path until M5: `chok update` installs
+	// the latest *published* release, and every release up to and
+	// including v0.1.4 lives under the v1 path on the module proxy.
+	// Flip to .../v2/cmd/chok when the first v2 tag is cut.
 	chokInstallPath = "github.com/zynthara/chok/cmd/chok"
 	githubLatestAPI = "https://api.github.com/repos/zynthara/chok/releases/latest"
 )

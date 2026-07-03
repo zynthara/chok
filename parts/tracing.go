@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/zynthara/chok/component"
+	"github.com/zynthara/chok/v2/component"
 )
 
 // TracingSettings is the flat view of tracing configuration expected

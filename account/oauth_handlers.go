@@ -12,10 +12,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/handler"
-	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/handler"
+	"github.com/zynthara/chok/v2/store"
 )
 
 // exchangeBindingCookieName is the HttpOnly cookie that binds an

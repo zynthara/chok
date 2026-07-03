@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zynthara/chok/apierr"
-	"github.com/zynthara/chok/auth"
-	"github.com/zynthara/chok/internal/ctxval"
-	"github.com/zynthara/chok/store"
-	"github.com/zynthara/chok/store/where"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/auth"
+	"github.com/zynthara/chok/v2/internal/ctxval"
+	"github.com/zynthara/chok/v2/store"
+	"github.com/zynthara/chok/v2/store/where"
 )
 
 // dummyHash is a pre-computed bcrypt hash used for constant-time comparison
