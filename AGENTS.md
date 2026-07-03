@@ -68,7 +68,7 @@ Prometheus, and OpenTelemetry.
 - Use `rid.New(prefix)` for externally exposed IDs. Do not leak internal
   numeric primary keys in API responses.
 - Do not bypass Store with raw `*gorm.DB` unless intentionally using
-  `s.DB()` for unscoped access or `s.ScopedDB(ctx)` for scoped access.
+  `s.Unsafe(ctx)` — the single escape hatch (tx-aware, scopes applied).
 - Declare `WithQueryFields` / `WithUpdateFields` explicitly for production
   Stores; do not rely on fragile field auto-discovery.
 - Use `store.Fields(&obj)` when optimistic locking matters.

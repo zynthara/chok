@@ -5,8 +5,12 @@
 > M1 起根包 App、`kernel/`、`conf/` 与 log/health/metrics/debug
 > 四模块均为 v2 形态；M2 起整个 Web 栈（`web/`、`middleware/`、
 > `handler/`、`swagger/`、`tracing/`）换轨 stdlib（gin 版
-> `server/` 与相关 parts 胶水已删除），本文对应章节（§8、§10.2、
-> §10.3、§11.10 等）暂不适用；v2 版设计文档随 M5 收口重写。
+> `server/` 与相关 parts 胶水已删除）；M3 起数据层为 v2 形态
+> （`db.Module` + `*db.DB` 薄句柄 + Postgres day-one + 版本化迁移，
+> `store.New` 首参改 `*db.DB`、`WithTx`/`DB()`/`ScopedDB()`/
+> after-hooks 删除——逃生门统一为 `Unsafe(ctx)`，事件走
+> `store.WithBus`），本文对应章节（§7 数据层、§8、§10.2、§10.3、
+> §11.10 等）暂不适用；v2 版设计文档随 M5 收口重写。
 >
 > chok 的架构设计与 API 契约。源代码是真相的最终来源；本文负责把
 > 「为什么」和「契约边界」讲清楚。每次公开 API 调整时与代码同步更新。

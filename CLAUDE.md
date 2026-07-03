@@ -71,17 +71,20 @@ blessed implementation per capability, configuration over code.
   `apierr.New(...)` — never return plain strings
 - Logging on the request path: `middleware.LoggerFrom(ctx)`; reserve
   `app.Logger()` for startup / shutdown / cron contexts
-- Tests open a real in-memory SQLite directly (in-package
-  `gorm.Open(sqlite.Open(":memory:"), ...)` helpers); `choktest` is the
-  exported harness for downstream apps and currently has zero in-repo
-  importers. In-package registry tests use the `mkReg()` helper
+- Tests open a real database via `db/dbtest.Open(t)` — SQLite by
+  default, Postgres when `CHOK_TEST_DRIVER=postgres` +
+  `CHOK_TEST_PG_DSN` are set (M3 dual-run; store/db test setups all
+  ride it). `choktest` is the exported harness for downstream apps
+  (`NewTestDB` returns `*db.DB`); in-repo it also backs db module
+  tests. In-package registry tests use the `mkReg()` helper
 
 ## Common pitfalls — observed in 14 rounds of review
 
 - **DON'T** call `k.Get` inside `Component.Close` — peers in the same
   topo level may already have `markUnavailable`'d themselves
 - **DON'T** bypass the store with raw `*gorm.DB` unless going through
-  `s.DB()` (no scopes) or `s.ScopedDB(ctx)` (with scopes) escape hatches
+  the `s.Unsafe(ctx)` escape hatch (tx-aware, scopes applied,
+  fail-closed on scope errors) or the handle-level `h.Unsafe(ctx)`
 - **DON'T** rely on store auto-discovery in production — always declare
   `WithQueryFields` / `WithUpdateFields` explicitly. Auto-discovery
   emits a warn log because the implicit set is fragile.
@@ -108,7 +111,9 @@ blessed implementation per capability, configuration over code.
   the blog smoke test (`examples/blog` is archived as
   `examples/_v1_blog`, build-ignored; blog is rebuilt on the v2 API
   in M5 and the smoke discipline returns then).
-  Current fixture: `go run ./internal/fixture/m2` and Ctrl-C.
+  Current fixture: `go run ./internal/fixture/m3` (from the repo
+  root) and Ctrl-C; store/db changes also run the Postgres lane
+  (`make test-pg` with `CHOK_TEST_PG_DSN`, or let CI's service run it).
 
 ## Where things live
 
@@ -120,7 +125,8 @@ blessed implementation per capability, configuration over code.
 | `kernel/` + `conf/` | v2 control plane: Descriptor / actor Registry / RCU config |
 | `component/` | v1-residue Component core (used by `parts/` until M4) |
 | `parts/` | v1-residue battery glue (db, cache, redis, account, ... — 9 left) |
-| `store/` | generic CRUD; locator + changes + scopes |
+| `db/` | v2 data module: Module/From + `*db.DB` thin handle + versioned migration engine (+ v1-residue constructors for `parts/`) |
+| `store/` | generic CRUD; locator + changes + scopes; opt-in `WithBus` events |
 | `store/where/` | query DSL (`resolveField` does identifier validation) |
 | `handler/` | generic `HandleRequest[T,R]` — stdlib http.Handler + Meta |
 | `middleware/` | stdlib middleware set (`func(http.Handler) http.Handler`) |
@@ -128,7 +134,6 @@ blessed implementation per capability, configuration over code.
 | `swagger/` `tracing/` `health/` `metrics/` `debug/` | v2 observability / docs modules |
 | `account/` | ready-to-use user module + login rate limiter |
 | `cache/` | memory + file + redis Chain + circuit Breaker |
-| `db/` | gorm wrapper + Model mixins + Migrate |
 | `examples/_v1_blog/` | archived v1 example (build-ignored); blog returns on the v2 API in M5 |
 | `examples/tasker/` | (planned) full-coverage example |
 | `docs/design.md` | architecture source of truth |

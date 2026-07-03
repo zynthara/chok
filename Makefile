@@ -49,6 +49,10 @@ install: ## Install the chok CLI into GOPATH/bin
 test: ## Run the full unit test suite with the race detector
 	$(GO) test -race -count=1 ./...
 
+.PHONY: test-pg
+test-pg: ## Run the store/db packages against Postgres (set CHOK_TEST_PG_DSN)
+	CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 ./store/... ./db/...
+
 .PHONY: cover
 cover: ## Generate a coverage report at _output/coverage.html
 	@mkdir -p $(OUTPUT_DIR)
@@ -57,11 +61,11 @@ cover: ## Generate a coverage report at _output/coverage.html
 	@echo "==> Coverage report: $(OUTPUT_DIR)/coverage.html"
 
 .PHONY: smoke
-smoke: build ## Boot examples/blog as a self-check
-	@echo "==> Smoke testing examples/blog..."
-	@( cd examples/blog && $(GO) run ./cmd/blog & \
-	   PID=$$!; sleep 3; kill $$PID 2>/dev/null; wait $$PID 2>/dev/null; \
-	   echo "==> blog start-up smoke OK" )
+smoke: ## Boot the current milestone fixture as a self-check (blog returns in M5)
+	@echo "==> Smoke testing internal/fixture/m3..."
+	@( $(GO) run ./internal/fixture/m3 & \
+	   PID=$$!; sleep 3; kill -INT $$PID 2>/dev/null; wait $$PID 2>/dev/null; \
+	   echo "==> m3 fixture start-up smoke OK" )
 
 ##@ Lint & Format
 

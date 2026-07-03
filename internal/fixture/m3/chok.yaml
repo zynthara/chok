@@ -1,0 +1,12 @@
+# M3 fixture config — the first real consumer of the v2 db section.
+# Launched from the repo root (go run ./internal/fixture/m3), so the
+# sqlite path lands next to nothing important; the acceptance test
+# overrides it into a temp dir via M3FIXTURE_DB_SQLITE_PATH.
+db:
+  driver: sqlite
+  migrate: versioned
+  sqlite:
+    path: m3fixture.db
+
+# Everything else rides defaults; debug is flipped on through the env
+# path in main() (same trick as the m2 fixture).
