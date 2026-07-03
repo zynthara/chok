@@ -1,14 +1,13 @@
-# Tag-driven goreleaser fallback.
+# Tag-driven goreleaser release.
 #
-# Normal release flow: release-please.yml inlines goreleaser, so the
-# automatic v* tag it creates triggers a build inside the same job —
-# bypassing GitHub's anti-loop policy that suppresses cross-workflow
-# triggers from GITHUB_TOKEN-created tags.
-#
-# This separate workflow stays as a manual fallback for ad-hoc tag
-# pushes (`git tag vX.Y.Z && git push --tags` from a developer
-# machine, or rerunning a release tag from the GitHub UI). goreleaser
-# is idempotent over an existing release thanks to mode: replace.
+# Releases are cut manually as of v2 (release-please retired: its
+# commit-counting versioning cannot express the human-paced
+# v2.0.0-beta.N series and it had already mis-opened a duplicate
+# release PR from pre-/v2 history). The flow: update CHANGELOG.md,
+# tag vX.Y.Z[-pre.N], push the tag; this workflow builds and
+# publishes the GitHub Release. goreleaser is idempotent over an
+# existing release thanks to mode: replace, so rerunning a release
+# tag from the GitHub UI is safe.
 
 name: goreleaser
 

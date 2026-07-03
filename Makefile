@@ -95,11 +95,12 @@ snapshot: ## Run goreleaser locally without publishing (output under dist/)
 	goreleaser release --snapshot --clean --skip=publish
 
 .PHONY: tag
-tag: ## Print the release-please workflow
-	@echo "Release workflow:"
-	@echo "  1. push to main; release-please opens / updates the release PR"
-	@echo "  2. review + merge the PR; the merge creates the git tag"
-	@echo "  3. the tag push triggers goreleaser to build and publish a GitHub Release"
+tag: ## Print the manual release workflow
+	@echo "Release workflow (manual since v2):"
+	@echo "  1. update CHANGELOG.md with the release entry"
+	@echo "  2. full suite green: make test && go vet ./..."
+	@echo "  3. git tag vX.Y.Z[-pre.N] && git push origin <tag>"
+	@echo "  4. the tag push triggers goreleaser to build and publish a GitHub Release"
 
 ##@ Clean
 
