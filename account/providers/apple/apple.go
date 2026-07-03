@@ -19,10 +19,10 @@ import (
 // refresh through coreos/go-oidc), the oauth2 config, and the
 // per-flow capabilities Module dispatches against.
 type provider struct {
-	cfg          *oauth2.Config
-	verifier     *oidc.IDTokenVerifier
-	secretCache  *clientSecretCache
-	redirectURL  string
+	cfg         *oauth2.Config
+	verifier    *oidc.IDTokenVerifier
+	secretCache *clientSecretCache
+	redirectURL string
 }
 
 // New constructs an Apple provider. PEM parsing happens here so a bad
@@ -129,15 +129,15 @@ func (p *provider) BeginAuth(_ context.Context, req *account.BeginRequest) (*acc
 // CompleteAuth implements account.AuthProvider.
 //
 // Three concerns interleave:
-//   1. The token exchange must inject the dynamically-signed
-//      client_secret into the form body (oauth2.Config has no slot
-//      for a per-request secret, so we use SetAuthURLParam).
-//   2. The id_token verifier checks signature + iss + aud + exp
-//      via JWKS. Nonce is per-request — we compare claims.Nonce
-//      against req.Nonce.
-//   3. The user's name (firstName/lastName) only arrives on the
-//      first callback after consent in a `user` form field. We
-//      parse it nil-safely and concat into ProviderIdentity.Name.
+//  1. The token exchange must inject the dynamically-signed
+//     client_secret into the form body (oauth2.Config has no slot
+//     for a per-request secret, so we use SetAuthURLParam).
+//  2. The id_token verifier checks signature + iss + aud + exp
+//     via JWKS. Nonce is per-request — we compare claims.Nonce
+//     against req.Nonce.
+//  3. The user's name (firstName/lastName) only arrives on the
+//     first callback after consent in a `user` form field. We
+//     parse it nil-safely and concat into ProviderIdentity.Name.
 //
 // Apple's `is_private_email` claim signals a privaterelay alias
 // rather than the user's real mailbox; we propagate it as
@@ -185,7 +185,7 @@ func (p *provider) CompleteAuth(ctx context.Context, req *account.CompleteReques
 		Email:             claims.Email,
 		// claims.EmailVerified is "true"|"false" (string, not bool)
 		// in Apple's id_token. Apple-specific quirk; coerce to bool.
-		EmailVerified:  claims.EmailVerifiedAsBool(),
+		EmailVerified: claims.EmailVerifiedAsBool(),
 		// Apple's `is_private_email` flags the @privaterelay.appleid.com
 		// alias case. Surface as IsAliasedEmail so Module's SPEC §8
 		// LinkByEmail double-check and §8.1 create-user gate both

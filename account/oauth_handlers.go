@@ -510,4 +510,3 @@ func (m *Module) handleUnlinkIdentity(ctx context.Context, req *unlinkIdentityRe
 	}
 	return m.UnlinkIdentity(ctx, p.Subject, req.IdentityID)
 }
-

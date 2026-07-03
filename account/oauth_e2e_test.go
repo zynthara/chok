@@ -33,12 +33,12 @@ func init() { gin.SetMode(gin.TestMode) }
 // e2eFixture bundles the Module + router + provider + shared session
 // store so each test can reach for the bits it needs.
 type e2eFixture struct {
-	m       *account.Module
-	r       *gin.Engine
-	p       *testfake.Provider
-	mem     *account.MemorySessionStore
-	store   account.OAuthSessionStore
-	authCS  account.AuthCodeStore
+	m      *account.Module
+	r      *gin.Engine
+	p      *testfake.Provider
+	mem    *account.MemorySessionStore
+	store  account.OAuthSessionStore
+	authCS account.AuthCodeStore
 }
 
 func setupOAuthFixture(t *testing.T, providerName string, modOpts ...account.Option) *e2eFixture {

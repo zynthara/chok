@@ -3,72 +3,77 @@ package chok
 import (
 	"context"
 	"errors"
-	"sync"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v2/component"
+	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/log"
 )
 
-// --- helpers ---
+// --- test modules ---------------------------------------------------------
 
-// blockingServer blocks on Start until Stop is called.
-type blockingServer struct {
-	mu      sync.Mutex
-	stopCh  chan struct{}
-	started bool
+type testComp struct {
+	kind    string
+	initRan *atomic.Bool
 }
 
-func newBlockingServer() *blockingServer {
-	return &blockingServer{stopCh: make(chan struct{})}
-}
-
-func (s *blockingServer) Start(_ context.Context, ready func()) error {
-	s.mu.Lock()
-	s.started = true
-	s.mu.Unlock()
-	ready()
-	<-s.stopCh
-	return nil
-}
-
-func (s *blockingServer) Stop(_ context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	select {
-	case <-s.stopCh:
-	default:
-		close(s.stopCh)
+func (c *testComp) Describe() kernel.Descriptor { return kernel.Descriptor{Kind: c.kind} }
+func (c *testComp) Init(ctx context.Context, k kernel.Kernel) error {
+	if c.initRan != nil {
+		c.initRan.Store(true)
 	}
 	return nil
 }
+func (c *testComp) Close(ctx context.Context) error { return nil }
 
-// failStartServer fails during Start before calling ready.
-type failStartServer struct{ err error }
+// blockingServer is the v2 shape of v1's test server: Serve blocks
+// until the kernel cancels it during shutdown.
+type blockingServer struct {
+	testComp
+}
 
-func (s *failStartServer) Start(_ context.Context, _ func()) error { return s.err }
-func (s *failStartServer) Stop(_ context.Context) error            { return nil }
+func (s *blockingServer) Serve(ctx context.Context, ready func()) error {
+	ready()
+	<-ctx.Done()
+	return nil
+}
 
-// --- tests ---
+func newBlockingServer() *blockingServer {
+	return &blockingServer{testComp: testComp{kind: "blocksrv"}}
+}
+
+func waitTrue(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("timeout: " + msg)
+}
+
+// --- Run semantics (ports chok_test.go themes) ------------------------------
 
 func TestRunCtxCancel_ReturnsNil(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	app := New("test", WithLogger(log.Empty()))
-	srv := newBlockingServer()
-	app.AddServer(srv)
+	app := New("test", WithLogger(log.Empty()), Use(newBlockingServer()))
 
 	done := make(chan error, 1)
 	go func() { done <- app.Run(ctx) }()
-
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	cancel()
 
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("expected nil on cancel, got: %v", err)
+			t.Fatalf("ctx cancel is an orderly stop, want nil, got %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout")
@@ -76,306 +81,356 @@ func TestRunCtxCancel_ReturnsNil(t *testing.T) {
 }
 
 func TestRunCtxDeadlineExceeded_ReturnsError(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
-
-	app := New("test", WithLogger(log.Empty()))
-	app.AddServer(newBlockingServer())
+	app := New("test", WithLogger(log.Empty()), Use(newBlockingServer()))
 
 	err := app.Run(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got: %v", err)
+		t.Fatalf("deadline expiry must surface as error, got %v", err)
 	}
 }
 
 func TestSingleUse(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // immediately cancelled
-
 	app := New("test", WithLogger(log.Empty()))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	_ = app.Run(ctx)
-	err := app.Run(ctx)
-	if err == nil || err.Error() != "chok: Run/Execute already called (App is single-use)" {
-		t.Fatalf("expected single-use error, got: %v", err)
+	if err := app.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "single-use") {
+		t.Fatalf("second Run must fail: %v", err)
 	}
 }
 
-func TestServerStartupFailure_Rollback(t *testing.T) {
-	app := New("test", WithLogger(log.Empty()))
-	good := newBlockingServer()
-	bad := &failStartServer{err: errors.New("bind failed")}
+// --- assembly semantics (Use / Override) -------------------------------------
 
-	app.AddServer(good)
-	app.AddServer(bad)
-
+func TestUse_DuplicateKey_FailsRun(t *testing.T) {
+	app := New("test", WithLogger(log.Empty()),
+		Use(&testComp{kind: "db"}, &testComp{kind: "db"}))
 	err := app.Run(context.Background())
-	if err == nil || !errors.Is(err, errors.New("bind failed")) && err.Error() != "bind failed" {
-		// Check the error message contains our error.
-		if err == nil {
-			t.Fatal("expected error")
+	if err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Fatalf("duplicate Use must fail startup, got %v", err)
+	}
+}
+
+func TestOverride_ReplacesModule(t *testing.T) {
+	var origRan, overrideRan atomic.Bool
+	orig := &testComp{kind: "db", initRan: &origRan}
+	repl := &testComp{kind: "db", initRan: &overrideRan}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	app := New("test", WithLogger(log.Empty()), Use(orig), Override(repl))
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	waitTrue(t, overrideRan.Load, "override module must init")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if origRan.Load() {
+		t.Fatal("overridden module must not init")
+	}
+}
+
+func TestOverride_MissingKey_FailsRun(t *testing.T) {
+	app := New("test", WithLogger(log.Empty()),
+		Use(&testComp{kind: "db"}),
+		Override(&testComp{kind: "dbx"})) // typo'd kind
+	err := app.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "matches no assembled module") {
+		t.Fatalf("Override on missing key must fail, got %v", err)
+	}
+}
+
+// --- Section[T] ----------------------------------------------------------------
+
+type bizCfg struct {
+	Name  string `mapstructure:"name" default:"anon"`
+	Limit int    `mapstructure:"limit" default:"10"`
+}
+
+func TestSection_TypedHandle(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "app.yaml")
+	if err := os.WriteFile(cfg, []byte("biz:\n  name: alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := New("test", WithLogger(log.Empty()), WithConfigFile(cfg), Use(newBlockingServer()))
+	h := Section[bizCfg](app, "biz")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	waitTrue(t, func() bool { return app.Kernel() != nil && app.storeRef() != nil }, "app assembling")
+	time.Sleep(50 * time.Millisecond)
+
+	got := h.Get()
+	if got.Name != "alice" {
+		t.Fatalf("yaml value must land: %+v", got)
+	}
+	if got.Limit != 10 {
+		t.Fatalf("default tag must apply to business sections: %+v", got)
+	}
+
+	// Registration after Run panics — the loader's type set is sealed.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Section after Run must panic")
+			}
+		}()
+		Section[bizCfg](app, "late")
+	}()
+
+	cancel()
+	<-done
+}
+
+func TestSection_GetBeforeRun_Panics(t *testing.T) {
+	app := New("test", WithLogger(log.Empty()))
+	h := Section[bizCfg](app, "biz")
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Get before Run must panic")
 		}
-	}
+	}()
+	_ = h.Get()
 }
 
-func TestServerUnexpectedExit(t *testing.T) {
-	app := New("test", WithLogger(log.Empty()))
-	// Server that returns nil immediately without Stop.
-	app.AddServer(ServerFunc(func(ctx context.Context, ready func()) error {
-		ready()
-		return nil // unexpected exit
-	}))
+// --- logger ownership ------------------------------------------------------------
 
-	err := app.Run(context.Background())
-	if !errors.Is(err, ErrServerUnexpectedExit) {
-		t.Fatalf("expected ErrServerUnexpectedExit, got: %v", err)
-	}
+type closableLogger struct {
+	log.Logger
+	closed atomic.Bool
 }
 
-func TestServerFunc_StopCancelsCtx(t *testing.T) {
-	stopped := make(chan struct{})
-	app := New("test", WithLogger(log.Empty()))
-	app.AddServer(ServerFunc(func(ctx context.Context, ready func()) error {
-		ready()
-		<-ctx.Done()
-		close(stopped)
-		return nil
-	}))
+func (c *closableLogger) Close() error {
+	c.closed.Store(true)
+	return nil
+}
 
+func TestWithLogger_CallerOwnsLifecycle(t *testing.T) {
+	cl := &closableLogger{Logger: log.Empty()}
 	ctx, cancel := context.WithCancel(context.Background())
+	app := New("test", WithLogger(cl), Use(newBlockingServer()))
 	done := make(chan error, 1)
 	go func() { done <- app.Run(ctx) }()
-
-	time.Sleep(20 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-stopped:
-	case <-time.After(5 * time.Second):
-		t.Fatal("ServerFunc ctx not cancelled on Stop")
-	}
-}
-
-func TestSetupFailure_CleanupStillRuns(t *testing.T) {
-	var cleaned atomic.Bool
-	app := New("test",
-		WithLogger(log.Empty()),
-		WithSetup(func(ctx context.Context, a *App) error {
-			a.AddCleanup(func(_ context.Context) error {
-				cleaned.Store(true)
-				return nil
-			})
-			return errors.New("setup boom")
-		}),
-	)
-
-	err := app.Run(context.Background())
-	if err == nil {
-		t.Fatal("expected setup error")
-	}
-	if !cleaned.Load() {
-		t.Fatal("cleanup should run even on setup failure")
-	}
-}
-
-func TestSetupReceivesRunCtx(t *testing.T) {
-	type ctxKey string
-	ctx := context.WithValue(context.Background(), ctxKey("k"), "v")
-
-	var got string
-	app := New("test",
-		WithLogger(log.Empty()),
-		WithSetup(func(ctx context.Context, a *App) error {
-			got = ctx.Value(ctxKey("k")).(string)
-			return nil
-		}),
-	)
-
-	ctxRun, cancel := context.WithCancel(ctx)
-	cancel()
-	_ = app.Run(ctxRun)
-
-	if got != "v" {
-		t.Fatalf("setup did not receive Run's ctx")
-	}
-}
-
-func TestCleanup_LIFO(t *testing.T) {
-	var order []int
-	var mu sync.Mutex
-	app := New("test",
-		WithLogger(log.Empty()),
-		WithCleanup(func(_ context.Context) error { mu.Lock(); order = append(order, 1); mu.Unlock(); return nil }),
-		WithCleanup(func(_ context.Context) error { mu.Lock(); order = append(order, 2); mu.Unlock(); return nil }),
-		WithSetup(func(_ context.Context, a *App) error {
-			a.AddCleanup(func(_ context.Context) error { mu.Lock(); order = append(order, 3); mu.Unlock(); return nil })
-			return nil
-		}),
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_ = app.Run(ctx)
-
-	if len(order) != 3 || order[0] != 3 || order[1] != 2 || order[2] != 1 {
-		t.Fatalf("expected LIFO [3,2,1], got %v", order)
-	}
-}
-
-func TestCleanup_ReceivesTimeoutCtx(t *testing.T) {
-	var deadline time.Time
-	var hasDeadline bool
-	app := New("test",
-		WithLogger(log.Empty()),
-		WithShutdownTimeout(5*time.Second),
-		WithCleanup(func(ctx context.Context) error {
-			deadline, hasDeadline = ctx.Deadline()
-			return nil
-		}),
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_ = app.Run(ctx)
-
-	if !hasDeadline {
-		t.Fatal("cleanup ctx should have deadline")
-	}
-	if time.Until(deadline) > 6*time.Second {
-		t.Fatalf("deadline too far: %v", deadline)
-	}
-}
-
-func TestStopPreReady_SafeCall(t *testing.T) {
-	// Server whose Start blocks on a channel before calling ready.
-	// Stop should unblock it.
-	type slowServer struct {
-		stopCh chan struct{}
-	}
-
-	srv := &slowServer{stopCh: make(chan struct{})}
-
-	app := New("test", WithLogger(log.Empty()))
-	app.AddServer(ServerFunc(func(ctx context.Context, ready func()) error {
-		select {
-		case <-srv.stopCh:
-			return errors.New("stopped before ready")
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- app.Run(ctx) }()
-
-	time.Sleep(20 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-done:
-		// Either nil or some error is fine; it should not hang.
-		_ = err
-	case <-time.After(5 * time.Second):
-		t.Fatal("Stop in pre-ready stage should not hang")
-	}
-}
-
-func TestDrainDelay_ReadyzBeforeServerStop(t *testing.T) {
-	// Verify: with a drain delay, the health component is marked as
-	// shutting down BEFORE the server Stop is called.
-	var healthShutdown atomic.Bool
-
-	app := New("test",
-		WithLogger(log.Empty()),
-		WithDrainDelay(50*time.Millisecond),
-		WithShutdownTimeout(2*time.Second),
-	)
-
-	// Custom server that checks health state inside Stop.
-	srv := &drainTestServer{
-		stopCh:      make(chan struct{}),
-		healthCheck: &healthShutdown,
-	}
-	app.AddServer(srv)
-
-	// Register a fake health component.
-	app.Register(&drainTestHealthComp{shutdown: &healthShutdown})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- app.Run(ctx) }()
-
-	// Let servers start up.
 	time.Sleep(50 * time.Millisecond)
 	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if cl.closed.Load() {
+		t.Fatal("injected logger must not be closed by the App")
+	}
+}
 
+// --- reload plumbing (WithReloadFunc gating at App level) --------------------------
+
+func TestReload_InvokesUserReloadFn(t *testing.T) {
+	var called atomic.Bool
+	app := New("test", WithLogger(log.Empty()),
+		WithReloadFunc(func(context.Context) error { called.Store(true); return nil }),
+		Use(newBlockingServer()))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	waitTrue(t, func() bool { return app.Kernel() != nil }, "assembled")
+	time.Sleep(50 * time.Millisecond)
+
+	if err := app.Reload(context.Background()); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !called.Load() {
+		t.Fatal("WithReloadFunc must run as the reload's last stage")
+	}
+	cancel()
+	<-done
+}
+
+// --- signals (ports signal_test.go; sequential — they signal the process) ----------
+
+func startSignalApp(t *testing.T, opts ...Option) chan error {
+	t.Helper()
+	base := []Option{WithLogger(log.Empty()), Use(newBlockingServer())}
+	app := New("test", append(base, opts...)...)
+	done := make(chan error, 1)
+	go func() { done <- app.Run(context.Background(), WithSignals()) }()
+	time.Sleep(80 * time.Millisecond) // let startup + signal watcher arm
+	return done
+}
+
+func awaitNil(t *testing.T, done chan error) {
+	t.Helper()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("graceful shutdown must return nil, got %v", err)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("timeout")
-	}
-
-	if !srv.drainedBeforeStop.Load() {
-		t.Fatal("expected health shutdown flag to be set before server Stop")
+		t.Fatal("timeout waiting for shutdown")
 	}
 }
 
-// drainTestServer records whether SetShuttingDown was called before Stop.
-type drainTestServer struct {
-	stopCh            chan struct{}
-	healthCheck       *atomic.Bool
-	drainedBeforeStop atomic.Bool
+func TestSignal_SIGTERM_GracefulShutdown(t *testing.T) {
+	done := startSignalApp(t)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	awaitNil(t, done)
 }
 
-func (s *drainTestServer) Start(_ context.Context, ready func()) error {
-	ready()
-	<-s.stopCh
-	return nil
+func TestSignal_SIGINT_GracefulShutdown(t *testing.T) {
+	done := startSignalApp(t)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	awaitNil(t, done)
 }
 
-func (s *drainTestServer) Stop(_ context.Context) error {
-	s.drainedBeforeStop.Store(s.healthCheck.Load())
-	close(s.stopCh)
-	return nil
+func TestSignal_SIGQUIT_FastShutdown(t *testing.T) {
+	done := startSignalApp(t)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGQUIT)
+	awaitNil(t, done)
 }
 
-// drainTestHealthComp is a minimal Component that mimics HealthComponent's
-// SetShuttingDown behavior for testing the drain delay.
-type drainTestHealthComp struct {
-	shutdown *atomic.Bool
+func TestSignal_SIGHUP_ReloadNotConfigured_KeepsRunning(t *testing.T) {
+	done := startSignalApp(t)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+	time.Sleep(80 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("SIGHUP must not exit the app: %v", err)
+	default:
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	awaitNil(t, done)
 }
 
-func (d *drainTestHealthComp) Name() string                                     { return "health" }
-func (d *drainTestHealthComp) ConfigKey() string                                { return "health" }
-func (d *drainTestHealthComp) Init(_ context.Context, _ component.Kernel) error { return nil }
-func (d *drainTestHealthComp) Close(_ context.Context) error                    { return nil }
-func (d *drainTestHealthComp) SetShuttingDown()                                 { d.shutdown.Store(true) }
+func TestSignal_SIGHUP_ReloadCalled(t *testing.T) {
+	var called atomic.Bool
+	done := startSignalApp(t, WithReloadFunc(func(context.Context) error {
+		called.Store(true)
+		return nil
+	}))
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+	waitTrue(t, called.Load, "reload func on SIGHUP")
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	awaitNil(t, done)
+}
 
-func TestMultiServerRollback(t *testing.T) {
-	var stopOrder []int
-	var mu sync.Mutex
+func TestSignal_SIGHUP_IgnoreDuringReload(t *testing.T) {
+	var count atomic.Int32
+	done := startSignalApp(t, WithReloadFunc(func(context.Context) error {
+		count.Add(1)
+		time.Sleep(200 * time.Millisecond)
+		return nil
+	}))
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+	time.Sleep(20 * time.Millisecond)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP) // lands mid-reload → dropped
+	time.Sleep(350 * time.Millisecond)
+	if c := count.Load(); c != 1 {
+		t.Fatalf("second SIGHUP during a reload must be ignored, got %d reloads", c)
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	awaitNil(t, done)
+}
 
-	makeSrv := func(id int, failStart bool) Server {
-		return ServerFunc(func(ctx context.Context, ready func()) error {
-			if failStart {
-				return errors.New("start failed")
-			}
-			ready()
+func TestSignal_SIGHUP_SequentialDelivery(t *testing.T) {
+	var count atomic.Int32
+	done := startSignalApp(t, WithReloadFunc(func(context.Context) error {
+		count.Add(1)
+		return nil
+	}))
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+	time.Sleep(150 * time.Millisecond)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+	time.Sleep(150 * time.Millisecond)
+	if c := count.Load(); c != 2 {
+		t.Fatalf("sequential SIGHUPs must both reload, got %d", c)
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	awaitNil(t, done)
+}
+
+func TestSignal_SIGHUP_NoServers_RepeatedReload(t *testing.T) {
+	var count atomic.Int32
+	app := New("test", WithLogger(log.Empty()),
+		WithReloadFunc(func(context.Context) error { count.Add(1); return nil }))
+	done := make(chan error, 1)
+	go func() { done <- app.Run(context.Background(), WithSignals()) }()
+	time.Sleep(80 * time.Millisecond)
+
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+	time.Sleep(120 * time.Millisecond)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+	time.Sleep(120 * time.Millisecond)
+	if c := count.Load(); c != 2 {
+		t.Fatalf("no-server app must keep reloading, got %d", c)
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	awaitNil(t, done)
+}
+
+func TestRunDefault_NoSignalHandling(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	app := New("test", WithLogger(log.Empty()), Use(newBlockingServer()))
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	awaitNil(t, done)
+}
+
+func TestReloadTimeout_OnlyLogs(t *testing.T) {
+	done := startSignalApp(t,
+		WithReloadTimeout(50*time.Millisecond),
+		WithReloadFunc(func(ctx context.Context) error {
 			<-ctx.Done()
-			mu.Lock()
-			stopOrder = append(stopOrder, id)
-			mu.Unlock()
-			return nil
-		})
+			return ctx.Err()
+		}))
+	_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+	time.Sleep(200 * time.Millisecond) // reload times out; app must survive
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	awaitNil(t, done)
+}
+
+// --- config watch (ports reload_test.go watcher themes) ---------------------------
+
+func TestWithConfigWatch_TriggersReloadOnFileChange(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "app.yaml")
+	if err := os.WriteFile(cfg, []byte("biz:\n  name: v1\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	app := New("test", WithLogger(log.Empty()))
-	app.AddServer(makeSrv(1, false))
-	app.AddServer(makeSrv(2, false))
-	app.AddServer(makeSrv(3, true)) // this one fails
+	var count atomic.Int32
+	app := New("test", WithLogger(log.Empty()), WithConfigFile(cfg),
+		WithReloadFunc(func(context.Context) error { count.Add(1); return nil }),
+		Use(newBlockingServer()))
+	h := Section[bizCfg](app, "biz")
 
-	err := app.Run(context.Background())
-	if err == nil {
-		t.Fatal("expected error from failed server")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx, WithConfigWatch()) }()
+	waitTrue(t, func() bool { return app.Kernel() != nil }, "assembled")
+	time.Sleep(150 * time.Millisecond) // watcher armed + hash seeded
+
+	if err := os.WriteFile(cfg, []byte("biz:\n  name: v2\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	waitTrue(t, func() bool { return count.Load() >= 1 }, "file change must trigger reload")
+	waitTrue(t, func() bool { return h.Get().Name == "v2" }, "new snapshot visible")
+
+	cancel()
+	<-done
+}
+
+func TestWithConfigWatch_NoPath_IsNoOp(t *testing.T) {
+	t.Chdir(t.TempDir()) // nothing auto-detected
+	ctx, cancel := context.WithCancel(context.Background())
+	app := New("test", WithLogger(log.Empty()), Use(newBlockingServer()))
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx, WithConfigWatch()) }()
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+	awaitNil(t, done)
 }

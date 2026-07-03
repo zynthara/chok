@@ -21,8 +21,8 @@ import (
 // TestClientSecret_ConcurrentSignsOnce asserts a 1000-goroutine
 // thundering herd produces exactly one signature.
 type clientSecretCache struct {
-	mu       sync.Mutex
-	value    string
+	mu        sync.Mutex
+	value     string
 	expiresAt time.Time
 
 	// signing inputs are immutable after provider construction; we

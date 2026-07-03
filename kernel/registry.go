@@ -83,6 +83,12 @@ type slot struct {
 	lastErr   string
 }
 
+// SectionKeyOf resolves the config section key a Descriptor addresses
+// (mini-SPEC §1): ConfigKey for the default instance,
+// ConfigKey + ".instances." + Instance for named ones, "" when the
+// component has no configuration.
+func SectionKeyOf(d Descriptor) string { return derivedConfigKey(d) }
+
 // derivedConfigKey applies the mini-SPEC §1 addressing rule.
 func derivedConfigKey(d Descriptor) string {
 	if d.ConfigKey == "" {

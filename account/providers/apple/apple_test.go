@@ -266,10 +266,10 @@ func (m *mockApple) serveToken(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token": "mock-access",
-		"token_type":   "Bearer",
-		"expires_in":   3600,
-		"id_token":     idToken,
+		"access_token":  "mock-access",
+		"token_type":    "Bearer",
+		"expires_in":    3600,
+		"id_token":      idToken,
 		"refresh_token": "mock-refresh",
 	})
 }

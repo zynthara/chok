@@ -116,7 +116,7 @@ func (a *AuthzComponent) Authorizer() authz.Authorizer { return a.auth }
 
 // Compile-time interface assertions.
 var (
-	_ component.Component          = (*AuthzComponent)(nil)
-	_ component.Dependent          = (*AuthzComponent)(nil)
-	_ component.OptionalDependent  = (*AuthzComponent)(nil)
+	_ component.Component         = (*AuthzComponent)(nil)
+	_ component.Dependent         = (*AuthzComponent)(nil)
+	_ component.OptionalDependent = (*AuthzComponent)(nil)
 )

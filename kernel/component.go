@@ -46,6 +46,13 @@ type Descriptor struct {
 	// after all sectioned components (SPEC §3.4).
 	ConfigKey string
 
+	// Options is a zero-value sample of the ConfigKey section's typed
+	// Options struct. The App collects these at assembly time to drive
+	// env binding, `default` tags, validation and reload tag diffing
+	// (SPEC §3.4 "framework section types collected via Use()").
+	// nil = the section stays untyped (ad-hoc decode only).
+	Options any
+
 	// Needs declares dependencies on other components by (Kind,
 	// Instance). Hard dependencies gate startup ordering and fail
 	// startup when missing or disabled; Optional ones degrade to

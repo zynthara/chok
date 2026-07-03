@@ -24,24 +24,24 @@ type AuditResolver func(appConfig any) *config.AuditOptions
 //
 // Lifecycle (SPEC parts-audit-claude.md §8):
 //   - Init     : AutoMigrate audit_logs table; start async DB sink
-//                worker (single goroutine drains a buffered channel
-//                and batches inserts).
+//     worker (single goroutine drains a buffered channel
+//     and batches inserts).
 //   - Migrate  : AutoMigrate audit_logs table (idempotent; run by
-//                Registry between Init and any other component's
-//                Migrate that depends on audit being queryable).
+//     Registry between Init and any other component's
+//     Migrate that depends on audit being queryable).
 //   - Health   : pending / dropped / written / failed counters +
-//                last sink error (if any).
+//     last sink error (if any).
 //   - Reload   : reload-safe = RetentionDays / PurgeInterval /
-//                PurgeBatchSize; restart-only = AsyncBufferSize +
-//                DropOnFull (mid-flight changes would surprise
-//                producer-side callers).
+//     PurgeBatchSize; restart-only = AsyncBufferSize +
+//     DropOnFull (mid-flight changes would surprise
+//     producer-side callers).
 //   - Close    : close producer channel, wait for worker to flush
-//                in-flight batch, return.
+//     in-flight batch, return.
 //
 // Dependencies declaration (SPEC §8 v0.3.5 revision):
 //   - hard:     "db"
 //   - optional: "authz" (admin API gating), "http" (mount admin
-//                route), "scheduler" (purge cron — landed in 7.D)
+//     route), "scheduler" (purge cron — landed in 7.D)
 //
 // Pool was removed from Dependencies in v0.3.5 because audit is a
 // single-producer-MPSC batched sink, not a generic any-func task —

@@ -89,10 +89,10 @@ func newMockIdP(t *testing.T, clientID string) *mockIdP {
 func (m *mockIdP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	doc := map[string]any{
-		"issuer":                 m.issuer,
-		"authorization_endpoint": m.issuer + "/auth",
-		"token_endpoint":         m.issuer + "/token",
-		"jwks_uri":               m.issuer + "/jwks",
+		"issuer":                                m.issuer,
+		"authorization_endpoint":                m.issuer + "/auth",
+		"token_endpoint":                        m.issuer + "/token",
+		"jwks_uri":                              m.issuer + "/jwks",
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 	}
 	_ = json.NewEncoder(w).Encode(doc)
@@ -535,4 +535,3 @@ func (r *fakeRawDecoder) Decode(out any) error {
 	}
 	return nil
 }
-

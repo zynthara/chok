@@ -203,7 +203,7 @@ func (p *provider) CompleteAuth(ctx context.Context, req *account.CompleteReques
 // Compile-time interface assertions. Catches drift the moment a chok
 // upgrade reshapes the AuthProvider contract.
 var (
-	_ account.AuthProvider       = (*provider)(nil)
+	_ account.AuthProvider        = (*provider)(nil)
 	_ account.RedirectURLProvider = (*provider)(nil)
 )
 

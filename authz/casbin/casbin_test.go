@@ -45,10 +45,10 @@ func (k *fakeKernel) Get(name string) component.Component {
 	return nil
 }
 
-func (k *fakeKernel) Config() any                          { return nil }
-func (k *fakeKernel) ConfigSnapshot() any                  { return nil }
-func (k *fakeKernel) Logger() log.Logger                   { return log.Empty() }
-func (k *fakeKernel) On(component.Event, component.Hook)   {}
+func (k *fakeKernel) Config() any                        { return nil }
+func (k *fakeKernel) ConfigSnapshot() any                { return nil }
+func (k *fakeKernel) Logger() log.Logger                 { return log.Empty() }
+func (k *fakeKernel) On(component.Event, component.Hook) {}
 func (k *fakeKernel) Health(context.Context) component.HealthReport {
 	return component.HealthReport{Status: component.HealthOK}
 }

@@ -32,9 +32,9 @@ type mockGitHub struct {
 	emailStatus int // override /user/emails response status
 
 	// request log for assertions
-	mu          mockMu
-	apiCalls    []string
-	enterprise  bool
+	mu         mockMu
+	apiCalls   []string
+	enterprise bool
 }
 
 // mockMu is an inlined sync.Mutex via embedding so test goroutines
@@ -241,7 +241,7 @@ func TestCompleteAuth_EmailVisibleOnUser(t *testing.T) {
 	mock.stage("code-1", "tok-1",
 		githubUser{
 			ID: 12345, Login: "alice", Name: "Alice",
-			Email: "alice@example.com",
+			Email:     "alice@example.com",
 			AvatarURL: "https://gh.example/avatars/alice.png",
 		},
 		nil,

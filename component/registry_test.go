@@ -1222,13 +1222,13 @@ func TestGet_RollbackScrubsAvailable(t *testing.T) {
 // panic into a structured error rather than crashing Start.
 type panicValidator struct{ stub *stub }
 
-func (p *panicValidator) Name() string                          { return p.stub.Name() }
-func (p *panicValidator) ConfigKey() string                     { return p.stub.Name() }
+func (p *panicValidator) Name() string      { return p.stub.Name() }
+func (p *panicValidator) ConfigKey() string { return p.stub.Name() }
 func (p *panicValidator) Init(c context.Context, k Kernel) error {
 	return p.stub.Init(c, k)
 }
-func (p *panicValidator) Close(c context.Context) error  { return p.stub.Close(c) }
-func (p *panicValidator) ValidateDeps(_ Kernel) error    { panic("nope") }
+func (p *panicValidator) Close(c context.Context) error { return p.stub.Close(c) }
+func (p *panicValidator) ValidateDeps(_ Kernel) error   { panic("nope") }
 
 func TestValidateDeps_RecoversPanic(t *testing.T) {
 	r := mkReg()
