@@ -14,6 +14,23 @@
 
 ---
 
+> [!IMPORTANT]
+> **`main` is the v2 rewrite, under active development** — module path
+> `github.com/zynthara/chok/v2`, APIs unstable until `v2.0.0`.
+>
+> The v1 line is sealed at [`v0.1.4`](https://github.com/zynthara/chok/releases/tag/v0.1.4)
+> and stays permanently installable:
+>
+> ```sh
+> go get github.com/zynthara/chok@v0.1.4
+> ```
+>
+> v0.1.x now receives security fixes only. The examples and README
+> below describe the released v1 API; the v1 quickstart example is
+> archived at [`examples/_v1_blog`](examples/_v1_blog).
+
+---
+
 `chok` bundles HTTP, database, cache, JWT auth, scheduler, and observability
 into a single Go module. One YAML file enables or disables every subsystem;
 all wiring is generated from your config struct.

@@ -9,7 +9,10 @@ A Go web framework that bundles HTTP + DB + cache + auth + scheduler +
 observability into one repository. Think "Rails for Go": single
 blessed implementation per capability, configuration over code.
 
-- Module path: `github.com/zynthara/chok`
+- Module path: `github.com/zynthara/chok/v2` — **main is the v2
+  rewrite (in progress)**. v1 is sealed at tag `v0.1.4` (v1 module
+  path, security fixes only). Implementation SPEC lives in
+  `.private/docs/specs/v2-claude.md`; milestones M0-M5 in its §10.
 - Three immutable adjectives: **config-driven**, **single blessed
   implementation**, **internally complex / externally trivial**
 
@@ -61,8 +64,10 @@ blessed implementation per capability, configuration over code.
   `apierr.New(...)` — never return plain strings
 - Logging on the request path: `middleware.LoggerFrom(ctx)`; reserve
   `app.Logger()` for startup / shutdown / cron contexts
-- Tests use `choktest.NewTestDB` / `choktest.NewTestStore`; in-package
-  registry tests use the `mkReg()` helper
+- Tests open a real in-memory SQLite directly (in-package
+  `gorm.Open(sqlite.Open(":memory:"), ...)` helpers); `choktest` is the
+  exported harness for downstream apps and currently has zero in-repo
+  importers. In-package registry tests use the `mkReg()` helper
 
 ## Common pitfalls — observed in 14 rounds of review
 
@@ -82,8 +87,8 @@ blessed implementation per capability, configuration over code.
   correlation. Use `context.WithoutCancel(ctx)` instead.
 - **DON'T** put pointer fields in `*Options` types — Reload's `Set()`
   copies values onto the live config and pointer fields end up stale
-- **DON'T** mock the database in store tests — use SQLite via
-  `choktest.NewTestDB`; mocked tests miss real schema interactions
+- **DON'T** mock the database in store tests — use a real in-memory
+  SQLite; mocked tests miss real schema interactions
 
 ## Testing requirements
 
@@ -91,8 +96,11 @@ blessed implementation per capability, configuration over code.
 - Run `go test ./... && go vet ./...` before committing
 - For review-driven fixes, name tests after the issue:
   `TestX_RoundNDescription` or `TestFix_RoundNX_<issue>`
-- The full suite must pass; `examples/blog` must start cleanly
-  (`cd examples/blog && go run ./cmd/blog` and Ctrl-C)
+- The full suite must pass; during the v2 transition (M1-M4) the
+  **current milestone's fixture app** must start cleanly instead of
+  the blog smoke test (`examples/blog` is archived as
+  `examples/_v1_blog`, build-ignored; blog is rebuilt on the v2 API
+  in M5 and the smoke discipline returns then)
 
 ## Where things live
 
@@ -102,7 +110,7 @@ blessed implementation per capability, configuration over code.
 | `options.go` | `WithXxx` constructors |
 | `config.go` | config loading + validation (`SelfValidating` recursion stop) |
 | `component/` | Component / Kernel / Registry — the abstraction core |
-| `parts/` | 15 built-in Components (log, db, cache, redis, http, ...) |
+| `parts/` | 16 built-in Components (log, db, cache, redis, http, ...) |
 | `store/` | generic CRUD; locator + changes + scopes |
 | `store/where/` | query DSL (`resolveField` does identifier validation) |
 | `handler/` | generic `HandleRequest[T,R]` |
@@ -111,7 +119,7 @@ blessed implementation per capability, configuration over code.
 | `account/` | ready-to-use user module + login rate limiter |
 | `cache/` | memory + file + redis Chain + circuit Breaker |
 | `db/` | gorm wrapper + Model mixins + Migrate |
-| `examples/blog/` | **quickstart-grade** example — do NOT bloat |
+| `examples/_v1_blog/` | archived v1 example (build-ignored); blog returns on the v2 API in M5 |
 | `examples/tasker/` | (planned) full-coverage example |
 | `docs/design.md` | architecture source of truth |
 
@@ -129,8 +137,10 @@ blessed implementation per capability, configuration over code.
   *"Does an external user reading this learn something they can
   act on?"* If no, it goes in `.private/`.
 - Code comments are English; design docs are Chinese (team preference)
-- New public APIs must have godoc + an example in `examples/blog`
-  (if quickstart-relevant) or `examples/tasker` (if advanced)
+- New public APIs must have godoc; example-app coverage
+  (`examples/blog` quickstart / `examples/tasker` advanced) resumes
+  when the examples are rebuilt on the v2 API in M5 — during M1-M4,
+  cover new surface in the milestone fixture app instead
 
 ## Commit message style
 

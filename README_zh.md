@@ -14,6 +14,22 @@
 
 ---
 
+> [!IMPORTANT]
+> **`main` 分支是开发中的 v2 重写** —— module path 为
+> `github.com/zynthara/chok/v2`，在 `v2.0.0` 之前 API 不稳定。
+>
+> v1 已封版于 [`v0.1.4`](https://github.com/zynthara/chok/releases/tag/v0.1.4)，
+> 经 module proxy 永久可安装：
+>
+> ```sh
+> go get github.com/zynthara/chok@v0.1.4
+> ```
+>
+> v0.1.x 此后只接收安全修复。下文示例与说明均为已发布的 v1 API；
+> v1 快速上手示例归档于 [`examples/_v1_blog`](examples/_v1_blog)。
+
+---
+
 `chok` 把 HTTP、数据库、缓存、JWT 鉴权、调度器、可观测性打包成一个 Go
 模块。一份 YAML 控制每个子系统的开关，所有组装代码由你的 Config 结构
 体自动生成。

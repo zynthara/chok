@@ -83,8 +83,10 @@ Prometheus, and OpenTelemetry.
 - Do not revert user changes in a dirty worktree unless explicitly asked.
 - Keep edits scoped to the requested behavior and nearby ownership boundary.
 - Follow existing package patterns before introducing new abstractions.
-- Public APIs need godoc and an example in `examples/blog` when quickstart
-  relevant, or `examples/tasker` when advanced.
+- Public APIs need godoc. Example-app coverage (`examples/blog`
+  quickstart / `examples/tasker` advanced) resumes when the examples
+  are rebuilt on the v2 API in M5; during M1-M4 cover new surface in
+  the milestone fixture app.
 
 ## Testing
 
@@ -97,8 +99,10 @@ go test ./...
 go vet ./...
 ```
 
-- The full suite should pass, and `examples/blog` should start cleanly after
-  framework-level changes.
+- The full suite should pass. During the v2 transition (M1-M4) the
+  current milestone's **fixture app** must start cleanly after
+  framework-level changes; the `examples/blog` smoke test is archived
+  (`examples/_v1_blog`, build-ignored) and returns in M5.
 
 ## Documentation
 
@@ -109,8 +113,9 @@ go vet ./...
   names because their loaders require the exact spelling.
 - Internal planning / agent SPEC drafts that should not ship to the
   public repo live under `.private/` (gitignored).
-- Keep `examples/blog` quickstart-grade; put advanced demonstrations in
-  `examples/tasker`.
+- `examples/_v1_blog` is a frozen v1 reference — do not edit it. When
+  blog is rebuilt in M5, keep it quickstart-grade and put advanced
+  demonstrations in `examples/tasker`.
 
 ## Review Reports
 
