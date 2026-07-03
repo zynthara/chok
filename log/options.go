@@ -16,8 +16,9 @@ type Options struct {
 	Output []string      `mapstructure:"output" default:"stdout" reload:"restart"`
 	Files  []FileOptions `mapstructure:"files"                   reload:"restart"`
 
-	// AccessFiles / AccessEnabled keep the v1 yaml shape; their consumer
-	// (the access-log middleware) returns with the web module in M2.
+	// AccessFiles / AccessEnabled keep the v1 yaml shape; web.Module
+	// consumes them when building the access-log middleware (dedicated
+	// rotating files when set, the root logger otherwise).
 	AccessFiles   []FileOptions `mapstructure:"access_files"   reload:"restart"`
 	AccessEnabled bool          `mapstructure:"access_enabled" default:"true" reload:"restart"`
 }

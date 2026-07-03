@@ -34,7 +34,7 @@ blessed implementation per capability, configuration over code.
 > single-actor lifecycle, RCU config snapshots, Descriptor-declared
 > components. The lock-order / TryLock / lazy-scrub bullets below
 > survive ONLY inside the v1 transition residue (`component/` +
-> `parts/`, used by the 12 not-yet-migrated batteries, M2-M4).
+> `parts/`, used by the 9 not-yet-migrated batteries, M3-M4).
 
 - `App` is single-use: `Run` / `Execute` may be called at most once
 - v2 kernel: all lifecycle transitions go through the control
@@ -51,8 +51,8 @@ blessed implementation per capability, configuration over code.
 - Components close in reverse-topo order, same-level in parallel
 - `AddCleanup` callbacks run AFTER `registry.Stop` — they must not
   access components (they're already torn down)
-- HTTP server `Stop` now follows `Shutdown` with `srv.Close()` so
-  hung handlers can't outlive registry teardown
+- web `Serve` wind-down bounds `Shutdown` by `http.shutdown_timeout`
+  then force-`Close`s so hung handlers can't outlive registry teardown
 
 ## Coding conventions when modifying chok itself
 
@@ -108,22 +108,24 @@ blessed implementation per capability, configuration over code.
   the blog smoke test (`examples/blog` is archived as
   `examples/_v1_blog`, build-ignored; blog is rebuilt on the v2 API
   in M5 and the smoke discipline returns then).
-  Current fixture: `go run ./internal/fixture/m1` and Ctrl-C.
+  Current fixture: `go run ./internal/fixture/m2` and Ctrl-C.
 
 ## Where things live
 
 | Path | Purpose |
 |---|---|
-| `chok.go` | App lifecycle (the spine, ~1200 LOC) |
+| `chok.go` | v2 App thin shell: New / Use / Routes / Section / Run |
 | `options.go` | `WithXxx` constructors |
 | `config.go` | config loading + validation (`SelfValidating` recursion stop) |
-| `component/` | Component / Kernel / Registry — the abstraction core |
-| `parts/` | 16 built-in Components (log, db, cache, redis, http, ...) |
+| `kernel/` + `conf/` | v2 control plane: Descriptor / actor Registry / RCU config |
+| `component/` | v1-residue Component core (used by `parts/` until M4) |
+| `parts/` | v1-residue battery glue (db, cache, redis, account, ... — 9 left) |
 | `store/` | generic CRUD; locator + changes + scopes |
 | `store/where/` | query DSL (`resolveField` does identifier validation) |
-| `handler/` | generic `HandleRequest[T,R]` |
-| `middleware/` | gin middleware (Authn / Authz / Recovery / Timeout / ...) |
-| `server/` | HTTP server impl (Stop force-closes after Shutdown timeout) |
+| `handler/` | generic `HandleRequest[T,R]` — stdlib http.Handler + Meta |
+| `middleware/` | stdlib middleware set (`func(http.Handler) http.Handler`) |
+| `web/` | v2 HTTP module: Server + Router + default middleware stack |
+| `swagger/` `tracing/` `health/` `metrics/` `debug/` | v2 observability / docs modules |
 | `account/` | ready-to-use user module + login rate limiter |
 | `cache/` | memory + file + redis Chain + circuit Breaker |
 | `db/` | gorm wrapper + Model mixins + Migrate |
