@@ -20,6 +20,8 @@ func main() {
 
 	root.AddCommand(initCmd())
 	root.AddCommand(syncCmd())
+	root.AddCommand(docsCmd())
+	root.AddCommand(openapiCmd())
 	root.AddCommand(versionCmd())
 	root.AddCommand(updateCmd())
 	root.AddCommand(migrateCmd())

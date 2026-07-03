@@ -36,6 +36,10 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the apidiff gate resolves the release
+          # baseline tag and diffs CHANGELOG.md against it.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -59,6 +63,23 @@ jobs:
 
       - name: build
         run: go build ./...
+
+      # SPEC §7.4 gates: generated surfaces must be current (drift is
+      # red), the public API may only change alongside a changelog
+      # entry, and the quickstart must actually boot. The JSON Schema
+      # validation of example yamls rides the test step
+      # (internal/docgen TestJSONSchema_ValidatesExampleYAMLs).
+      - name: generated docs are current (docs gen --check)
+        run: go run ./cmd/chok docs gen --check
+
+      - name: blog assembly is current (sync --check)
+        run: go run ./cmd/chok sync --check --config examples/blog/chok.yaml --dir examples/blog
+
+      - name: apidiff vs release baseline
+        run: ./hack/apidiff.sh
+
+      - name: examples smoke (boot blog, SIGINT, clean exit)
+        run: make smoke
 
   lint:
     runs-on: ubuntu-latest

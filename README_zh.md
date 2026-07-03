@@ -5,172 +5,179 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.26+" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
-  <a href="https://pkg.go.dev/github.com/zynthara/chok"><img src="https://pkg.go.dev/badge/github.com/zynthara/chok.svg" alt="Go Reference" /></a>
+  <a href="https://pkg.go.dev/github.com/zynthara/chok/v2"><img src="https://pkg.go.dev/badge/github.com/zynthara/chok/v2.svg" alt="Go Reference" /></a>
   <a href="https://github.com/zynthara/chok/actions/workflows/ci.yml"><img src="https://github.com/zynthara/chok/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
 </p>
 
 <h1 align="center"><code>chok</code></h1>
-<p align="center"><b>强约定、配置驱动的 Go Web 框架。</b></p>
+<p align="center"><b>一个有主见的、配置驱动的 Go Web 框架。</b></p>
 
 ---
 
-> [!IMPORTANT]
-> **`main` 分支是开发中的 v2 重写** —— module path 为
-> `github.com/zynthara/chok/v2`，在 `v2.0.0` 之前 API 不稳定。
->
-> v1 已封版于 [`v0.1.4`](https://github.com/zynthara/chok/releases/tag/v0.1.4)，
-> 经 module proxy 永久可安装：
->
-> ```sh
-> go get github.com/zynthara/chok@v0.1.4
-> ```
->
-> v0.1.x 此后只接收安全修复。下文示例与说明均为已发布的 v1 API；
-> v1 快速上手示例归档于 [`examples/_v1_blog`](examples/_v1_blog)。
+> [!NOTE]
+> 这里是 **chok v2**（`github.com/zynthara/chok/v2`），目前处于
+> beta。v1 已封版于
+> [`v0.1.4`](https://github.com/zynthara/chok/releases/tag/v0.1.4)
+> （只收安全修复），永久可安装：
+> `go get github.com/zynthara/chok@v0.1.4`。从 v1 迁移请看
+> [v1 → v2 迁移指南](docs/migration-v1-to-v2.md)。
 
 ---
 
-`chok` 把 HTTP、数据库、缓存、JWT 鉴权、调度器、可观测性打包成一个 Go
-模块。一份 YAML 控制每个子系统的开关，所有组装代码由你的 Config 结构
-体自动生成。
+`chok` 把 HTTP、数据库、缓存、JWT 认证、RBAC、定时任务与可观测性
+装进同一个 Go module。一份 YAML 既声明装配哪些模块、也配置它们；
+装配代码由工具生成。
 
 ```yaml
-# chok.yaml
-http:      { addr: ":8080" }
-log:       { level: info, format: json, output: [stdout] }
-database:  { driver: sqlite, sqlite: { path: "app.db" } }
-account:   { enabled: true, signing_key: "..." }
-swagger:   { enabled: true, title: "My API" }
+# chok.yaml — 段在场 = 模块装配；enabled = 运行期开关
+log:     { level: info, format: json }
+http:    { addr: ":8080" }
+db:      { driver: sqlite, migrate: auto, sqlite: { path: app.db } }
+health:  { path: /healthz }
+swagger: { title: "My API" }
+account: { signing_key: "${MYAPP_ACCOUNT_SIGNING_KEY}" }
 ```
 
 ```go
-// main.go —— 三行串起整个应用
-type Config struct {
-    HTTP     config.HTTPOptions     `mapstructure:"http"`
-    Log      config.SlogOptions     `mapstructure:"log"`
-    Database config.DatabaseOptions `mapstructure:"database"`
-    Account  config.AccountOptions  `mapstructure:"account"`
-    Swagger  config.SwaggerOptions  `mapstructure:"swagger"`
-}
-
-var cfg Config
-
+// main.go — 全部接线
 func main() {
     chok.New("myapp",
-        chok.WithConfig(&cfg),
-        chok.WithRoutes(func(_ context.Context, a *chok.App) error {
-            a.API("/api/v1", a.AuthMiddleware()).GET("/me", meHandler)
+        chokModules(), // chok_modules_gen.go —— `chok sync` 重新生成
+        chok.Override(db.Module(db.WithTables(db.Table(&Note{})))),
+        chok.Routes(func(r kernel.Router, k kernel.Kernel) error {
+            notes := store.New[Note](db.From(k), log.From(k),
+                store.WithQueryFields("id", "title", "created_at"),
+                store.WithUpdateFields("title", "body"))
+            api := r.Group("/api/v1", account.Authn(k))
+            api.Handle("GET", "/notes/{rid}", handler.HandleRequest(getNote))
             return nil
         }),
     ).Execute()
 }
 ```
 
-跑起来你会得到：JSON 日志的 HTTP 服务器、SQLite + 自动迁移、JWT
-驱动的 `/auth/register|login|refresh-token|change-password|...`、
-`/swagger` 上的 OpenAPI 3.0 规范、Kubernetes 友好的 `/healthz`
-`/livez` `/readyz`，以及 Prometheus `/metrics`——全程没有一个手写
-的 `Register` 调用。
+跑起来就有：JSON 日志的 HTTP 服务器、自动迁移的 SQLite、JWT 的
+`/auth/register|login|refresh-token|...`、`/swagger` 的 OpenAPI 3
+文档、面向 Kubernetes 的 `/healthz` `/livez` `/readyz`、Prometheus
+`/metrics` —— 且二进制里只链入你声明过的模块。
 
 ## 设计
 
 三个不可变形容词：
 
-- **配置驱动**：`enabled: true|false` 是启停子系统的主要方式。代码改
-  动留给业务逻辑，不留给装配。
-- **每个能力只给一个官方实现**：HTTP 是 gin；ORM 是 gorm；缓存是
-  Otter + Badger + Redis；定时任务是 robfig；JWT 是 golang-jwt；
-  追踪是 OpenTelemetry。不提供平行选择。
-- **内部复杂、外部极简**：拓扑生命周期、热加载分发、健康聚合都封装
-  在 `Component` 抽象下，对外暴露的是 `app.Register(c)` 与
-  `app.Logger()`。
+- **配置驱动。** yaml 段声明跑什么；`enabled: true|false` 是运行期
+  开关；`reload:"hot"` 字段 SIGHUP 即生效不用重启。代码只留给业务。
+- **每个能力一个钦定实现。** HTTP 是 stdlib `ServeMux`（Go 1.22+
+  模式路由）；ORM 是 gorm —— 藏在 store 后面不可见；缓存是
+  otter + redis；cron 是 robfig；JWT 是 golang-jwt；RBAC 是 casbin；
+  观测是 Prometheus + OpenTelemetry。不提供平行选择。
+- **内部复杂，外部极简。** 单 actor 内核跑生命周期（拓扑 Init、
+  mount、serve、drain、逆序 Close）；配置是不可变 RCU 快照；组件
+  声明 `Descriptor`，能力靠类型发现。这些都不出现在业务代码里。
 
-## 快速上手
+结构性拿到的保证：owned 模型的未认证查询 fail-closed、对外 ID 是
+带前缀的 RID（数字主键不外泄）、乐观锁走 version 列、日志里密钥
+自动脱敏、raw SQL 只有两扇门 —— 都叫 `Unsafe`。
+
+## 快速开始
 
 ```bash
-go install github.com/zynthara/chok/cmd/chok@latest
+go install github.com/zynthara/chok/v2/cmd/chok@latest
 
 chok init myapp
-cd myapp && go mod tidy && make run
+cd myapp && go mod tidy && go run .
 ```
 
-脚手架会生成 `cmd/`、`internal/{app,handler}`、`configs/`、一个会
-通过 ldflags 注入构建元信息的 `Makefile`，以及一份默认开启 HTTP +
-日志 + SQLite + JWT 鉴权 + Swagger 的 `chok.yaml`。访问
-<http://127.0.0.1:8080/healthz> 验证启动成功。
+`curl localhost:8080/healthz`，再打开 <http://localhost:8080/swagger>。
+脚手架自带能跑的 Note API（模型 + 三条路由）、声明标准模块的
+`chok.yaml`、versioned 模式用的 `migrations/` 骨架。加电池 = 加一个
+yaml 段，跑 `chok sync`，完事。
 
-## 内置 Component
+带讲解的完整路径 —— 认证、属主隔离的 CRUD、curl 里的乐观锁 ——
+走一遍 [`examples/blog`](examples/blog)（五分钟）。
 
-15 个子系统，全部以 `Component` 实现，强制 `Init` / `Close` 方法 +
-按需 `Reload` / `Health` / `Router` / `Migrate` 等可选能力。多数
-能从 `Config` 结构体字段自动注册；其余在 `WithSetup` 中显式注册。
+## 内置模块
 
-| Component | 自动注册 | 选中条件 | 能力 |
-|---|---|---|---|
-| `LoggerComponent`    | 是 | `SlogOptions`        | 日志 + 访问日志 + 热加载 |
-| `HTTPComponent`      | 是 | `HTTPOptions`        | gin + 默认中间件栈 |
-| `DBComponent`        | 是 | `DatabaseOptions`    | gorm + 自动迁移 (sqlite/mysql) |
-| `RedisComponent`     | 是 | `RedisOptions`       | go-redis 客户端 + 健康 |
-| `CacheComponent`     | 是 | `CacheMemory/FileOptions` | 内存 + 文件 + Redis 链 |
-| `AccountComponent`   | 是 | `AccountOptions`     | 注册 / 登录 / JWT / 重置 |
-| `SwaggerComponent`   | 是 | `SwaggerOptions`     | OpenAPI 3.0 + Swagger UI |
-| `HealthComponent`    | 是 | （只要有 HTTP）       | `/healthz` `/livez` `/readyz` |
-| `MetricsComponent`   | 是 | （只要有 HTTP）       | Prometheus `/metrics` |
-| `DebugComponent`     | 是 | `DebugOptions`       | `/componentz` 拓扑诊断 |
-| `TracingComponent`   | 显式 | 代码注册             | OTel tracer + OTLP exporter |
-| `SchedulerComponent` | 显式 | 代码注册             | robfig cron + 统计 |
-| `PoolComponent`      | 显式 | 代码注册             | 有界异步任务池 |
-| `JWTComponent`       | 显式 | 代码注册             | 额外 JWT manager |
-| `AuthzComponent`     | 显式 | 代码注册             | 可插拔 Authorizer |
+每个子系统都是模块：经 `chok.Use`（或生成的 `chokModules()`）装配、
+以 `Descriptor` 声明、由各自的 yaml 段配置。能力由内核按类型发现
+（mount/serve/migrate/reload/health/ready/drain），下表由事实源生成
+—— `chok docs gen` 保真。
 
-自定义组件实现同一接口即可纳入 registry 的生命周期、热加载与健康
-检查。详见 [`docs/design.md`](docs/design.md) §13。
+<!-- gen:components -->
+| 模块 | 配置段 | 依赖（`?` = 软依赖） | 能力 | 默认启用 | 说明 |
+|---|---|---|---|---|---|
+| `log.Module()` | `log` | — | reload | always | 根日志段（级别/格式/输出）；级别热更新。 |
+| `web.Module()` | `http` | log?, metrics?, tracing?, authz? | serve, router | true | stdlib HTTP 服务器 + 路由 + 默认中间件栈。 |
+| `health.Module()` | `health` | — | reload, mount, drain | true | /healthz /livez /readyz 探针；停机时先摘除就绪。 |
+| `metrics.Module()` | `metrics` | — | mount | true | Prometheus 注册表 + /metrics 端点。 |
+| `debug.Module()` | `debug` | — | mount | false | /componentz 拓扑与生命周期事件视图（默认关闭）。 |
+| `swagger.Module()` | `swagger` | http | mount | true | 由路由表生成 OpenAPI 3 spec + Swagger UI。 |
+| `tracing.Module()` | `tracing` | — | — | false | OpenTelemetry tracer provider（stdout/OTLP 导出）。 |
+| `db.Module()` | `db` | log?, tracing? | health, migrate | true | 数据库连接池（sqlite/mysql/postgres）+ 迁移（auto/versioned/off）。 |
+| `redis.Module()` | `redis` | log? | health | true | go-redis 客户端（TLS/CA 支持）；健康探针。 |
+| `cache.Module()` | `cache` | redis?, log? | — | true | 分层缓存：otter 内存层 + redis 层 + 熔断器。 |
+| `scheduler.Module()` | `scheduler` | log? | health, serve | true | robfig cron（panic 防护、重叠策略、统计）。 |
+| `audit.Module()` | `audit` | db, scheduler?, account?, log? | reload, mount, migrate | false | 合规审计日志：异步 DB sink、清理 cron、admin API（显式启用）。 |
+| `authz.Module()` | `authz` | db, redis?, audit?, log? | migrate, ready | true | casbin RBAC 引擎：adapter、Redis watcher、bootstrap 播种、决策审计。 |
+| `account.Module()` | `account` | db, log? | mount, migrate | true | 用户模块：注册/登录/JWT/重置 + 登录限速 + OAuth providers。 |
+<!-- /gen:components -->
+
+各模块的全部配置项见 [`docs/config.md`](docs/config.md)；
+[`docs/chok.schema.json`](docs/chok.schema.json) 给编辑器补全与 CI
+校验用。
+
+自定义组件实现 `kernel.Component`（`Describe` / `Init` / `Close` +
+所需行为接口）即可加入同一套生命周期。
 
 ## CLI
 
 ```bash
-chok init <name>          # 创建新项目
-chok version [--json]     # 构建 / VCS / 运行时元信息
-chok update [--ref vX.Y]  # 通过 go install 升级本地 CLI
+chok init <name>            # 脚手架一个 v2 项目（生成即可启动）
+chok sync [--check]         # chok.yaml → chok_modules_gen.go（可做 CI 闸）
+chok migrate create|up|status   # forward-only 版本化迁移
+chok docs gen [--check]     # 组件表 + 配置参考 + JSON Schema
+chok openapi export         # 运行中应用的 OpenAPI spec → .json/.yaml
+chok version [--json]       # 构建 / VCS / 运行时元数据
+chok update [--ref vX.Y]    # 经 go install 升级本地 CLI
 ```
-
-版本元信息按以下顺序解析：`make build` / goreleaser 注入的 ldflags
-→ `debug.ReadBuildInfo`（让 `go install ...@latest` 也能显示真实
-的 pseudo-version + git hash）→ `dev` / `unknown` 兜底。
 
 ## 示例
 
-| 路径 | 演示内容 |
+| 路径 | 展示内容 |
 |---|---|
-| [`examples/blog`](examples/blog) | 入门级：HTTP + SQLite + JWT + Swagger + 一个带乐观锁、软删除、owner scope 的 `Post` 资源。5 分钟跑通。 |
+| [`examples/blog`](examples/blog) | 快速上手级：JWT 认证 + 带属主隔离、乐观锁、软删除的 `Post` 资源 + 生成的 OpenAPI。其验收测试在 CI 里用真实 HTTP 走一遍 README 路径。 |
 
-完整覆盖所有 Component 与自定义组件模式的例子（`examples/tasker`）
-在路线图上，见 [`docs/roadmap.md`](docs/roadmap.md)。
+覆盖 authz、audit、scheduler 与自定义组件的完整示例
+（`examples/tasker`）在路线图上。
 
 ## 文档
 
 | 主题 | 位置 |
 |---|---|
-| 架构与 API 契约 | [`docs/design.md`](docs/design.md) |
-| 设计变更记录（按发布） | [`docs/changelog.md`](docs/changelog.md) |
+| 架构与契约（中文） | [`docs/design.md`](docs/design.md) |
+| 配置参考（生成） | [`docs/config.md`](docs/config.md) |
+| v1 → v2 迁移指南 | [`docs/migration-v1-to-v2.md`](docs/migration-v1-to-v2.md) |
+| 设计变更日志 | [`docs/changelog.md`](docs/changelog.md) |
 | 路线图 | [`docs/roadmap.md`](docs/roadmap.md) |
-| GoDoc 参考 | <https://pkg.go.dev/github.com/zynthara/chok> |
-| AI / Agent 工具指引 | [`CLAUDE.md`](CLAUDE.md)、[`AGENTS.md`](AGENTS.md) |
+| GoDoc | <https://pkg.go.dev/github.com/zynthara/chok/v2> |
+| Agent / AI 协作指引 | [`CLAUDE.md`](CLAUDE.md)、[`AGENTS.md`](AGENTS.md) |
 
-## 贡献
+## 参与贡献
 
-项目使用 Conventional Commits（`feat:` / `fix:` / `docs:` /
-`chore:`），release-please 据此自动生成版本号与 CHANGELOG；tag
-推送触发 goreleaser 构建 linux / darwin / windows × amd64 /
-arm64 的二进制。
+Conventional commits（`feat:`、`fix:`、`docs:`、`chore:`）。release
+手动裁切：写 changelog → 打 tag → goreleaser 发布。公开 API 变更
+必须伴随 changelog 条目 —— CI 对最近的 release tag 跑 `apidiff`，
+外加 `chok docs gen --check` 与 `chok sync --check`，生成面不允许
+漂移。
 
 ```bash
 make all      # tidy + lint + test + build
-make smoke    # 启动 examples/blog 自检
-make snapshot # 本地试跑 goreleaser，不上传
+make smoke    # 启动 examples/blog 做冒烟
+make test-pg  # store/db 套件跑 Postgres（设 CHOK_TEST_PG_DSN）
 ```
 
-项目恪守的硬规则与架构不变量记录在 [`CLAUDE.md`](CLAUDE.md)。
+架构不变量记录在 [`CLAUDE.md`](CLAUDE.md) 与
+[`docs/design.md`](docs/design.md)。
 
 ## 许可证
 

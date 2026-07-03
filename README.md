@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.26+" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
-  <a href="https://pkg.go.dev/github.com/zynthara/chok"><img src="https://pkg.go.dev/badge/github.com/zynthara/chok.svg" alt="Go Reference" /></a>
+  <a href="https://pkg.go.dev/github.com/zynthara/chok/v2"><img src="https://pkg.go.dev/badge/github.com/zynthara/chok/v2.svg" alt="Go Reference" /></a>
   <a href="https://github.com/zynthara/chok/actions/workflows/ci.yml"><img src="https://github.com/zynthara/chok/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
 </p>
 
@@ -14,167 +14,178 @@
 
 ---
 
-> [!IMPORTANT]
-> **`main` is the v2 rewrite, under active development** — module path
-> `github.com/zynthara/chok/v2`, APIs unstable until `v2.0.0`.
->
-> The v1 line is sealed at [`v0.1.4`](https://github.com/zynthara/chok/releases/tag/v0.1.4)
-> and stays permanently installable:
->
-> ```sh
-> go get github.com/zynthara/chok@v0.1.4
-> ```
->
-> v0.1.x now receives security fixes only. The examples and README
-> below describe the released v1 API; the v1 quickstart example is
-> archived at [`examples/_v1_blog`](examples/_v1_blog).
+> [!NOTE]
+> This is **chok v2** (`github.com/zynthara/chok/v2`), currently in
+> beta. The v1 line is sealed at
+> [`v0.1.4`](https://github.com/zynthara/chok/releases/tag/v0.1.4)
+> (security fixes only) and stays permanently installable:
+> `go get github.com/zynthara/chok@v0.1.4`. Migrating? See the
+> [v1 → v2 migration guide](docs/migration-v1-to-v2.md).
 
 ---
 
-`chok` bundles HTTP, database, cache, JWT auth, scheduler, and observability
-into a single Go module. One YAML file enables or disables every subsystem;
-all wiring is generated from your config struct.
+`chok` bundles HTTP, database, cache, JWT auth, RBAC, scheduler, and
+observability into a single Go module. One YAML file declares the
+modules *and* configures them; the assembly code is generated.
 
 ```yaml
-# chok.yaml
-http:      { addr: ":8080" }
-log:       { level: info, format: json, output: [stdout] }
-database:  { driver: sqlite, sqlite: { path: "app.db" } }
-account:   { enabled: true, signing_key: "..." }
-swagger:   { enabled: true, title: "My API" }
+# chok.yaml — sections present = modules assembled; enabled = runtime switch
+log:     { level: info, format: json }
+http:    { addr: ":8080" }
+db:      { driver: sqlite, migrate: auto, sqlite: { path: app.db } }
+health:  { path: /healthz }
+swagger: { title: "My API" }
+account: { signing_key: "${MYAPP_ACCOUNT_SIGNING_KEY}" }
 ```
 
 ```go
-// main.go — three lines wire the entire app
-type Config struct {
-    HTTP     config.HTTPOptions     `mapstructure:"http"`
-    Log      config.SlogOptions     `mapstructure:"log"`
-    Database config.DatabaseOptions `mapstructure:"database"`
-    Account  config.AccountOptions  `mapstructure:"account"`
-    Swagger  config.SwaggerOptions  `mapstructure:"swagger"`
-}
-
-var cfg Config
-
+// main.go — the whole wiring
 func main() {
     chok.New("myapp",
-        chok.WithConfig(&cfg),
-        chok.WithRoutes(func(_ context.Context, a *chok.App) error {
-            a.API("/api/v1", a.AuthMiddleware()).GET("/me", meHandler)
+        chokModules(), // chok_modules_gen.go — regenerate with `chok sync`
+        chok.Override(db.Module(db.WithTables(db.Table(&Note{})))),
+        chok.Routes(func(r kernel.Router, k kernel.Kernel) error {
+            notes := store.New[Note](db.From(k), log.From(k),
+                store.WithQueryFields("id", "title", "created_at"),
+                store.WithUpdateFields("title", "body"))
+            api := r.Group("/api/v1", account.Authn(k))
+            api.Handle("GET", "/notes/{rid}", handler.HandleRequest(getNote))
             return nil
         }),
     ).Execute()
 }
 ```
 
-That's an HTTP server with JSON logging, SQLite + auto-migration, JWT-backed
-`/auth/register|login|refresh-token|change-password|...`, an OpenAPI 3.0
-spec at `/swagger`, `/healthz` `/livez` `/readyz` for Kubernetes, and a
-Prometheus `/metrics` endpoint — without a single explicit `Register` call.
+That boots an HTTP server with JSON logging, SQLite with
+auto-migration, JWT-backed `/auth/register|login|refresh-token|...`,
+an OpenAPI 3 spec at `/swagger`, `/healthz` `/livez` `/readyz` for
+Kubernetes, and Prometheus `/metrics` — and only the modules you
+declared are linked into the binary.
 
 ## Design
 
 Three immutable adjectives:
 
-- **Config-driven.** `enabled: true|false` is the primary on/off switch.
-  Code changes are reserved for business logic, not subsystem assembly.
-- **One blessed implementation per capability.** HTTP is gin. ORM is gorm.
-  Cache is Otter + Badger + Redis. Cron is robfig. JWT is golang-jwt.
-  Tracing is OpenTelemetry. No parallel choices.
-- **Internally complex, externally trivial.** A `Component` abstraction
-  with topological lifecycle, hot-reload dispatch, and health aggregation
-  hides behind `app.Register(c)` and `app.Logger()`.
+- **Config-driven.** yaml sections declare what runs; `enabled:
+  true|false` flips subsystems at runtime; `reload:"hot"` fields apply
+  on SIGHUP without a restart. Code is reserved for business logic.
+- **One blessed implementation per capability.** HTTP is stdlib
+  `ServeMux` (Go 1.22+ patterns). ORM is gorm — invisible behind the
+  store. Cache is otter + redis. Cron is robfig. JWT is golang-jwt.
+  RBAC is casbin. Observability is Prometheus + OpenTelemetry. No
+  parallel choices.
+- **Internally complex, externally trivial.** A single-actor kernel
+  runs the lifecycle (topological init, mount, serve, drain, reverse
+  close); config is immutable RCU snapshots; components declare a
+  `Descriptor` and the framework discovers capabilities by type. None
+  of that appears in application code.
+
+Guarantees you get structurally: unauthenticated queries on owned
+models fail closed, external IDs are prefixed RIDs (numeric keys never
+leak), optimistic locking rides a version column, secrets are redacted
+in logs, raw SQL has exactly two doors — both named `Unsafe`.
 
 ## Quick start
 
 ```bash
-go install github.com/zynthara/chok/cmd/chok@latest
+go install github.com/zynthara/chok/v2/cmd/chok@latest
 
 chok init myapp
-cd myapp && go mod tidy && make run
+cd myapp && go mod tidy && go run .
 ```
 
-The scaffold ships with `cmd/`, `internal/{app,handler}`, `configs/`, a
-`Makefile` that injects build metadata via ldflags, and a `chok.yaml`
-that enables HTTP + logging + SQLite + JWT auth + Swagger. Hit
-<http://127.0.0.1:8080/healthz> to confirm the boot.
+`curl localhost:8080/healthz`, then open <http://localhost:8080/swagger>.
+The scaffold ships a working Note API (model + three routes), a
+`chok.yaml` declaring the standard modules, and a `migrations/`
+skeleton for versioned mode. Add a battery = add a yaml section, run
+`chok sync`, done.
 
-## Built-in Components
+For a guided tour — auth, owner-scoped CRUD, optimistic locking over
+curl — walk [`examples/blog`](examples/blog) (five minutes).
 
-15 subsystems, each registered as a `Component` with `Init` / `Close` and
-optional `Reload` / `Health` / `Router` / `Migrate` capabilities. Most
-auto-register from your `Config` struct; the rest you opt into in
-`WithSetup`.
+## Built-in modules
 
-| Component | Auto-register | Selected by | Capability |
-|---|---|---|---|
-| `LoggerComponent`    | yes | `SlogOptions`        | logger + access log + reload |
-| `HTTPComponent`      | yes | `HTTPOptions`        | gin server + middleware stack |
-| `DBComponent`        | yes | `DatabaseOptions`    | gorm + auto-migrate (sqlite/mysql) |
-| `RedisComponent`     | yes | `RedisOptions`       | go-redis client + health |
-| `CacheComponent`     | yes | `CacheMemory/FileOptions` | memory + file + Redis chain |
-| `AccountComponent`   | yes | `AccountOptions`     | register / login / JWT / reset |
-| `SwaggerComponent`   | yes | `SwaggerOptions`     | OpenAPI 3.0 + Swagger UI |
-| `HealthComponent`    | yes | (whenever HTTP)      | `/healthz` `/livez` `/readyz` |
-| `MetricsComponent`   | yes | (whenever HTTP)      | Prometheus `/metrics` |
-| `DebugComponent`     | yes | `DebugOptions`       | `/componentz` topology dump |
-| `TracingComponent`   | explicit | code            | OTel tracer + OTLP exporter |
-| `SchedulerComponent` | explicit | code            | robfig cron with stats |
-| `PoolComponent`      | explicit | code            | bounded async worker pool |
-| `JWTComponent`       | explicit | code            | extra JWT managers |
-| `AuthzComponent`     | explicit | code            | pluggable authorizer |
+Every subsystem is a module: assembled via `chok.Use` (or the
+generated `chokModules()`), declared by a `Descriptor`, configured by
+its yaml section. Capabilities are discovered by the kernel
+(mount/serve/migrate/reload/health/ready/drain), so the table below is
+generated from the source of truth — `chok docs gen` keeps it honest.
 
-Custom components implement the same interface and integrate with the
-registry's lifecycle, hot-reload, and health checks. See
-[`docs/design.md`](docs/design.md) §13.
+<!-- gen:components -->
+| Module | Section | Needs (`?` = optional) | Capabilities | Enabled by default | What it does |
+|---|---|---|---|---|---|
+| `log.Module()` | `log` | — | reload | always | Root logger section (level/format/outputs); hot level reload. |
+| `web.Module()` | `http` | log?, metrics?, tracing?, authz? | serve, router | true | stdlib HTTP server + router + default middleware stack. |
+| `health.Module()` | `health` | — | reload, mount, drain | true | /healthz /livez /readyz probes; drains readiness on shutdown. |
+| `metrics.Module()` | `metrics` | — | mount | true | Prometheus registry + /metrics endpoint. |
+| `debug.Module()` | `debug` | — | mount | false | /componentz topology and lifecycle-event dump (off by default). |
+| `swagger.Module()` | `swagger` | http | mount | true | OpenAPI 3 spec generated from the route table + Swagger UI. |
+| `tracing.Module()` | `tracing` | — | — | false | OpenTelemetry tracer provider (stdout/OTLP exporters). |
+| `db.Module()` | `db` | log?, tracing? | health, migrate | true | Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off). |
+| `redis.Module()` | `redis` | log? | health | true | go-redis client with TLS/CA support; health probe. |
+| `cache.Module()` | `cache` | redis?, log? | — | true | Layered cache: otter memory + redis + circuit breaker. |
+| `scheduler.Module()` | `scheduler` | log? | health, serve | true | robfig cron with panic-safety, overlap policies and stats. |
+| `audit.Module()` | `audit` | db, scheduler?, account?, log? | reload, mount, migrate | false | Compliance audit log: async DB sink, purge cron, admin API (opt-in). |
+| `authz.Module()` | `authz` | db, redis?, audit?, log? | migrate, ready | true | casbin RBAC engine: adapter, Redis watcher, bootstrap seeding, decision audit. |
+| `account.Module()` | `account` | db, log? | mount, migrate | true | User module: register/login/JWT/reset + login rate limit + OAuth providers. |
+<!-- /gen:components -->
+
+Configuration for every module: [`docs/config.md`](docs/config.md) —
+and [`docs/chok.schema.json`](docs/chok.schema.json) gives your editor
+completion and CI validation for `chok.yaml`.
+
+Custom components implement `kernel.Component` (`Describe` / `Init` /
+`Close` plus any behavior interfaces) and join the same lifecycle.
 
 ## CLI
 
 ```bash
-chok init <name>          # scaffold a new project
-chok version [--json]     # build / VCS / runtime metadata
-chok update [--ref vX.Y]  # upgrade the local CLI via go install
+chok init <name>            # scaffold a v2 project (boots immediately)
+chok sync [--check]         # chok.yaml → chok_modules_gen.go (CI-gateable)
+chok migrate create|up|status   # forward-only versioned migrations
+chok docs gen [--check]     # components tables + config reference + JSON Schema
+chok openapi export         # running app's OpenAPI spec → .json/.yaml
+chok version [--json]       # build / VCS / runtime metadata
+chok update [--ref vX.Y]    # upgrade the local CLI via go install
 ```
-
-Version metadata resolves in order: ldflags injected by `make build` /
-goreleaser → `debug.ReadBuildInfo` (so `go install ...@latest` shows a
-real pseudo-version + git hash) → `dev` / `unknown` fallback.
 
 ## Examples
 
 | Path | What it shows |
 |---|---|
-| [`examples/blog`](examples/blog) | Quickstart-grade: HTTP + SQLite + JWT + Swagger + a single `Post` resource with optimistic locking, soft delete, and owner scope. Boot in 5 minutes. |
+| [`examples/blog`](examples/blog) | Quickstart-grade: JWT auth + a `Post` resource with owner scope, optimistic locking, soft delete, generated OpenAPI. Its acceptance test walks the README path over real HTTP in CI. |
 
-A full-coverage example (`examples/tasker`) exercising every Component and
-custom-component pattern is on the roadmap; see
-[`docs/roadmap.md`](docs/roadmap.md).
+A full-coverage example (`examples/tasker`) exercising authz, audit,
+scheduler and custom components is on the roadmap.
 
 ## Documentation
 
 | Topic | Where |
 |---|---|
-| Architecture & API contracts | [`docs/design.md`](docs/design.md) |
-| Design changelog (per release) | [`docs/changelog.md`](docs/changelog.md) |
+| Architecture & contracts (Chinese) | [`docs/design.md`](docs/design.md) |
+| Configuration reference (generated) | [`docs/config.md`](docs/config.md) |
+| v1 → v2 migration guide | [`docs/migration-v1-to-v2.md`](docs/migration-v1-to-v2.md) |
+| Design changelog | [`docs/changelog.md`](docs/changelog.md) |
 | Roadmap | [`docs/roadmap.md`](docs/roadmap.md) |
-| GoDoc reference | <https://pkg.go.dev/github.com/zynthara/chok> |
+| GoDoc reference | <https://pkg.go.dev/github.com/zynthara/chok/v2> |
 | Agent / AI assistant guidance | [`CLAUDE.md`](CLAUDE.md), [`AGENTS.md`](AGENTS.md) |
 
 ## Contributing
 
-Conventional commits (`feat:`, `fix:`, `docs:`, `chore:`) drive
-release-please's automatic versioning and CHANGELOG generation. Tag
-push triggers a goreleaser build for linux / darwin / windows × amd64
-/ arm64.
+Conventional commits (`feat:`, `fix:`, `docs:`, `chore:`). Releases
+are cut manually: changelog entry → tag → goreleaser publishes.
+Public API changes must land with a changelog entry — CI runs
+`apidiff` against the latest release tag, plus `chok docs gen --check`
+and `chok sync --check` so generated surfaces can't drift.
 
 ```bash
 make all      # tidy + lint + test + build
 make smoke    # boot examples/blog as a sanity check
-make snapshot # run goreleaser locally without publishing
+make test-pg  # store/db suites against Postgres (set CHOK_TEST_PG_DSN)
 ```
 
-The hard rules and the architectural invariants the project tries to
-preserve are documented in [`CLAUDE.md`](CLAUDE.md).
+The architectural invariants are documented in [`CLAUDE.md`](CLAUDE.md)
+and [`docs/design.md`](docs/design.md).
 
 ## License
 

@@ -17,6 +17,32 @@
 
 ---
 
+## 组件总览（生成区块）
+
+> 下表由 `chok docs gen` 从各模块的 Descriptor 生成——单一事实源
+> 公理的落地形态；手改会被 CI 的 `docs gen --check` 拦下。
+
+<!-- gen:components -->
+| 模块 | 配置段 | 依赖（`?` = 软依赖） | 能力 | 默认启用 | 说明 |
+|---|---|---|---|---|---|
+| `log.Module()` | `log` | — | reload | always | 根日志段（级别/格式/输出）；级别热更新。 |
+| `web.Module()` | `http` | log?, metrics?, tracing?, authz? | serve, router | true | stdlib HTTP 服务器 + 路由 + 默认中间件栈。 |
+| `health.Module()` | `health` | — | reload, mount, drain | true | /healthz /livez /readyz 探针；停机时先摘除就绪。 |
+| `metrics.Module()` | `metrics` | — | mount | true | Prometheus 注册表 + /metrics 端点。 |
+| `debug.Module()` | `debug` | — | mount | false | /componentz 拓扑与生命周期事件视图（默认关闭）。 |
+| `swagger.Module()` | `swagger` | http | mount | true | 由路由表生成 OpenAPI 3 spec + Swagger UI。 |
+| `tracing.Module()` | `tracing` | — | — | false | OpenTelemetry tracer provider（stdout/OTLP 导出）。 |
+| `db.Module()` | `db` | log?, tracing? | health, migrate | true | 数据库连接池（sqlite/mysql/postgres）+ 迁移（auto/versioned/off）。 |
+| `redis.Module()` | `redis` | log? | health | true | go-redis 客户端（TLS/CA 支持）；健康探针。 |
+| `cache.Module()` | `cache` | redis?, log? | — | true | 分层缓存：otter 内存层 + redis 层 + 熔断器。 |
+| `scheduler.Module()` | `scheduler` | log? | health, serve | true | robfig cron（panic 防护、重叠策略、统计）。 |
+| `audit.Module()` | `audit` | db, scheduler?, account?, log? | reload, mount, migrate | false | 合规审计日志：异步 DB sink、清理 cron、admin API（显式启用）。 |
+| `authz.Module()` | `authz` | db, redis?, audit?, log? | migrate, ready | true | casbin RBAC 引擎：adapter、Redis watcher、bootstrap 播种、决策审计。 |
+| `account.Module()` | `account` | db, log? | mount, migrate | true | 用户模块：注册/登录/JWT/重置 + 登录限速 + OAuth providers。 |
+<!-- /gen:components -->
+
+---
+
 ## 1. 定位
 
 chok 是一个 Go Web 框架。三个不可变形容词：
