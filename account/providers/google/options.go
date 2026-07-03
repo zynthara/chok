@@ -1,8 +1,12 @@
 // Package google provides chok's Google OAuth 2.0 + OpenID Connect
 // implementation of account.AuthProvider.
 //
-// Wire it via chok.yaml — chok bundles this provider through the
-// account/providers/blessed curator, so applications need no Go code:
+// Assemble it explicitly (import decides linkage, yaml stays the
+// runtime switch):
+//
+//	account.Module(account.WithProviders(google.Provider()))
+//
+// and configure via chok.yaml:
 //
 //	account:
 //	  enabled: true
@@ -34,12 +38,6 @@ import (
 // account.providers.google block. ProviderRawOptions.Decode populates
 // it through mapstructure tags.
 type Options struct {
-	// Enabled mirrors the kill switch in yaml. When false the factory
-	// short-circuits before validating client_id / secret, so an
-	// operator can keep an "enabled: false" stanza in chok.yaml as a
-	// staging area for credentials they aren't ready to deploy.
-	Enabled bool `mapstructure:"enabled"`
-
 	// ClientID and ClientSecret come from a Google Cloud Console OAuth
 	// client. They are required when Enabled is true. ClientSecret is
 	// flagged sensitive: chok's config.Redact / GoString helpers mask
@@ -78,9 +76,6 @@ type Options struct {
 // enabled. Pre-construction checks beat surfacing the same errors at
 // /auth/google/start time — operators see fail-fast at startup.
 func (o *Options) Validate() error {
-	if !o.Enabled {
-		return nil
-	}
 	if o.ClientID == "" {
 		return fmt.Errorf("google.client_id is required")
 	}

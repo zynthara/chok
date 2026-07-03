@@ -38,10 +38,6 @@ type provider struct {
 // deployments pass "" (empty) which falls back to Options.IssuerURL,
 // then to productionIssuer.
 func New(ctx context.Context, opts Options) (account.AuthProvider, error) {
-	if !opts.Enabled {
-		return nil, errors.New("google: New called with Enabled=false; gate this in the factory")
-	}
-
 	issuer := opts.IssuerURL
 	if issuer == "" {
 		issuer = productionIssuer

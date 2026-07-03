@@ -46,7 +46,7 @@ func TestValidateRedirectBack(t *testing.T) {
 				}
 				parsed = append(parsed, entry)
 			}
-			m := &Module{allowedRedirects: parsed}
+			m := &Service{allowedRedirects: parsed}
 			err := m.validateRedirectBack(tc.input)
 			if tc.wantOK && err != nil {
 				t.Fatalf("expected ok, got err: %v", err)

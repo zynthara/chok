@@ -7,22 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
+	"net/http"
 	"sync"
 	"time"
-
-	"gorm.io/gorm"
-
-	"github.com/gin-gonic/gin"
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/auth"
 	"github.com/zynthara/chok/v2/auth/jwt"
-	"github.com/zynthara/chok/v2/config"
 	"github.com/zynthara/chok/v2/db"
-	handler "github.com/zynthara/chok/v2/internal/ginresidue"
+	"github.com/zynthara/chok/v2/handler"
+	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/log"
-	middleware "github.com/zynthara/chok/v2/internal/ginresidue"
+	"github.com/zynthara/chok/v2/middleware"
 	"github.com/zynthara/chok/v2/store"
 )
 
@@ -32,7 +28,7 @@ type Sender interface {
 	Send(ctx context.Context, to string, code string) error
 }
 
-// Module manages user accounts.
+// Service manages user accounts.
 //
 // Two User stores are intentionally maintained:
 //
@@ -56,7 +52,7 @@ type Sender interface {
 //     the framework rejects accidental writes through the public Store API,
 //     but does not (and cannot) prevent an engineer who deliberately
 //     reaches for raw gorm. Treat publicStore as a guardrail, not a wall.
-type Module struct {
+type Service struct {
 	jwt             *jwt.Manager
 	resetJWT        *jwt.Manager // short-lived tokens for password reset
 	h               *db.DB       // v2 thin handle wrapping the gdb New received; tx root for OAuth flows
@@ -215,8 +211,9 @@ func WithLinkByEmail(enabled bool) Option {
 	return func(m *moduleConfig) { m.linkByEmail = enabled }
 }
 
-// New creates an account module.
-func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
+// New creates an account module against the v2 thin database handle
+// (kernel-less embedding and tests; the kernel path is account.Module).
+func New(h *db.DB, logger log.Logger, opts ...Option) (*Service, error) {
 	cfg := &moduleConfig{
 		expiration:      2 * time.Hour,
 		resetExpiration: 15 * time.Minute,
@@ -242,12 +239,6 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// h bridges this v1-residue module onto the v2 data layer: stores
-	// take the thin handle, and OAuth flows use it as the RunInTx root.
-	// account keeps its *gorm.DB constructor signature until its own M4
-	// migration; db.Wrap is the sanctioned transition shim.
-	h := db.Wrap(gdb)
 
 	// userStore is Module-private: full UpdateFields whitelist so internal
 	// flows (changePassword, resetPassword, UpdateUserRoles, ...) can write
@@ -292,7 +283,7 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 		parsedAllow = append(parsedAllow, entry)
 	}
 
-	m := &Module{
+	m := &Service{
 		h:                        h,
 		jwt:                      jwtMgr,
 		resetJWT:                 resetMgr,
@@ -330,7 +321,7 @@ func New(gdb *gorm.DB, logger log.Logger, opts ...Option) (*Module, error) {
 // default authCodeStore-as-prefix-bucket adapter) don't pay a no-op
 // Close cost. errors.Join surfaces all close failures without short-
 // circuiting, matching the SPEC §12 contract.
-func (m *Module) Close() error {
+func (m *Service) Close() error {
 	if m == nil {
 		return nil
 	}
@@ -384,24 +375,24 @@ func (m *Module) Close() error {
 // every restriction listed above. This is intentional — the framework
 // trusts engineers to honour CLAUDE.md's "DON'T bypass the store with
 // raw *gorm.DB" rule for sensitive writes.
-func (m *Module) Store() *store.Store[User] { return m.publicStore }
+func (m *Service) Store() *store.Store[User] { return m.publicStore }
 
 // LoginRateLimitEnabled reports whether per-email login throttling is
 // active. Useful for diagnostics, /healthz reporting, and tests that
 // need to confirm a builder propagated the LoginRateWindow /
 // LoginRateLimit configuration without poking at internal state.
-func (m *Module) LoginRateLimitEnabled() bool {
+func (m *Service) LoginRateLimitEnabled() bool {
 	return m != nil && m.limiter != nil
 }
 
 // TokenParser returns the JWT manager for use with middleware.Authn.
-func (m *Module) TokenParser() middleware.TokenParser {
+func (m *Service) TokenParser() middleware.TokenParser {
 	return m.jwt
 }
 
 // PrincipalResolver returns a resolver that builds a Principal from JWT claims.
 // Roles are read from the "roles" claim in the token — no DB lookup required.
-func (m *Module) PrincipalResolver() middleware.PrincipalResolver {
+func (m *Service) PrincipalResolver() middleware.PrincipalResolver {
 	return func(_ context.Context, subject string, claims map[string]any) (auth.Principal, error) {
 		p := auth.Principal{Subject: subject, Claims: claims}
 		if name, ok := claims["name"].(string); ok {
@@ -418,250 +409,78 @@ func (m *Module) PrincipalResolver() middleware.PrincipalResolver {
 	}
 }
 
-// AuthChain is the blessed authentication middleware chain for protected
-// business routes. Equivalent to:
+// Authn is the blessed authentication middleware for protected
+// business routes: token verification (middleware.Authn) composed
+// with ActiveCheck. Mount it on a group:
 //
-//	[]gin.HandlerFunc{
-//	    middleware.Authn(m.TokenParser(), m.PrincipalResolver()),
-//	    m.ActiveCheck(),
-//	}
+//	api := r.Group("/api/v1", acct.Authn())
 //
-// returned as a single slice for ergonomic mounting:
-//
-//	api := srv.Group("/api/v1", m.AuthChain()...)
-//
-// **Use AuthChain, not bare Authn.** Authn alone only validates the JWT
-// signature and populates auth.Principal — it does not touch the database.
-// The framework's "PV bump invalidates outstanding tokens" guarantee
-// (UpdateUserRoles / SetUserActive / BumpPasswordVersion) requires
-// ActiveCheck, which queries the user row on every request and rejects
-// disabled accounts or stale token versions. A route that mounts only
-// Authn will continue serving disabled / role-revoked users until their
-// token naturally expires, breaking the revocation contract.
-func (m *Module) AuthChain() []gin.HandlerFunc {
-	return []gin.HandlerFunc{
-		middleware.Authn(m.TokenParser(), m.PrincipalResolver()),
-		m.ActiveCheck(),
+// **Use Authn, not bare middleware.Authn.** Bare token verification
+// only validates the JWT signature and populates auth.Principal — it
+// does not touch the database. The framework's "PV bump invalidates
+// outstanding tokens" guarantee (UpdateUserRoles / SetUserActive /
+// BumpPasswordVersion) requires ActiveCheck, which queries the user
+// row on every request and rejects disabled accounts or stale token
+// versions. A route that mounts only token verification will continue
+// serving disabled / role-revoked users until their token naturally
+// expires, breaking the revocation contract.
+func (m *Service) Authn() kernel.Middleware {
+	authn := middleware.Authn(m.TokenParser(), m.PrincipalResolver())
+	active := m.ActiveCheck()
+	return func(next http.Handler) http.Handler {
+		return authn(active(next))
 	}
 }
 
-// ActiveCheck returns a gin middleware that verifies the authenticated user
+// ActiveCheck returns a middleware that verifies the authenticated user
 // still exists, is active, and the JWT's password version matches the
 // current one in the DB. It hits the database on every request.
 //
 // PrincipalResolver is stateless by design (no DB per request). Apply
-// ActiveCheck to routes where real-time revocation matters:
-//
-//	api := srv.Group("/api/v1")
-//	api.Use(middleware.Authn(acct.TokenParser(), acct.PrincipalResolver()))
-//	api.Use(acct.ActiveCheck())
+// ActiveCheck to routes where real-time revocation matters — or just
+// mount Authn(), which composes both.
 //
 // The pv check rejects tokens whose roles or password are stale: any
 // admin operation that wants to invalidate existing tokens (disable,
 // role change, password reset) bumps PasswordVersion in the DB, and the
 // next request from that token's holder will be 401'd here.
-func (m *Module) ActiveCheck() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		p, ok := auth.PrincipalFrom(c.Request.Context())
-		if !ok {
-			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated)
-			c.Abort()
-			return
-		}
-		user, err := m.userStore.Get(c.Request.Context(), store.RID(p.Subject))
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated.WithMessage("account not found"))
-			} else {
-				handler.WriteResponse(c, 0, nil, apierr.ErrInternal)
+func (m *Service) ActiveCheck() kernel.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, ok := auth.PrincipalFrom(r.Context())
+			if !ok {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated)
+				return
 			}
-			c.Abort()
-			return
-		}
-		if !user.Active {
-			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated.WithMessage("account is disabled"))
-			c.Abort()
-			return
-		}
-		// pv mismatch ⇒ 用户的 roles / password 在 token 签发后被改过，
-		// 老 token 不应再被接受（让 client 重新登录拿新 claims）。
-		// JSON unmarshal 把数字转成 float64，所以这里类型断言走 float64。
-		if pv, ok := p.Claims["pv"].(float64); !ok || int(pv) != user.PasswordVersion {
-			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated.WithMessage("token invalidated, please re-login"))
-			c.Abort()
-			return
-		}
-		c.Next()
+			user, err := m.userStore.Get(r.Context(), store.RID(p.Subject))
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated.WithMessage("account not found"))
+				} else {
+					handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal)
+				}
+				return
+			}
+			if !user.Active {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated.WithMessage("account is disabled"))
+				return
+			}
+			// pv mismatch ⇒ 用户的 roles / password 在 token 签发后被改过，
+			// 老 token 不应再被接受（让 client 重新登录拿新 claims）。
+			// JSON unmarshal 把数字转成 float64，所以这里类型断言走 float64。
+			if pv, ok := p.Claims["pv"].(float64); !ok || int(pv) != user.PasswordVersion {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated.WithMessage("token invalidated, please re-login"))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
-// RouteGroup is the minimal interface for registering routes.
-// *gin.RouterGroup satisfies this (use srv.Group("/path") to obtain one).
-//
-// v0.3.1 break: GET / DELETE were added so OAuth routes
-// (/auth/identities, /auth/identities/:id) can be mounted. *gin.RouterGroup
-// inherits both natively, so 99% of business code (which passes
-// srv.Group("/auth")) keeps compiling. Custom mock implementations of
-// RouteGroup may need to add the missing methods.
-type RouteGroup interface {
-	GET(string, ...gin.HandlerFunc) gin.IRoutes
-	POST(string, ...gin.HandlerFunc) gin.IRoutes
-	PUT(string, ...gin.HandlerFunc) gin.IRoutes
-	DELETE(string, ...gin.HandlerFunc) gin.IRoutes
-	Group(string, ...gin.HandlerFunc) *gin.RouterGroup
-}
-
-// OptionsFromConfig converts config.AccountOptions into the slice of
-// account.Option that account.New expects. Both account.Setup and
-// parts.DefaultAccountBuilder route through it so the two entry points
-// stay in sync — earlier divergence (Setup forwarding only signing key
-// + expirations while builder forwarded the new OAuth fields too)
-// silently broke standalone Setup callers using yaml-driven OAuth.
-//
-// The returned slice does NOT include framework-internal options that
-// resolve from config (LoginRateLimit pair, DisableRegister) — those
-// are added here. Callers wanting to layer extras (e.g. WithSender)
-// pass them as modOpts to Setup or append manually.
-func OptionsFromConfig(opts *config.AccountOptions) []Option {
-	if opts == nil {
-		return nil
-	}
-	out := []Option{WithSigningKey(opts.SigningKey)}
-	if opts.Expiration > 0 {
-		out = append(out, WithExpiration(opts.Expiration))
-	}
-	if opts.ResetExpiration > 0 {
-		out = append(out, WithResetExpiration(opts.ResetExpiration))
-	}
-	if opts.LoginRateWindow > 0 && opts.LoginRateLimit > 0 {
-		out = append(out, WithLoginRateLimit(opts.LoginRateWindow, opts.LoginRateLimit))
-	}
-	if opts.DisableRegister {
-		out = append(out, WithoutPublicRegister())
-	}
-	if opts.LinkByEmail {
-		out = append(out, WithLinkByEmail(true))
-	}
-	if len(opts.AllowedRedirectBacks) > 0 {
-		out = append(out, WithAllowedRedirectBacks(opts.AllowedRedirectBacks...))
-	}
-	if opts.OAuthCallbackFrontendURL != "" {
-		out = append(out, WithOAuthCallbackFrontendURL(opts.OAuthCallbackFrontendURL))
-	}
-	return out
-}
-
-// RegisterConfiguredProviders walks opts.Providers in deterministic
-// (sorted) order and registers each Enabled entry on the Module via
-// the global ProviderFactory registry. Unknown provider names cause a
-// fail-fast error so a typo in chok.yaml doesn't silently disable an
-// IdP. Disabled entries are skipped — yaml entries serve as kill
-// switches without removing the config block.
-//
-// account.Setup and parts.DefaultAccountBuilder both call this so the
-// "yaml drives provider list" behaviour is identical regardless of
-// entry point.
-func RegisterConfiguredProviders(m *Module, opts *config.AccountOptions) error {
-	if m == nil || opts == nil || len(opts.Providers) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(opts.Providers))
-	for name := range opts.Providers {
-		names = append(names, name)
-	}
-	// Deterministic registration order — map iteration is randomised.
-	for _, name := range sortedNames(names) {
-		raw := opts.Providers[name]
-		if !raw.Enabled {
-			continue
-		}
-		factory, ok := LookupProviderFactory(name)
-		if !ok {
-			// chok pulls every blessed provider into the binary via
-			// the account/providers/blessed curator (imported from
-			// chok core), so reaching here typically means a typo in
-			// chok.yaml's `account.providers.<name>` — the registry
-			// holds the four blessed names (google / github /
-			// facebook / apple) plus anything the app registered
-			// itself. Less commonly: a fork of chok with the blessed
-			// import stripped that forgot to wire its own factory.
-			available := registeredProviderNames()
-			return fmt.Errorf("account: provider %q is enabled in config but no factory is registered "+
-				"(typo in chok.yaml `account.providers`? available: %v)",
-				name, available)
-		}
-		provider, err := factory(&raw)
-		if err != nil {
-			return fmt.Errorf("account: build provider %q: %w", name, err)
-		}
-		if err := m.RegisterProvider(provider); err != nil {
-			return fmt.Errorf("account: register provider %q: %w", name, err)
-		}
-	}
-	return nil
-}
-
-// sortedNames returns a sorted copy. Pulled out so OptionsFromConfig /
-// RegisterConfiguredProviders don't pull in `sort` at the top — keeps
-// the helper section reflect-light.
-func sortedNames(names []string) []string {
-	out := append([]string(nil), names...)
-	sort.Strings(out)
-	return out
-}
-
-// Setup creates the account module from config, migrates the schema,
-// registers OAuth providers declared in opts.Providers, and registers
-// routes — all in one call.
-//
-// Returns (nil, nil) if opts is nil or opts.Enabled is false.
-// Extra modOpts (e.g. WithSender) are applied on top of config values.
-//
-//	acct, err := account.Setup(gdb, logger, &cfg.Account, srv.Group("/auth"))
-//
-// As of Phase 3 Setup honours the full AccountOptions surface
-// (LinkByEmail / AllowedRedirectBacks / OAuthCallbackFrontendURL /
-// Providers) — yaml-driven OAuth works on the standalone entry point
-// the same way it does through parts.AccountComponent.
-func Setup(gdb *gorm.DB, logger log.Logger, opts *config.AccountOptions, r RouteGroup, modOpts ...Option) (*Module, error) {
-	if opts == nil || !opts.Enabled {
-		return nil, nil
-	}
-
-	if err := opts.Validate(); err != nil {
-		return nil, fmt.Errorf("account: %w", err)
-	}
-
-	// MigrateSchema is the canonical migration path: AutoMigrate
-	// (Table + IdentityTable) plus the has_password backfill that
-	// rescues legacy password rows whose has_password column defaults
-	// to false post-AutoMigrate. Setup uses context.Background so
-	// schema creation runs to completion even when called from a
-	// short-lived request context.
-	if err := MigrateSchema(context.Background(), gdb); err != nil {
-		return nil, fmt.Errorf("account: migrate: %w", err)
-	}
-
-	combined := append([]Option(nil), OptionsFromConfig(opts)...)
-	combined = append(combined, modOpts...)
-
-	m, err := New(gdb, logger, combined...)
-	if err != nil {
-		return nil, fmt.Errorf("account: %w", err)
-	}
-
-	if err := RegisterConfiguredProviders(m, opts); err != nil {
-		// Tear down the just-built module so callers don't leak the
-		// limiter goroutine etc. on a half-constructed Setup.
-		_ = m.Close()
-		return nil, err
-	}
-
-	m.RegisterRoutes(r)
-	return m, nil
-}
-
-// RegisterRoutes registers account API routes on the given router.
+// RegisterRoutes registers account API routes on the given router —
+// typically the "/auth" group the account module mounts (the paths
+// below are relative; group prefix + relative path yields the SPEC §7
+// absolute URLs, so hardcoding "/auth/" here would double-prefix).
 //
 // Public routes (no auth required):
 //
@@ -669,26 +488,30 @@ func Setup(gdb *gorm.DB, logger log.Logger, opts *config.AccountOptions, r Route
 //	POST /login
 //	POST /forgot-password   (only if WithSender is configured)
 //	POST /reset-password    (only if WithSender is configured)
-//	GET  /auth/{name}/start    (one entry per registered OAuth provider)
-//	GET|POST /auth/{name}/callback
-//	POST /auth/exchange     (only if any OAuth provider is registered)
+//	GET  /{name}/start      (one entry per registered OAuth provider)
+//	GET|POST /{name}/callback
+//	POST /exchange          (only if any OAuth provider is registered)
 //
-// Authenticated routes:
+// Authenticated routes (Authn = token verification + ActiveCheck, so
+// the PV-bump revocation invariant is enforced on the module's own
+// routes too — without ActiveCheck, an admin's BumpPasswordVersion /
+// UpdateUserRoles call would not invalidate the user's ability to hit
+// /change-password until the token's natural expiry):
 //
 //	POST   /refresh-token
 //	PUT    /change-password
-//	GET    /auth/identities          (only if any OAuth provider is registered)
-//	POST   /auth/identities/link
-//	DELETE /auth/identities/:id
-func (m *Module) RegisterRoutes(r RouteGroup) {
+//	GET    /identities           (only if any OAuth provider is registered)
+//	POST   /identities/link
+//	DELETE /identities/{id}
+func (m *Service) RegisterRoutes(r kernel.Router) {
 	if !m.disableRegister {
-		r.POST("/register", handler.HandleRequest(m.register, handler.WithSuccessCode(201)))
+		r.Handle(http.MethodPost, "/register", handler.HandleRequest(m.register, handler.WithSuccessCode(201)))
 	}
-	r.POST("/login", handler.HandleRequest(m.login))
+	r.Handle(http.MethodPost, "/login", handler.HandleRequest(m.login))
 
 	if m.sender != nil {
-		r.POST("/forgot-password", handler.HandleAction(m.forgotPassword))
-		r.POST("/reset-password", handler.HandleAction(m.resetPassword))
+		r.Handle(http.MethodPost, "/forgot-password", handler.HandleAction(m.forgotPassword))
+		r.Handle(http.MethodPost, "/reset-password", handler.HandleAction(m.resetPassword))
 	}
 
 	// OAuth public routes — only mounted when any provider was
@@ -704,42 +527,29 @@ func (m *Module) RegisterRoutes(r RouteGroup) {
 	hasOAuth := len(providerNames) > 0
 	m.oauthMu.Unlock()
 
-	// OAuth route paths are relative to the RouteGroup the caller mounts
-	// us on (typically srv.Group("/auth") via parts.AccountComponent). The
-	// public URLs the SPEC §7 documents (/auth/{name}/start, /auth/exchange,
-	// /auth/identities, ...) come from group prefix + relative path here —
-	// hardcoding "/auth/" again would double-prefix to /auth/auth/...
 	for _, name := range providerNames {
 		p := m.providers[name]
-		r.GET("/"+name+"/start", m.handleBegin(p))
+		r.Handle(http.MethodGet, "/"+name+"/start", m.handleBegin(p))
 		switch providerHTTPMethodFor(p) {
 		case "POST":
-			r.POST("/"+name+"/callback", m.handleCallback(p))
+			r.Handle(http.MethodPost, "/"+name+"/callback", m.handleCallback(p))
 		default:
-			r.GET("/"+name+"/callback", m.handleCallback(p))
+			r.Handle(http.MethodGet, "/"+name+"/callback", m.handleCallback(p))
 		}
 	}
 	if hasOAuth {
-		r.POST("/exchange", m.handleExchange)
+		r.Handle(http.MethodPost, "/exchange", http.HandlerFunc(m.handleExchange))
 	}
 
-	// Use AuthChain (Authn + ActiveCheck) rather than bare Authn so the
-	// PV-bump revocation invariant (SPEC §9) is enforced on Module's own
-	// authenticated routes too. Without ActiveCheck, an admin's
-	// BumpPasswordVersion / UpdateUserRoles call on a user does not
-	// invalidate that user's ability to hit /change-password until the
-	// token's natural expiry — if the user (or an attacker holding the
-	// token + password) racing the admin can rotate the password, they
-	// regain a fresh token and the revocation is defeated.
-	authed := r.Group("", m.AuthChain()...)
-	authed.POST("/refresh-token", handler.HandleRequest(m.refreshToken))
-	authed.PUT("/change-password", handler.HandleAction(m.changePassword))
+	authed := r.Group("", m.Authn())
+	authed.Handle(http.MethodPost, "/refresh-token", handler.HandleRequest(m.refreshToken))
+	authed.Handle(http.MethodPut, "/change-password", handler.HandleAction(m.changePassword))
 	if hasOAuth {
-		authed.GET("/identities", handler.HandleRequest(m.handleListIdentities))
-		// /identities/link is a raw gin handler because the link flow needs
+		authed.Handle(http.MethodGet, "/identities", handler.HandleRequest(m.handleListIdentities))
+		// /identities/link is a raw handler because the link flow needs
 		// to write the same SessionCarrier cookie that /{name}/start does —
-		// HandleRequest's signature has no *gin.Context for cookie writes.
-		authed.POST("/identities/link", m.handleLinkIdentity)
-		authed.DELETE("/identities/:id", handler.HandleAction(m.handleUnlinkIdentity))
+		// HandleRequest's signature has no writer for cookie writes.
+		authed.Handle(http.MethodPost, "/identities/link", http.HandlerFunc(m.handleLinkIdentity))
+		authed.Handle(http.MethodDelete, "/identities/{id}", handler.HandleAction(m.handleUnlinkIdentity))
 	}
 }

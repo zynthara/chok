@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -601,38 +600,30 @@ func keys(m map[string]int) []string {
 	return out
 }
 
-// --- Factory --------------------------------------------------------
+// --- Provider spec ----------------------------------------------------
 
-func TestFactory_RegistersInRegistry(t *testing.T) {
-	f, ok := account.LookupProviderFactory("apple")
-	if !ok || f == nil {
-		t.Fatal("apple factory not registered")
+func TestProvider_SpecShape(t *testing.T) {
+	spec := apple.Provider()
+	if spec.Name != "apple" {
+		t.Fatalf("spec name = %q, want apple", spec.Name)
+	}
+	if spec.Build == nil {
+		t.Fatal("spec Build is nil")
 	}
 }
 
-func TestFactory_DecodeRoundTrip(t *testing.T) {
+func TestProvider_DecodeRoundTrip(t *testing.T) {
 	mock := newMockApple(t, "com.example.web")
-
-	account.ResetProviderRegistryForTest()
-	t.Cleanup(func() {
-		account.ResetProviderRegistryForTest()
-		account.RegisterProviderFactory("apple", apple.Factory)
-	})
-	account.RegisterProviderFactory("apple", apple.Factory)
-
 	pem := generateTestPEM(t)
-	raw := &fakeRawDecoder{data: map[string]any{
-		"enabled":           true,
+	p, err := apple.Provider().Build(context.Background(), map[string]any{
 		"service_id":        "com.example.web",
 		"team_id":           "TEAM123456",
 		"key_id":            "KEY1234567",
 		"private_key":       pem,
 		"redirect_url":      "https://app.example.test/cb",
-		"client_secret_ttl": 30 * 24 * time.Hour,
+		"client_secret_ttl": "720h",
 		"issuer_url":        mock.issuer,
-	}}
-	f, _ := account.LookupProviderFactory("apple")
-	p, err := f(raw)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,38 +632,10 @@ func TestFactory_DecodeRoundTrip(t *testing.T) {
 	}
 }
 
-type fakeRawDecoder struct {
-	data map[string]any
-}
-
-func (r *fakeRawDecoder) Decode(out any) error {
-	opts, ok := out.(*apple.Options)
-	if !ok {
-		return fmt.Errorf("fakeRawDecoder.Decode: want *apple.Options, got %T", out)
+func TestProvider_RejectsInvalidConfig(t *testing.T) {
+	if _, err := apple.Provider().Build(context.Background(), map[string]any{
+		"service_id": "only-service",
+	}); err == nil {
+		t.Fatal("expected validation error for incomplete provider config")
 	}
-	if v, ok := r.data["enabled"].(bool); ok {
-		opts.Enabled = v
-	}
-	if v, ok := r.data["service_id"].(string); ok {
-		opts.ServiceID = v
-	}
-	if v, ok := r.data["team_id"].(string); ok {
-		opts.TeamID = v
-	}
-	if v, ok := r.data["key_id"].(string); ok {
-		opts.KeyID = v
-	}
-	if v, ok := r.data["private_key"].(string); ok {
-		opts.PrivateKey = v
-	}
-	if v, ok := r.data["redirect_url"].(string); ok {
-		opts.RedirectURL = v
-	}
-	if v, ok := r.data["client_secret_ttl"].(time.Duration); ok {
-		opts.ClientSecretTTL = v
-	}
-	if v, ok := r.data["issuer_url"].(string); ok {
-		opts.IssuerURL = v
-	}
-	return nil
 }

@@ -1,8 +1,12 @@
 // Package facebook provides chok's Facebook OAuth 2.0 implementation
 // of account.AuthProvider.
 //
-// Wire it via chok.yaml — chok bundles this provider through the
-// account/providers/blessed curator, so applications need no Go code:
+// Assemble it explicitly (import decides linkage, yaml stays the
+// runtime switch):
+//
+//	account.Module(account.WithProviders(facebook.Provider()))
+//
+// and configure via chok.yaml:
 //
 //	account:
 //	  enabled: true
@@ -30,9 +34,6 @@ import (
 // Options is the typed config decoded from chok.yaml's
 // account.providers.facebook block.
 type Options struct {
-	// Enabled mirrors the kill switch in yaml.
-	Enabled bool `mapstructure:"enabled"`
-
 	// ClientID and ClientSecret come from a Facebook App
 	// (developers.facebook.com → App → Settings → Basic). Required
 	// when Enabled. ClientSecret is masked by chok's Redact /
@@ -60,9 +61,6 @@ type Options struct {
 
 // Validate enforces the minimum-viable config.
 func (o *Options) Validate() error {
-	if !o.Enabled {
-		return nil
-	}
 	if o.ClientID == "" {
 		return fmt.Errorf("facebook.client_id is required")
 	}

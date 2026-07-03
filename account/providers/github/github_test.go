@@ -3,7 +3,6 @@ package github_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -137,8 +136,7 @@ func (m *mockGitHub) stage(code, token string, u githubUser, emails []githubEmai
 func newProvider(t *testing.T, mock *mockGitHub, enterprise bool) account.AuthProvider {
 	t.Helper()
 	opts := github.Options{
-		Enabled:      true,
-		ClientID:     "client-abc",
+				ClientID:     "client-abc",
 		ClientSecret: "shh",
 		RedirectURL:  "https://app.example.test/auth/github/callback",
 	}
@@ -171,14 +169,13 @@ func TestOptions_Validate(t *testing.T) {
 		opts github.Options
 		ok   bool
 	}{
-		{"disabled bypasses", github.Options{Enabled: false}, true},
-		{"missing client_id", github.Options{Enabled: true, ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing client_secret", github.Options{Enabled: true, ClientID: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing redirect_url", github.Options{Enabled: true, ClientID: "x", ClientSecret: "x"}, false},
-		{"relative redirect_url", github.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
-		{"ok minimal", github.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
-		{"bad enterprise_url", github.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", EnterpriseURL: "not-a-url"}, false},
-		{"ok enterprise_url", github.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", EnterpriseURL: "https://gh.corp"}, true},
+		{"missing client_id", github.Options{ ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing client_secret", github.Options{ ClientID: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing redirect_url", github.Options{ ClientID: "x", ClientSecret: "x"}, false},
+		{"relative redirect_url", github.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
+		{"ok minimal", github.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
+		{"bad enterprise_url", github.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", EnterpriseURL: "not-a-url"}, false},
+		{"ok enterprise_url", github.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", EnterpriseURL: "https://gh.corp"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -409,32 +406,22 @@ func TestCompleteAuth_UserAPIFailure(t *testing.T) {
 	}
 }
 
-func TestFactory_RegistersInRegistry(t *testing.T) {
-	f, ok := account.LookupProviderFactory("github")
-	if !ok {
-		t.Fatal("github factory not registered")
+func TestProvider_SpecShape(t *testing.T) {
+	spec := github.Provider()
+	if spec.Name != "github" {
+		t.Fatalf("spec name = %q, want github", spec.Name)
 	}
-	if f == nil {
-		t.Fatal("factory is nil")
+	if spec.Build == nil {
+		t.Fatal("spec Build is nil")
 	}
 }
 
-func TestFactory_DecodeRoundTrip(t *testing.T) {
-	account.ResetProviderRegistryForTest()
-	t.Cleanup(func() {
-		account.ResetProviderRegistryForTest()
-		account.RegisterProviderFactory("github", github.Factory)
-	})
-	account.RegisterProviderFactory("github", github.Factory)
-
-	raw := &fakeRawDecoder{data: map[string]any{
-		"enabled":       true,
-		"client_id":     "abc",
+func TestProvider_DecodeRoundTrip(t *testing.T) {
+	p, err := github.Provider().Build(context.Background(), map[string]any{
+		"client_id":     "cli-abc",
 		"client_secret": "shh",
 		"redirect_url":  "https://app.example.test/cb",
-	}}
-	f, _ := account.LookupProviderFactory("github")
-	p, err := f(raw)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,29 +430,10 @@ func TestFactory_DecodeRoundTrip(t *testing.T) {
 	}
 }
 
-type fakeRawDecoder struct {
-	data map[string]any
-}
-
-func (r *fakeRawDecoder) Decode(out any) error {
-	opts, ok := out.(*github.Options)
-	if !ok {
-		return fmt.Errorf("fakeRawDecoder.Decode: want *github.Options, got %T", out)
+func TestProvider_RejectsInvalidConfig(t *testing.T) {
+	if _, err := github.Provider().Build(context.Background(), map[string]any{
+		"client_id": "only-id",
+	}); err == nil {
+		t.Fatal("expected validation error for incomplete provider config")
 	}
-	if v, ok := r.data["enabled"].(bool); ok {
-		opts.Enabled = v
-	}
-	if v, ok := r.data["client_id"].(string); ok {
-		opts.ClientID = v
-	}
-	if v, ok := r.data["client_secret"].(string); ok {
-		opts.ClientSecret = v
-	}
-	if v, ok := r.data["redirect_url"].(string); ok {
-		opts.RedirectURL = v
-	}
-	if v, ok := r.data["enterprise_url"].(string); ok {
-		opts.EnterpriseURL = v
-	}
-	return nil
 }

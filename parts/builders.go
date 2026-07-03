@@ -3,7 +3,6 @@ package parts
 import (
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v2/account"
 	"github.com/zynthara/chok/v2/cache"
 	"github.com/zynthara/chok/v2/component"
 	"github.com/zynthara/chok/v2/config"
@@ -25,34 +24,6 @@ func SQLiteBuilder(opts *config.SQLiteOptions) DBBuilder {
 func MySQLBuilder(opts *config.MySQLOptions) DBBuilder {
 	return func(_ component.Kernel) (*gorm.DB, error) {
 		return db.NewMySQL(opts)
-	}
-}
-
-// DefaultAccountBuilder returns an AccountBuilder that creates an
-// account.Module from config.AccountOptions. Returns (nil, nil) when
-// opts is nil or Enabled is false, putting the component into disabled
-// mode (Mount/Migrate/Module become no-ops).
-//
-// Delegates all yaml→Option mapping and provider loop to
-// account.OptionsFromConfig + account.RegisterConfiguredProviders so
-// the builder and the standalone account.Setup entry stay in sync.
-// Earlier divergence (Setup forwarded only signing key + expirations
-// while the builder also handled the new OAuth fields) silently broke
-// standalone Setup callers using yaml-driven OAuth.
-func DefaultAccountBuilder(opts *config.AccountOptions) AccountBuilder {
-	return func(k component.Kernel, gdb *gorm.DB) (*account.Module, error) {
-		if opts == nil || !opts.Enabled {
-			return nil, nil
-		}
-		m, err := account.New(gdb, k.Logger(), account.OptionsFromConfig(opts)...)
-		if err != nil {
-			return nil, err
-		}
-		if err := account.RegisterConfiguredProviders(m, opts); err != nil {
-			_ = m.Close() // tear down half-built module on provider failure
-			return nil, err
-		}
-		return m, nil
 	}
 }
 
@@ -101,15 +72,6 @@ func NewDefaultDBComponent(sqlite *config.SQLiteOptions, mysql *config.MySQLOpti
 		return NewDBComponent(MySQLBuilder(mysql), tables...)
 	}
 	return nil
-}
-
-// NewDefaultAccountComponent is a shorthand for the common case.
-// Returns nil when opts is nil or Enabled is false.
-func NewDefaultAccountComponent(opts *config.AccountOptions) *AccountComponent {
-	if opts == nil || !opts.Enabled {
-		return nil
-	}
-	return NewAccountComponent(DefaultAccountBuilder(opts), "/auth")
 }
 
 // NewDefaultRedisComponent is a shorthand for the common case.

@@ -10,51 +10,49 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-
-	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/log"
-	middleware "github.com/zynthara/chok/v2/internal/ginresidue"
 	"github.com/zynthara/chok/v2/store"
 	"github.com/zynthara/chok/v2/store/where"
 )
 
 const testSigningKey = "this-is-a-test-signing-key-32bytes!"
 
-func init() { gin.SetMode(gin.TestMode) }
-
 // --- helpers ---
 
-func setupModule(t *testing.T, opts ...Option) (*Module, *gin.Engine) {
+func openTestHandle(t *testing.T) *db.DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
-		Logger: logger.Discard,
-	})
+	h, err := db.Open(db.Options{Driver: "sqlite", SQLite: db.SQLiteOptions{Path: ":memory:"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Migrate(context.Background(), gdb, Table(), IdentityTable()); err != nil {
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.Migrate(context.Background(), Table(), IdentityTable()); err != nil {
 		t.Fatal(err)
 	}
+	return h
+}
+
+func setupModule(t *testing.T, opts ...Option) (*Service, http.Handler) {
+	t.Helper()
+	h := openTestHandle(t)
 
 	defaults := []Option{WithSigningKey(testSigningKey)}
 	defaults = append(defaults, opts...)
 
-	m, err := New(gdb, log.Empty(), defaults...)
+	m, err := New(h, log.Empty(), defaults...)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = m.Close() })
 
-	r := gin.New()
+	r := choktest.NewServeRouter()
 	m.RegisterRoutes(r)
 	return m, r
 }
 
-func doJSON(r *gin.Engine, method, path string, body any, token ...string) *httptest.ResponseRecorder {
+func doJSON(r http.Handler, method, path string, body any, token ...string) *httptest.ResponseRecorder {
 	var buf bytes.Buffer
 	if body != nil {
 		json.NewEncoder(&buf).Encode(body)
@@ -484,125 +482,17 @@ func TestForgotPassword_NotRegistered_WithoutSender(t *testing.T) {
 	}
 }
 
-// --- Setup tests ---
+// --- Options.Validate tests (the yaml section type) ---
 
-func openTestDB(t *testing.T) *gorm.DB {
-	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
-		Logger: logger.Discard,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return gdb
-}
-
-func TestSetup_Enabled(t *testing.T) {
-	gdb := openTestDB(t)
-	r := gin.New()
-
-	opts := &config.AccountOptions{
-		Enabled:         true,
-		SigningKey:      testSigningKey,
-		Expiration:      2 * time.Hour,
-		ResetExpiration: 15 * time.Minute,
-	}
-
-	m, err := Setup(gdb, log.Empty(), opts, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m == nil {
-		t.Fatal("expected non-nil module when enabled")
-	}
-
-	// Routes should work — register a user.
-	w := doJSON(r, "POST", "/register", map[string]string{
-		"email":    "alice@test.com",
-		"password": "password123",
-	})
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestSetup_Disabled(t *testing.T) {
-	gdb := openTestDB(t)
-	r := gin.New()
-
-	m, err := Setup(gdb, log.Empty(), &config.AccountOptions{Enabled: false}, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m != nil {
-		t.Fatal("expected nil module when disabled")
-	}
-}
-
-func TestSetup_NilOpts(t *testing.T) {
-	gdb := openTestDB(t)
-	r := gin.New()
-
-	m, err := Setup(gdb, log.Empty(), nil, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m != nil {
-		t.Fatal("expected nil module for nil opts")
-	}
-}
-
-func TestSetup_WithSender(t *testing.T) {
-	gdb := openTestDB(t)
-	r := gin.New()
-	sender := newMockSender()
-
-	opts := &config.AccountOptions{
-		Enabled:         true,
-		SigningKey:      testSigningKey,
-		Expiration:      2 * time.Hour,
-		ResetExpiration: 15 * time.Minute,
-	}
-
-	m, err := Setup(gdb, log.Empty(), opts, r, WithSender(sender))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m == nil {
-		t.Fatal("expected non-nil module")
-	}
-
-	// Register, then forgot-password should call the sender.
-	doJSON(r, "POST", "/register", map[string]string{
-		"email":    "bob@test.com",
-		"password": "password123",
-	})
-	w := doJSON(r, "POST", "/forgot-password", map[string]string{
-		"email": "bob@test.com",
-	})
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d", w.Code)
-	}
-	if !sender.waitCalled(2 * time.Second) {
-		t.Fatal("sender.Send was not invoked within 2s")
-	}
-	to, _ := sender.snapshot()
-	if to != "bob@test.com" {
-		t.Fatalf("sender.to = %q, want bob@test.com", to)
-	}
-}
-
-// --- AccountOptions.Validate tests ---
-
-func TestAccountOptions_Validate_Disabled(t *testing.T) {
-	opts := &config.AccountOptions{Enabled: false}
+func TestOptions_Validate_Disabled(t *testing.T) {
+	opts := &Options{Enabled: false}
 	if err := opts.Validate(); err != nil {
 		t.Fatalf("disabled should pass validation: %v", err)
 	}
 }
 
-func TestAccountOptions_Validate_ShortKey(t *testing.T) {
-	opts := &config.AccountOptions{
+func TestOptions_Validate_ShortKey(t *testing.T) {
+	opts := &Options{
 		Enabled:         true,
 		SigningKey:      "short",
 		Expiration:      2 * time.Hour,
@@ -613,8 +503,8 @@ func TestAccountOptions_Validate_ShortKey(t *testing.T) {
 	}
 }
 
-func TestAccountOptions_Validate_OK(t *testing.T) {
-	opts := &config.AccountOptions{
+func TestOptions_Validate_OK(t *testing.T) {
+	opts := &Options{
 		Enabled:         true,
 		SigningKey:      testSigningKey,
 		Expiration:      2 * time.Hour,
@@ -625,44 +515,25 @@ func TestAccountOptions_Validate_OK(t *testing.T) {
 	}
 }
 
-func TestSetup_ValidationError(t *testing.T) {
-	gdb := openTestDB(t)
-	r := gin.New()
-
-	opts := &config.AccountOptions{
-		Enabled:    true,
-		SigningKey: "too-short",
+func TestOptions_Validate_HalfConfiguredLimiter(t *testing.T) {
+	opts := &Options{
+		Enabled:         true,
+		SigningKey:      testSigningKey,
+		LoginRateWindow: 15 * time.Minute, // limit left zero
 	}
-	_, err := Setup(gdb, log.Empty(), opts, r)
-	if err == nil {
-		t.Fatal("expected validation error for short signing key")
+	if err := opts.Validate(); err == nil {
+		t.Fatal("expected error for half-configured rate limiter")
 	}
 }
 
-func TestSetup_ZeroExpiration_UsesDefaults(t *testing.T) {
-	gdb := openTestDB(t)
-	r := gin.New()
-
-	opts := &config.AccountOptions{
+func TestOptions_Validate_EnabledProviderNeedsFrontendURL(t *testing.T) {
+	opts := &Options{
 		Enabled:    true,
 		SigningKey: testSigningKey,
-		// Expiration and ResetExpiration intentionally zero
+		Providers:  map[string]ProviderRaw{"google": {Enabled: true}},
 	}
-	m, err := Setup(gdb, log.Empty(), opts, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m == nil {
-		t.Fatal("expected non-nil module")
-	}
-
-	// Register and verify token is issued (proves defaults were applied).
-	w := doJSON(r, "POST", "/register", map[string]string{
-		"email":    "alice@test.com",
-		"password": "password123",
-	})
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	if err := opts.Validate(); err == nil {
+		t.Fatal("expected error: enabled provider without oauth_callback_frontend_url")
 	}
 }
 
@@ -688,11 +559,10 @@ func TestActiveCheck_DisabledUser_Blocked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Set up a protected route with ActiveCheck.
-	protected := gin.New()
-	protected.Use(middleware.Authn(m.TokenParser(), m.PrincipalResolver()))
-	protected.Use(m.ActiveCheck())
-	protected.GET("/me", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+	// Set up a protected route with the composed Authn chain
+	// (token verification + ActiveCheck).
+	protected := choktest.NewServeRouter()
+	protected.Handle(http.MethodGet, "/me", okHandler(), m.Authn())
 
 	req := httptest.NewRequest("GET", "/me", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -713,10 +583,8 @@ func TestActiveCheck_ActiveUser_Allowed(t *testing.T) {
 	})
 	token := decodeToken(t, w)
 
-	protected := gin.New()
-	protected.Use(middleware.Authn(m.TokenParser(), m.PrincipalResolver()))
-	protected.Use(m.ActiveCheck())
-	protected.GET("/me", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+	protected := choktest.NewServeRouter()
+	protected.Handle(http.MethodGet, "/me", okHandler(), m.Authn())
 
 	req := httptest.NewRequest("GET", "/me", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -762,4 +630,12 @@ func TestLimiter_CloseWaitsForCleanup(t *testing.T) {
 	// goroutine was launched — proves the closed flag short-circuits
 	// the launch path.
 	l.Close()
+}
+
+// okHandler is the trivial protected endpoint the Authn tests mount.
+func okHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
 }

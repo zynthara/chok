@@ -5,22 +5,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/gin-gonic/gin"
 )
-
-func newCookieGinCtx(req *http.Request) (*gin.Context, *httptest.ResponseRecorder) {
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = req
-	return c, w
-}
 
 func TestCookieCarrier_RoundTrip(t *testing.T) {
 	c := NewCookieCarrier([]byte("test-secret-32-bytes-padding-ok!!"), "_chok_oauth_sid")
 
-	ctx, w := newCookieGinCtx(httptest.NewRequest("GET", "/", nil))
-	if err := c.Issue(ctx, "sid-abc"); err != nil {
+	w := httptest.NewRecorder()
+	if err := c.Issue(w, httptest.NewRequest("GET", "/", nil), "sid-abc"); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 	setCookie := w.Header().Get("Set-Cookie")
@@ -33,8 +24,7 @@ func TestCookieCarrier_RoundTrip(t *testing.T) {
 	for _, cv := range w.Result().Cookies() {
 		req.AddCookie(cv)
 	}
-	ctx2, _ := newCookieGinCtx(req)
-	got, err := c.Read(ctx2)
+	got, err := c.Read(httptest.NewRecorder(), req)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -47,9 +37,7 @@ func TestCookieCarrier_RejectsTamperedSig(t *testing.T) {
 	c := NewCookieCarrier([]byte("test-secret-32-bytes-padding-ok!!"), "_chok_oauth_sid")
 	req := httptest.NewRequest("GET", "/", nil)
 	req.AddCookie(&http.Cookie{Name: "_chok_oauth_sid", Value: "sid-abc.bogus-signature"})
-	ctx, _ := newCookieGinCtx(req)
-
-	_, err := c.Read(ctx)
+	_, err := c.Read(httptest.NewRecorder(), req)
 	if err == nil {
 		t.Fatal("expected error for tampered signature")
 	}
@@ -62,8 +50,7 @@ func TestCookieCarrier_RejectsMalformedValue(t *testing.T) {
 		t.Run(v, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/", nil)
 			req.AddCookie(&http.Cookie{Name: "_chok_oauth_sid", Value: v})
-			ctx, _ := newCookieGinCtx(req)
-			if _, err := c.Read(ctx); err == nil {
+			if _, err := c.Read(httptest.NewRecorder(), req); err == nil {
 				t.Fatalf("expected error for malformed value %q", v)
 			}
 		})
@@ -72,8 +59,8 @@ func TestCookieCarrier_RejectsMalformedValue(t *testing.T) {
 
 func TestCookieCarrier_DevMode_SameSiteLax(t *testing.T) {
 	c := NewCookieCarrier([]byte("test-secret-32-bytes-padding-ok!!"), "_chok_oauth_sid", WithDevMode())
-	ctx, w := newCookieGinCtx(httptest.NewRequest("GET", "/", nil))
-	if err := c.Issue(ctx, "sid-x"); err != nil {
+	w := httptest.NewRecorder()
+	if err := c.Issue(w, httptest.NewRequest("GET", "/", nil), "sid-x"); err != nil {
 		t.Fatal(err)
 	}
 	setCookie := w.Header().Get("Set-Cookie")
@@ -87,8 +74,8 @@ func TestCookieCarrier_DevMode_SameSiteLax(t *testing.T) {
 
 func TestCookieCarrier_Production_SameSiteNoneSecure(t *testing.T) {
 	c := NewCookieCarrier([]byte("test-secret-32-bytes-padding-ok!!"), "_chok_oauth_sid")
-	ctx, w := newCookieGinCtx(httptest.NewRequest("GET", "/", nil))
-	if err := c.Issue(ctx, "sid-x"); err != nil {
+	w := httptest.NewRecorder()
+	if err := c.Issue(w, httptest.NewRequest("GET", "/", nil), "sid-x"); err != nil {
 		t.Fatal(err)
 	}
 	setCookie := w.Header().Get("Set-Cookie")
@@ -104,16 +91,16 @@ func TestCookieCarrier_Read_ClearsCookie(t *testing.T) {
 	c := NewCookieCarrier([]byte("test-secret-32-bytes-padding-ok!!"), "_chok_oauth_sid")
 
 	// First Issue to get a valid signed cookie value.
-	issueCtx, issueW := newCookieGinCtx(httptest.NewRequest("GET", "/", nil))
-	_ = c.Issue(issueCtx, "sid-abc")
+	issueW := httptest.NewRecorder()
+	_ = c.Issue(issueW, httptest.NewRequest("GET", "/", nil), "sid-abc")
 
 	// Replay it on a fresh request and inspect Read's response cookies.
 	req := httptest.NewRequest("GET", "/", nil)
 	for _, cv := range issueW.Result().Cookies() {
 		req.AddCookie(cv)
 	}
-	readCtx, readW := newCookieGinCtx(req)
-	if _, err := c.Read(readCtx); err != nil {
+	readW := httptest.NewRecorder()
+	if _, err := c.Read(readW, req); err != nil {
 		t.Fatal(err)
 	}
 

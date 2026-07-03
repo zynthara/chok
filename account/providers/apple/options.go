@@ -1,8 +1,12 @@
 // Package apple provides chok's Apple Sign-In implementation of
 // account.AuthProvider.
 //
-// Wire it via chok.yaml — chok bundles this provider through the
-// account/providers/blessed curator, so applications need no Go code:
+// Assemble it explicitly (import decides linkage, yaml stays the
+// runtime switch):
+//
+//	account.Module(account.WithProviders(apple.Provider()))
+//
+// and configure via chok.yaml:
 //
 //	account:
 //	  enabled: true
@@ -57,15 +61,6 @@ import (
 // Options is the typed config decoded from chok.yaml's
 // account.providers.apple block.
 type Options struct {
-	// Enabled is the kill-switch in yaml. SPEC v0.3.6: Validate does
-	// NOT short-circuit on Enabled=false because programmatic callers
-	// frequently pass options with Enabled at its zero value, and a
-	// short-circuit would let missing-field bugs slip past startup.
-	// The per-yaml-entry Enabled is consumed by chok's
-	// account.RegisterConfiguredProviders to decide whether to
-	// instantiate; Validate is purely structural.
-	Enabled bool `mapstructure:"enabled"`
-
 	// ServiceID is the Apple Web Service ID (a Service identifier
 	// like com.example.web, distinct from the App ID). Treated as
 	// the OAuth client_id. Required.

@@ -1,8 +1,12 @@
 // Package github provides chok's GitHub OAuth 2.0 implementation of
 // account.AuthProvider.
 //
-// Wire it via chok.yaml — chok bundles this provider through the
-// account/providers/blessed curator, so applications need no Go code:
+// Assemble it explicitly (import decides linkage, yaml stays the
+// runtime switch):
+//
+//	account.Module(account.WithProviders(github.Provider()))
+//
+// and configure via chok.yaml:
 //
 //	account:
 //	  enabled: true
@@ -35,11 +39,6 @@ import (
 // Options is the typed config decoded from chok.yaml's
 // account.providers.github block.
 type Options struct {
-	// Enabled mirrors the kill switch in yaml. When false the factory
-	// short-circuits before validating client_id/secret, so an
-	// operator can keep `enabled: false` as a staging stanza.
-	Enabled bool `mapstructure:"enabled"`
-
 	// ClientID and ClientSecret come from a GitHub OAuth App
 	// (Settings → Developer settings → OAuth Apps). Required when
 	// Enabled is true. ClientSecret is masked by chok.config.Redact /
@@ -69,9 +68,6 @@ type Options struct {
 // enabled. Run pre-construction so a missing client_id surfaces as a
 // startup failure, not a runtime auth one.
 func (o *Options) Validate() error {
-	if !o.Enabled {
-		return nil
-	}
 	if o.ClientID == "" {
 		return fmt.Errorf("github.client_id is required")
 	}

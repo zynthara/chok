@@ -67,7 +67,7 @@ type resetPasswordRequest struct {
 // Handlers
 // ---------------------------------------------------------------------------
 
-func (m *Module) register(ctx context.Context, req *registerRequest) (*tokenResponse, error) {
+func (m *Service) register(ctx context.Context, req *registerRequest) (*tokenResponse, error) {
 	req.Email = normalizeEmail(req.Email)
 
 	if err := validatePasswordStrength(req.Password); err != nil {
@@ -105,7 +105,7 @@ func (m *Module) register(ctx context.Context, req *registerRequest) (*tokenResp
 	return m.issueToken(user)
 }
 
-func (m *Module) login(ctx context.Context, req *loginRequest) (*tokenResponse, error) {
+func (m *Service) login(ctx context.Context, req *loginRequest) (*tokenResponse, error) {
 	req.Email = normalizeEmail(req.Email)
 
 	// Rate limit is keyed on (email, client-ip). An attacker rotating
@@ -190,7 +190,7 @@ func tooManyRequestsWithRetryAfter(window time.Duration) *apierr.Error {
 	return apierr.ErrTooManyRequests.WithHeader("Retry-After", strconv.Itoa(secs))
 }
 
-func (m *Module) refreshToken(ctx context.Context, _ *refreshTokenRequest) (*tokenResponse, error) {
+func (m *Service) refreshToken(ctx context.Context, _ *refreshTokenRequest) (*tokenResponse, error) {
 	p, ok := auth.PrincipalFrom(ctx)
 	if !ok {
 		return nil, apierr.ErrUnauthenticated
@@ -218,7 +218,7 @@ func (m *Module) refreshToken(ctx context.Context, _ *refreshTokenRequest) (*tok
 	return m.issueToken(user)
 }
 
-func (m *Module) changePassword(ctx context.Context, req *changePasswordRequest) error {
+func (m *Service) changePassword(ctx context.Context, req *changePasswordRequest) error {
 	p, ok := auth.PrincipalFrom(ctx)
 	if !ok {
 		return apierr.ErrUnauthenticated
@@ -255,7 +255,7 @@ func (m *Module) changePassword(ctx context.Context, req *changePasswordRequest)
 		store.Fields(user, "password_hash", "password_version", "has_password"))
 }
 
-func (m *Module) forgotPassword(ctx context.Context, req *forgotPasswordRequest) error {
+func (m *Service) forgotPassword(ctx context.Context, req *forgotPasswordRequest) error {
 	req.Email = normalizeEmail(req.Email)
 
 	user, err := m.userStore.Get(ctx, store.Where(where.WithFilter("email", req.Email)))
@@ -282,7 +282,7 @@ func (m *Module) forgotPassword(ctx context.Context, req *forgotPasswordRequest)
 // dispatchResetEmail signs the reset token and calls the Sender. It is
 // intended to run asynchronously from forgotPassword — see there for
 // the timing-attack rationale. All errors are logged, never returned.
-func (m *Module) dispatchResetEmail(ctx context.Context, user *User) {
+func (m *Service) dispatchResetEmail(ctx context.Context, user *User) {
 	defer func() {
 		if r := recover(); r != nil && m.logger != nil {
 			m.logger.Error("forgot-password dispatch panicked", "panic", r)
@@ -305,7 +305,7 @@ func (m *Module) dispatchResetEmail(ctx context.Context, user *User) {
 	}
 }
 
-func (m *Module) resetPassword(ctx context.Context, req *resetPasswordRequest) error {
+func (m *Service) resetPassword(ctx context.Context, req *resetPasswordRequest) error {
 	subject, claims, err := m.resetJWT.Parse(req.Token)
 	if err != nil {
 		return apierr.ErrInvalidArgument.WithMessage("invalid or expired reset token")
@@ -468,7 +468,7 @@ func maskDomain(domain string) string {
 	return b.String()
 }
 
-func (m *Module) issueToken(user *User) (*tokenResponse, error) {
+func (m *Service) issueToken(user *User) (*tokenResponse, error) {
 	claims := map[string]any{
 		"name": user.Name,
 		"pv":   user.PasswordVersion, // password version; used to invalidate tokens on password change

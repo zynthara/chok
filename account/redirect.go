@@ -119,7 +119,7 @@ func (a allowedRedirect) matches(scheme, host, path string) bool {
 // callers (Module.handleBegin / handleLinkIdentity) wrap it into
 // ErrInvalidArgument so the final HTTP response stays opaque enough not
 // to advertise the policy.
-func (m *Module) validateRedirectBack(redirectBack string) error {
+func (m *Service) validateRedirectBack(redirectBack string) error {
 	if redirectBack == "" {
 		return nil
 	}

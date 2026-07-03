@@ -9,16 +9,15 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/store"
 	"github.com/zynthara/chok/v2/store/where"
 )
 
 // --- helper: create a registered user and return their RID + initial PV ---
 
-func registerUser(t *testing.T, m *Module, r *gin.Engine, email, password string) (rid string, pv int) {
+func registerUser(t *testing.T, m *Service, r http.Handler, email, password string) (rid string, pv int) {
 	t.Helper()
 	w := doJSON(r, "POST", "/register", map[string]string{
 		"email":    email,
@@ -185,9 +184,8 @@ func TestUpdateUserRoles_InvalidatesOldToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	protected := gin.New()
-	protected.Use(m.AuthChain()...)
-	protected.GET("/me", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+	protected := choktest.NewServeRouter()
+	protected.Handle(http.MethodGet, "/me", okHandler(), m.Authn())
 	req := httptest.NewRequest("GET", "/me", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp := httptest.NewRecorder()
@@ -322,9 +320,8 @@ func TestAuthChain_RejectsDisabledUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	protected := gin.New()
-	protected.Use(m.AuthChain()...)
-	protected.GET("/me", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+	protected := choktest.NewServeRouter()
+	protected.Handle(http.MethodGet, "/me", okHandler(), m.Authn())
 
 	req := httptest.NewRequest("GET", "/me", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -343,9 +340,8 @@ func TestAuthChain_AllowsActiveUser(t *testing.T) {
 	})
 	token := decodeToken(t, w)
 
-	protected := gin.New()
-	protected.Use(m.AuthChain()...)
-	protected.GET("/me", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+	protected := choktest.NewServeRouter()
+	protected.Handle(http.MethodGet, "/me", okHandler(), m.Authn())
 
 	req := httptest.NewRequest("GET", "/me", nil)
 	req.Header.Set("Authorization", "Bearer "+token)

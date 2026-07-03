@@ -191,8 +191,7 @@ var _ = big.NewInt
 func newProvider(t *testing.T, mock *mockIdP, opts func(*google.Options)) account.AuthProvider {
 	t.Helper()
 	o := google.Options{
-		Enabled:      true,
-		ClientID:     mock.clientID,
+				ClientID:     mock.clientID,
 		ClientSecret: "mock-secret",
 		RedirectURL:  "https://app.example.test/auth/google/callback",
 		IssuerURL:    mock.issuer,
@@ -218,13 +217,12 @@ func TestOptions_Validate(t *testing.T) {
 		opts google.Options
 		ok   bool
 	}{
-		{"disabled bypasses", google.Options{Enabled: false}, true},
-		{"missing client_id", google.Options{Enabled: true, ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing client_secret", google.Options{Enabled: true, ClientID: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing redirect_url", google.Options{Enabled: true, ClientID: "x", ClientSecret: "x"}, false},
-		{"relative redirect_url", google.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
-		{"ok minimal", google.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
-		{"bad issuer_url", google.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", IssuerURL: "not-a-url"}, false},
+		{"missing client_id", google.Options{ ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing client_secret", google.Options{ ClientID: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing redirect_url", google.Options{ ClientID: "x", ClientSecret: "x"}, false},
+		{"relative redirect_url", google.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
+		{"ok minimal", google.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
+		{"bad issuer_url", google.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", IssuerURL: "not-a-url"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -349,8 +347,7 @@ func TestCompleteAuth_RejectsWrongAudience(t *testing.T) {
 	// Point provider at wrongAudMock's issuer (so it discovers the
 	// JWKS there) but with the original clientID.
 	p, err := google.New(context.Background(), google.Options{
-		Enabled:      true,
-		ClientID:     "client-abc",
+				ClientID:     "client-abc",
 		ClientSecret: "secret",
 		RedirectURL:  "https://app.example.test/cb",
 		IssuerURL:    wrongAudMock.issuer,
@@ -454,45 +451,25 @@ func TestCompleteAuth_TokenExchangeFailure(t *testing.T) {
 	}
 }
 
-func TestFactory_RegistersInRegistry(t *testing.T) {
-	// init() in factory.go runs at import time; the registry should
-	// already hold "google".
-	f, ok := account.LookupProviderFactory("google")
-	if !ok {
-		t.Fatal("google factory not registered")
+func TestProvider_SpecShape(t *testing.T) {
+	spec := google.Provider()
+	if spec.Name != "google" {
+		t.Fatalf("spec name = %q, want google", spec.Name)
 	}
-	if f == nil {
-		t.Fatal("factory is nil")
+	if spec.Build == nil {
+		t.Fatal("spec Build is nil")
 	}
 }
 
-func TestFactory_DecodeRoundTrip(t *testing.T) {
-	// Reset to a clean registry first; factory.init() already
-	// registered "google" but we want a deterministic state for
-	// this test. After reset we re-register via google.Factory and
-	// schedule another reset on cleanup so subsequent tests in the
-	// package see the same starting point. (This package's other
-	// tests don't depend on the registry; the cleanup is for
-	// belt-and-braces hygiene.)
-	account.ResetProviderRegistryForTest()
-	t.Cleanup(func() {
-		account.ResetProviderRegistryForTest()
-		account.RegisterProviderFactory("google", google.Factory)
-	})
-	account.RegisterProviderFactory("google", google.Factory)
-
+func TestProvider_DecodeRoundTrip(t *testing.T) {
 	mock := newMockIdP(t, "client-abc")
-	raw := &fakeRawDecoder{
-		data: map[string]any{
-			"enabled":       true,
-			"client_id":     "client-abc",
-			"client_secret": "secret",
-			"redirect_url":  "https://app.example.test/cb",
-			"issuer_url":    mock.issuer,
-		},
-	}
-	f, _ := account.LookupProviderFactory("google")
-	p, err := f(raw)
+	spec := google.Provider()
+	p, err := spec.Build(context.Background(), map[string]any{
+		"client_id":     "client-abc",
+		"client_secret": "secret",
+		"redirect_url":  "https://app.example.test/cb",
+		"issuer_url":    mock.issuer,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,37 +478,11 @@ func TestFactory_DecodeRoundTrip(t *testing.T) {
 	}
 }
 
-// fakeRawDecoder mimics config.ProviderRawOptions for the test —
-// google.Factory only needs Decode(out any) error.
-type fakeRawDecoder struct {
-	data map[string]any
+func TestProvider_RejectsInvalidConfig(t *testing.T) {
+	if _, err := google.Provider().Build(context.Background(), map[string]any{
+		"client_id": "only-id",
+	}); err == nil {
+		t.Fatal("expected validation error for incomplete provider config")
+	}
 }
 
-func (r *fakeRawDecoder) Decode(out any) error {
-	// Hand-roll a tiny mapstructure-equivalent for the four fields
-	// google.Options cares about. Avoids dragging the real
-	// config.ProviderRawOptions test plumbing in here.
-	opts, ok := out.(*google.Options)
-	if !ok {
-		return fmt.Errorf("fakeRawDecoder.Decode: want *google.Options, got %T", out)
-	}
-	if v, ok := r.data["enabled"].(bool); ok {
-		opts.Enabled = v
-	}
-	if v, ok := r.data["client_id"].(string); ok {
-		opts.ClientID = v
-	}
-	if v, ok := r.data["client_secret"].(string); ok {
-		opts.ClientSecret = v
-	}
-	if v, ok := r.data["redirect_url"].(string); ok {
-		opts.RedirectURL = v
-	}
-	if v, ok := r.data["issuer_url"].(string); ok {
-		opts.IssuerURL = v
-	}
-	if v, ok := r.data["hosted_domain"].(string); ok {
-		opts.HostedDomain = v
-	}
-	return nil
-}

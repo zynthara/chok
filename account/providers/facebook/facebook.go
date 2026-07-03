@@ -3,7 +3,6 @@ package facebook
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,10 +36,6 @@ func New(opts Options) (account.AuthProvider, error) {
 // callers stick to New(); production deployments never need to
 // change the API host.
 func NewWithAPIBase(opts Options, apiBase string) (account.AuthProvider, error) {
-	if !opts.Enabled {
-		return nil, errors.New("facebook: New called with Enabled=false; gate this in the factory")
-	}
-
 	apiVersion := opts.APIVersion
 	if apiVersion == "" {
 		apiVersion = defaultAPIVersion

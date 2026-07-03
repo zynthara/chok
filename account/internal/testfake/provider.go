@@ -171,50 +171,45 @@ type FactoryOptions struct {
 	RequiresFormPost bool   `mapstructure:"requires_form_post"`
 }
 
-// Factory adapts testfake to the account.ProviderFactory contract used
-// by parts.DefaultAccountBuilder's yaml-driven assembly. Tests register
-// it before launching chok with:
+// Spec adapts testfake to the account.ProviderSpec assembly contract
+// so tests can exercise the yaml-driven provider matrix end-to-end
+// without an external IdP:
 //
-//	account.RegisterProviderFactory("fake", testfake.Factory)
+//	account.Module(account.WithProviders(testfake.Spec("fake")))
 //
-// rawCfg is the *config.ProviderRawOptions the builder forwards. We
-// import config inside this leaf package — provider packages are the
-// natural junction of account + config.
-func Factory(rawCfg any) (account.AuthProvider, error) {
-	r, ok := rawCfg.(rawDecoder)
-	if !ok {
-		return nil, fmt.Errorf("testfake.Factory: expected rawDecoder, got %T", rawCfg)
-	}
-	var opts FactoryOptions
-	if err := r.Decode(&opts); err != nil {
-		return nil, fmt.Errorf("testfake.Factory: decode: %w", err)
-	}
-	name := opts.Name
+// name is the spec's assembly name (and the default provider name;
+// the yaml block's `name` key can still override what Name() reports).
+func Spec(name string) account.ProviderSpec {
 	if name == "" {
 		name = "fake"
 	}
-	caps := account.ProviderCapabilities{
-		CallbackMethod:   opts.CallbackMethod,
-		RequiresNonce:    opts.RequiresNonce,
-		SupportsPKCE:     opts.SupportsPKCE,
-		RequiresFormPost: opts.RequiresFormPost,
+	return account.ProviderSpec{
+		Name: name,
+		Build: func(_ context.Context, raw map[string]any) (account.AuthProvider, error) {
+			var opts FactoryOptions
+			if err := account.DecodeProviderConfig(raw, &opts); err != nil {
+				return nil, fmt.Errorf("testfake: decode: %w", err)
+			}
+			pname := opts.Name
+			if pname == "" {
+				pname = name
+			}
+			caps := account.ProviderCapabilities{
+				CallbackMethod:   opts.CallbackMethod,
+				RequiresNonce:    opts.RequiresNonce,
+				SupportsPKCE:     opts.SupportsPKCE,
+				RequiresFormPost: opts.RequiresFormPost,
+			}
+			if caps.CallbackMethod == "" {
+				caps.CallbackMethod = "GET"
+			}
+			p := New(pname).WithCapabilities(caps)
+			if opts.RedirectURL != "" {
+				p = p.WithRedirectURL(opts.RedirectURL)
+			}
+			return p, nil
+		},
 	}
-	if caps.CallbackMethod == "" {
-		caps.CallbackMethod = "GET"
-	}
-	p := New(name).WithCapabilities(caps)
-	if opts.RedirectURL != "" {
-		p = p.WithRedirectURL(opts.RedirectURL)
-	}
-	return p, nil
-}
-
-// rawDecoder is the subset of config.ProviderRawOptions Factory needs.
-// Defining it as an interface here keeps testfake importable from any
-// test (it could otherwise pull in a config dependency cycle when used
-// by config tests themselves).
-type rawDecoder interface {
-	Decode(out any) error
 }
 
 // EncodedState is a small helper for tests that need to scrape the

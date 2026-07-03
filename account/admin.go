@@ -65,7 +65,7 @@ func validateRoles(roles []string) error {
 // callers each get a distinct increment. The roles column itself is
 // last-write-wins between concurrent admins (consistent with intent;
 // roles are an admin-set value, not a derived counter).
-func (m *Module) UpdateUserRoles(ctx context.Context, userID string, roles []string) error {
+func (m *Service) UpdateUserRoles(ctx context.Context, userID string, roles []string) error {
 	if userID == "" {
 		return apierr.ErrInvalidArgument.WithMessage("userID is required")
 	}
@@ -100,7 +100,7 @@ func (m *Module) UpdateUserRoles(ctx context.Context, userID string, roles []str
 // concurrent SetUserActive calls each produce a distinct PV increment;
 // the active value is last-write-wins (admin intent is the source of
 // truth, not a prior read).
-func (m *Module) SetUserActive(ctx context.Context, userID string, active bool) error {
+func (m *Service) SetUserActive(ctx context.Context, userID string, active bool) error {
 	if userID == "" {
 		return apierr.ErrInvalidArgument.WithMessage("userID is required")
 	}
@@ -133,7 +133,7 @@ func (m *Module) SetUserActive(ctx context.Context, userID string, active bool) 
 // password_version + 1`, computed atomically by the DB engine. N
 // concurrent callers produce N distinct increments — every bump lands,
 // no lost updates regardless of isolation level.
-func (m *Module) BumpPasswordVersion(ctx context.Context, userID string) error {
+func (m *Service) BumpPasswordVersion(ctx context.Context, userID string) error {
 	if userID == "" {
 		return apierr.ErrInvalidArgument.WithMessage("userID is required")
 	}
@@ -166,7 +166,7 @@ func (m *Module) BumpPasswordVersion(ctx context.Context, userID string) error {
 // which would surface as a spurious 404 to a concurrent caller losing
 // the race or to anyone calling on an already-verified user. SQLite
 // reports matched-rows so this path is MySQL-specific in practice.
-func (m *Module) MarkEmailVerified(ctx context.Context, userID string) error {
+func (m *Service) MarkEmailVerified(ctx context.Context, userID string) error {
 	if userID == "" {
 		return apierr.ErrInvalidArgument.WithMessage("userID is required")
 	}

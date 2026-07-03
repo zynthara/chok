@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
 // CookieCarrier is the default SessionCarrier implementation: it stores
@@ -92,7 +90,7 @@ func NewCookieCarrier(secret []byte, cookieName string, opts ...CookieOption) *C
 // Issue writes the signed sid as a Set-Cookie header. Format is
 // "<sid>.<base64url-hmac>" — the sid is preserved as-is so server logs
 // reading the cookie (without verification) still see a meaningful id.
-func (c *CookieCarrier) Issue(g *gin.Context, sid string) error {
+func (c *CookieCarrier) Issue(w http.ResponseWriter, r *http.Request, sid string) error {
 	signed := c.sign(sid)
 	cookie := &http.Cookie{
 		Name:     c.cookieName,
@@ -108,7 +106,7 @@ func (c *CookieCarrier) Issue(g *gin.Context, sid string) error {
 		cookie.Secure = true
 		cookie.SameSite = http.SameSiteNoneMode
 	}
-	http.SetCookie(g.Writer, cookie)
+	http.SetCookie(w, cookie)
 	return nil
 }
 
@@ -122,8 +120,8 @@ func (c *CookieCarrier) Issue(g *gin.Context, sid string) error {
 // the browser stops re-sending the sid after a successful exchange.
 // This is defence-in-depth; OAuthSessionStore.Take has already
 // invalidated the server-side session.
-func (c *CookieCarrier) Read(g *gin.Context) (string, error) {
-	cookie, err := g.Request.Cookie(c.cookieName)
+func (c *CookieCarrier) Read(w http.ResponseWriter, r *http.Request) (string, error) {
+	cookie, err := r.Cookie(c.cookieName)
 	if err != nil {
 		return "", errors.New("oauth sid cookie missing")
 	}
@@ -138,7 +136,7 @@ func (c *CookieCarrier) Read(g *gin.Context) (string, error) {
 	if !hmac.Equal([]byte(mac), []byte(expectedMac)) {
 		return "", errors.New("oauth sid cookie signature invalid")
 	}
-	c.deleteCookie(g)
+	c.deleteCookie(w)
 	return sid, nil
 }
 
@@ -150,7 +148,7 @@ func (c *CookieCarrier) sign(sid string) string {
 	return sid + "." + tag
 }
 
-func (c *CookieCarrier) deleteCookie(g *gin.Context) {
+func (c *CookieCarrier) deleteCookie(w http.ResponseWriter) {
 	cookie := &http.Cookie{
 		Name:     c.cookieName,
 		Value:    "",
@@ -165,5 +163,5 @@ func (c *CookieCarrier) deleteCookie(g *gin.Context) {
 		cookie.Secure = true
 		cookie.SameSite = http.SameSiteNoneMode
 	}
-	http.SetCookie(g.Writer, cookie)
+	http.SetCookie(w, cookie)
 }

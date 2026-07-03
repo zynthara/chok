@@ -50,7 +50,7 @@ type LoginMethod struct {
 //
 // Re-registering the same provider name returns an error to surface
 // duplicate-registration bugs at startup.
-func (m *Module) RegisterProvider(p AuthProvider) error {
+func (m *Service) RegisterProvider(p AuthProvider) error {
 	if p == nil {
 		return errors.New("account: RegisterProvider received nil provider")
 	}
@@ -89,7 +89,7 @@ func (m *Module) RegisterProvider(p AuthProvider) error {
 }
 
 // Provider returns the registered provider by name.
-func (m *Module) Provider(name string) (AuthProvider, bool) {
+func (m *Service) Provider(name string) (AuthProvider, bool) {
 	m.oauthMu.Lock()
 	defer m.oauthMu.Unlock()
 	p, ok := m.providers[name]
@@ -99,7 +99,7 @@ func (m *Module) Provider(name string) (AuthProvider, bool) {
 // ProviderNames returns the registered provider names (sorted by
 // insertion is not guaranteed — callers that need determinism should
 // sort the result themselves).
-func (m *Module) ProviderNames() []string {
+func (m *Service) ProviderNames() []string {
 	m.oauthMu.Lock()
 	defer m.oauthMu.Unlock()
 	out := make([]string, 0, len(m.providers))
@@ -112,7 +112,7 @@ func (m *Module) ProviderNames() []string {
 // ensureOAuthSessionPlumbing populates sessionCarrier / sessionStore /
 // authCodeStore on the Module if they were not explicitly injected via
 // WithXxx. Caller must hold m.oauthMu.
-func (m *Module) ensureOAuthSessionPlumbing() error {
+func (m *Service) ensureOAuthSessionPlumbing() error {
 	// cookieDevMode must reflect the actual deployment posture so the
 	// /auth/exchange browser-binding cookie picks Secure / SameSite to
 	// match the sid cookie. The decision flow:
@@ -207,7 +207,7 @@ func isLocalDevRedirect(rawURL string) bool {
 // link based on email policy, else error per SPEC §8.1. See the SPEC
 // for the full state machine; comments here cover the implementation
 // nuances.
-func (m *Module) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity) (*User, *Identity, error) {
+func (m *Service) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity) (*User, *Identity, error) {
 	if pi == nil {
 		return nil, nil, errors.New("account: ResolveOAuthIdentity received nil ProviderIdentity")
 	}
@@ -324,7 +324,7 @@ func (m *Module) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity)
 // LinkIdentity attaches a fresh Identity to an existing user (post-login
 // flow: the user is already authenticated and is binding an extra IdP).
 // Wraps the inner write in a transaction so caller doesn't need to.
-func (m *Module) LinkIdentity(ctx context.Context, userID string, pi *ProviderIdentity) (*Identity, error) {
+func (m *Service) LinkIdentity(ctx context.Context, userID string, pi *ProviderIdentity) (*Identity, error) {
 	if userID == "" {
 		return nil, apierr.ErrInvalidArgument.WithMessage("userID is required")
 	}
@@ -349,7 +349,7 @@ func (m *Module) LinkIdentity(ctx context.Context, userID string, pi *ProviderId
 // linkIdentityTx writes Identity inside a caller-supplied tx context.
 // Translates store.ErrDuplicate into the actionable "already bound to
 // another user" 409.
-func (m *Module) linkIdentityTx(ctx context.Context, userID string, pi *ProviderIdentity) (*Identity, error) {
+func (m *Service) linkIdentityTx(ctx context.Context, userID string, pi *ProviderIdentity) (*Identity, error) {
 	raw, marshalErr := json.Marshal(pi.Raw)
 	if marshalErr != nil && m.logger != nil {
 		// pi.Raw is map[string]any so a Marshal failure means the IdP
@@ -391,7 +391,7 @@ func (m *Module) linkIdentityTx(ctx context.Context, userID string, pi *Provider
 // holds the write lock at a time, so the second one observes the
 // already-decremented count. On MySQL / PG / TiDB the lock makes the
 // guarantee explicit.
-func (m *Module) UnlinkIdentity(ctx context.Context, userID, identityID string) error {
+func (m *Service) UnlinkIdentity(ctx context.Context, userID, identityID string) error {
 	if userID == "" || identityID == "" {
 		return apierr.ErrInvalidArgument.WithMessage("userID and identityID are required")
 	}
@@ -450,7 +450,7 @@ func (m *Module) UnlinkIdentity(ctx context.Context, userID, identityID string) 
 }
 
 // ListIdentities returns every Identity bound to the given user.
-func (m *Module) ListIdentities(ctx context.Context, userID string) ([]Identity, error) {
+func (m *Service) ListIdentities(ctx context.Context, userID string) ([]Identity, error) {
 	if userID == "" {
 		return nil, apierr.ErrInvalidArgument.WithMessage("userID is required")
 	}
@@ -471,7 +471,7 @@ func (m *Module) ListIdentities(ctx context.Context, userID string) ([]Identity,
 // Earlier code derived "has password" from `PasswordVersion > 0 ||
 // len(idents) == 0`; that broke as soon as a regular password user
 // linked OAuth (PV stayed 0, idents=1, password slot disappeared).
-func (m *Module) ListLoginMethods(ctx context.Context, userID string) ([]LoginMethod, error) {
+func (m *Service) ListLoginMethods(ctx context.Context, userID string) ([]LoginMethod, error) {
 	if userID == "" {
 		return nil, apierr.ErrInvalidArgument.WithMessage("userID is required")
 	}
@@ -503,7 +503,7 @@ func (m *Module) ListLoginMethods(ctx context.Context, userID string) ([]LoginMe
 // "user has set a password" intent explicitly, replacing the earlier
 // `PV>0 || len(idents)==0` heuristic that was wrong for password users
 // who later linked OAuth.
-func (m *Module) userHasPasswordHistory(ctx context.Context, userID string) (bool, error) {
+func (m *Service) userHasPasswordHistory(ctx context.Context, userID string) (bool, error) {
 	user, err := m.userStore.Get(ctx, store.RID(userID))
 	if err != nil {
 		return false, err
@@ -513,7 +513,7 @@ func (m *Module) userHasPasswordHistory(ctx context.Context, userID string) (boo
 
 // userByEmailVerified looks up a verified-email User by address. Used
 // by ResolveOAuthIdentity's auto-link path. Soft-deleted rows excluded.
-func (m *Module) userByEmailVerified(ctx context.Context, email string) (*User, error) {
+func (m *Service) userByEmailVerified(ctx context.Context, email string) (*User, error) {
 	user, err := m.userStore.Get(ctx, store.Where(where.WithFilter("email", email)))
 	if err != nil {
 		return nil, err
@@ -527,7 +527,7 @@ func (m *Module) userByEmailVerified(ctx context.Context, email string) (*User, 
 // touchIdentity bumps last_used_at on a successful OAuth login. Errors
 // are logged but never surfaced — the user is already logged in and a
 // stale timestamp is harmless.
-func (m *Module) touchIdentity(ctx context.Context, identityID string) {
+func (m *Service) touchIdentity(ctx context.Context, identityID string) {
 	defer func() {
 		if r := recover(); r != nil && m.logger != nil {
 			m.logger.Error("touchIdentity panicked", "panic", r)

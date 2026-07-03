@@ -5,16 +5,15 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"time"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/auth"
-	handler "github.com/zynthara/chok/v2/internal/ginresidue"
+	"github.com/zynthara/chok/v2/handler"
 	"github.com/zynthara/chok/v2/store"
 )
 
@@ -38,27 +37,44 @@ const exchangeBindingCookieName = "_chok_oauth_xchg"
 // still useful to an attacker.
 const exchangeBindingMaxAge = 60
 
-// handleBegin returns the gin handler for GET /{name}/start.
+// oauthBodyLimit caps the JSON bodies of /exchange and
+// /identities/link — both are tiny fixed-shape requests; anything
+// larger is abuse (matches the binding layer's 1 MiB posture).
+const oauthBodyLimit = 1 << 20
+
+// bindJSON decodes a JSON body with the size cap. It exists because
+// the two OAuth POST handlers are raw http.HandlerFuncs (they write
+// cookies, which the generic binding layer's signature has no slot
+// for) yet must keep the same bind-error surface as bound handlers.
+func bindJSON(w http.ResponseWriter, r *http.Request, out any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, oauthBodyLimit))
+	if err := dec.Decode(out); err != nil {
+		return apierr.ErrBind.Wrap(err)
+	}
+	return nil
+}
+
+// handleBegin returns the handler for GET /{name}/start.
 //
 // Lifecycle: validate redirect_back → mint sid + state/nonce/PKCE →
 // persist OAuthSession → issue sid carrier → invoke provider.BeginAuth →
 // 302 redirect to IdP authorize URL. Any failure rolls back the session
 // store entry so an attacker cannot exhaust capacity by triggering Issue
 // errors.
-func (m *Module) handleBegin(p AuthProvider) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		redirectBack := c.Query("redirect_back")
+func (m *Service) handleBegin(p AuthProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		redirectBack := r.URL.Query().Get("redirect_back")
 		if err := m.validateRedirectBack(redirectBack); err != nil {
-			handler.WriteResponse(c, 0, nil,
+			handler.WriteResponse(w, r, 0, nil,
 				apierr.ErrInvalidArgument.WithMessage("redirect_back not allowed: "+err.Error()))
 			return
 		}
-		redirectTo, err := m.startOAuthFlow(c, p, redirectBack, "")
+		redirectTo, err := m.startOAuthFlow(w, r, p, redirectBack, "")
 		if err != nil {
-			handler.WriteResponse(c, 0, nil, apierr.FromError(err))
+			handler.WriteResponse(w, r, 0, nil, apierr.FromError(err))
 			return
 		}
-		c.Redirect(http.StatusFound, redirectTo)
+		http.Redirect(w, r, redirectTo, http.StatusFound)
 	}
 }
 
@@ -72,8 +88,8 @@ func (m *Module) handleBegin(p AuthProvider) gin.HandlerFunc {
 // flow. handleCallback inspects the field and routes to LinkIdentity
 // rather than ResolveOAuthIdentity, guaranteeing the resulting Identity
 // row attaches to the authenticated user.
-func (m *Module) startOAuthFlow(c *gin.Context, p AuthProvider, redirectBack, linkUserID string) (string, error) {
-	ctx := c.Request.Context()
+func (m *Service) startOAuthFlow(w http.ResponseWriter, r *http.Request, p AuthProvider, redirectBack, linkUserID string) (string, error) {
+	ctx := r.Context()
 	caps := p.Capabilities()
 	sess := &OAuthSession{
 		State:        randomID(),
@@ -93,7 +109,7 @@ func (m *Module) startOAuthFlow(c *gin.Context, p AuthProvider, redirectBack, li
 	if err := m.sessionStore.Save(ctx, sid, sess, 5*time.Minute); err != nil {
 		return "", apierr.ErrInternal.Wrap(err)
 	}
-	if err := m.sessionCarrier.Issue(c, sid); err != nil {
+	if err := m.sessionCarrier.Issue(w, r, sid); err != nil {
 		_, _ = m.sessionStore.Take(context.WithoutCancel(ctx), sid)
 		return "", apierr.ErrInternal.Wrap(err)
 	}
@@ -111,8 +127,7 @@ func (m *Module) startOAuthFlow(c *gin.Context, p AuthProvider, redirectBack, li
 	return resp.RedirectTo, nil
 }
 
-// handleCallback returns the gin handler for GET or POST
-// /{name}/callback.
+// handleCallback returns the handler for GET or POST /{name}/callback.
 //
 // Reads sid from carrier → atomic Take from sessionStore → state check →
 // extract code/state from query (GET) or form (POST/form_post) →
@@ -120,24 +135,24 @@ func (m *Module) startOAuthFlow(c *gin.Context, p AuthProvider, redirectBack, li
 // then LinkIdentity(LinkUserID, pi) and 302 to redirect_back?status=linked;
 // otherwise ResolveOAuthIdentity → write one-shot AuthCode + browser-
 // binding cookie → 302 to oauthCallbackFrontendURL?code=…
-func (m *Module) handleCallback(p AuthProvider) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ctx := c.Request.Context()
+func (m *Service) handleCallback(p AuthProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		caps := p.Capabilities()
 
-		sid, err := m.sessionCarrier.Read(c)
+		sid, err := m.sessionCarrier.Read(w, r)
 		if err != nil {
-			handler.WriteResponse(c, 0, nil,
+			handler.WriteResponse(w, r, 0, nil,
 				apierr.ErrInvalidArgument.WithMessage("oauth session id missing or invalid"))
 			return
 		}
 		sess, err := m.sessionStore.Take(ctx, sid)
 		if err != nil {
 			if errors.Is(err, ErrSessionNotFound) {
-				handler.WriteResponse(c, 0, nil, apierr.ErrGone.WithMessage("oauth session expired"))
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrGone.WithMessage("oauth session expired"))
 				return
 			}
-			handler.WriteResponse(c, 0, nil, apierr.ErrInternal.Wrap(err))
+			handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal.Wrap(err))
 			return
 		}
 		if sess.Provider != p.Name() {
@@ -149,29 +164,29 @@ func (m *Module) handleCallback(p AuthProvider) gin.HandlerFunc {
 				m.logger.Warn("oauth callback provider mismatch",
 					"expected", sess.Provider, "got", p.Name())
 			}
-			handler.WriteResponse(c, 0, nil, apierr.ErrGone.WithMessage("oauth session expired"))
+			handler.WriteResponse(w, r, 0, nil, apierr.ErrGone.WithMessage("oauth session expired"))
 			return
 		}
 
 		var formBody url.Values
 		if caps.RequiresFormPost {
-			if err := c.Request.ParseForm(); err != nil {
-				handler.WriteResponse(c, 0, nil,
+			if err := r.ParseForm(); err != nil {
+				handler.WriteResponse(w, r, 0, nil,
 					apierr.ErrInvalidArgument.WithMessage("invalid form body"))
 				return
 			}
-			formBody = c.Request.PostForm
+			formBody = r.PostForm
 		}
 		getParam := func(key string) string {
 			if caps.RequiresFormPost {
 				return formBody.Get(key)
 			}
-			return c.Query(key)
+			return r.URL.Query().Get(key)
 		}
 
 		gotState := getParam("state")
 		if gotState != sess.State {
-			handler.WriteResponse(c, 0, nil,
+			handler.WriteResponse(w, r, 0, nil,
 				apierr.ErrInvalidArgument.WithMessage("oauth state mismatch"))
 			return
 		}
@@ -184,7 +199,7 @@ func (m *Module) handleCallback(p AuthProvider) gin.HandlerFunc {
 			FormBody:     formBody,
 		})
 		if err != nil {
-			handler.WriteResponse(c, 0, nil, apierr.FromError(err))
+			handler.WriteResponse(w, r, 0, nil, apierr.FromError(err))
 			return
 		}
 		if ident.Provider == "" {
@@ -198,17 +213,17 @@ func (m *Module) handleCallback(p AuthProvider) gin.HandlerFunc {
 		// IdP returned.
 		if sess.LinkUserID != "" {
 			if _, err := m.LinkIdentity(ctx, sess.LinkUserID, ident); err != nil {
-				handler.WriteResponse(c, 0, nil, apierr.FromError(err))
+				handler.WriteResponse(w, r, 0, nil, apierr.FromError(err))
 				return
 			}
 			redirectURL := buildLinkSuccessRedirect(m.oauthCallbackFrontendURL, sess.RedirectBack, p.Name())
-			c.Redirect(http.StatusFound, redirectURL)
+			http.Redirect(w, r, redirectURL, http.StatusFound)
 			return
 		}
 
 		user, _, err := m.ResolveOAuthIdentity(ctx, ident)
 		if err != nil {
-			handler.WriteResponse(c, 0, nil, apierr.FromError(err))
+			handler.WriteResponse(w, r, 0, nil, apierr.FromError(err))
 			return
 		}
 
@@ -226,16 +241,16 @@ func (m *Module) handleCallback(p AuthProvider) gin.HandlerFunc {
 			BindingHash:  hex.EncodeToString(bindHash[:]),
 			CreatedAt:    time.Now(),
 		}, 5*time.Second); err != nil {
-			handler.WriteResponse(c, 0, nil, apierr.ErrInternal.Wrap(err))
+			handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal.Wrap(err))
 			return
 		}
-		m.writeExchangeBindingCookie(c, bindToken)
+		m.writeExchangeBindingCookie(w, bindToken)
 
 		sep := "?"
 		if hasQuery(m.oauthCallbackFrontendURL) {
 			sep = "&"
 		}
-		c.Redirect(http.StatusFound, m.oauthCallbackFrontendURL+sep+"code="+url.QueryEscape(authCode))
+		http.Redirect(w, r, m.oauthCallbackFrontendURL+sep+"code="+url.QueryEscape(authCode), http.StatusFound)
 	}
 }
 
@@ -253,7 +268,7 @@ func hasQuery(u string) bool {
 // writeExchangeBindingCookie sets the browser-binding cookie. SameSite /
 // Secure attributes mirror m.cookieDevMode so dev (HTTP localhost) and
 // prod (HTTPS) deployments use the same posture as the sid carrier.
-func (m *Module) writeExchangeBindingCookie(c *gin.Context, token string) {
+func (m *Service) writeExchangeBindingCookie(w http.ResponseWriter, token string) {
 	cookie := &http.Cookie{
 		Name:     exchangeBindingCookieName,
 		Value:    token,
@@ -268,7 +283,7 @@ func (m *Module) writeExchangeBindingCookie(c *gin.Context, token string) {
 		cookie.Secure = true
 		cookie.SameSite = http.SameSiteNoneMode
 	}
-	http.SetCookie(c.Writer, cookie)
+	http.SetCookie(w, cookie)
 }
 
 // clearExchangeBindingCookie writes a delete-cookie response so the
@@ -276,7 +291,7 @@ func (m *Module) writeExchangeBindingCookie(c *gin.Context, token string) {
 // exchange. Defence-in-depth — the cookie's MaxAge already caps it but
 // proactive clearing closes a window where a leaked browser profile
 // could be replayed offline.
-func (m *Module) clearExchangeBindingCookie(c *gin.Context) {
+func (m *Service) clearExchangeBindingCookie(w http.ResponseWriter) {
 	cookie := &http.Cookie{
 		Name:     exchangeBindingCookieName,
 		Value:    "",
@@ -291,13 +306,13 @@ func (m *Module) clearExchangeBindingCookie(c *gin.Context) {
 		cookie.Secure = true
 		cookie.SameSite = http.SameSiteNoneMode
 	}
-	http.SetCookie(c.Writer, cookie)
+	http.SetCookie(w, cookie)
 }
 
 // readExchangeBindingCookie pulls the binding token from the request.
 // Empty string + non-nil error if the cookie is missing.
-func (m *Module) readExchangeBindingCookie(c *gin.Context) (string, error) {
-	ck, err := c.Request.Cookie(exchangeBindingCookieName)
+func (m *Service) readExchangeBindingCookie(r *http.Request) (string, error) {
+	ck, err := r.Cookie(exchangeBindingCookieName)
 	if err != nil {
 		return "", err
 	}
@@ -322,7 +337,7 @@ func buildLinkSuccessRedirect(frontendURL, redirectBack, provider string) string
 
 // exchangeRequest is the JSON body of POST /auth/exchange.
 type exchangeRequest struct {
-	Code string `json:"code" binding:"required"`
+	Code string `json:"code"`
 }
 
 // exchangeResponse is the success payload of POST /auth/exchange.
@@ -342,27 +357,27 @@ type exchangeResponse struct {
 // missing cookie) returns 401, so a leaked code without the cookie is
 // useless.
 //
-// Raw gin.HandlerFunc rather than handler.HandleRequest because we
-// need *gin.Context to read the binding cookie — HandleRequest's
+// Raw http.HandlerFunc rather than handler.HandleRequest because we
+// need the writer to read/clear the binding cookie — HandleRequest's
 // signature is context.Context-only.
-func (m *Module) handleExchange(c *gin.Context) {
-	ctx := c.Request.Context()
+func (m *Service) handleExchange(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	var req exchangeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		handler.WriteResponse(c, 0, nil, apierr.ErrBind.Wrap(err))
+	if err := bindJSON(w, r, &req); err != nil {
+		handler.WriteResponse(w, r, 0, nil, err)
 		return
 	}
 	if req.Code == "" {
-		handler.WriteResponse(c, 0, nil,
+		handler.WriteResponse(w, r, 0, nil,
 			apierr.ErrInvalidArgument.WithMessage("code is required"))
 		return
 	}
 
-	bindToken, err := m.readExchangeBindingCookie(c)
+	bindToken, err := m.readExchangeBindingCookie(r)
 	if err != nil || bindToken == "" {
 		// No cookie → can't be the same browser that received the code.
 		// 401 + opaque message so we don't leak which check failed.
-		handler.WriteResponse(c, 0, nil,
+		handler.WriteResponse(w, r, 0, nil,
 			apierr.ErrUnauthenticated.WithMessage("oauth exchange binding missing"))
 		return
 	}
@@ -370,11 +385,11 @@ func (m *Module) handleExchange(c *gin.Context) {
 	data, err := m.authCodeStore.Take(ctx, req.Code)
 	if err != nil {
 		if errors.Is(err, ErrAuthCodeNotFound) {
-			handler.WriteResponse(c, 0, nil,
+			handler.WriteResponse(w, r, 0, nil,
 				apierr.ErrGone.WithMessage("oauth auth code expired or already consumed"))
 			return
 		}
-		handler.WriteResponse(c, 0, nil, apierr.ErrInternal.Wrap(err))
+		handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal.Wrap(err))
 		return
 	}
 
@@ -389,7 +404,7 @@ func (m *Module) handleExchange(c *gin.Context) {
 			m.logger.Warn("oauth exchange binding mismatch",
 				"user_id", data.UserID)
 		}
-		handler.WriteResponse(c, 0, nil,
+		handler.WriteResponse(w, r, 0, nil,
 			apierr.ErrUnauthenticated.WithMessage("oauth exchange binding invalid"))
 		return
 	}
@@ -397,26 +412,26 @@ func (m *Module) handleExchange(c *gin.Context) {
 	user, err := m.userStore.Get(ctx, store.RID(data.UserID))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			handler.WriteResponse(c, 0, nil,
+			handler.WriteResponse(w, r, 0, nil,
 				apierr.ErrUnauthenticated.WithMessage("account not found"))
 			return
 		}
-		handler.WriteResponse(c, 0, nil, apierr.ErrInternal.Wrap(err))
+		handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal.Wrap(err))
 		return
 	}
 	if !user.Active {
-		handler.WriteResponse(c, 0, nil,
+		handler.WriteResponse(w, r, 0, nil,
 			apierr.ErrUnauthenticated.WithMessage("account is disabled"))
 		return
 	}
 
 	tok, err := m.issueToken(user)
 	if err != nil {
-		handler.WriteResponse(c, 0, nil, apierr.FromError(err))
+		handler.WriteResponse(w, r, 0, nil, apierr.FromError(err))
 		return
 	}
-	m.clearExchangeBindingCookie(c)
-	handler.WriteResponse(c, http.StatusOK, &exchangeResponse{
+	m.clearExchangeBindingCookie(w)
+	handler.WriteResponse(w, r, http.StatusOK, &exchangeResponse{
 		Token:        tok.Token,
 		ExpiresAt:    tok.ExpiresAt,
 		RedirectBack: data.RedirectBack,
@@ -424,12 +439,12 @@ func (m *Module) handleExchange(c *gin.Context) {
 }
 
 // handleListIdentities returns the authenticated caller's login methods.
-// Mounted under m.AuthChain() so a stale-PV token cannot snoop.
+// Mounted under the module's Authn chain so a stale-PV token cannot snoop.
 type identitiesResponse struct {
 	Methods []LoginMethod `json:"methods"`
 }
 
-func (m *Module) handleListIdentities(ctx context.Context, _ *struct{}) (*identitiesResponse, error) {
+func (m *Service) handleListIdentities(ctx context.Context, _ *struct{}) (*identitiesResponse, error) {
 	p, ok := auth.PrincipalFrom(ctx)
 	if !ok {
 		return nil, apierr.ErrUnauthenticated
@@ -455,7 +470,7 @@ func (m *Module) handleListIdentities(ctx context.Context, _ *struct{}) (*identi
 //     same sid cookie. handleCallback sees sess.LinkUserID != "" and
 //     routes through Module.LinkIdentity rather than ResolveOAuthIdentity.
 type linkIdentityRequest struct {
-	Provider     string `json:"provider"      binding:"required"`
+	Provider     string `json:"provider"`
 	RedirectBack string `json:"redirect_back"`
 }
 
@@ -466,44 +481,49 @@ type linkIdentityResponse struct {
 }
 
 // handleLinkIdentity is the entrypoint for "bind another IdP to my
-// account". Raw gin handler so we can write the carrier cookie.
-func (m *Module) handleLinkIdentity(c *gin.Context) {
-	ctx := c.Request.Context()
+// account". Raw handler so we can write the carrier cookie.
+func (m *Service) handleLinkIdentity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	principal, ok := auth.PrincipalFrom(ctx)
 	if !ok {
-		handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated)
+		handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated)
 		return
 	}
 	var req linkIdentityRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		handler.WriteResponse(c, 0, nil, apierr.ErrBind.Wrap(err))
+	if err := bindJSON(w, r, &req); err != nil {
+		handler.WriteResponse(w, r, 0, nil, err)
+		return
+	}
+	if req.Provider == "" {
+		handler.WriteResponse(w, r, 0, nil,
+			apierr.ErrInvalidArgument.WithMessage("provider is required"))
 		return
 	}
 	provider, ok := m.Provider(req.Provider)
 	if !ok {
-		handler.WriteResponse(c, 0, nil,
+		handler.WriteResponse(w, r, 0, nil,
 			apierr.ErrInvalidArgument.WithMessage("unknown provider: "+req.Provider))
 		return
 	}
 	if err := m.validateRedirectBack(req.RedirectBack); err != nil {
-		handler.WriteResponse(c, 0, nil,
+		handler.WriteResponse(w, r, 0, nil,
 			apierr.ErrInvalidArgument.WithMessage("redirect_back not allowed: "+err.Error()))
 		return
 	}
-	redirectTo, err := m.startOAuthFlow(c, provider, req.RedirectBack, principal.Subject)
+	redirectTo, err := m.startOAuthFlow(w, r, provider, req.RedirectBack, principal.Subject)
 	if err != nil {
-		handler.WriteResponse(c, 0, nil, apierr.FromError(err))
+		handler.WriteResponse(w, r, 0, nil, apierr.FromError(err))
 		return
 	}
-	handler.WriteResponse(c, http.StatusOK, &linkIdentityResponse{RedirectTo: redirectTo}, nil)
+	handler.WriteResponse(w, r, http.StatusOK, &linkIdentityResponse{RedirectTo: redirectTo}, nil)
 }
 
-// unlinkIdentityRequest is the gin path-param variant.
+// unlinkIdentityRequest carries the path parameter.
 type unlinkIdentityRequest struct {
 	IdentityID string `uri:"id" binding:"required"`
 }
 
-func (m *Module) handleUnlinkIdentity(ctx context.Context, req *unlinkIdentityRequest) error {
+func (m *Service) handleUnlinkIdentity(ctx context.Context, req *unlinkIdentityRequest) error {
 	p, ok := auth.PrincipalFrom(ctx)
 	if !ok {
 		return apierr.ErrUnauthenticated

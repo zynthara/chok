@@ -4,8 +4,6 @@ import (
 	"context"
 	"strings"
 
-	"gorm.io/gorm"
-
 	"github.com/zynthara/chok/v2/db"
 )
 
@@ -68,15 +66,14 @@ func Table() db.TableSpec {
 
 // MigrateSchema runs AutoMigrate for User + Identity tables and then
 // the idempotent has_password backfill. This is the single canonical
-// migration path used by both AccountComponent.Migrate (the framework
-// path) and the standalone account.Setup helper — keeping them in sync
-// avoids the class of bug where one path runs the new migration and
-// the other doesn't.
-func MigrateSchema(ctx context.Context, gdb *gorm.DB) error {
-	if err := db.Migrate(ctx, gdb, Table(), IdentityTable()); err != nil {
+// migration path — the account module's Migrator calls it (honouring
+// the framework migrate mode), and kernel-less embedders can call it
+// directly.
+func MigrateSchema(ctx context.Context, h *db.DB) error {
+	if err := h.Migrate(ctx, Table(), IdentityTable()); err != nil {
 		return err
 	}
-	return BackfillHasPassword(ctx, gdb)
+	return BackfillHasPassword(ctx, h)
 }
 
 // BackfillHasPassword populates User.HasPassword for legacy rows that
@@ -94,7 +91,7 @@ func MigrateSchema(ctx context.Context, gdb *gorm.DB) error {
 //
 // Idempotent: WHERE has_password = false guards against re-running.
 // Safe to call from AccountComponent.Migrate on every startup.
-func BackfillHasPassword(ctx context.Context, gdb *gorm.DB) error {
+func BackfillHasPassword(ctx context.Context, h *db.DB) error {
 	const sql = `
 UPDATE users
 SET has_password = TRUE
@@ -107,5 +104,5 @@ WHERE has_password = FALSE
       AND identities.deleted_at IS NULL
   )
 `
-	return gdb.WithContext(ctx).Exec(sql).Error
+	return h.Unsafe(ctx).Exec(sql).Error
 }

@@ -12,14 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-
 	"github.com/zynthara/chok/v2/account"
 	"github.com/zynthara/chok/v2/account/internal/testfake"
-	"github.com/zynthara/chok/v2/config"
+	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store"
@@ -28,13 +23,27 @@ import (
 
 const e2eSigningKey = "this-is-a-test-signing-key-32bytes!"
 
-func init() { gin.SetMode(gin.TestMode) }
+// openE2EHandle opens an isolated in-memory database with the account
+// schema migrated (SoftUnique email index included).
+func openE2EHandle(t *testing.T) *db.DB {
+	t.Helper()
+	h, err := db.Open(db.Options{Driver: "sqlite", SQLite: db.SQLiteOptions{Path: ":memory:"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.Migrate(context.Background(), account.Table(), account.IdentityTable()); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
 
 // e2eFixture bundles the Module + router + provider + shared session
 // store so each test can reach for the bits it needs.
 type e2eFixture struct {
-	m      *account.Module
-	r      *gin.Engine
+	h      *db.DB
+	m      *account.Service
+	r      *choktest.ServeRouter
 	p      *testfake.Provider
 	mem    *account.MemorySessionStore
 	store  account.OAuthSessionStore
@@ -43,13 +52,7 @@ type e2eFixture struct {
 
 func setupOAuthFixture(t *testing.T, providerName string, modOpts ...account.Option) *e2eFixture {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(context.Background(), gdb, account.Table(), account.IdentityTable()); err != nil {
-		t.Fatal(err)
-	}
+	h := openE2EHandle(t)
 
 	mem := account.NewMemorySessionStore()
 	t.Cleanup(func() { _ = mem.Close() })
@@ -64,27 +67,28 @@ func setupOAuthFixture(t *testing.T, providerName string, modOpts ...account.Opt
 	}
 	opts = append(opts, modOpts...)
 
-	m, err := account.New(gdb, log.Empty(), opts...)
+	m, err := account.New(h, log.Empty(), opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = m.Close() })
 	p := testfake.New(providerName)
 	if err := m.RegisterProvider(p); err != nil {
 		t.Fatal(err)
 	}
-	r := gin.New()
-	// Mount under /auth to match parts.NewDefaultAccountComponent's
-	// production wiring — Module.RegisterRoutes registers relative paths
-	// (/{name}/start, /exchange, /identities) that combine with the
-	// group prefix to yield the SPEC §7 absolute URLs.
+	r := choktest.NewServeRouter()
+	// Mount under /auth to match the account module's production
+	// wiring — RegisterRoutes registers relative paths (/{name}/start,
+	// /exchange, /identities) that combine with the group prefix to
+	// yield the SPEC §7 absolute URLs.
 	m.RegisterRoutes(r.Group("/auth"))
 	return &e2eFixture{
-		m: m, r: r, p: p, mem: mem,
+		h: h, m: m, r: r, p: p, mem: mem,
 		store: mem, authCS: account.NewMemoryAuthCodeStore(mem),
 	}
 }
 
-func send(r *gin.Engine, method, path string, cookies []*http.Cookie) *httptest.ResponseRecorder {
+func send(r http.Handler, method, path string, cookies []*http.Cookie) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
 	for _, ck := range cookies {
 		req.AddCookie(ck)
@@ -94,7 +98,7 @@ func send(r *gin.Engine, method, path string, cookies []*http.Cookie) *httptest.
 	return w
 }
 
-func sendJSON(r *gin.Engine, method, path string, body any, cookies []*http.Cookie) *httptest.ResponseRecorder {
+func sendJSON(r http.Handler, method, path string, body any, cookies []*http.Cookie) *httptest.ResponseRecorder {
 	buf, _ := json.Marshal(body)
 	req := httptest.NewRequest(method, path, bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
@@ -514,16 +518,10 @@ func TestOAuthOnly_LoginRejected(t *testing.T) {
 }
 
 func TestProviderRegistration_RequiresFrontendURL(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(context.Background(), gdb, account.Table(), account.IdentityTable()); err != nil {
-		t.Fatal(err)
-	}
+	h := openE2EHandle(t)
 	mem := account.NewMemorySessionStore()
 	defer mem.Close()
-	m, err := account.New(gdb, log.Empty(),
+	m, err := account.New(h, log.Empty(),
 		account.WithSigningKey(e2eSigningKey),
 		account.WithSessionCarrier(account.NewCookieCarrier(
 			[]byte("oauth-test-secret-32bytes-padded!!"), "_chok_oauth_sid", account.WithDevMode())),
@@ -699,97 +697,6 @@ func TestUnlinkIdentity_RaceLeavesOneMethod(t *testing.T) {
 	}
 }
 
-// TestSetup_HonoursOAuthFields proves account.Setup forwards the full
-// AccountOptions surface — LinkByEmail / AllowedRedirectBacks /
-// OAuthCallbackFrontendURL / Providers — through to the live Module.
-// Pre-fix Setup ignored these four fields, so a standalone caller
-// passing yaml-driven OAuth config would build a Module that thought
-// OAuth was disabled (no /auth/{name}/start routes mounted).
-func TestSetup_HonoursOAuthFields(t *testing.T) {
-	t.Cleanup(account.ResetProviderRegistryForTest)
-	account.RegisterProviderFactory("setupfake", func(rawCfg any) (account.AuthProvider, error) {
-		return testfake.New("setupfake"), nil
-	})
-
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	mod, err := account.Setup(gdb, log.Empty(),
-		&config.AccountOptions{
-			Enabled:                  true,
-			SigningKey:               e2eSigningKey,
-			LinkByEmail:              true,
-			AllowedRedirectBacks:     []string{"https://app.example.test/"},
-			OAuthCallbackFrontendURL: "https://app.example.test/auth/finish",
-			Providers: map[string]config.ProviderRawOptions{
-				"setupfake": {Enabled: true},
-			},
-		},
-		r.Group("/auth"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mod == nil {
-		t.Fatal("Setup returned nil")
-	}
-
-	// Provider must be registered (proves OAuth fields were forwarded).
-	if names := mod.ProviderNames(); len(names) != 1 || names[0] != "setupfake" {
-		t.Fatalf("provider not registered via Setup: got %v", names)
-	}
-
-	// /auth/setupfake/start must be mounted (proves OAuthCallbackFrontendURL
-	// passed validation and routes were registered).
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/auth/setupfake/start", nil)
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusFound {
-		t.Fatalf("/auth/setupfake/start: %d %s", w.Code, w.Body.String())
-	}
-
-	// Allowlist passed through: an absolute URL in the configured prefix
-	// must be accepted on redirect_back.
-	w = httptest.NewRecorder()
-	req = httptest.NewRequest("GET",
-		"/auth/setupfake/start?redirect_back=https://app.example.test/post-login", nil)
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusFound {
-		t.Fatalf("allowlisted redirect_back rejected: %d %s", w.Code, w.Body.String())
-	}
-}
-
-// TestSetup_RejectsEnabledProviderWithoutFrontendURL covers the SPEC
-// §10.3 fail-fast: AccountOptions.Validate refuses configs where any
-// provider is enabled but oauth_callback_frontend_url is empty —
-// Setup must surface that as an error rather than silently building
-// a half-configured module.
-func TestSetup_RejectsEnabledProviderWithoutFrontendURL(t *testing.T) {
-	t.Cleanup(account.ResetProviderRegistryForTest)
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	_, err = account.Setup(gdb, log.Empty(),
-		&config.AccountOptions{
-			Enabled:    true,
-			SigningKey: e2eSigningKey,
-			Providers: map[string]config.ProviderRawOptions{
-				"any": {Enabled: true},
-			},
-		},
-		r.Group("/auth"),
-	)
-	if err == nil {
-		t.Fatal("expected fail-fast on missing oauth_callback_frontend_url")
-	}
-}
-
 // TestOAuth_DevModeAutoDetect covers High #6: when the first registered
 // AuthProvider implements RedirectURLProvider AND its URL is HTTP-on-
 // localhost, RegisterProvider must propagate the hint into the default
@@ -801,27 +708,22 @@ func TestSetup_RejectsEnabledProviderWithoutFrontendURL(t *testing.T) {
 // response. The carrier's internal devMode bool is a private field —
 // Set-Cookie attributes are the contract.
 func TestOAuth_DevModeAutoDetect(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(context.Background(), gdb, account.Table(), account.IdentityTable()); err != nil {
-		t.Fatal(err)
-	}
-	// Note: no WithSessionCarrier — Module derives its default carrier
-	// from signingKey + dev-mode flag from firstRedirectURL.
-	m, err := account.New(gdb, log.Empty(),
+	h := openE2EHandle(t)
+	// Note: no WithSessionCarrier — the service derives its default
+	// carrier from signingKey + dev-mode flag from firstRedirectURL.
+	m, err := account.New(h, log.Empty(),
 		account.WithSigningKey(e2eSigningKey),
 		account.WithOAuthCallbackFrontendURL("http://localhost:3000/auth/finish"),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = m.Close() })
 	p := testfake.New("fake").WithRedirectURL("http://localhost:8080/auth/fake/callback")
 	if err := m.RegisterProvider(p); err != nil {
 		t.Fatal(err)
 	}
-	r := gin.New()
+	r := choktest.NewServeRouter()
 	m.RegisterRoutes(r.Group("/auth"))
 
 	w := send(r, "GET", "/auth/fake/start", nil)
@@ -963,10 +865,8 @@ func TestOAuth_F1_BackfillRescuesLegacyRows(t *testing.T) {
 		t.Fatal("setup invalid: legacy row should have has_password=false before backfill")
 	}
 
-	// Run backfill (this is what AccountComponent.Migrate calls).
-	if backfillDB, err := fx.m.Store().Unsafe(ctx); err != nil {
-		t.Fatal(err)
-	} else if err := account.BackfillHasPassword(ctx, backfillDB); err != nil {
+	// Run backfill (this is what the account module's Migrate calls).
+	if err := account.BackfillHasPassword(ctx, fx.h); err != nil {
 		t.Fatal(err)
 	}
 
@@ -979,9 +879,7 @@ func TestOAuth_F1_BackfillRescuesLegacyRows(t *testing.T) {
 	}
 
 	// Idempotent: second call must not error.
-	if backfillDB, err := fx.m.Store().Unsafe(ctx); err != nil {
-		t.Fatal(err)
-	} else if err := account.BackfillHasPassword(ctx, backfillDB); err != nil {
+	if err := account.BackfillHasPassword(ctx, fx.h); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1015,9 +913,7 @@ func TestOAuth_F1_BackfillSkipsOAuthOnlyUsers(t *testing.T) {
 	}
 
 	// Run backfill — it must NOT touch this user (Identity row exists).
-	if backfillDB, err := fx.m.Store().Unsafe(ctx); err != nil {
-		t.Fatal(err)
-	} else if err := account.BackfillHasPassword(ctx, backfillDB); err != nil {
+	if err := account.BackfillHasPassword(ctx, fx.h); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := fx.m.Store().Get(ctx, store.RID(user.RID))
@@ -1026,60 +922,55 @@ func TestOAuth_F1_BackfillSkipsOAuthOnlyUsers(t *testing.T) {
 	}
 }
 
-// TestSetup_MigratesIdentityAndBackfills proves the standalone
-// account.Setup entry runs the same migration path as
-// parts.AccountComponent.Migrate. Earlier versions migrated only the
-// User table, leaving the Identity table missing AND skipping the
-// has_password backfill — legacy password users on the Setup path
-// hit OAUTH_ONLY_ACCOUNT after upgrade. Both must now happen
-// regardless of which entry point the operator picked.
-func TestSetup_MigratesIdentityAndBackfills(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+// TestMigrateSchema_MigratesIdentityAndBackfills proves the canonical
+// migration path (used by the account module's Migrator and any
+// kernel-less embedder) migrates BOTH tables and runs the
+// has_password backfill — legacy password users must not hit
+// OAUTH_ONLY_ACCOUNT after upgrade.
+func TestMigrateSchema_MigratesIdentityAndBackfills(t *testing.T) {
+	h, err := db.Open(db.Options{Driver: "sqlite", SQLite: db.SQLiteOptions{Path: ":memory:"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = h.Close() })
 	// Pre-create only the User table with a "legacy" password row that
 	// pre-dates has_password. We seed via raw SQL to bypass the new
 	// /register code path so has_password=0 (the legacy state).
-	if err := db.Migrate(context.Background(), gdb, account.Table()); err != nil {
+	if err := h.Migrate(context.Background(), account.Table()); err != nil {
 		t.Fatal(err)
 	}
-	if err := gdb.Exec(`
+	if err := h.Unsafe(context.Background()).Exec(`
 		INSERT INTO users (rid, email, password_hash, has_password, password_version, name, active, created_at, updated_at)
 		VALUES ('usr_legacy01', 'legacy@local.test', '$2a$10$abcdefghijklmnopqrstuv', 0, 0, 'Legacy', 1, datetime('now'), datetime('now'))
 	`).Error; err != nil {
 		t.Fatal(err)
 	}
 
-	// Run Setup as a real caller would — it MUST migrate Identity AND
-	// flip has_password=true on the legacy row.
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	mod, err := account.Setup(gdb, log.Empty(),
-		&config.AccountOptions{Enabled: true, SigningKey: e2eSigningKey},
-		r.Group("/auth"),
-	)
+	// Run the canonical path — it MUST migrate Identity AND flip
+	// has_password=true on the legacy row.
+	if err := account.MigrateSchema(context.Background(), h); err != nil {
+		t.Fatal(err)
+	}
+	m, err := account.New(h, log.Empty(), account.WithSigningKey(e2eSigningKey))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mod == nil {
-		t.Fatal("Setup returned nil module despite Enabled=true")
-	}
+	t.Cleanup(func() { _ = m.Close() })
 
 	// Identity table must now exist — listing on a non-existent table
 	// errors out, so a successful (empty) list proves the migration ran.
-	if _, err := mod.ListIdentities(context.Background(), "usr_legacy01"); err != nil {
-		t.Fatalf("Identity table missing after Setup: %v", err)
+	if _, err := m.ListIdentities(context.Background(), "usr_legacy01"); err != nil {
+		t.Fatalf("Identity table missing after MigrateSchema: %v", err)
 	}
 
 	// Legacy password row must be backfilled to has_password=true.
 	var got int
-	if err := gdb.Raw(`SELECT has_password FROM users WHERE rid = 'usr_legacy01'`).
+	if err := h.Unsafe(context.Background()).Raw(`SELECT has_password FROM users WHERE rid = 'usr_legacy01'`).
 		Scan(&got).Error; err != nil {
 		t.Fatal(err)
 	}
 	if got != 1 {
-		t.Fatalf("BackfillHasPassword skipped on Setup path: has_password=%d (expected 1)", got)
+		t.Fatalf("BackfillHasPassword skipped: has_password=%d (expected 1)", got)
 	}
 }
 
@@ -1088,16 +979,10 @@ func TestSetup_MigratesIdentityAndBackfills(t *testing.T) {
 // /auth/exchange browser-binding cookie must mirror that posture so
 // the cookie isn't dropped by browsers on HTTP localhost.
 func TestOAuth_DevModeMirroredFromCustomCarrier(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(context.Background(), gdb, account.Table(), account.IdentityTable()); err != nil {
-		t.Fatal(err)
-	}
+	h := openE2EHandle(t)
 	mem := account.NewMemorySessionStore()
 	t.Cleanup(func() { _ = mem.Close() })
-	m, err := account.New(gdb, log.Empty(),
+	m, err := account.New(h, log.Empty(),
 		account.WithSigningKey(e2eSigningKey),
 		account.WithOAuthCallbackFrontendURL("http://localhost:3000/auth/finish"),
 		// Caller picks dev mode for the sid carrier; binding cookie
@@ -1117,7 +1002,7 @@ func TestOAuth_DevModeMirroredFromCustomCarrier(t *testing.T) {
 	if err := m.RegisterProvider(p); err != nil {
 		t.Fatal(err)
 	}
-	r := gin.New()
+	r := choktest.NewServeRouter()
 	m.RegisterRoutes(r.Group("/auth"))
 
 	// Drive a full start → callback so callback writes the binding cookie.
@@ -1156,15 +1041,9 @@ func TestOAuth_DevModeMirroredFromCustomCarrier(t *testing.T) {
 // Calling Close twice asserts idempotency (sync.Once on the underlying
 // MemorySessionStore.Close).
 func TestModule_Close_ClosesAdapterStore(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(context.Background(), gdb, account.Table(), account.IdentityTable()); err != nil {
-		t.Fatal(err)
-	}
+	h := openE2EHandle(t)
 	customStore := account.NewMemorySessionStore()
-	m, err := account.New(gdb, log.Empty(),
+	m, err := account.New(h, log.Empty(),
 		account.WithSigningKey(e2eSigningKey),
 		account.WithOAuthCallbackFrontendURL("https://app.example.test/auth/finish"),
 		account.WithOAuthSessionStore(customStore),

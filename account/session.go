@@ -3,9 +3,8 @@ package account
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
 // OAuthSession is the per-flow state that bridges /auth/{name}/start and
@@ -66,16 +65,16 @@ type SessionCarrier interface {
 	// onto the response (e.g. Set-Cookie) so the browser presents it
 	// back during Callback. Returning an error aborts Begin with 500;
 	// Module.handleBegin rolls back the just-saved session in that case.
-	Issue(c *gin.Context, sid string) error
+	Issue(w http.ResponseWriter, r *http.Request, sid string) error
 
 	// Read is called at the top of Callback. It pulls sid off the request
 	// (e.g. Cookie header) and returns it for sessionStore.Take. Errors
-	// surface as 400 (sid missing or signature invalid).
-	//
-	// Cookie implementations should also overwrite the cookie with an
-	// immediately-expired empty value so the browser stops re-sending it
-	// after a successful exchange — defence-in-depth against sid leaks.
-	Read(c *gin.Context) (sid string, err error)
+	// surface as 400 (sid missing or signature invalid). The writer is
+	// supplied so cookie implementations can overwrite the cookie with an
+	// immediately-expired empty value on success, so the browser stops
+	// re-sending it after a successful exchange — defence-in-depth
+	// against sid leaks.
+	Read(w http.ResponseWriter, r *http.Request) (sid string, err error)
 }
 
 // OAuthSessionStore is the server-side sid → OAuthSession repository.

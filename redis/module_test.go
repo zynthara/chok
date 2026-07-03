@@ -3,8 +3,6 @@ package redis_test
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,7 +10,6 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/zynthara/chok/v2/choktest"
-	"github.com/zynthara/chok/v2/conf"
 	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/redis"
 )
@@ -89,7 +86,7 @@ redis:
 }
 
 func TestModule_BadCACert_FailsStartup(t *testing.T) {
-	err := startExpectingError(t, `
+	_, err := choktest.StartKernel(t, `
 redis:
   addr: 127.0.0.1:6379
   ca_cert: /no/such/ca.pem
@@ -116,39 +113,4 @@ redis:
 	if strings.Contains(dump, "super-secret-credential") {
 		t.Fatalf("RedactedSettings leaked the redis password: %s", dump)
 	}
-}
-
-// startExpectingError assembles a kernel like choktest.NewTestKernel
-// but hands the Start error back instead of failing the test — for
-// fail-fast-path assertions.
-func startExpectingError(t *testing.T, yaml string, comps ...kernel.Component) error {
-	t.Helper()
-
-	loader := conf.NewLoader("choktest", "CHOKTEST")
-	path := filepath.Join(t.TempDir(), "choktest.yaml")
-	if err := os.WriteFile(path, []byte(strings.TrimSpace(yaml)+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	loader.SetPath(path)
-	for _, c := range comps {
-		d := c.Describe()
-		if key := kernel.SectionKeyOf(d); key != "" && d.Options != nil {
-			if err := loader.Register(key, d.Options); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	store, err := conf.NewStore(loader)
-	if err != nil {
-		return err
-	}
-	reg, err := kernel.New(kernel.Config{Store: store, Components: comps})
-	if err != nil {
-		return err
-	}
-	err = reg.Start(context.Background())
-	if err == nil {
-		t.Cleanup(func() { _ = reg.Stop(context.Background()) })
-	}
-	return err
 }

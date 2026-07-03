@@ -3,7 +3,6 @@ package facebook_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -112,8 +111,7 @@ func (m *mockGraph) stage(code, token string, u fbUser) {
 func newProvider(t *testing.T, mock *mockGraph, opts func(*facebook.Options)) account.AuthProvider {
 	t.Helper()
 	o := facebook.Options{
-		Enabled:      true,
-		ClientID:     "app-abc",
+				ClientID:     "app-abc",
 		ClientSecret: "shh",
 		RedirectURL:  "https://app.example.test/auth/facebook/callback",
 		APIVersion:   "v18.0",
@@ -139,12 +137,11 @@ func TestOptions_Validate(t *testing.T) {
 		opts facebook.Options
 		ok   bool
 	}{
-		{"disabled bypasses", facebook.Options{Enabled: false}, true},
-		{"missing client_id", facebook.Options{Enabled: true, ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing client_secret", facebook.Options{Enabled: true, ClientID: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing redirect_url", facebook.Options{Enabled: true, ClientID: "x", ClientSecret: "x"}, false},
-		{"relative redirect_url", facebook.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
-		{"ok minimal", facebook.Options{Enabled: true, ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
+		{"missing client_id", facebook.Options{ ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing client_secret", facebook.Options{ ClientID: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing redirect_url", facebook.Options{ ClientID: "x", ClientSecret: "x"}, false},
+		{"relative redirect_url", facebook.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
+		{"ok minimal", facebook.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -294,30 +291,23 @@ func TestCompleteAuth_MeAPIFailure(t *testing.T) {
 	}
 }
 
-func TestFactory_RegistersInRegistry(t *testing.T) {
-	f, ok := account.LookupProviderFactory("facebook")
-	if !ok || f == nil {
-		t.Fatal("facebook factory not registered")
+func TestProvider_SpecShape(t *testing.T) {
+	spec := facebook.Provider()
+	if spec.Name != "facebook" {
+		t.Fatalf("spec name = %q, want facebook", spec.Name)
+	}
+	if spec.Build == nil {
+		t.Fatal("spec Build is nil")
 	}
 }
 
-func TestFactory_DecodeRoundTrip(t *testing.T) {
-	account.ResetProviderRegistryForTest()
-	t.Cleanup(func() {
-		account.ResetProviderRegistryForTest()
-		account.RegisterProviderFactory("facebook", facebook.Factory)
-	})
-	account.RegisterProviderFactory("facebook", facebook.Factory)
-
-	raw := &fakeRawDecoder{data: map[string]any{
-		"enabled":       true,
+func TestProvider_DecodeRoundTrip(t *testing.T) {
+	p, err := facebook.Provider().Build(context.Background(), map[string]any{
 		"client_id":     "app-abc",
 		"client_secret": "shh",
 		"redirect_url":  "https://app.example.test/cb",
 		"api_version":   "v18.0",
-	}}
-	f, _ := account.LookupProviderFactory("facebook")
-	p, err := f(raw)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,29 +316,10 @@ func TestFactory_DecodeRoundTrip(t *testing.T) {
 	}
 }
 
-type fakeRawDecoder struct {
-	data map[string]any
-}
-
-func (r *fakeRawDecoder) Decode(out any) error {
-	opts, ok := out.(*facebook.Options)
-	if !ok {
-		return fmt.Errorf("fakeRawDecoder.Decode: want *facebook.Options, got %T", out)
+func TestProvider_RejectsInvalidConfig(t *testing.T) {
+	if _, err := facebook.Provider().Build(context.Background(), map[string]any{
+		"client_id": "only-id",
+	}); err == nil {
+		t.Fatal("expected validation error for incomplete provider config")
 	}
-	if v, ok := r.data["enabled"].(bool); ok {
-		opts.Enabled = v
-	}
-	if v, ok := r.data["client_id"].(string); ok {
-		opts.ClientID = v
-	}
-	if v, ok := r.data["client_secret"].(string); ok {
-		opts.ClientSecret = v
-	}
-	if v, ok := r.data["redirect_url"].(string); ok {
-		opts.RedirectURL = v
-	}
-	if v, ok := r.data["api_version"].(string); ok {
-		opts.APIVersion = v
-	}
-	return nil
 }
