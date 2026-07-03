@@ -14,7 +14,7 @@ import (
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/auth"
-	"github.com/zynthara/chok/v2/handler"
+	handler "github.com/zynthara/chok/v2/internal/ginresidue"
 	"github.com/zynthara/chok/v2/store"
 )
 

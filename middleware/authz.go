@@ -2,8 +2,7 @@ package middleware
 
 import (
 	"context"
-
-	"github.com/gin-gonic/gin"
+	"net/http"
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/auth"
@@ -13,28 +12,35 @@ import (
 	"github.com/zynthara/chok/v2/log"
 )
 
-// ContextKeyAuthz is the gin.Context key under which the active
-// authz.Authorizer lives. AttachAuthz writes it; RequireAuthz /
-// RequireAuthzInDomain read it.
-//
-// Exported as a string constant so application code can override the
-// gin context (e.g. mount a per-tenant Authorizer on a sub-router)
-// without depending on this package's internals.
-const ContextKeyAuthz = "chok.authz"
+type authzCtxKey struct{}
 
-// AttachAuthz installs the supplied Authorizer onto the gin.Context
-// for downstream RequireAuthz / RequireAuthzInDomain calls. Production
-// chok wiring (parts/http.go OptionalDependencies + Init) calls this
-// automatically when an AuthzComponent is registered, so application
-// code rarely needs to invoke it directly.
-//
-// Tests that exercise RequireAuthz without spinning up the full
-// component registry should mount AttachAuthz on their gin engine
-// before the protected routes.
-func AttachAuthz(az authz.Authorizer) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Set(ContextKeyAuthz, az)
-		c.Next()
+// WithAuthorizer stores the active authz.Authorizer on the context —
+// the v2 replacement for v1's gin-context key. AttachAuthz applies it
+// per request; exported so application code can override the
+// authorizer for a sub-router (per-tenant enforcement) and tests can
+// exercise RequireAuthz without the full module wiring.
+func WithAuthorizer(ctx context.Context, az authz.Authorizer) context.Context {
+	return context.WithValue(ctx, authzCtxKey{}, az)
+}
+
+// AuthorizerFrom retrieves the Authorizer installed by AttachAuthz /
+// WithAuthorizer. ok=false means no authz component was wired.
+func AuthorizerFrom(ctx context.Context) (authz.Authorizer, bool) {
+	az, ok := ctx.Value(authzCtxKey{}).(authz.Authorizer)
+	return az, ok && az != nil
+}
+
+// AttachAuthz installs the supplied Authorizer onto every request
+// context for downstream RequireAuthz / RequireAuthzInDomain calls.
+// Production wiring is automatic: web.Module attaches it during
+// assembly when an authz component is present (soft dependency —
+// absent means no attach, no error). Manual use covers tests and
+// sub-router overrides.
+func AttachAuthz(az authz.Authorizer) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(WithAuthorizer(r.Context(), az)))
+		})
 	}
 }
 
@@ -43,132 +49,112 @@ func AttachAuthz(az authz.Authorizer) gin.HandlerFunc {
 //
 //	authz.Authorize(ctx, principal.Subject, obj, act)
 //
-// against the Authorizer attached to the gin.Context.
+// against the Authorizer attached to the request context.
 //
 // Outcomes:
-//   - allowed=true  → c.Next()
+//   - allowed=true  → next
 //   - allowed=false → 403 PermissionDenied
 //   - error         → 500 InternalError (logged with subject/obj/act)
 //   - no Principal  → 401 Unauthenticated (Authn middleware missing)
 //   - no Authorizer → 500 InternalError ("authz not wired" — fix wiring)
 //
-// The previous URL-based form (Authz(az), object=route pattern,
-// action=HTTP method) was removed in v0.3 because (a) policy DBs
-// filled with URL strings are fragile under refactors and (b) Casbin
-// idiom is business-code (sub, obj, act) tuples decoupled from
-// transport.
-func RequireAuthz(obj, act string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ctx := c.Request.Context()
-		p, ok := auth.PrincipalFrom(ctx)
-		if !ok {
-			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated)
-			c.Abort()
-			return
-		}
-		az, ok := authzFromContext(c)
-		if !ok {
-			logAuthzWiringError(ctx, "RequireAuthz", obj, act, p.Subject)
-			handler.WriteResponse(c, 0, nil, apierr.ErrInternal.WithMessage("authz not wired"))
-			c.Abort()
-			return
-		}
-		allowed, err := az.Authorize(ctx, p.Subject, obj, act)
-		if err != nil {
-			logAuthzError(ctx, "RequireAuthz", err, p.Subject, "", obj, act)
-			handler.WriteResponse(c, 0, nil, apierr.ErrInternal)
-			c.Abort()
-			return
-		}
-		if !allowed {
-			handler.WriteResponse(c, 0, nil, apierr.ErrPermissionDenied)
-			c.Abort()
-			return
-		}
-		c.Next()
+// The URL-based form (object=route pattern, action=HTTP method) was
+// removed in v0.3 because (a) policy DBs filled with URL strings are
+// fragile under refactors and (b) Casbin idiom is business-code
+// (sub, obj, act) tuples decoupled from transport.
+func RequireAuthz(obj, act string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			p, ok := auth.PrincipalFrom(ctx)
+			if !ok {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated)
+				return
+			}
+			az, ok := AuthorizerFrom(ctx)
+			if !ok {
+				logAuthzWiringError(ctx, "RequireAuthz", obj, act, p.Subject)
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal.WithMessage("authz not wired"))
+				return
+			}
+			allowed, err := az.Authorize(ctx, p.Subject, obj, act)
+			if err != nil {
+				logAuthzError(ctx, "RequireAuthz", err, p.Subject, "", obj, act)
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal)
+				return
+			}
+			if !allowed {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrPermissionDenied)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
 // RequireAuthzInDomain is the multi-tenant cousin of RequireAuthz.
-// It reads the tenant id from the named gin path parameter
-// (typically "wsid", "orgid", "tenant") and calls
+// It reads the tenant id from the named path parameter (typically
+// "wsid", "orgid", "tenant") via r.PathValue and calls
 //
 //	authz.AuthorizeInDomain(ctx, principal.Subject, dom, obj, act)
 //
 // requiring the configured Authorizer to satisfy authz.DomainAuthorizer.
 //
-// Fail-closed posture (SPEC v0.3.2): when the active Authorizer does
+// Fail-closed posture (SPEC §0.3): when the active Authorizer does
 // NOT implement DomainAuthorizer the middleware refuses the request
 // with 500 — silent degradation to Authorize would drop the domain
 // constraint and let cross-tenant requests through. Wire the right
 // Authorizer (chok's authz/casbin satisfies it natively) or this
 // route is unsafe to expose.
 //
-// domainParam name is consulted via c.Param; an empty value yields
-// 400 InvalidArgument (the route declared :wsid but the request didn't
+// domainParam is consulted via r.PathValue; an empty value yields
+// 400 InvalidArgument (the route declared {wsid} but the request didn't
 // match — almost certainly a routing bug in the application).
-func RequireAuthzInDomain(obj, act, domainParam string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ctx := c.Request.Context()
-		p, ok := auth.PrincipalFrom(ctx)
-		if !ok {
-			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated)
-			c.Abort()
-			return
-		}
-		az, ok := authzFromContext(c)
-		if !ok {
-			logAuthzWiringError(ctx, "RequireAuthzInDomain", obj, act, p.Subject)
-			handler.WriteResponse(c, 0, nil, apierr.ErrInternal.WithMessage("authz not wired"))
-			c.Abort()
-			return
-		}
-		dz, ok := az.(authz.DomainAuthorizer)
-		if !ok {
-			// Fail-closed: refuse rather than silently degrade.
-			if l, ok := ctxval.LoggerFrom(ctx).(log.Logger); ok && l != nil {
-				l.ErrorContext(ctx,
-					"authz: RequireAuthzInDomain used but Authorizer is not a DomainAuthorizer; refusing to avoid silently bypassing domain check",
-					"obj", obj, "act", act, "domain_param", domainParam)
+func RequireAuthzInDomain(obj, act, domainParam string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			p, ok := auth.PrincipalFrom(ctx)
+			if !ok {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated)
+				return
 			}
-			handler.WriteResponse(c, 0, nil, apierr.ErrInternal.WithMessage("authz domain not supported"))
-			c.Abort()
-			return
-		}
-		dom := c.Param(domainParam)
-		if dom == "" {
-			handler.WriteResponse(c, 0, nil,
-				apierr.ErrInvalidArgument.WithMessage("missing domain path parameter: "+domainParam))
-			c.Abort()
-			return
-		}
-		allowed, err := dz.AuthorizeInDomain(ctx, p.Subject, dom, obj, act)
-		if err != nil {
-			logAuthzError(ctx, "RequireAuthzInDomain", err, p.Subject, dom, obj, act)
-			handler.WriteResponse(c, 0, nil, apierr.ErrInternal)
-			c.Abort()
-			return
-		}
-		if !allowed {
-			handler.WriteResponse(c, 0, nil, apierr.ErrPermissionDenied)
-			c.Abort()
-			return
-		}
-		c.Next()
+			az, ok := AuthorizerFrom(ctx)
+			if !ok {
+				logAuthzWiringError(ctx, "RequireAuthzInDomain", obj, act, p.Subject)
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal.WithMessage("authz not wired"))
+				return
+			}
+			dz, ok := az.(authz.DomainAuthorizer)
+			if !ok {
+				// Fail-closed: refuse rather than silently degrade.
+				if l, ok := ctxval.LoggerFrom(ctx).(log.Logger); ok && l != nil {
+					l.ErrorContext(ctx,
+						"authz: RequireAuthzInDomain used but Authorizer is not a DomainAuthorizer; refusing to avoid silently bypassing domain check",
+						"obj", obj, "act", act, "domain_param", domainParam)
+				}
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal.WithMessage("authz domain not supported"))
+				return
+			}
+			dom := r.PathValue(domainParam)
+			if dom == "" {
+				handler.WriteResponse(w, r, 0, nil,
+					apierr.ErrInvalidArgument.WithMessage("missing domain path parameter: "+domainParam))
+				return
+			}
+			allowed, err := dz.AuthorizeInDomain(ctx, p.Subject, dom, obj, act)
+			if err != nil {
+				logAuthzError(ctx, "RequireAuthzInDomain", err, p.Subject, dom, obj, act)
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrInternal)
+				return
+			}
+			if !allowed {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrPermissionDenied)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
-}
-
-// authzFromContext retrieves the Authorizer that AttachAuthz stored.
-// Returns ok=false when AttachAuthz didn't run (deployments that
-// forgot to register an AuthzComponent or didn't wire it through
-// HTTPComponent.OptionalDependencies).
-func authzFromContext(c *gin.Context) (authz.Authorizer, bool) {
-	v, ok := c.Get(ContextKeyAuthz)
-	if !ok {
-		return nil, false
-	}
-	az, ok := v.(authz.Authorizer)
-	return az, ok
 }
 
 // logAuthzError emits a structured log entry for an Authorize-side
@@ -188,11 +174,11 @@ func logAuthzError(ctx context.Context, where string, err error, subject, domain
 }
 
 // logAuthzWiringError reports that AttachAuthz never ran for this
-// request (no AuthzComponent registered, or HTTPComponent didn't
-// pull it via OptionalDependencies).
+// request (no authz component assembled, or it initialized without an
+// Authorizer).
 func logAuthzWiringError(ctx context.Context, where, obj, act, subject string) {
 	if l, ok := ctxval.LoggerFrom(ctx).(log.Logger); ok && l != nil {
-		l.ErrorContext(ctx, "authz not wired; register parts.AuthzComponent or include it in HTTPComponent OptionalDependencies",
+		l.ErrorContext(ctx, "authz not wired; assemble the authz module (or attach one manually via middleware.AttachAuthz)",
 			"where", where, "obj", obj, "act", act, "subject", subject)
 	}
 }

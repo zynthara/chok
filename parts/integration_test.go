@@ -21,9 +21,8 @@ import (
 // integration test below. Each top-level field is what a resolver will
 // reach into.
 type integrationCfg struct {
-	Log     *config.SlogOptions
-	Redis   *config.RedisOptions
-	Swagger *SwaggerSettings
+	Log   *config.SlogOptions
+	Redis *config.RedisOptions
 }
 
 // TestPhase3_FullRegistry spins up every Component this package ships
@@ -38,7 +37,6 @@ type integrationCfg struct {
 //   - jwt       (no deps)
 //   - authz     (no deps)
 //   - scheduler (dep: log)
-//   - swagger   (no deps)
 //   - account   (dep: db, log)
 //
 // Registration order is deliberately scrambled so the topo sort has to
@@ -50,8 +48,7 @@ func TestPhase3_FullRegistry(t *testing.T) {
 			Format: "json",
 			Output: []string{"stdout"},
 		},
-		Redis:   nil, // disabled path — exercises the "no socket" mode
-		Swagger: &SwaggerSettings{Enabled: true, Title: "integration", Version: "1"},
+		Redis: nil, // disabled path — exercises the "no socket" mode
 	}
 	reg := component.New(cfg, log.Empty())
 
@@ -61,9 +58,6 @@ func TestPhase3_FullRegistry(t *testing.T) {
 	reg.Register(NewSchedulerComponent(context.Background(), time.Second))
 	reg.Register(NewCacheComponent(func(k component.Kernel) (cache.Cache, error) {
 		return cache.NewMemory(&cache.MemoryOptions{Capacity: 100, TTL: time.Minute})
-	}))
-	reg.Register(NewSwaggerComponent(func(a any) *SwaggerSettings {
-		return a.(*integrationCfg).Swagger
 	}))
 	reg.Register(NewAuthzComponent(func(component.Kernel) (authz.Authorizer, error) {
 		return authz.AuthorizerFunc(func(context.Context, string, string, string) (bool, error) {
@@ -87,7 +81,7 @@ func TestPhase3_FullRegistry(t *testing.T) {
 	}
 
 	// Every component should be reachable via Get.
-	for _, name := range []string{"log", "redis", "db", "cache", "jwt", "authz", "scheduler", "swagger", "account"} {
+	for _, name := range []string{"log", "redis", "db", "cache", "jwt", "authz", "scheduler", "account"} {
 		if reg.Get(name) == nil {
 			t.Errorf("Get(%q) returned nil after Start", name)
 		}

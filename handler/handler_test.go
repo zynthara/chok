@@ -10,16 +10,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/internal/ctxval"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/validate"
 )
 
-func init() {
-	gin.SetMode(gin.TestMode)
+// mux builds a ServeMux with one route — the stdlib stand-in for the
+// v1 gin engine in these tests. Patterns use Go 1.22 method syntax.
+func mux(pattern string, h http.Handler) *http.ServeMux {
+	m := http.NewServeMux()
+	m.Handle(pattern, h)
+	return m
 }
 
 // --- request types ---
@@ -51,8 +53,7 @@ type conflictReq struct {
 // --- tests ---
 
 func TestHandleRequest_URIBinding(t *testing.T) {
-	r := gin.New()
-	r.GET("/users/:rid", HandleRequest(func(_ context.Context, req *uriReq) (*uriReq, error) {
+	r := mux("GET /users/{rid}", HandleRequest(func(_ context.Context, req *uriReq) (*uriReq, error) {
 		return req, nil
 	}))
 
@@ -71,8 +72,7 @@ func TestHandleRequest_URIBinding(t *testing.T) {
 }
 
 func TestHandleRequest_JSONBinding(t *testing.T) {
-	r := gin.New()
-	r.POST("/users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
+	r := mux("POST /users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
 		return req, nil
 	}, WithSuccessCode(201)))
 
@@ -88,8 +88,7 @@ func TestHandleRequest_JSONBinding(t *testing.T) {
 }
 
 func TestHandleRequest_QueryBinding(t *testing.T) {
-	r := gin.New()
-	r.GET("/users", HandleRequest(func(_ context.Context, req *queryReq) (*queryReq, error) {
+	r := mux("GET /users", HandleRequest(func(_ context.Context, req *queryReq) (*queryReq, error) {
 		return req, nil
 	}))
 
@@ -108,8 +107,7 @@ func TestHandleRequest_QueryBinding(t *testing.T) {
 }
 
 func TestHandleRequest_MultiSourceBinding(t *testing.T) {
-	r := gin.New()
-	r.PUT("/users/:rid", HandleRequest(func(_ context.Context, req *multiReq) (*multiReq, error) {
+	r := mux("PUT /users/{rid}", HandleRequest(func(_ context.Context, req *multiReq) (*multiReq, error) {
 		return req, nil
 	}))
 
@@ -147,8 +145,7 @@ func TestHandleRequest_ConflictingTags_Panics(t *testing.T) {
 }
 
 func TestHandleRequest_DisallowUnknownFields(t *testing.T) {
-	r := gin.New()
-	r.POST("/users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
+	r := mux("POST /users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
 		return req, nil
 	}))
 
@@ -169,8 +166,7 @@ func TestHandleRequest_DisallowUnknownFields(t *testing.T) {
 }
 
 func TestHandleRequest_MalformedJSON(t *testing.T) {
-	r := gin.New()
-	r.POST("/users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
+	r := mux("POST /users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
 		return req, nil
 	}))
 
@@ -185,8 +181,7 @@ func TestHandleRequest_MalformedJSON(t *testing.T) {
 }
 
 func TestHandleRequest_TypeConversionError(t *testing.T) {
-	r := gin.New()
-	r.POST("/test", HandleRequest(func(_ context.Context, req *struct {
+	r := mux("POST /test", HandleRequest(func(_ context.Context, req *struct {
 		Count int `json:"count"`
 	}) (any, error) {
 		return req, nil
@@ -203,8 +198,7 @@ func TestHandleRequest_TypeConversionError(t *testing.T) {
 }
 
 func TestHandleRequest_EmptyBody_URIOnly(t *testing.T) {
-	r := gin.New()
-	r.GET("/users/:rid", HandleRequest(func(_ context.Context, req *uriReq) (*uriReq, error) {
+	r := mux("GET /users/{rid}", HandleRequest(func(_ context.Context, req *uriReq) (*uriReq, error) {
 		return req, nil
 	}))
 
@@ -218,8 +212,7 @@ func TestHandleRequest_EmptyBody_URIOnly(t *testing.T) {
 }
 
 func TestHandleRequest_EmptyBody_RequiredJSONField(t *testing.T) {
-	r := gin.New()
-	r.POST("/users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
+	r := mux("POST /users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
 		return req, nil
 	}))
 
@@ -234,8 +227,7 @@ func TestHandleRequest_EmptyBody_RequiredJSONField(t *testing.T) {
 }
 
 func TestHandleAction_Default204(t *testing.T) {
-	r := gin.New()
-	r.DELETE("/users/:rid", HandleAction(func(_ context.Context, req *uriReq) error {
+	r := mux("DELETE /users/{rid}", HandleAction(func(_ context.Context, req *uriReq) error {
 		return nil
 	}))
 
@@ -252,8 +244,7 @@ func TestHandleAction_Default204(t *testing.T) {
 }
 
 func TestHandleRequest_APIErrorPassthrough(t *testing.T) {
-	r := gin.New()
-	r.GET("/fail", HandleRequest(func(_ context.Context, req *struct{}) (any, error) {
+	r := mux("GET /fail", HandleRequest(func(_ context.Context, req *struct{}) (any, error) {
 		return nil, apierr.ErrNotFound.WithMessage("user not found")
 	}))
 
@@ -271,16 +262,20 @@ func TestHandleRequest_APIErrorPassthrough(t *testing.T) {
 	}
 }
 
-func TestHandleRequest_InternalError_NoLeak(t *testing.T) {
-	r := gin.New()
-	// Inject logger via context to test error logging.
-	r.Use(func(c *gin.Context) {
-		ctx := ctxval.WithLogger(c.Request.Context(), log.Empty())
-		c.Request = c.Request.WithContext(ctx)
-		c.Next()
+// withCtx wraps h, deriving the request context before it runs — the
+// stdlib replacement for the gin middleware the old tests used.
+func withCtx(h http.Handler, derive func(context.Context) context.Context) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(derive(r.Context())))
 	})
-	r.GET("/fail", HandleRequest(func(_ context.Context, req *struct{}) (any, error) {
+}
+
+func TestHandleRequest_InternalError_NoLeak(t *testing.T) {
+	h := HandleRequest(func(_ context.Context, req *struct{}) (any, error) {
 		return nil, errors.New("db connection failed")
+	})
+	r := mux("GET /fail", withCtx(h, func(ctx context.Context) context.Context {
+		return ctxval.WithLogger(ctx, log.Empty())
 	}))
 
 	w := httptest.NewRecorder()
@@ -299,9 +294,8 @@ func TestHandleRequest_InternalError_NoLeak(t *testing.T) {
 }
 
 func TestHandleRequest_NoLogger_NoPanic(t *testing.T) {
-	r := gin.New()
-	// No middleware.Logger registered — should not panic.
-	r.GET("/fail", HandleRequest(func(_ context.Context, req *struct{}) (any, error) {
+	// No logger in context — should not panic.
+	r := mux("GET /fail", HandleRequest(func(_ context.Context, req *struct{}) (any, error) {
 		return nil, errors.New("boom")
 	}))
 
@@ -315,14 +309,11 @@ func TestHandleRequest_NoLogger_NoPanic(t *testing.T) {
 }
 
 func TestWriteResponse_InjectsRequestID(t *testing.T) {
-	r := gin.New()
-	r.Use(func(c *gin.Context) {
-		ctx := ctxval.WithRequestID(c.Request.Context(), "req-abc")
-		c.Request = c.Request.WithContext(ctx)
-		c.Next()
-	})
-	r.GET("/fail", HandleRequest(func(_ context.Context, req *struct{}) (any, error) {
+	h := HandleRequest(func(_ context.Context, req *struct{}) (any, error) {
 		return nil, apierr.ErrNotFound
+	})
+	r := mux("GET /fail", withCtx(h, func(ctx context.Context) context.Context {
+		return ctxval.WithRequestID(ctx, "req-abc")
 	}))
 
 	w := httptest.NewRecorder()
@@ -344,8 +335,7 @@ func TestValidated(t *testing.T) {
 		return nil
 	})
 
-	r := gin.New()
-	r.POST("/users", HandleRequest(
+	r := mux("POST /users", HandleRequest(
 		Validated(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
 			return req, nil
 		}, checkName),
@@ -382,8 +372,7 @@ func TestValidatedAction(t *testing.T) {
 		return nil
 	})
 
-	r := gin.New()
-	r.DELETE("/users/:rid", HandleAction(
+	r := mux("DELETE /users/{rid}", HandleAction(
 		ValidatedAction(func(_ context.Context, req *uriReq) error {
 			called = true
 			return nil
@@ -413,8 +402,7 @@ func TestValidatedAction(t *testing.T) {
 // --- regression: #3 Content-Type non-JSON with json-tagged fields ---
 
 func TestHandleRequest_MissingContentType_ErrBind(t *testing.T) {
-	r := gin.New()
-	r.POST("/users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
+	r := mux("POST /users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
 		return req, nil
 	}))
 
@@ -435,8 +423,7 @@ func TestHandleRequest_MissingContentType_ErrBind(t *testing.T) {
 }
 
 func TestHandleRequest_NonJSONContentType_ErrBind(t *testing.T) {
-	r := gin.New()
-	r.POST("/users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
+	r := mux("POST /users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
 		return req, nil
 	}))
 
@@ -457,8 +444,7 @@ func TestHandleRequest_NonJSONContentType_ErrBind(t *testing.T) {
 }
 
 func TestHandleRequest_ValidationErrors_FieldMetadata(t *testing.T) {
-	r := gin.New()
-	r.POST("/users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
+	r := mux("POST /users", HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
 		return req, nil
 	}))
 
@@ -499,8 +485,7 @@ func (r *defaultQueryReq) Default() {
 }
 
 func TestHandleRequest_DefaultHook_SetsDefaults(t *testing.T) {
-	r := gin.New()
-	r.GET("/items", HandleRequest(func(_ context.Context, req *defaultQueryReq) (*defaultQueryReq, error) {
+	r := mux("GET /items", HandleRequest(func(_ context.Context, req *defaultQueryReq) (*defaultQueryReq, error) {
 		return req, nil
 	}))
 
@@ -523,8 +508,7 @@ func TestHandleRequest_DefaultHook_SetsDefaults(t *testing.T) {
 }
 
 func TestHandleRequest_DefaultHook_ExplicitValuesPreserved(t *testing.T) {
-	r := gin.New()
-	r.GET("/items", HandleRequest(func(_ context.Context, req *defaultQueryReq) (*defaultQueryReq, error) {
+	r := mux("GET /items", HandleRequest(func(_ context.Context, req *defaultQueryReq) (*defaultQueryReq, error) {
 		return req, nil
 	}))
 
@@ -548,8 +532,7 @@ func TestHandleRequest_DefaultHook_ExplicitValuesPreserved(t *testing.T) {
 
 func TestHandleRequest_NoDefaulter_StillWorks(t *testing.T) {
 	// queryReq does not implement Defaulter — should work without error.
-	r := gin.New()
-	r.GET("/items", HandleRequest(func(_ context.Context, req *queryReq) (*queryReq, error) {
+	r := mux("GET /items", HandleRequest(func(_ context.Context, req *queryReq) (*queryReq, error) {
 		return req, nil
 	}))
 
@@ -577,8 +560,7 @@ func TestResolveError_UsesRegisteredMapper(t *testing.T) {
 		return nil
 	})
 
-	r := gin.New()
-	r.GET("/item", HandleRequest(func(_ context.Context, _ *queryReq) (*queryReq, error) {
+	r := mux("GET /item", HandleRequest(func(_ context.Context, _ *queryReq) (*queryReq, error) {
 		return nil, customNotFound // return raw sentinel — mapper should kick in
 	}))
 
@@ -606,8 +588,7 @@ func TestResolveError_UsesRegisteredMapper(t *testing.T) {
 // payload is decoded; validation is skipped because validator.v10
 // requires a struct target.
 func TestHandleRequest_NonStructTBindsJSON(t *testing.T) {
-	r := gin.New()
-	r.POST("/echo", HandleRequest(func(_ context.Context, req *map[string]any) (map[string]any, error) {
+	r := mux("POST /echo", HandleRequest(func(_ context.Context, req *map[string]any) (map[string]any, error) {
 		return *req, nil
 	}))
 
@@ -620,13 +601,99 @@ func TestHandleRequest_NonStructTBindsJSON(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	// WriteResponse calls c.JSON(data) without a wrapper, so the body
-	// is the echoed map verbatim.
 	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if resp["hello"] != "world" {
 		t.Fatalf("expected hello=world, got %v", resp)
+	}
+}
+
+// --- M2: metadata rides the handler; render hooks; written guard ---
+
+func TestHandlerMeta_AttachedToConstructedHandlers(t *testing.T) {
+	h := HandleRequest(func(_ context.Context, req *jsonReq) (*jsonReq, error) {
+		return req, nil
+	}, WithSuccessCode(201), WithSummary("Create user"), WithTags("users"), WithPublic())
+
+	mh, ok := h.(interface{ Meta() Meta })
+	if !ok {
+		t.Fatal("HandleRequest result must expose Meta()")
+	}
+	m := mh.Meta()
+	if m.Code != 201 || m.Summary != "Create user" || len(m.Tags) != 1 || !m.Public {
+		t.Fatalf("unexpected meta: %+v", m)
+	}
+	if m.ReqType == nil || m.ReqType.Name() != "jsonReq" {
+		t.Fatalf("ReqType not captured: %v", m.ReqType)
+	}
+	if m.RespType == nil {
+		t.Fatal("RespType not captured")
+	}
+
+	if _, ok := HandleAction(func(context.Context, *uriReq) error { return nil }).(interface{ Meta() Meta }); !ok {
+		t.Fatal("HandleAction result must expose Meta()")
+	}
+}
+
+func TestWriteError_RenderHookLocalizesCopy(t *testing.T) {
+	reg := apierr.NewMapperRegistry()
+	reg.RegisterRenderHook(func(_ context.Context, ae *apierr.Error) {
+		ae.Message = "localized message"
+	})
+
+	h := HandleRequest(func(_ context.Context, _ *struct{}) (any, error) {
+		return nil, apierr.ErrNotFound
+	})
+	r := mux("GET /fail", withCtx(h, func(ctx context.Context) context.Context {
+		return apierr.WithMapperRegistry(ctx, reg)
+	}))
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/fail", nil)
+	r.ServeHTTP(w, req)
+
+	var resp ErrorResponse
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Message != "localized message" {
+		t.Fatalf("render hook did not apply, got %q", resp.Message)
+	}
+	// The shared sentinel must NOT have been mutated (hooks get a copy).
+	if apierr.ErrNotFound.Message != "resource not found" {
+		t.Fatalf("sentinel polluted by render hook: %q", apierr.ErrNotFound.Message)
+	}
+}
+
+// writtenRecorder simulates the web layer's written-tracking writer.
+type writtenRecorder struct {
+	*httptest.ResponseRecorder
+	written bool
+}
+
+func (w *writtenRecorder) Written() bool { return w.written }
+
+func TestWriteResponse_NoopWhenAlreadyWritten(t *testing.T) {
+	w := &writtenRecorder{ResponseRecorder: httptest.NewRecorder(), written: true}
+	req, _ := http.NewRequest("GET", "/", nil)
+	WriteResponse(w, req, 200, map[string]string{"x": "y"}, nil)
+	if w.Body.Len() != 0 {
+		t.Fatalf("WriteResponse must no-op after a response was written, got %q", w.Body.String())
+	}
+	WriteError(w, req, apierr.ErrInternal)
+	if w.Body.Len() != 0 {
+		t.Fatalf("WriteError must no-op after a response was written, got %q", w.Body.String())
+	}
+}
+
+func TestWriteError_EmitsApierrHeaders(t *testing.T) {
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/", nil)
+	WriteError(w, req, apierr.ErrTooManyRequests.WithHeader("Retry-After", "30"))
+	if w.Code != 429 {
+		t.Fatalf("expected 429, got %d", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After header missing, got %q", got)
 	}
 }

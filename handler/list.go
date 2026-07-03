@@ -7,8 +7,6 @@ import (
 	"reflect"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/zynthara/chok/v2/store/where"
 )
 
@@ -18,8 +16,8 @@ type QueryLister[T any] interface {
 	ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, error)
 }
 
-// HandleList creates a gin handler that parses page/size/order/filter from
-// URL query parameters and returns a paginated ListResult.
+// HandleList creates an http.Handler that parses page/size/order/filter
+// from URL query parameters and returns a paginated ListResult.
 //
 // Supported query params (parsed by where.FromQuery):
 //
@@ -30,55 +28,56 @@ type QueryLister[T any] interface {
 //
 // Usage:
 //
-//	rg.GET("/posts", handler.HandleList(postStore))
-func HandleList[T any](lister QueryLister[T], opts ...HandleOption) gin.HandlerFunc {
+//	r.Handle("GET", "/posts", handler.HandleList(postStore))
+func HandleList[T any](lister QueryLister[T], opts ...HandleOption) http.Handler {
 	cfg := &handleConfig{}
 	for _, o := range opts {
 		o(cfg)
 	}
 
-	ginH := func(c *gin.Context) {
-		items, total, err := lister.ListFromQuery(c.Request.Context(), c.Request.URL.Query())
-		if err != nil {
-			WriteResponse(c, 0, nil, err)
-			return
-		}
-		// Guarantee non-nil slice so JSON serializes as [] not null.
-		if items == nil {
-			items = []T{}
-		}
-		// Parse page/size from query for the response envelope.
-		// Bounds were already enforced by where.FromQuery; clamp here
-		// only for the envelope's own display values. int64 math guards
-		// against overflow if clients send arbitrary integers.
-		q := c.Request.URL.Query()
-		page, _ := strconv.Atoi(q.Get("page"))
-		size, _ := strconv.Atoi(q.Get("size"))
-		if page < 1 {
-			page = 1
-		}
-		if size < 1 {
-			size = 20
-		}
-		if size > where.MaxPageSize {
-			size = where.MaxPageSize
-		}
-		hasMore := total > 0 && int64(page)*int64(size) < total
-		WriteResponse(c, http.StatusOK, &ListResult[T]{
-			Items:   items,
-			Total:   total,
-			Page:    page,
-			Size:    size,
-			HasMore: hasMore,
-		}, nil)
+	return &metaHandler{
+		serve: func(w http.ResponseWriter, r *http.Request) {
+			items, total, err := lister.ListFromQuery(r.Context(), r.URL.Query())
+			if err != nil {
+				WriteResponse(w, r, 0, nil, err)
+				return
+			}
+			// Guarantee non-nil slice so JSON serializes as [] not null.
+			if items == nil {
+				items = []T{}
+			}
+			// Parse page/size from query for the response envelope.
+			// Bounds were already enforced by where.FromQuery; clamp here
+			// only for the envelope's own display values. int64 math guards
+			// against overflow if clients send arbitrary integers.
+			q := r.URL.Query()
+			page, _ := strconv.Atoi(q.Get("page"))
+			size, _ := strconv.Atoi(q.Get("size"))
+			if page < 1 {
+				page = 1
+			}
+			if size < 1 {
+				size = 20
+			}
+			if size > where.MaxPageSize {
+				size = where.MaxPageSize
+			}
+			hasMore := total > 0 && int64(page)*int64(size) < total
+			WriteResponse(w, r, http.StatusOK, &ListResult[T]{
+				Items:   items,
+				Total:   total,
+				Page:    page,
+				Size:    size,
+				HasMore: hasMore,
+			}, nil)
+		},
+		meta: Meta{
+			RespType: reflect.TypeOf((*T)(nil)).Elem(),
+			Code:     http.StatusOK,
+			Summary:  cfg.summary,
+			Tags:     cfg.tags,
+			IsList:   true,
+			Public:   cfg.public,
+		},
 	}
-	registerMeta(ginH, &HandlerMeta{
-		RespType: reflect.TypeOf((*T)(nil)).Elem(),
-		Code:     http.StatusOK,
-		Summary:  cfg.summary,
-		Tags:     cfg.tags,
-		IsList:   true,
-		Public:   cfg.public,
-	})
-	return ginH
 }

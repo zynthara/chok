@@ -4,10 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"net/http"
 	"sync/atomic"
 	"time"
-
-	"github.com/gin-gonic/gin"
 
 	"github.com/zynthara/chok/v2/internal/ctxval"
 )
@@ -26,31 +25,28 @@ const maxRequestIDLen = 128
 // RequestID generates or propagates a request ID via the X-Request-ID header.
 // Client-supplied IDs are truncated to 128 chars and reduced to a strict
 // ASCII safe-set ([A-Za-z0-9._-]) before propagation. The whitelist
-// approach blocks log-injection vectors that the previous "strip < 0x20"
-// filter missed: high-byte UTF-8 sequences such as U+2028 (LINE
-// SEPARATOR) / U+2029 (PARAGRAPH SEPARATOR) used to be passed through
-// verbatim and could split log lines in viewers that interpret them as
-// breaks.
+// approach blocks log-injection vectors that a "strip < 0x20" filter
+// would miss: high-byte UTF-8 sequences such as U+2028 (LINE SEPARATOR)
+// / U+2029 (PARAGRAPH SEPARATOR) could otherwise split log lines in
+// viewers that interpret them as breaks.
 //
-// As a convenience, the resolved client IP (c.ClientIP()) is also stored
-// in the request context so downstream handlers — in particular the
-// account module's login rate limiter — can key on source address
-// without needing direct access to *gin.Context.
-func RequestID() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		rid := c.GetHeader(headerXRequestID)
-		if rid == "" {
-			rid = generateID()
-		} else {
-			rid = sanitizeRequestID(rid)
-		}
-		ctx := ctxval.WithRequestID(c.Request.Context(), rid)
-		if ip := c.ClientIP(); ip != "" {
-			ctx = ctxval.WithClientIP(ctx, ip)
-		}
-		c.Request = c.Request.WithContext(ctx)
-		c.Header(headerXRequestID, rid)
-		c.Next()
+// The response header is set before next runs, so outer layers
+// (Recovery) can correlate even when inner context copies are
+// unreachable. Client-IP resolution — bundled here in v1 — is the
+// separate ClientIP middleware since M2.
+func RequestID() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rid := r.Header.Get(headerXRequestID)
+			if rid == "" {
+				rid = generateID()
+			} else {
+				rid = sanitizeRequestID(rid)
+			}
+			ctx := ctxval.WithRequestID(r.Context(), rid)
+			w.Header().Set(headerXRequestID, rid)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
 }
 

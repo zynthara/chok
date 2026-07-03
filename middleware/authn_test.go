@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/zynthara/chok/v2/auth"
 	"github.com/zynthara/chok/v2/auth/jwt"
 	"github.com/zynthara/chok/v2/handler"
@@ -35,22 +33,20 @@ func newTestJWT(t *testing.T) *jwt.Manager {
 	return m
 }
 
-func authnRouter(parser TokenParser, resolver PrincipalResolver) *gin.Engine {
-	r := gin.New()
-	r.Use(Authn(parser, resolver))
-	r.GET("/me", func(c *gin.Context) {
-		p, ok := auth.PrincipalFrom(c.Request.Context())
+func authnRouter(parser TokenParser, resolver PrincipalResolver) http.Handler {
+	me := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, ok := auth.PrincipalFrom(r.Context())
 		if !ok {
-			handler.WriteResponse(c, 0, nil, errors.New("no principal"))
+			handler.WriteResponse(w, r, 0, nil, errors.New("no principal"))
 			return
 		}
-		c.JSON(200, gin.H{
+		handler.WriteResponse(w, r, 200, map[string]any{
 			"subject": p.Subject,
 			"name":    p.Name,
 			"roles":   p.Roles,
-		})
+		}, nil)
 	})
-	return r
+	return chain(me, Authn(parser, resolver))
 }
 
 func TestAuthn_ValidToken_NilResolver(t *testing.T) {

@@ -77,8 +77,11 @@ func (d *DBComponent) Init(ctx context.Context, k component.Kernel) error {
 	}
 	d.gdb.Store(gdb)
 
-	// Auto-enable GORM query tracing when TracingComponent is active.
-	if tc, ok := k.Get("tracing").(*TracingComponent); ok && tc != nil && tc.Enabled() {
+	// Auto-enable GORM query tracing when a tracing component is active.
+	// Structural assertion: the v2 tracing module lives outside this
+	// registry, so post-M2 this path stays dormant in the v1-residue
+	// world — kept for any test double that fills the role.
+	if tc, ok := k.Get("tracing").(interface{ Enabled() bool }); ok && tc != nil && tc.Enabled() {
 		db.EnableTracing(gdb)
 	}
 

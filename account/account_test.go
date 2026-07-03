@@ -18,7 +18,7 @@ import (
 	"github.com/zynthara/chok/v2/config"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/log"
-	"github.com/zynthara/chok/v2/middleware"
+	middleware "github.com/zynthara/chok/v2/internal/ginresidue"
 	"github.com/zynthara/chok/v2/store"
 	"github.com/zynthara/chok/v2/store/where"
 )

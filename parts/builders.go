@@ -56,36 +56,11 @@ func DefaultAccountBuilder(opts *config.AccountOptions) AccountBuilder {
 	}
 }
 
-// DefaultSwaggerResolver returns a SwaggerResolver that maps
-// config.SwaggerOptions to SwaggerSettings.
-func DefaultSwaggerResolver(opts *config.SwaggerOptions) SwaggerResolver {
-	return func(any) *SwaggerSettings {
-		if opts == nil || !opts.Enabled {
-			return nil
-		}
-		return &SwaggerSettings{
-			Enabled:    true,
-			Title:      opts.Title,
-			Version:    opts.Version,
-			Prefix:     opts.Prefix,
-			BearerAuth: opts.BearerAuth,
-		}
-	}
-}
-
 // DefaultRedisResolver returns a RedisResolver that forwards
 // config.RedisOptions. Returns nil when opts is nil, disabling the
 // component.
 func DefaultRedisResolver(opts *config.RedisOptions) RedisResolver {
 	return func(any) *config.RedisOptions {
-		return opts
-	}
-}
-
-// DefaultHTTPResolver returns an HTTPResolver that forwards
-// config.HTTPOptions directly.
-func DefaultHTTPResolver(opts *config.HTTPOptions) HTTPResolver {
-	return func(any) *config.HTTPOptions {
 		return opts
 	}
 }
@@ -120,15 +95,6 @@ func DefaultCacheBuilder(memOpts *config.CacheMemoryOptions, fileOpts *config.Ca
 
 // --- helpers for auto-register callers ---
 
-// NewDefaultHTTPComponent is a shorthand for the common case.
-// Returns nil when opts is nil.
-func NewDefaultHTTPComponent(opts *config.HTTPOptions) *HTTPComponent {
-	if opts == nil || !opts.Enabled {
-		return nil
-	}
-	return NewHTTPComponent(DefaultHTTPResolver(opts))
-}
-
 // NewDefaultDBComponent is a shorthand for the common case:
 // SQLite or MySQL builder from discovered config, plus user-supplied
 // table specs. Returns nil when no options are provided.
@@ -149,15 +115,6 @@ func NewDefaultAccountComponent(opts *config.AccountOptions) *AccountComponent {
 		return nil
 	}
 	return NewAccountComponent(DefaultAccountBuilder(opts), "/auth")
-}
-
-// NewDefaultSwaggerComponent is a shorthand for the common case.
-// Returns nil when opts is nil or Enabled is false.
-func NewDefaultSwaggerComponent(opts *config.SwaggerOptions) *SwaggerComponent {
-	if opts == nil || !opts.Enabled {
-		return nil
-	}
-	return NewSwaggerComponent(DefaultSwaggerResolver(opts))
 }
 
 // NewDefaultRedisComponent is a shorthand for the common case.

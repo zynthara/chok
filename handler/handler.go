@@ -1,3 +1,10 @@
+// Package handler is chok's typed request layer: generic
+// HandleRequest / HandleAction / HandleList constructors that bind
+// path + query + JSON sources into one request struct, validate it,
+// call the business function and render the uniform success / apierr
+// envelope. Since M2 the whole layer is stdlib-only — handlers are
+// plain http.Handler values; route metadata rides on the handler
+// itself via Meta() (consumed by the web route table, SPEC §4.2).
 package handler
 
 import (
@@ -6,12 +13,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"reflect"
 	"strings"
 
-	"github.com/gin-gonic/gin"
-	"github.com/gin-gonic/gin/binding"
 	"github.com/go-playground/validator/v10"
 
 	"github.com/zynthara/chok/v2/apierr"
@@ -105,36 +111,104 @@ type ErrorResponse struct {
 type Binder interface {
 	// Tag returns the struct tag this binder handles (e.g., "uri", "form", "json").
 	Tag() string
-	// Bind maps values from the request into the target struct.
-	Bind(c *gin.Context, target any) error
+	// Bind maps values from the request into the target struct. w is
+	// available for body-limit enforcement (http.MaxBytesReader).
+	Bind(w http.ResponseWriter, r *http.Request, target any) error
 }
 
-// defaultBinders is the built-in set: URI params, query string, JSON body.
-var defaultBinders = []Binder{uriBinder{}, queryBinder{}, jsonBinder{}}
+// defaultBinders builds the built-in set for one handler: URI params,
+// query string, JSON body (with the handler's body cap baked in).
+func defaultBinders(reqType reflect.Type, maxBody int64) []Binder {
+	if maxBody <= 0 {
+		maxBody = maxBodySize
+	}
+	return []Binder{
+		uriBinder{params: uriParamNames(reqType)},
+		queryBinder{},
+		jsonBinder{limit: maxBody},
+	}
+}
 
-type uriBinder struct{}
+// uriBinder maps ServeMux path values ({name} segments) into `uri`-tagged
+// fields. The parameter name set is derived from the request type at
+// construction time; r.PathValue is consulted per request.
+type uriBinder struct {
+	params []string
+}
 
 func (uriBinder) Tag() string { return "uri" }
-func (uriBinder) Bind(c *gin.Context, target any) error {
-	m := make(map[string][]string)
-	for _, p := range c.Params {
-		m[p.Key] = []string{p.Value}
+func (b uriBinder) Bind(_ http.ResponseWriter, r *http.Request, target any) error {
+	if len(b.params) == 0 {
+		return nil
 	}
-	return binding.MapFormWithTag(target, m, "uri")
+	m := make(map[string][]string, len(b.params))
+	for _, name := range b.params {
+		if v := r.PathValue(name); v != "" {
+			m[name] = []string{v}
+		}
+	}
+	return decodeForm(m, target, "uri")
+}
+
+// uriParamNames collects the `uri` tag names declared on the request
+// type (embedded structs included) so Bind knows which path values to
+// pull. Non-struct types have none.
+func uriParamNames(t reflect.Type) []string {
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return nil
+	}
+	var names []string
+	collectTagNames(t, "uri", &names, make(map[reflect.Type]bool))
+	return names
+}
+
+func collectTagNames(t reflect.Type, tag string, out *[]string, seen map[reflect.Type]bool) {
+	if seen[t] {
+		return
+	}
+	seen[t] = true
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if f.Anonymous {
+			ft := f.Type
+			if ft.Kind() == reflect.Ptr {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct {
+				collectTagNames(ft, tag, out, seen)
+			}
+			continue
+		}
+		name := f.Tag.Get(tag)
+		if comma := strings.IndexByte(name, ','); comma >= 0 {
+			name = name[:comma]
+		}
+		if name != "" && name != "-" {
+			*out = append(*out, name)
+		}
+	}
 }
 
 type queryBinder struct{}
 
 func (queryBinder) Tag() string { return "form" }
-func (queryBinder) Bind(c *gin.Context, target any) error {
-	return binding.MapFormWithTag(target, c.Request.URL.Query(), "form")
+func (queryBinder) Bind(_ http.ResponseWriter, r *http.Request, target any) error {
+	return decodeForm(r.URL.Query(), target, "form")
 }
 
-type jsonBinder struct{}
+type jsonBinder struct {
+	limit int64
+}
 
 func (jsonBinder) Tag() string { return "json" }
-func (jsonBinder) Bind(c *gin.Context, target any) error {
-	return bindJSON(c, target)
+func (b jsonBinder) Bind(w http.ResponseWriter, r *http.Request, target any) error {
+	return bindJSON(w, r, target, b.limit)
 }
 
 // activeBinders inspects struct tags at construction time and returns the
@@ -217,68 +291,80 @@ func scanTags(t reflect.Type, binders []Binder, seen map[reflect.Type]bool) map[
 	return present
 }
 
-// HandleRequest creates a gin.HandlerFunc with multi-source binding.
-// Tag analysis happens once at construction time (Setup phase).
-func HandleRequest[T any, R any](h HandlerFunc[T, R], opts ...HandleOption) gin.HandlerFunc {
-	cfg := &handleConfig{successCode: http.StatusOK, binders: append([]Binder(nil), defaultBinders...)}
-	for _, o := range opts {
-		o(cfg)
-	}
-	active := activeBinders(reflect.TypeOf((*T)(nil)).Elem(), cfg.binders)
-
-	maxBody := cfg.maxBodyBytes
-	ginH := func(c *gin.Context) {
-		if maxBody > 0 {
-			c.Set(maxBodyCtxKey, maxBody)
-		}
-		req := new(T)
-		if err := bindRequest(c, req, active); err != nil {
-			WriteResponse(c, 0, nil, toBind(err))
-			return
-		}
-		resp, err := h(c.Request.Context(), req)
-		WriteResponse(c, cfg.successCode, resp, err)
-	}
-	registerMeta(ginH, &HandlerMeta{
-		ReqType:  reflect.TypeOf((*T)(nil)).Elem(),
-		RespType: reflect.TypeOf((*R)(nil)).Elem(),
-		Code:     cfg.successCode,
-		Summary:  cfg.summary,
-		Tags:     cfg.tags,
-		Public:   cfg.public,
-	})
-	return ginH
+// metaHandler is the constructed handler value: a plain http.Handler
+// that also carries its route metadata. The web router type-asserts
+// the optional interface { Meta() Meta } at registration and records
+// the metadata in its route table (SPEC §4.2 item 1).
+type metaHandler struct {
+	serve http.HandlerFunc
+	meta  Meta
 }
 
-// HandleAction creates a gin.HandlerFunc for actions (no response body, 204 by default).
-func HandleAction[T any](h ActionFunc[T], opts ...HandleOption) gin.HandlerFunc {
-	cfg := &handleConfig{successCode: http.StatusNoContent, binders: append([]Binder(nil), defaultBinders...)}
+func (h *metaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.serve(w, r) }
+
+// Meta returns the route metadata attached at construction.
+func (h *metaHandler) Meta() Meta { return h.meta }
+
+// HandleRequest creates an http.Handler with multi-source binding.
+// Tag analysis happens once at construction time.
+func HandleRequest[T any, R any](h HandlerFunc[T, R], opts ...HandleOption) http.Handler {
+	cfg := &handleConfig{successCode: http.StatusOK}
 	for _, o := range opts {
 		o(cfg)
 	}
-	active := activeBinders(reflect.TypeOf((*T)(nil)).Elem(), cfg.binders)
+	reqType := reflect.TypeOf((*T)(nil)).Elem()
+	binders := append(defaultBinders(reqType, cfg.maxBodyBytes), cfg.binders...)
+	active := activeBinders(reqType, binders)
 
-	maxBody := cfg.maxBodyBytes
-	ginH := func(c *gin.Context) {
-		if maxBody > 0 {
-			c.Set(maxBodyCtxKey, maxBody)
-		}
-		req := new(T)
-		if err := bindRequest(c, req, active); err != nil {
-			WriteResponse(c, 0, nil, toBind(err))
-			return
-		}
-		err := h(c.Request.Context(), req)
-		WriteResponse(c, cfg.successCode, nil, err)
+	return &metaHandler{
+		serve: func(w http.ResponseWriter, r *http.Request) {
+			req := new(T)
+			if err := bindRequest(w, r, req, active); err != nil {
+				WriteResponse(w, r, 0, nil, toBind(err))
+				return
+			}
+			resp, err := h(r.Context(), req)
+			WriteResponse(w, r, cfg.successCode, resp, err)
+		},
+		meta: Meta{
+			ReqType:  reqType,
+			RespType: reflect.TypeOf((*R)(nil)).Elem(),
+			Code:     cfg.successCode,
+			Summary:  cfg.summary,
+			Tags:     cfg.tags,
+			Public:   cfg.public,
+		},
 	}
-	registerMeta(ginH, &HandlerMeta{
-		ReqType: reflect.TypeOf((*T)(nil)).Elem(),
-		Code:    cfg.successCode,
-		Summary: cfg.summary,
-		Tags:    cfg.tags,
-		Public:  cfg.public,
-	})
-	return ginH
+}
+
+// HandleAction creates an http.Handler for actions (no response body, 204 by default).
+func HandleAction[T any](h ActionFunc[T], opts ...HandleOption) http.Handler {
+	cfg := &handleConfig{successCode: http.StatusNoContent}
+	for _, o := range opts {
+		o(cfg)
+	}
+	reqType := reflect.TypeOf((*T)(nil)).Elem()
+	binders := append(defaultBinders(reqType, cfg.maxBodyBytes), cfg.binders...)
+	active := activeBinders(reqType, binders)
+
+	return &metaHandler{
+		serve: func(w http.ResponseWriter, r *http.Request) {
+			req := new(T)
+			if err := bindRequest(w, r, req, active); err != nil {
+				WriteResponse(w, r, 0, nil, toBind(err))
+				return
+			}
+			err := h(r.Context(), req)
+			WriteResponse(w, r, cfg.successCode, nil, err)
+		},
+		meta: Meta{
+			ReqType: reqType,
+			Code:    cfg.successCode,
+			Summary: cfg.summary,
+			Tags:    cfg.tags,
+			Public:  cfg.public,
+		},
+	}
 }
 
 // Validated wraps a HandlerFunc with additional validation functions.
@@ -327,6 +413,15 @@ func wrapValidationError(err error) error {
 	return apierr.ErrInvalidArgument.WithMessage(err.Error())
 }
 
+// responseWritten reports whether a response has already gone out, via
+// the written-tracking ResponseWriter the web server installs. A bare
+// writer (package-level tests, custom servers) counts as unwritten —
+// consumer-side structural interface, no web import (M2 mini-SPEC §1).
+func responseWritten(w http.ResponseWriter) bool {
+	ww, ok := w.(interface{ Written() bool })
+	return ok && ww.Written()
+}
+
 // WriteResponse writes a success or error JSON response.
 //
 // Success: HTTP {code}, body = data.
@@ -336,37 +431,77 @@ func wrapValidationError(err error) error {
 // middleware already wrote 504). Without this guard, a recovered panic
 // in a later handler would trigger "http: superfluous response.WriteHeader
 // call" warnings and produce a garbled body.
-func WriteResponse(c *gin.Context, code int, data any, err error) {
-	if c.Writer.Written() {
+func WriteResponse(w http.ResponseWriter, r *http.Request, code int, data any, err error) {
+	if responseWritten(w) {
 		return
 	}
-	if err == nil {
-		if data == nil {
-			c.Status(code)
-			return
-		}
-		c.JSON(code, data)
+	if err != nil {
+		WriteError(w, r, err)
 		return
 	}
+	if data == nil {
+		w.WriteHeader(code)
+		return
+	}
+	writeJSON(w, r, code, data)
+}
 
-	ctx := c.Request.Context()
-	ae := resolveError(ctx, err)
-	rid := ctxval.RequestIDFrom(ctx)
+// WriteError renders err through the apierr pipeline: resolve to
+// *apierr.Error, run render hooks on a per-response copy, emit headers
+// and the uniform envelope. Same written-guard as WriteResponse.
+func WriteError(w http.ResponseWriter, r *http.Request, err error) {
+	if responseWritten(w) {
+		return
+	}
+	ctx := r.Context()
+	resolved := resolveError(ctx, err)
 
-	// Emit caller-supplied headers (e.g. Retry-After on 429). Headers must
-	// be written before c.JSON flushes the response.
+	// Render hooks fire before serialization, typically filling
+	// ae.Message via i18n. They receive a shallow copy — resolveError
+	// can return a shared sentinel (ErrInternal, ...), and an in-place
+	// fill on that would leak across requests and languages (mini-SPEC
+	// §7). Hooks replace maps on the copy rather than mutating them.
+	ae := *resolved
+	apierr.RenderWithContext(ctx, &ae)
+
+	// Emit caller-supplied headers (e.g. Retry-After on 429) before the
+	// status line is written.
 	for hk, hv := range ae.Headers {
-		c.Header(hk, hv)
+		w.Header().Set(hk, hv)
 	}
 
-	resp := ErrorResponse{
+	writeJSON(w, r, ae.Code, ErrorResponse{
 		Code:      ae.Code,
 		Reason:    ae.Reason,
 		Message:   ae.Message,
-		RequestID: rid,
+		RequestID: ctxval.RequestIDFrom(ctx),
 		Metadata:  ae.Metadata,
+	})
+}
+
+// writeJSON marshals first, then writes — an encode failure must not
+// corrupt an already-started response.
+func writeJSON(w http.ResponseWriter, r *http.Request, code int, v any) {
+	buf, err := json.Marshal(v)
+	if err != nil {
+		if l := loggerFrom(r.Context()); l != nil {
+			l.ErrorContext(r.Context(), "response encode failed", "error", err)
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"code":500,"reason":"InternalError","message":"response encoding failed"}`))
+		return
 	}
-	c.JSON(ae.Code, resp)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_, _ = w.Write(buf)
+}
+
+func loggerFrom(ctx context.Context) log.Logger {
+	if l, ok := ctxval.LoggerFrom(ctx).(log.Logger); ok && l != nil {
+		return l
+	}
+	return nil
 }
 
 // resolveError maps any error to *apierr.Error, logging internal errors.
@@ -394,7 +529,7 @@ func resolveError(ctx context.Context, err error) *apierr.Error {
 	}
 
 	// Unknown error — log and return ErrInternal.
-	if l, ok := ctxval.LoggerFrom(ctx).(log.Logger); ok && l != nil {
+	if l := loggerFrom(ctx); l != nil {
 		l.ErrorContext(ctx, "internal error", "error", err)
 	}
 	return apierr.ErrInternal
@@ -409,18 +544,27 @@ type defaulter interface {
 	Default()
 }
 
+// structValidator is the shared validator/v10 instance. TagName stays
+// "binding" so existing request structs (`binding:"required,email"`)
+// keep working across the gin → stdlib move.
+var structValidator = func() *validator.Validate {
+	v := validator.New()
+	v.SetTagName("binding")
+	return v
+}()
+
 // bindRequest performs multi-source binding using the active binders.
 // Each binder runs without validation; validation runs once at the end
 // so that cross-source required fields don't fail prematurely.
 // If the request implements Defaulter, Default() is called between
 // binding and validation.
 //
-// validator.v10 panics-without-panicking on non-struct targets (it
-// returns InvalidValidationError); skip the call entirely in that
-// case so HandleRequest[map[string]any, R] flows through cleanly.
-func bindRequest(c *gin.Context, req any, binders []Binder) error {
+// validator.v10 rejects non-struct targets (InvalidValidationError);
+// skip the call entirely in that case so
+// HandleRequest[map[string]any, R] flows through cleanly.
+func bindRequest(w http.ResponseWriter, r *http.Request, req any, binders []Binder) error {
 	for _, b := range binders {
-		if err := b.Bind(c, req); err != nil {
+		if err := b.Bind(w, r, req); err != nil {
 			return err
 		}
 	}
@@ -434,42 +578,33 @@ func bindRequest(c *gin.Context, req any, binders []Binder) error {
 	if rv.Kind() != reflect.Struct {
 		return nil
 	}
-	return binding.Validator.ValidateStruct(req)
+	return structValidator.Struct(req)
 }
 
 // maxBodySize is the default limit on JSON request body size (4 MB).
 // Prevents unbounded memory allocation from oversized payloads. Override
-// per handler via WithMaxBodySize — the chosen value is propagated to
-// bindJSON through a gin.Context key.
+// per handler via WithMaxBodySize.
 const maxBodySize = 4 << 20
 
-// maxBodyCtxKey is the gin.Context key HandleRequest/HandleAction use to
-// publish the effective body-size cap before the binders run. bindJSON
-// reads this key; when absent it falls back to maxBodySize.
-const maxBodyCtxKey = "chok:max_body_bytes"
-
 // bindJSON decodes JSON body with DisallowUnknownFields.
-// Returns ErrBind if Content-Type is not application/json.
-func bindJSON(c *gin.Context, obj any) error {
-	if c.Request.Body == nil || c.Request.ContentLength == 0 {
+// Returns a bind error when Content-Type is not application/json.
+func bindJSON(w http.ResponseWriter, r *http.Request, obj any, limit int64) error {
+	if r.Body == nil || r.ContentLength == 0 {
 		// No body — skip JSON binding (validation will catch required fields).
 		return nil
 	}
-	ct := c.ContentType()
+	ct := contentType(r)
 	if ct != "application/json" {
 		if ct == "" {
 			return fmt.Errorf("missing Content-Type for JSON binding (expected application/json)")
 		}
 		return fmt.Errorf("unsupported Content-Type %q for JSON binding", ct)
 	}
-	limit := int64(maxBodySize)
-	if v, ok := c.Get(maxBodyCtxKey); ok {
-		if n, ok := v.(int64); ok && n > 0 {
-			limit = n
-		}
+	if limit <= 0 {
+		limit = maxBodySize
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
-	dec := json.NewDecoder(c.Request.Body)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(obj); err != nil {
 		return err
@@ -479,8 +614,27 @@ func bindJSON(c *gin.Context, obj any) error {
 		return errors.New("request body contains multiple JSON values")
 	}
 	// Drain the body so downstream can't re-read.
-	_, _ = io.ReadAll(c.Request.Body)
+	_, _ = io.ReadAll(r.Body)
 	return nil
+}
+
+// contentType extracts the media type, dropping parameters like
+// charset (gin's c.ContentType() equivalent).
+func contentType(r *http.Request) string {
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		return ""
+	}
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		// Fall back to the raw prefix so malformed-but-obvious values
+		// still classify ("application/json;;").
+		if i := strings.IndexByte(ct, ';'); i >= 0 {
+			return strings.TrimSpace(ct[:i])
+		}
+		return strings.TrimSpace(ct)
+	}
+	return mt
 }
 
 // toBind converts any binding error to apierr.ErrBind.

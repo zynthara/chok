@@ -2,9 +2,8 @@ package middleware
 
 import (
 	"context"
+	"net/http"
 	"strings"
-
-	"github.com/gin-gonic/gin"
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/auth"
@@ -29,40 +28,42 @@ type PrincipalResolver func(ctx context.Context, subject string, claims map[stri
 // parser: validates the token (built-in jwt.Manager or custom TokenParser).
 // Panics if nil — configuration errors are caught at startup, not at request time.
 // resolver: optional, enriches Principal from subject+claims.
-func Authn(parser TokenParser, resolver PrincipalResolver) gin.HandlerFunc {
+//
+// The account battery's convenience wiring (account.Authn(k)) arrives
+// with its M4 migration; until then callers hand in the parser pair
+// explicitly — the middleware itself is fully generic.
+func Authn(parser TokenParser, resolver PrincipalResolver) func(http.Handler) http.Handler {
 	if parser == nil {
 		panic("middleware: Authn parser must not be nil")
 	}
-	return func(c *gin.Context) {
-		tokenStr := extractBearer(c.GetHeader("Authorization"))
-		if tokenStr == "" {
-			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated)
-			c.Abort()
-			return
-		}
-
-		subject, claims, err := parser.Parse(tokenStr)
-		if err != nil {
-			handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated)
-			c.Abort()
-			return
-		}
-
-		var p auth.Principal
-		if resolver != nil {
-			p, err = resolver(c.Request.Context(), subject, claims)
-			if err != nil {
-				handler.WriteResponse(c, 0, nil, apierr.ErrUnauthenticated)
-				c.Abort()
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenStr := extractBearer(r.Header.Get("Authorization"))
+			if tokenStr == "" {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated)
 				return
 			}
-		} else {
-			p = auth.Principal{Subject: subject, Claims: claims}
-		}
 
-		ctx := auth.WithPrincipal(c.Request.Context(), p)
-		c.Request = c.Request.WithContext(ctx)
-		c.Next()
+			subject, claims, err := parser.Parse(tokenStr)
+			if err != nil {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated)
+				return
+			}
+
+			var p auth.Principal
+			if resolver != nil {
+				p, err = resolver(r.Context(), subject, claims)
+				if err != nil {
+					handler.WriteResponse(w, r, 0, nil, apierr.ErrUnauthenticated)
+					return
+				}
+			} else {
+				p = auth.Principal{Subject: subject, Claims: claims}
+			}
+
+			ctx := auth.WithPrincipal(r.Context(), p)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
 }
 

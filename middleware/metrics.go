@@ -1,14 +1,16 @@
 package middleware
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/zynthara/chok/v2/internal/ctxval"
 )
 
-// Metrics returns a gin middleware that instruments HTTP requests with
+// Metrics returns a middleware that instruments HTTP requests with
 // the RED (Rate, Errors, Duration) metrics — the industry-standard
 // golden signals for any HTTP service:
 //
@@ -16,12 +18,16 @@ import (
 //   - http_request_duration_seconds{method, path}     — histogram
 //   - http_requests_in_flight                         — gauge
 //
-// reg is typically obtained from MetricsComponent.PrometheusRegistry().
-// The middleware is safe to use with any prometheus.Registerer, and is
-// idempotent across re-initialisation: on AlreadyRegisteredError (which
-// happens when HTTPComponent.Init runs after a prior Init/Close cycle)
-// the existing collectors are reused instead of panicking.
-func Metrics(reg prometheus.Registerer) gin.HandlerFunc {
+// reg is typically the metrics module's Prometheus registry — web.Module
+// wires that automatically when the module is assembled. The middleware
+// is safe to use with any prometheus.Registerer, and is idempotent
+// across re-initialisation: on AlreadyRegisteredError the existing
+// collectors are reused instead of panicking.
+//
+// The path label is the matched route pattern ({rid} style since M2 —
+// declared change, dashboards keying on :rid labels need updating);
+// unmatched requests record "unmatched".
+func Metrics(reg prometheus.Registerer) func(http.Handler) http.Handler {
 	requestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests.",
@@ -42,24 +48,26 @@ func Metrics(reg prometheus.Registerer) gin.HandlerFunc {
 	requestDuration = registerOrReuseHistogramVec(reg, requestDuration)
 	requestsInFlight = registerOrReuseGauge(reg, requestsInFlight)
 
-	return func(c *gin.Context) {
-		start := time.Now()
-		path := c.FullPath()
-		if path == "" {
-			path = "unmatched"
-		}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
 
-		requestsInFlight.Inc()
-		defer requestsInFlight.Dec()
+			requestsInFlight.Inc()
+			defer requestsInFlight.Dec()
 
-		c.Next()
+			next.ServeHTTP(w, r)
 
-		status := strconv.Itoa(c.Writer.Status())
-		method := c.Request.Method
-		elapsed := time.Since(start).Seconds()
+			path := ctxval.RoutePatternFrom(r.Context())
+			if path == "" {
+				path = "unmatched"
+			}
+			status := strconv.Itoa(statusOf(w))
+			method := r.Method
+			elapsed := time.Since(start).Seconds()
 
-		requestsTotal.WithLabelValues(method, path, status).Inc()
-		requestDuration.WithLabelValues(method, path).Observe(elapsed)
+			requestsTotal.WithLabelValues(method, path, status).Inc()
+			requestDuration.WithLabelValues(method, path).Observe(elapsed)
+		})
 	}
 }
 

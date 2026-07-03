@@ -1,7 +1,6 @@
 package swagger
 
 import (
-	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -27,18 +26,6 @@ type testModel struct {
 	Title     string `json:"title"`
 	Status    string `json:"status"`
 	CreatedAt string `json:"created_at"`
-}
-
-func createHandler(_ context.Context, req *testCreateReq) (*testModel, error) {
-	return &testModel{Title: req.Title}, nil
-}
-
-func getHandler(_ context.Context, req *testGetReq) (*testModel, error) {
-	return &testModel{ID: req.RID}, nil
-}
-
-func updateHandler(_ context.Context, req *testUpdateReq) (*testModel, error) {
-	return &testModel{ID: req.RID}, nil
 }
 
 func TestSpec_MarshalJSON(t *testing.T) {
@@ -133,16 +120,18 @@ func TestExtractParams_URI(t *testing.T) {
 	}
 }
 
-func TestGinPathToOpenAPI(t *testing.T) {
+func TestPatternToOpenAPI(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"/posts/:rid", "/posts/{rid}"},
+		{"/posts/{rid}", "/posts/{rid}"},
 		{"/api/v1/posts", "/api/v1/posts"},
-		{"/users/:uid/posts/:pid", "/users/{uid}/posts/{pid}"},
+		{"/users/{uid}/posts/{pid}", "/users/{uid}/posts/{pid}"},
+		{"/files/{path...}", "/files/{path}"},
+		{"/{$}", "/"},
 	}
 	for _, tt := range tests {
-		got := ginPathToOpenAPI(tt.in)
+		got := patternToOpenAPI(tt.in)
 		if got != tt.want {
-			t.Fatalf("ginPathToOpenAPI(%q) = %q, want %q", tt.in, got, tt.want)
+			t.Fatalf("patternToOpenAPI(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }

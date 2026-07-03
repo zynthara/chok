@@ -2,13 +2,11 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-
-	"github.com/zynthara/chok/v2/internal/ctxval"
+	"github.com/zynthara/chok/v2/apierr"
+	"github.com/zynthara/chok/v2/handler"
 )
 
 // Timeout returns a middleware that injects a context deadline into each
@@ -19,53 +17,33 @@ import (
 // A zero or negative duration disables the middleware (pass-through).
 //
 // This is a cooperative timeout: the handler runs synchronously on the
-// same goroutine, so gin.Context is never accessed concurrently. If a
-// handler ignores context cancellation (e.g. a pure CPU loop), it will
-// block until it returns on its own. For hard process-level limits,
+// same goroutine, so the ResponseWriter is never accessed concurrently.
+// If a handler ignores context cancellation (e.g. a pure CPU loop), it
+// will block until it returns on its own. For hard process-level limits,
 // configure http.Server.WriteTimeout instead.
-func Timeout(d time.Duration) gin.HandlerFunc {
+//
+// v1 carried extra "did gin's double context lose the deadline" gymnastics;
+// with the single context.Context those are gone (SPEC §4.1) — derive,
+// serve, and backstop with the written-tracking check.
+func Timeout(d time.Duration) func(http.Handler) http.Handler {
 	if d <= 0 {
-		return func(c *gin.Context) { c.Next() }
+		return func(next http.Handler) http.Handler { return next }
 	}
-	return func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), d)
-		defer cancel()
-		c.Request = c.Request.WithContext(ctx)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), d)
+			defer cancel()
+			r = r.WithContext(ctx)
 
-		c.Next()
+			next.ServeHTTP(w, r)
 
-		// If the handler bailed out due to the deadline (or any other
-		// reason) without writing a response, send 504.
-		if ctx.Err() != nil && !c.Writer.Written() {
-			c.Header("Content-Type", "application/json; charset=utf-8")
-			c.Writer.WriteHeader(http.StatusGatewayTimeout)
-			body := timeoutBodyFor(ctxval.RequestIDFrom(c.Request.Context()))
-			c.Writer.Write(body) //nolint:errcheck
-			c.Abort()
-		}
+			// If the handler bailed out due to the deadline (or any other
+			// reason) without writing a response, send 504. The envelope
+			// matches every other error response (code/reason/message/
+			// request_id) — apierr.ErrGatewayTimeout is the v1 body.
+			if ctx.Err() != nil && !responseWritten(w) {
+				handler.WriteResponse(w, r, 0, nil, apierr.ErrGatewayTimeout)
+			}
+		})
 	}
-}
-
-// timeoutBodyFor serialises the 504 envelope for a given request_id.
-// Encoded on demand (rather than via a static []byte) so the body
-// carries the same request_id field that other error responses use,
-// letting log correlation work at the edge.
-func timeoutBodyFor(requestID string) []byte {
-	body := struct {
-		Code      int    `json:"code"`
-		Reason    string `json:"reason"`
-		Message   string `json:"message"`
-		RequestID string `json:"request_id,omitempty"`
-	}{
-		Code:      http.StatusGatewayTimeout,
-		Reason:    "GatewayTimeout",
-		Message:   "request timed out",
-		RequestID: requestID,
-	}
-	b, err := json.Marshal(body)
-	if err != nil {
-		// Should be unreachable — fall back to the static form.
-		return []byte(`{"code":504,"reason":"GatewayTimeout","message":"request timed out"}`)
-	}
-	return b
 }

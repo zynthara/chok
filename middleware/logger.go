@@ -2,8 +2,8 @@ package middleware
 
 import (
 	"context"
+	"net/http"
 
-	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/zynthara/chok/v2/internal/ctxval"
@@ -16,33 +16,41 @@ import (
 //
 // Both ctxval (internal, used by handler error logging) and log.WithContext
 // (public, used by business code) are populated.
-func Logger(l log.Logger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ctx := c.Request.Context()
+func Logger(l log.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
 
-		// Build a per-request logger enriched with request_id and
-		// trace context (when OpenTelemetry tracing is active).
-		reqLogger := l
-		if rid := ctxval.RequestIDFrom(ctx); rid != "" {
-			reqLogger = l.With("request_id", rid)
-		}
-		if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-			reqLogger = reqLogger.With(
-				"trace_id", sc.TraceID().String(),
-				"span_id", sc.SpanID().String(),
-			)
-		}
+			// Build a per-request logger enriched with request_id and
+			// trace context (when OpenTelemetry tracing is active).
+			reqLogger := l
+			if rid := ctxval.RequestIDFrom(ctx); rid != "" {
+				reqLogger = l.With("request_id", rid)
+			}
+			if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+				reqLogger = reqLogger.With(
+					"trace_id", sc.TraceID().String(),
+					"span_id", sc.SpanID().String(),
+				)
+			}
 
-		ctx = ctxval.WithLogger(ctx, reqLogger)
-		ctx = log.WithContext(ctx, reqLogger)
-		c.Request = c.Request.WithContext(ctx)
-		c.Next()
+			ctx = ctxval.WithLogger(ctx, reqLogger)
+			ctx = log.WithContext(ctx, reqLogger)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
 }
 
 // RequestIDFrom extracts the request ID from context (user-facing helper).
 func RequestIDFrom(ctx context.Context) string {
 	return ctxval.RequestIDFrom(ctx)
+}
+
+// ClientIPFrom extracts the resolved client IP from context (set by the
+// ClientIP middleware). Empty when unresolved — skip IP-keyed decisions
+// in that case.
+func ClientIPFrom(ctx context.Context) string {
+	return ctxval.ClientIPFrom(ctx)
 }
 
 // LoggerFrom extracts the logger from context (user-facing helper).

@@ -1,6 +1,8 @@
 // Package swagger provides automatic OpenAPI 3.0 spec generation from
-// chok's typed handler system. Route registration and spec collection
-// happen in a single call — zero annotations required.
+// chok's typed handler system. Since M2 the spec is built from the web
+// router's route table (pattern + handler.Meta collected at
+// registration) — the v1 gin-walk and unsafe closure registry are gone
+// (SPEC §4.2 item 1). Module() is the assembly entry point.
 package swagger
 
 import (
@@ -9,10 +11,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-
-	"github.com/gin-gonic/gin"
-
-	"github.com/zynthara/chok/v2/config"
 )
 
 // Spec collects OpenAPI metadata during route registration.
@@ -28,29 +26,6 @@ func New(title, version string) *Spec {
 		info:  specInfo{Title: title, Version: version},
 		paths: make(map[string]*pathItem),
 	}
-}
-
-// Setup creates a Spec from config, applies BearerAuth if configured,
-// and mounts the swagger UI — all in one call. Returns nil if not enabled.
-//
-//	doc := swagger.Setup(&cfg.Swagger, srv.Engine())
-//	swagger.Post(doc, api, "/posts", h.create, swagger.Op{...})
-func Setup(opts *config.SwaggerOptions, r interface {
-	GET(string, ...gin.HandlerFunc) gin.IRoutes
-}) *Spec {
-	if opts == nil || !opts.Enabled {
-		return nil
-	}
-	doc := New(defStr(opts.Title, "API"), defStr(opts.Version, "1.0.0"))
-	if opts.BearerAuth {
-		doc.BearerAuth()
-	}
-	prefix := opts.Prefix
-	if prefix == "" {
-		prefix = "/swagger"
-	}
-	doc.Mount(r, prefix)
-	return doc
 }
 
 func defStr(v, fallback string) string {
@@ -82,11 +57,11 @@ type Op struct {
 }
 
 // addOperation adds an operation to the spec. Nil-safe.
-func (s *Spec) addOperation(method, ginPath string, op Op, reqType, respType reflect.Type) {
+func (s *Spec) addOperation(method, pattern string, op Op, reqType, respType reflect.Type) {
 	if s == nil {
 		return
 	}
-	oaPath := ginPathToOpenAPI(ginPath)
+	oaPath := patternToOpenAPI(pattern)
 	method = strings.ToLower(method)
 
 	pi := s.paths[oaPath]
@@ -176,35 +151,6 @@ func (s *Spec) MarshalJSON() ([]byte, error) {
 	return json.Marshal(spec)
 }
 
-// Mount registers swagger UI and spec JSON on the server.
-//
-//	doc.Mount(srv, "/swagger")
-//
-// Serves:
-//
-//	GET /swagger/doc.json — OpenAPI JSON
-//	GET /swagger/          — Swagger UI
-//
-// Mount registers swagger UI and spec JSON on the server.
-// Nil-safe: no-op when Spec is nil (swagger disabled).
-func (s *Spec) Mount(r interface {
-	GET(string, ...gin.HandlerFunc) gin.IRoutes
-}, prefix string) {
-	if s == nil {
-		return
-	}
-	prefix = strings.TrimRight(prefix, "/")
-	r.GET(prefix+"/*any", func(c *gin.Context) {
-		if strings.HasSuffix(c.Request.URL.Path, "/doc.json") {
-			c.Header("Access-Control-Allow-Origin", "*")
-			c.JSON(http.StatusOK, s)
-			return
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, swaggerHTML(prefix+"/doc.json"))
-	})
-}
-
 // --- OpenAPI 3.0 types ---
 
 type openAPISpec struct {
@@ -287,15 +233,27 @@ type securityScheme struct {
 
 // --- helpers ---
 
-// ginPathToOpenAPI converts Gin's :param to OpenAPI {param}.
-func ginPathToOpenAPI(path string) string {
-	parts := strings.Split(path, "/")
-	for i, p := range parts {
-		if strings.HasPrefix(p, ":") {
-			parts[i] = "{" + p[1:] + "}"
+// patternToOpenAPI normalizes a ServeMux pattern to an OpenAPI path:
+// {name} segments already match; the "..." wildcard suffix and the
+// "{$}" exact-match marker are ServeMux-only spellings and are
+// reduced to plain OpenAPI forms.
+func patternToOpenAPI(pattern string) string {
+	parts := strings.Split(pattern, "/")
+	out := parts[:0]
+	for _, p := range parts {
+		if p == "{$}" {
+			continue
 		}
+		if strings.HasPrefix(p, "{") && strings.HasSuffix(p, "...}") {
+			p = strings.TrimSuffix(p, "...}") + "}"
+		}
+		out = append(out, p)
 	}
-	return strings.Join(parts, "/")
+	joined := strings.Join(out, "/")
+	if joined == "" {
+		return "/"
+	}
+	return joined
 }
 
 func statusCode(code int) string {

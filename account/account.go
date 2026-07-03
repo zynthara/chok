@@ -19,9 +19,9 @@ import (
 	"github.com/zynthara/chok/v2/auth"
 	"github.com/zynthara/chok/v2/auth/jwt"
 	"github.com/zynthara/chok/v2/config"
-	"github.com/zynthara/chok/v2/handler"
+	handler "github.com/zynthara/chok/v2/internal/ginresidue"
 	"github.com/zynthara/chok/v2/log"
-	"github.com/zynthara/chok/v2/middleware"
+	middleware "github.com/zynthara/chok/v2/internal/ginresidue"
 	"github.com/zynthara/chok/v2/store"
 )
 
