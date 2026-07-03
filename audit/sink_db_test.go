@@ -18,6 +18,13 @@ func newSinkDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The async sink goroutine queries concurrently with the test; a
+	// second pool connection over :memory: would be a fresh empty
+	// database (same pinning db.Open applies).
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+	}
 	if err := db.AutoMigrate(&Log{}); err != nil {
 		t.Fatal(err)
 	}

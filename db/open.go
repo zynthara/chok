@@ -38,11 +38,34 @@ func openSQLite(o *SQLiteOptions) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("db: open sqlite: %w", err)
 	}
+	if sqliteIsMemory(o.Path) {
+		// A memory database lives and dies with its connection: every
+		// extra pool connection is a fresh empty database, and closing
+		// the last one drops the data. Pin the pool to one immortal
+		// connection so concurrent use (async sinks, parallel tests)
+		// serializes instead of intermittently seeing "no such table".
+		if sqlDB, derr := gdb.DB(); derr == nil {
+			sqlDB.SetMaxOpenConns(1)
+			sqlDB.SetMaxIdleConns(1)
+			sqlDB.SetConnMaxLifetime(0)
+			sqlDB.SetConnMaxIdleTime(0)
+		}
+		return gdb, nil
+	}
 	// WAL mode for concurrency (v1 behaviour carried over).
 	if err := gdb.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
 		return nil, fmt.Errorf("db: sqlite enable WAL: %w", err)
 	}
 	return gdb, nil
+}
+
+// sqliteIsMemory reports whether the path denotes an in-memory SQLite
+// database (":memory:", "file::memory:...", or any DSN carrying
+// mode=memory).
+func sqliteIsMemory(path string) bool {
+	return path == ":memory:" ||
+		strings.HasPrefix(path, "file::memory:") ||
+		strings.Contains(path, "mode=memory")
 }
 
 func openMySQL(o *MySQLOptions) (*gorm.DB, error) {

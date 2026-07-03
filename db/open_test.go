@@ -9,10 +9,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -153,3 +155,46 @@ func TestOpen_ValidatesFirst(t *testing.T) {
 	}
 }
 
+
+// TestOpen_MemorySQLiteSurvivesConcurrentPoolUse pins the :memory:
+// pool fix: without capping the pool to one immortal connection, every
+// connection database/sql opens beyond the first is a fresh empty
+// database, and concurrent use (an async sink goroutine next to the
+// caller) intermittently fails with "no such table". Eight goroutines
+// hammering queries force pool growth deterministically pre-fix.
+func TestOpen_MemorySQLiteSurvivesConcurrentPoolUse(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: ":memory:"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	ctx := context.Background()
+	if err := h.Migrate(ctx, Table(&TestItem{})); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for g := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 25 {
+				if err := h.Unsafe(ctx).Create(&TestItem{Code: fmt.Sprintf("g%d-%d", g, i)}).Error; err != nil {
+					errCh <- err
+					return
+				}
+				var n int64
+				if err := h.Unsafe(ctx).Model(&TestItem{}).Count(&n).Error; err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	if err := <-errCh; err != nil {
+		t.Fatalf("concurrent pool use over :memory: must not lose the schema: %v", err)
+	}
+}
