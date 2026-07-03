@@ -3,11 +3,60 @@
 > 此文档记录 chok 公开契约层面的设计变迁——新增能力、不兼容变更、
 > 弃用与移除。**实现细节不在此处**，请直接看 [`docs/design.md`](design.md)。
 >
-> 项目使用 [Conventional Commits](https://www.conventionalcommits.org/)
-> 与 [release-please](https://github.com/googleapis/release-please)
-> 自动生成根目录的 [`CHANGELOG.md`](../CHANGELOG.md)。本文与之互补：
-> 那份记录"哪个 commit 进了哪个版本"，本文记录"为什么这次发布的设计
-> 选择是这样"。
+> 项目使用 [Conventional Commits](https://www.conventionalcommits.org/)；
+> 自 v2 起 release 手动裁切（写根目录 [`CHANGELOG.md`](../CHANGELOG.md)
+> 条目 → 打 tag → goreleaser 发布）。本文与之互补：那份记录"哪个
+> 变更进了哪个版本"，本文记录"为什么这次发布的设计选择是这样"。
+
+---
+
+## 2.0.0-beta.1 — v2：把不变量翻译进类型与控制面
+
+> **v2 重写的首个可安装版本**（M0-M5 六个里程碑的产物）。module
+> path 升级 `github.com/zynthara/chok/v2`；39 条破坏性变更逐条见
+> [迁移指南](migration-v1-to-v2.md)。一句话主题：**把 v1 靠文档、
+> warn 日志和 code review 维持的十几条不变量，翻译成类型系统和
+> 单线程控制面的结构性保证**。
+
+### 为什么重写
+
+v1 的结构性债务在同一处反复付息：反射式 auto-register 需要一张
+多模式矩阵去解释；live config 指针带来 torn read 与整套拷贝纪律；
+`reloadMu → mu` 锁序靠背诵；13 个类型断言可选接口是接口动物园；
+gin 与 gorm 类型钉死公开 API。v2 的答案不是修补而是换地基：
+
+- **显式装配替代反射扫描**——`chok.Use(模块())` 是唯一注册面，
+  链接器自然裁剪二进制；`chok sync` 让 yaml 驱动的零思考体验与
+  显式 import 和解。
+- **单 actor 控制面替代锁序**——生命周期只有一个写者，读路径走
+  原子快照；「Close 里别调 Get」从守则变成结构性不可能。
+- **不可变 RCU 替代 live 指针**——reload 失败零污染不再靠小心
+  拷贝，而是「没交换就没发生」。
+- **Descriptor + 行为接口替代接口动物园**——声明是数据，能力是
+  行为，7 个静态声明接口消失。
+- **stdlib ServeMux 替代 gin、`*db.DB` 薄句柄藏死 gorm**——公开
+  面的第三方类型清零；raw SQL 收敛为两扇自名其险的 `Unsafe` 门。
+
+### 设计层新增
+
+- 注册-禁用模型：disabled 组件有四条定义良好的语义，注册拓扑不再
+  随配置漂移。
+- `reload:"hot|restart"` 字段 tag：热载语义上提到类型层，框架统一
+  diff 与 warn。
+- 事务模型收敛：context 传播唯一化，`AfterCommit` 把实体事件锚定
+  提交，回滚无幻影。
+- 版本化迁移双轨 + 电池表白名单 + Postgres day-one。
+- casbin 决策审计真值表：`audit_enabled=true` 时审计缺失即启动
+  失败——合规语义绝不静默退化。
+- 生成面治漂移：组件表 / 配置参考 / JSON Schema 全部由 Descriptor
+  与 Options 生成，CI 三道闸（docs gen --check / apidiff /
+  examples 冒烟）把漂移挡在合入前。
+
+### 移除
+
+`component/`、`parts/`、`server/`、`config/` 四包；hook 系统
+（`On`）、`AddCleanup`、`WithConfig/WithSetup`；after-hooks；
+gin、badger 及其传递依赖树。逐条对照见迁移指南。
 
 ---
 
