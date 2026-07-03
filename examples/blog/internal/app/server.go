@@ -81,8 +81,10 @@ func NewTestRouter() *gin.Engine {
 		},
 	}
 
+	// Ephemeral port: the delayed cancel below lets the server reach
+	// its listen phase, and the zero-value Addr would mean ":http".
 	httpComp := parts.NewHTTPComponent(
-		func(any) *config.HTTPOptions { return &config.HTTPOptions{} },
+		func(any) *config.HTTPOptions { return &config.HTTPOptions{Addr: "127.0.0.1:0"} },
 	).WithoutAccessLog()
 
 	a := chok.New("blog-test",
@@ -104,18 +106,26 @@ func NewTestRouter() *gin.Engine {
 		chok.WithRoutes(blogRoutes()),
 	)
 
-	ready := make(chan struct{})
-	a.On(component.EventAfterStart, func(ctx context.Context) error {
-		close(ready)
+	// Readiness barrier: a user AfterStart hook is NOT safe here — user
+	// hooks run before the framework's internal route-mount hook, so
+	// cancelling on such a signal races route mounting (the loser sees
+	// "hook timeout exceeded for after_start" and requests 404). Servers
+	// start strictly after every AfterStart hook completes, so a blocking
+	// ServerFunc is a race-free "fully started" signal.
+	started := make(chan struct{})
+	a.AddServer(chok.ServerFunc(func(ctx context.Context, ready func()) error {
+		close(started)
+		ready()
+		<-ctx.Done()
 		return nil
-	})
+	}))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- a.Run(ctx) }()
 
 	select {
-	case <-ready:
+	case <-started:
 	case err := <-done:
 		cancel()
 		panic(fmt.Sprintf("blog test setup failed: %v", err))
