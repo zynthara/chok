@@ -1,7 +1,8 @@
 package log
 
 import (
-	"github.com/zynthara/chok/v2/config"
+	"fmt"
+	"strings"
 )
 
 // Options is the v2 "log" section. The App owns the root logger built
@@ -24,6 +25,8 @@ type Options struct {
 }
 
 // FileOptions configures one rotating file output (lumberjack-backed).
+// Empty path disables the entry; rotation thresholds are size-based
+// with optional age/backup caps.
 type FileOptions struct {
 	Path       string `mapstructure:"path"`
 	MaxSizeMB  int    `mapstructure:"max_size_mb"  default:"100"`
@@ -34,34 +37,60 @@ type FileOptions struct {
 
 // Validate implements conf.Validatable.
 func (o *Options) Validate() error {
-	return o.slog().Validate()
+	switch o.Level {
+	case "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf("log: unsupported level %q (use debug/info/warn/error)", o.Level)
+	}
+	switch o.Format {
+	case "json", "text":
+	default:
+		return fmt.Errorf("log: unsupported format %q (use json/text)", o.Format)
+	}
+	// Reject blank Output entries up front. Blank strings would silently
+	// drop through buildWriter and could confuse later debugging when an
+	// operator stares at a config that "should write to a file".
+	for i, name := range o.Output {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("log.output[%d]: must not be empty", i)
+		}
+	}
+	// Determine whether at least one *effective* sink is configured.
+	// FileOptions documents a blank Path as "disabled", so a slice of
+	// all-blank entries equates to no file sink even though len > 0.
+	effectiveFiles := 0
+	for i := range o.Files {
+		if err := o.Files[i].Validate(); err != nil {
+			return fmt.Errorf("log.files[%d]: %w", i, err)
+		}
+		if o.Files[i].Path != "" {
+			effectiveFiles++
+		}
+	}
+	for i := range o.AccessFiles {
+		if err := o.AccessFiles[i].Validate(); err != nil {
+			return fmt.Errorf("log.access_files[%d]: %w", i, err)
+		}
+	}
+	if len(o.Output) == 0 && effectiveFiles == 0 {
+		return fmt.Errorf("log: output or files must not both be empty")
+	}
+	return nil
 }
 
-// slog converts to the v1 construction options — the slog/lumberjack
-// build path is shared during the transition (config package retires
-// with the last v1 battery, M5).
-func (o *Options) slog() *config.SlogOptions {
-	files := make([]config.LogFileOptions, 0, len(o.Files))
-	for _, f := range o.Files {
-		files = append(files, config.LogFileOptions(f))
+// Validate implements conf.Validatable for one file entry.
+func (f *FileOptions) Validate() error {
+	if f.Path == "" {
+		return nil // empty path disables the entry
 	}
-	access := make([]config.LogFileOptions, 0, len(o.AccessFiles))
-	for _, f := range o.AccessFiles {
-		access = append(access, config.LogFileOptions(f))
+	if f.MaxSizeMB < 0 {
+		return fmt.Errorf("max_size_mb must not be negative")
 	}
-	return &config.SlogOptions{
-		Level:         o.Level,
-		Format:        o.Format,
-		Output:        o.Output,
-		Files:         files,
-		AccessFiles:   access,
-		AccessEnabled: o.AccessEnabled,
+	if f.MaxBackups < 0 {
+		return fmt.Errorf("max_backups must not be negative")
 	}
-}
-
-// New builds a Logger from Options. The returned logger implements
-// io.Closer when file outputs are configured; the owner (the App for
-// the root logger) must Close it after the control plane stops.
-func New(o Options) Logger {
-	return NewSlog(o.slog())
+	if f.MaxAgeDays < 0 {
+		return fmt.Errorf("max_age_days must not be negative")
+	}
+	return nil
 }

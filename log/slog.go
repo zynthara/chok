@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zynthara/chok/v2/config"
 	"github.com/zynthara/chok/v2/internal/ctxval"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -30,30 +29,23 @@ type slogLogger struct {
 	closers  []io.Closer
 }
 
-// NewSlog creates a Logger from SlogOptions.
-func NewSlog(opts *config.SlogOptions) Logger {
+// New builds a Logger from Options. The returned logger implements
+// io.Closer when file outputs are configured; the owner (the App for
+// the root logger) must Close it after the control plane stops.
+func New(o Options) Logger {
 	lv := new(slog.LevelVar)
-	lv.Set(parseLevel(opts.Level))
-	writer, closers := buildWriter(opts.Output, opts.Files)
+	lv.Set(parseLevel(o.Level))
+	writer, closers := buildWriter(o.Output, o.Files)
 
 	var handler slog.Handler
 	hopts := &slog.HandlerOptions{Level: lv}
-	switch strings.ToLower(opts.Format) {
+	switch strings.ToLower(o.Format) {
 	case "text":
 		handler = slog.NewTextHandler(writer, hopts)
 	default:
 		handler = slog.NewJSONHandler(writer, hopts)
 	}
 	return &slogLogger{sl: slog.New(handler), levelVar: lv, closers: closers}
-}
-
-// NewDefaultSlog creates a JSON/info Logger writing to stdout.
-func NewDefaultSlog() Logger {
-	return NewSlog(&config.SlogOptions{
-		Level:  "info",
-		Format: "json",
-		Output: []string{"stdout"},
-	})
 }
 
 func (l *slogLogger) Debug(msg string, kv ...any) { l.sl.Debug(msg, kv...) }
@@ -141,13 +133,13 @@ func parseLevel(s string) slog.Level {
 // on Close. Stdout/stderr are never added to the closer list.
 //
 // Empty entries (blank string in `outputs`, blank Path in `files`) are
-// silently skipped: LogFileOptions documents a blank path as "disabled"
-// and SlogOptions.Validate now rejects blank Output strings up front,
-// so a blank entry reaching this function would be a defence-in-depth
-// case (e.g. an unvalidated programmatic build). Skipping prevents
+// silently skipped: FileOptions documents a blank path as "disabled"
+// and Options.Validate rejects blank Output strings up front, so a
+// blank entry reaching this function would be a defence-in-depth case
+// (e.g. an unvalidated programmatic build). Skipping prevents
 // lumberjack from defaulting an empty Filename to a temp-dir log file
 // the operator never asked for.
-func buildWriter(outputs []string, files []config.LogFileOptions) (io.Writer, []io.Closer) {
+func buildWriter(outputs []string, files []FileOptions) (io.Writer, []io.Closer) {
 	writers := make([]io.Writer, 0, len(outputs)+len(files))
 	var closers []io.Closer
 	for _, o := range outputs {
@@ -202,7 +194,7 @@ func singleWriter(name string) (io.Writer, io.Closer) {
 	}
 }
 
-func fileWriter(f *config.LogFileOptions) *lumberjack.Logger {
+func fileWriter(f *FileOptions) *lumberjack.Logger {
 	return &lumberjack.Logger{
 		Filename:   f.Path,
 		MaxSize:    f.MaxSizeMB,

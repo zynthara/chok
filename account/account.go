@@ -260,8 +260,8 @@ func New(h *db.DB, logger log.Logger, opts ...Option) (*Service, error) {
 	)
 	// idStore is always created — Identity rows are written only by OAuth
 	// flows, but having the store ready means switching deployments from
-	// password-only to OAuth at runtime needs no Module surgery. Schema
-	// is created by parts.AccountComponent.Migrate (Phase 2 update).
+	// password-only to OAuth at runtime needs no Service surgery. Schema
+	// is created by the account Component's Migrate.
 	idStore := store.New[Identity](h, logger,
 		store.WithQueryFields("id", "user_id", "provider", "provider_account_id", "email", "last_used_at"),
 		store.WithUpdateFields("email", "profile", "last_used_at"),

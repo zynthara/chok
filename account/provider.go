@@ -9,10 +9,10 @@ import (
 // provider. Password authentication is NOT a provider — it lives on
 // /login + User.PasswordHash and is intentionally outside this interface.
 //
-// Provider implementations live under account/providers/<name>/ and
-// register themselves to the package-level providerRegistry via init() +
-// RegisterProviderFactory; Module.RegisterProvider then attaches the
-// runtime instance during Phase 3 config-driven assembly.
+// Provider implementations live under account/providers/<name>/, each
+// exporting Provider() ProviderSpec; the operator assembles them
+// explicitly via account.Module(account.WithProviders(...)) and yaml's
+// providers.<name>.enabled stays the runtime switch (SPEC §6).
 type AuthProvider interface {
 	// Name is the lowercase provider identifier ("google", "github", ...).
 	// Used as the URL segment in /auth/{name}/start and as the

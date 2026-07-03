@@ -54,11 +54,11 @@ type batchGranter interface {
 	grantRoleBatch(ctx context.Context, role string, perms []Permission) error
 }
 
-// Bootstrap is the canonical idempotent admin-seeding helper.
-// chok's autoregister calls it after AuthzComponent.Init when
-// chok.yaml provides authz.casbin.bootstrap_admin_user_id; setup-
-// driven users invoke it themselves from an a.On(EventAfterStart, ...)
-// hook with their own BootstrapConfig.
+// Bootstrap is the canonical idempotent admin-seeding helper. The
+// authz module's Migrate tail calls it — table built, audit hook
+// attached, strictly before serve (SPEC §3.5/§6) — when chok.yaml
+// provides authz.casbin.bootstrap_admin_user_id; library users invoke
+// it directly with their own BootstrapConfig.
 //
 // The implementation walks Service writes that are themselves no-op
 // on duplicate (the chok adapter's unique index + Casbin's in-memory

@@ -96,11 +96,11 @@ type Query struct {
 	Page, Size int
 }
 
-// Logger is the contract every audit sink implements. parts/audit
-// wires *dbLogger (async DB sink) into chok components; tests can
-// inject a *MemoryLogger or similar without changing call sites.
+// Logger is the contract every audit sink implements. The audit
+// Component wires *DBLogger (async DB sink) in; tests can inject a
+// *MemoryLogger or similar without changing call sites.
 //
-// Lifecycle: Logger is bound to a Component (parts/audit). After
+// Lifecycle: Logger is bound to the audit Component. After
 // Component.Close, calls to Log/LogSync return errors / drop on the
 // floor — caller code must not assume the sink remains live past
 // shutdown. Query is read-only against the underlying table; it
@@ -130,9 +130,9 @@ type Logger interface {
 // Stats is exposed by Logger implementations that want to surface
 // async-sink health to operators (matching the WatcherStats
 // pattern in authz/casbin). Not all Loggers implement this — the
-// in-memory test logger doesn't; the parts/audit DB-backed Logger
-// does. Callers type-assert on this interface to decide whether
-// to render the panel.
+// in-memory test logger doesn't; the DB-backed DBLogger does.
+// Callers type-assert on this interface to decide whether to
+// render the panel.
 type Stats struct {
 	Pending uint64 // entries in the async buffer right now
 	Dropped uint64 // lifetime DropOnFull-mode rejections
@@ -140,8 +140,8 @@ type Stats struct {
 	Failed  uint64 // lifetime sink failures (DB error etc.)
 }
 
-// Statser is the optional escape hatch. parts/audit Logger satisfies
-// it; admin / health endpoints type-assert to render counters.
+// Statser is the optional escape hatch. DBLogger satisfies it;
+// admin / health endpoints type-assert to render counters.
 type Statser interface {
 	Stats() Stats
 }

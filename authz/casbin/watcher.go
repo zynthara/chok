@@ -16,7 +16,7 @@ import (
 )
 
 // redisWatcher is chok's persist.Watcher implementation over the
-// existing parts.RedisComponent. Casbin's enforcer.AddPolicy /
+// redis module's client. Casbin's enforcer.AddPolicy /
 // RemovePolicy / SavePolicy paths call Watcher.Update after a
 // successful adapter write; peer instances subscribed to the same
 // channel reload their policy.

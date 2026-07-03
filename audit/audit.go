@@ -1,24 +1,22 @@
-// Package audit is chok's compliance-grade audit log component.
+// Package audit is chok's compliance-grade audit log battery.
 //
 // Audit log records "who did what to which resource" — distinct from:
 //
-//   - access log (parts/log AccessFiles): HTTP traffic, request-scoped,
-//     short retention, ops-facing.
-//   - metrics (parts/metrics): aggregate counters, no per-event detail.
-//   - traces (parts/tracing OpenTelemetry): performance / latency
+//   - access log (the log module's AccessFiles): HTTP traffic,
+//     request-scoped, short retention, ops-facing.
+//   - metrics (metrics module): aggregate counters, no per-event detail.
+//   - traces (tracing module, OpenTelemetry): performance / latency
 //     attribution, sampled, not retained for compliance.
 //
 // Audit is long-retention (≥ months), per-event, and queryable by
 // auditors / admins. Write path is async (buffered channel → batch
 // insert) so business handlers don't pay DB latency on every event;
-// the trade-off (back-pressure vs drop) is configured per
-// deployment via config.AuditOptions.DropOnFull.
+// the trade-off (back-pressure vs drop) is configured per deployment
+// via Options.DropOnFull.
 //
-// This package only defines the data model + Logger contract +
-// context-extraction helpers. The Component plumbing (channel +
-// worker + cron purge + admin HTTP route) lives in parts/audit.
-//
-// Reference: SPEC parts-audit-claude.md.
+// This file defines the data model + Logger contract + context-
+// extraction helpers. The Component plumbing (channel + worker + cron
+// purge + admin HTTP route) lives in module.go / sink_db.go.
 package audit
 
 import (

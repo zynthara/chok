@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Options is the "http" yaml section (v1 config.HTTPOptions carried
+// Options is the "http" yaml section (the v1 section shape carried
 // over; h2c and shutdown_timeout are v2 additions). Everything here
 // shapes server construction, so every field is restart-only — the
 // framework reload diff warns on changes without dispatching.

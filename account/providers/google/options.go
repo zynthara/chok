@@ -19,9 +19,10 @@
 //	      redirect_url:  "https://app.example.com/auth/google/callback"
 //	      hosted_domain: "example.com"   # optional G Suite restriction
 //
-// The package's init() registers a factory keyed "google" against
-// account.providerRegistry; Module.RegisterConfiguredProviders looks
-// it up and invokes it with the operator's ProviderRawOptions.
+// The operator assembles the provider explicitly —
+// account.Module(account.WithProviders(google.Provider())) — and the
+// yaml block above stays the runtime switch; Provider().Build decodes
+// the raw keys into Options (SPEC §6 explicit provider assembly).
 //
 // Protocol choice: we use the OIDC ID Token rather than a userinfo
 // roundtrip — Google ships a verified JWT with email, name, picture
@@ -39,9 +40,8 @@ import (
 // it through mapstructure tags.
 type Options struct {
 	// ClientID and ClientSecret come from a Google Cloud Console OAuth
-	// client. They are required when Enabled is true. ClientSecret is
-	// flagged sensitive: chok's config.Redact / GoString helpers mask
-	// it via the heuristic key match (`*secret*`).
+	// client. ClientSecret is masked by conf's redaction (RedactedSettings
+	// and the provider-map heuristic key match, `*secret*`).
 	ClientID     string `mapstructure:"client_id"`
 	ClientSecret string `mapstructure:"client_secret"`
 

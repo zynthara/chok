@@ -29,15 +29,14 @@ func marshalJSON(v any) (datatypes.JSON, error) {
 	return datatypes.JSON(raw), nil
 }
 
-// DBLogger is the async DB-backed Logger used by parts/audit. The
-// Component owns one and exposes it as audit.Logger to callers.
+// DBLogger is the async DB-backed Logger the audit Component owns
+// and exposes as audit.Logger to callers.
 //
-// Why not parts/pool: audit is a single-producer-MPSC batched sink —
+// Why not scheduler/pool: audit is a single-producer-MPSC batched sink —
 // many callers feed one channel, one worker drains, batches by size
 // or interval, commits with one INSERT. Pool's any-func-any-time
 // task model doesn't compose with batch ordering or with a Close
-// that must drain the in-flight batch before db is closed by parts.
-// SPEC §8 was updated (v0.3.5) to drop pool from Dependencies.
+// that must drain the in-flight batch before the db handle goes away.
 //
 // Backpressure semantics:
 //
@@ -100,7 +99,7 @@ const (
 
 // DBLoggerOption tunes test-side knobs (smaller batches, faster
 // flush) without exposing the surface to operators — production
-// callers go through parts/audit which uses the constants.
+// callers go through the audit Component, which uses the constants.
 type DBLoggerOption func(*DBLogger)
 
 func withBatchSize(n int) DBLoggerOption {
@@ -255,7 +254,7 @@ func (l *DBLogger) Stats() Stats {
 
 // LastError returns the most recent sink-side DB error and when it
 // happened. Returns (nil, zero-time) when no error has occurred.
-// Useful for the parts/audit Health output.
+// Useful for operator-facing health notes.
 func (l *DBLogger) LastError() (error, time.Time) {
 	box := l.lastErr.Load()
 	if box == nil {
@@ -265,8 +264,8 @@ func (l *DBLogger) LastError() (error, time.Time) {
 }
 
 // Close stops the worker. Idempotent. Returns when the worker has
-// drained any pending batch and exited. Caller (parts/audit
-// Component.Close) is responsible for waiting before letting the
+// drained any pending batch and exited. Caller (the audit
+// Component's Close) is responsible for waiting before letting the
 // underlying DB go away.
 func (l *DBLogger) Close() {
 	l.closeOnce.Do(func() {

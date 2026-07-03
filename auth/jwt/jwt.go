@@ -120,7 +120,7 @@ func (m *Manager) Sign(subject string, claims map[string]any) (string, time.Time
 //   - iat must not be in the future (WithIssuedAt).
 //   - iss is validated if Options.Issuer was set.
 //
-// Parse does not depend on *gin.Context — Bearer extraction is handled by
+// Parse takes the bare token string — Bearer extraction is handled by
 // the middleware layer.
 //
 // Parse satisfies the middleware.TokenParser interface.

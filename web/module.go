@@ -1,9 +1,8 @@
 // Package web is the chok v2 HTTP layer: a stdlib http.Server plus a
 // ServeMux-backed implementation of the kernel Router/RouterProvider
 // contracts (SPEC §4). The module owns the default middleware stack —
-// including the RED-metrics and dedicated access-log integrations that
-// parts/http.go dropped in M1 — wiring soft dependencies (metrics,
-// tracing, authz) by role, never by import.
+// RED metrics and the dedicated access log included — wiring soft
+// dependencies (metrics, tracing, authz) by role, never by import.
 package web
 
 import (

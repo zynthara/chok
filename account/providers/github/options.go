@@ -40,9 +40,8 @@ import (
 // account.providers.github block.
 type Options struct {
 	// ClientID and ClientSecret come from a GitHub OAuth App
-	// (Settings → Developer settings → OAuth Apps). Required when
-	// Enabled is true. ClientSecret is masked by chok.config.Redact /
-	// AccountOptions.GoString through the `*secret*` heuristic.
+	// (Settings → Developer settings → OAuth Apps). ClientSecret is
+	// masked by conf's redaction through the `*secret*` heuristic.
 	ClientID     string `mapstructure:"client_id"`
 	ClientSecret string `mapstructure:"client_secret"`
 
