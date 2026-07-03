@@ -351,6 +351,13 @@ func (a *App) assemble() error {
 	a.store = store
 	a.mu.Unlock()
 
+	// Drain-delay inheritance (SPEC §9): an explicit WithDrainDelay
+	// wins; otherwise the "http" section's drain_delay applies when an
+	// http-owning module is assembled and enabled. Like the "log"
+	// section above, "http" is an App-level section convention — the
+	// kernel itself keeps knowing no names.
+	a.drainDelay = inheritDrainDelay(a.drainDelay, comps, store.Snapshot())
+
 	if !a.userLogger {
 		var lo log.Options
 		if err := store.Snapshot().Section("log", &lo); err != nil {
@@ -381,6 +388,32 @@ func (a *App) assemble() error {
 	a.reg = reg
 	a.mu.Unlock()
 	return nil
+}
+
+// inheritDrainDelay resolves the effective kernel drain delay:
+// explicit (non-zero) App option first, then the http section's
+// drain_delay when a component owning the "http" section is assembled
+// and enabled (v1 autoRegisterHTTP inheritance, SPEC §9).
+func inheritDrainDelay(explicit time.Duration, comps []kernel.Component, snap *conf.Snapshot) time.Duration {
+	if explicit != 0 {
+		return explicit
+	}
+	for _, c := range comps {
+		if kernel.SectionKeyOf(c.Describe()) != "http" {
+			continue
+		}
+		if !snap.EnabledFor("http") {
+			return explicit
+		}
+		var o struct {
+			DrainDelay time.Duration `mapstructure:"drain_delay"`
+		}
+		if err := snap.Section("http", &o); err == nil && o.DrainDelay > 0 {
+			return o.DrainDelay
+		}
+		return explicit
+	}
+	return explicit
 }
 
 // resolveModules merges Use and Override: duplicates inside Use fail
