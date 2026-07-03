@@ -439,13 +439,15 @@ func TestWithConfigWatch_NoPath_IsNoOp(t *testing.T) {
 // --- WithErrorMapper handshake ----------------------------------------------
 
 // mapperSink is an assembled component that consumes the per-App
-// error-mapper registry (the web module's role in production).
+// error-mapper registry (the web module's role in production). The
+// attach happens on the Run goroutine while the test polls — hence
+// the atomic holder.
 type mapperSink struct {
 	testComp
-	got *apierr.MapperRegistry
+	got atomic.Pointer[apierr.MapperRegistry]
 }
 
-func (m *mapperSink) AttachErrorMappers(reg *apierr.MapperRegistry) { m.got = reg }
+func (m *mapperSink) AttachErrorMappers(reg *apierr.MapperRegistry) { m.got.Store(reg) }
 
 // TestWithErrorMapper_ReachesAttachConsumer pins the assembly
 // handshake the blog rebuild exposed as missing: WithErrorMapper was
@@ -462,9 +464,9 @@ func TestWithErrorMapper_ReachesAttachConsumer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
 	go func() { runErr <- app.Run(ctx) }()
-	waitTrue(t, func() bool { return sink.got != nil }, "AttachErrorMappers never called during assembly")
+	waitTrue(t, func() bool { return sink.got.Load() != nil }, "AttachErrorMappers never called during assembly")
 
-	if got := sink.got.Resolve(errors.New("anything")); got == nil || got.Message != "mapped" {
+	if got := sink.got.Load().Resolve(errors.New("anything")); got == nil || got.Message != "mapped" {
 		t.Fatalf("attached registry must carry the WithErrorMapper mapper, got %v", got)
 	}
 
