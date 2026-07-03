@@ -1,26 +1,338 @@
-# chok 设计文档
+# chok v2 设计文档
 
-> **状态注记（v2 过渡期）**：本文档描述的是 **v1**（封版于
-> `v0.1.4`，v1 用户请以该 tag 为准）。`main` 已进入 v2 重写——
-> M1 起根包 App、`kernel/`、`conf/` 与 log/health/metrics/debug
-> 四模块均为 v2 形态；M2 起整个 Web 栈（`web/`、`middleware/`、
-> `handler/`、`swagger/`、`tracing/`）换轨 stdlib（gin 版
-> `server/` 与相关 parts 胶水已删除）；M3 起数据层为 v2 形态
-> （`db.Module` + `*db.DB` 薄句柄 + Postgres day-one + 版本化迁移，
-> `store.New` 首参改 `*db.DB`、`WithTx`/`DB()`/`ScopedDB()`/
-> after-hooks 删除——逃生门统一为 `Unsafe(ctx)`，事件走
-> `store.WithBus`），本文对应章节（§7 数据层、§8、§10.2、§10.3、
-> §11.10 等）暂不适用；v2 版设计文档随 M5 收口重写。
+> 本文是 chok v2 架构的**中文正文**（团队惯例：设计文档中文、代码
+> 注释英文）。源代码是真相的最终来源；本文负责讲清「为什么」与
+> 「契约边界」。公开契约变更时与代码同步更新。
 >
-> chok 的架构设计与 API 契约。源代码是真相的最终来源；本文负责把
-> 「为什么」和「契约边界」讲清楚。每次公开 API 调整时与代码同步更新。
+> 标注「生成区块」的部分由 `chok docs gen` 从代码产出，手改无效
+> （CI 的 `docs gen --check` 拦截漂移）；其余为手写正文。
+>
+> v1 的设计文档随 `v0.1.4` 封版，可在该 tag 的仓库快照中查阅。
 
 ---
 
-## 组件总览（生成区块）
+## 1. 定位
 
-> 下表由 `chok docs gen` 从各模块的 Descriptor 生成——单一事实源
-> 公理的落地形态；手改会被 CI 的 `docs gen --check` 拦下。
+chok 是一个 Go Web 框架，模块路径 `github.com/zynthara/chok/v2`。
+三个不可变形容词：
+
+- **全家桶**：HTTP + 数据层 + 缓存 + 认证 + 授权（RBAC）+ 定时任务
+  + 可观测性在同一个仓库内，不把能力外推给用户自组装。
+- **配置驱动**：`chok.yaml` 既声明装配哪些模块，也配置它们；
+  `enabled: true/false` 是运行期启停的主开关。
+- **单一官方实现**：每个能力只给一个成熟方案——HTTP 是 stdlib
+  `ServeMux`（Go 1.22+ 模式路由）、ORM 是 gorm（藏在 store 之后）、
+  缓存是 otter + redis、cron 是 robfig、JWT 是 golang-jwt、RBAC 是
+  casbin、观测是 Prometheus + OpenTelemetry。不提供平行选择。
+
+## 2. 设计公理
+
+继承 v1 三条，v2 新增两条：
+
+1. **Config is the only knob** —— 用户 90% 的需求靠 yaml 解决。
+2. **One blessed implementation** —— 接口留扩展点，不做多后端。
+3. **Internally complex, externally trivial** —— 复杂度归框架。
+4. **Invariants live in types, not docs** —— 需要写进「陷阱清单」
+   的约束，就是还没设计完的约束。v1 靠文档与 review 维持的十几条
+   不变量，v2 翻译成类型系统与单线程控制面的结构性保证（§12）。
+5. **One source of truth** —— 组件清单、依赖图、配置参考只存在于
+   `Descriptor` 与 Options 类型里；文档表格、`/componentz`、JSON
+   Schema 一律生成。
+
+## 3. 装配模型
+
+一个 v2 应用的全部接线：
+
+```go
+func main() {
+    chok.New("blog",
+        chokModules(),                    // chok_modules_gen.go：chok sync 从 chok.yaml 生成
+        chok.WithErrorMapper(store.MapError),
+        chok.Override(db.Module(          // 定制 = 显式替换同键模块
+            db.WithTables(db.Table(&Post{})),
+        )),
+        chok.Routes(routes),              // 业务路由回调
+    ).Execute()
+}
+```
+
+- **`chok.Use(...)` 是唯一注册面**。每个子系统包导出
+  `Module(...) kernel.Component`；`Use` 内同 `(kind, instance)` 键
+  重复 ⇒ 启动失败（fail-fast）；有意替换写 `chok.Override(c)`，
+  替换不存在的键同样报错（防 typo）。
+- **yaml 段在场 = 链接期意图；`enabled` = 运行期开关**。`chok sync`
+  读 chok.yaml 生成 `chok_modules_gen.go`：段在场的模块进 Use 清单
+  （含 `enabled: false` 的——「注册-禁用」模型，见下），段缺席的
+  模块不 import，Go 链接器自然裁剪二进制。手写 Use 清单同样成立，
+  sync 纯属可选。
+- **disabled 的四条语义**（注册-禁用模型）：
+  1. 硬依赖指向 disabled 组件 ⇒ 启动失败，错误信息点名
+     「X requires Y which is disabled」；软依赖视为缺席，正常降级。
+  2. `chok.Get[T](k, kind)` 对 disabled 实例返回 `(zero, false)`——
+     拿不到半初始化对象。
+  3. disabled 组件出现在 Health 与 `/componentz` 中，状态
+     `disabled`（信息态，聚合视为 OK）——可诊断，不凭空消失。
+  4. `enabled` 恒为 restart-only（框架级规则，模块自身的 reload
+     tag 不可覆盖）；disabled 组件不参与任何生命周期 phase。
+- **业务配置**走 `chok.Section[T](app, "myapp")`——`Run` 前注册、
+  返回类型化句柄，`handle.Get()` 每次解码当前快照。框架不再需要
+  用户巨型 Config 结构体。
+- **多实例**按 `(kind, instance)` 二元组注册：yaml 用段内保留子键
+  `instances.<name>`（如 `db.instances.read`），代码侧
+  `db.Module(db.As("read"))`，访问 `db.From(k, "read")`。
+
+## 4. 内核（`kernel/`）
+
+### 4.1 单 actor 控制面
+
+```
+              commands（有缓冲 chan）
+  Start ──┐
+  Stop  ──┼──▶ 控制 goroutine（唯一写者）──▶ 原子发布 view 快照
+  Reload ─┘        │                            │
+                   │ phase 序：拓扑排序 → 分层并行 │  Get / Health / Ready
+                   │ Init → 串行 Migrate → mount │  读快照，无锁
+                   │ → serve → draining → Close  │
+```
+
+- **所有生命周期变更**（start / stop / reload / 失败回滚）由单一
+  控制 goroutine 串行处理——不存在可写错的锁序。
+- **读路径不进 actor**：组件集合经 `atomic.Pointer[view]` 发布，
+  `Get` / `Health` / `Ready` 读快照。Stop 按层发布收缩后的 view，
+  所以「Close 里拿 peer」结构上不可能成功——这不是守则，是事实。
+- **reload 合并**：控制循环处理 reload 期间到达的后续 reload 直接
+  回执 `ErrReloadInProgress`（CAS 门），不排队。
+- 执行语义：Kahn 拓扑排序、同层并行 Init（per-component 超时）、
+  Migrate 按层串行、必需组件失败反序回滚、`Optional` 组件失败降级
+  （warn + Degraded）、逆拓扑同层并行 Close、错误 joined。
+- **draining** 是 serve 与 close 之间的固定 phase：对全部 `Drainer`
+  广播（health 借此翻 `/readyz` 503）→ 等 `DrainDelay` → 取消各
+  `Serve` 并等其返回 → 逆序 Close。长任务组件（scheduler）的
+  in-flight 收尾发生在 `Serve` 返回前，因此 drain 期间其依赖（db
+  等）全部存活。
+
+### 4.2 组件契约：Descriptor + 行为接口
+
+```go
+type Component interface {
+    Describe() Descriptor
+    Init(ctx context.Context, k Kernel) error
+    Close(ctx context.Context) error
+}
+```
+
+`Descriptor` 是纯数据声明：`Kind` / `Instance` / `ConfigKey` /
+`Options`（零值样本，conf 据此重建 default/env/validate）/
+`Needs []Dep`（软依赖 `Optional: true`）/ `Timeouts` / `Optional` /
+`MountOrder`。
+
+可选能力是**行为接口**，Registry 以类型断言发现：
+
+| 接口 | 语义 |
+|---|---|
+| `Reloader` | 配置段热变更派发（见 §5 reload tag） |
+| `Healther` | `Health(ctx) error`——正常/故障二值 + disabled 信息态 |
+| `Mounter` | `Mount(r kernel.Router) error`，mount phase 挂路由 |
+| `Migrator` | Init 后、serve 前的 schema 步骤 |
+| `Readier` | `/readyz` 参与方 |
+| `Server` | `Serve(ctx, ready)`——长驻循环（http、scheduler） |
+| `Drainer` | draining phase 广播（health 摘流量） |
+| `RouterProvider` | 路由器提供方（角色型，恒单一；web.Module 实现） |
+
+- mount 顺序：`MountOrder ≤ 0` 的 Mounter → 用户 `Routes` 回调 →
+  `MountOrder > 0` 升序（swagger 自声明 100，故它能看见全部路由）
+  ——kernel 不认识任何电池名。
+- 存在 Mounter / Routes 而无 RouterProvider ⇒ 启动失败（门禁）；
+  出现两个 RouterProvider 同样 fail-fast。
+
+### 4.3 事件总线（层二，异步）
+
+生命周期 phase（层一，同步、可 veto——组件 `Init` 返回错误即中止
+启动）与业务事件总线（层二）严格分离。总线是类型化 pub/sub：
+
+```go
+event.Publish[T](ctx, bus, ev)
+event.Subscribe[T](bus, fn, opts...) (cancel func())
+```
+
+订阅者默认异步 + 每订阅者有界队列（默认 64），溢出策略
+`Block | DropOldest`（默认 DropOldest + 限速 warn；Publish 永不
+反压生命周期）；订阅者 panic recover 后订阅存活。生命周期事件
+（`ComponentInitialized` / `ReloadApplied` / ...）发布到总线，
+metrics、`/componentz` 从这里取数。关闭顺序：组件逆序 Close →
+发布最终事件 → bus drain（5s 预算）→ 根 logger 最后关。
+
+根 logger 的 close-last 由**所有权**表达：App 在装配期构建 logger
+（先于控制面）、控制面完全停止后由 App flush/close——组件 Close
+期间日志始终可用；`WithLogger` 注入的实例归调用方关。
+
+## 5. 配置引擎（`conf/`）
+
+- **装载栈**：viper（file + env + flag），优先级 flag > env > file >
+  default；路径解析 `WithConfigFile` 显式 > `{PREFIX}_CONFIG` env >
+  `./{name}.yaml` > `./configs/{name}.yaml`。装载结果是不可变树。
+- **RCU**：`atomic.Pointer[Snapshot]`。Reload = 全新构建 → 逐段
+  decode → 递归 Validate → 原子交换 → 按段 diff 派发。失败零污染
+  是结构性的：没交换就没发生。用户拿不到 live 指针。
+- **类型注册**：框架段来自 `Descriptor.Options` 零值样本；业务段
+  来自 `chok.Section[T]`（Run 前）。据此重建三件事：逐叶
+  `BindEnv`、`default` tag 注册、启动期递归 `Validate`。动态 map
+  键（`account.providers.*`）走 imperative env 覆盖 pass。
+- **校验协议**：Options 实现 `conf.Validatable`；discriminator 类型
+  （driver 选分支）另实现 `conf.SelfValidating`——递归走查器到此
+  停降，未选分支不被误校验。
+- **reload 语义在类型层**：
+
+```go
+type Options struct {
+    Level  string   `mapstructure:"level"  reload:"hot"`
+    Output []string `mapstructure:"output" reload:"restart"`
+}
+```
+
+  hot 字段变更 ⇒ 调该组件 `Reload`；restart 字段变更 ⇒ 框架统一
+  warn（组件不再手写）；无 tag 默认 restart（保守）；嵌套字段继承
+  外层 tag、可覆盖；map/slice 整体 DeepEqual；`enabled` 恒 restart
+  且置 `EnabledFlipped`。`ConfigKey == ""` 的 Reloader 在每次配置
+  变更时都被派发、排在全部有段组件之后——无派发死角。
+- **敏感字段**：`sensitive:"true"` tag 驱动 `Redact` /
+  `RedactedSettings`（含 provider map 的键启发式：`*secret*` /
+  `*password*` / `private_key` / ...）；`GoString/String` 掩码有
+  断言测试。生成的 JSON Schema 同步标 `writeOnly` 且不带默认值。
+
+## 6. HTTP 层（`web/` + `middleware/` + `handler/`）
+
+- **契约在 kernel、实现在 web**：`kernel.Router`（`Handle` /
+  `Group`，`Middleware = func(http.Handler) http.Handler`）只依赖
+  net/http；web 提供 ServeMux 实现并保有**路由表**。
+- **路由表是 swagger 的数据源**：泛型 handler 构造产物实现
+  `web.HandlerMeta`（`Meta()` 携带 req/resp 类型、summary、tags、
+  success code），`Handle` 注册时断言入表；swagger 从表生成
+  OpenAPI 3 spec（`/swagger/doc.json` + UI）。v1 的 unsafe 闭包
+  地址注册表不复存在。
+- **中间件栈**（web.Module Init 构建）：RequestID → ClientIP
+  （XFF + 可信代理链校验，登录限速的输入，安全敏感项有伪造回归
+  测试）→ 访问日志（专用轮转文件或根 logger）→ RED metrics →
+  tracing span → Recovery → Timeout（written-tracking，deadline
+  未写响应补 504）→ AttachAuthz（软依赖，缺席不挂不报错）。
+  未匹配请求走完整栈（标签 `unmatched`）；404/405 出 apierr
+  envelope。
+- **handler 绑定层**：`HandleRequest[T,R]` / `HandleAction[T]` /
+  `HandleList[T]` 返回 `http.Handler`；uri/query/json 三绑定器 +
+  validator/v10（`binding` tag）；错误经 apierr + per-App
+  `MapperRegistry`（`chok.WithErrorMapper` 注入，装配期结构化握手
+  交给 web 模块）渲染统一 envelope。
+- **对 v1 的声明变更**（迁移指南详列）：trailing-slash / fixed-path
+  不再纠错（ServeMux 语义）；路由标签 `:rid` → `{rid}`；span 命名
+  时机后移。`shutdown_timeout`（默认 10s，Shutdown 预算超时后
+  force-Close）与 `h2c` 是 v2 新增。
+
+## 7. 数据层（`db/` + `store/`）
+
+### 7.1 薄句柄与两扇 Unsafe 门
+
+公开面不出现 `*gorm.DB`。`*db.DB` 是 chok 自有薄句柄：
+`store.New` 的入参、`RunInTx` / `Migrate` / `Ping` / `Close` 的
+载体。取用路径：`db.From(k, instance...)`（blessed 便捷，缺席即
+panic——装配错误应 fail-fast）或 `chok.Get[*db.Component]` 双值
+形式。
+
+raw SQL 恰有两扇门，名字即警示（M5 §5.2 复评定案）：
+
+| 门 | 语义 | 边界 |
+|---|---|---|
+| `Store.Unsafe(ctx)` | tx-aware + **scope 已应用** + scope 失败 fail-closed | store DSL 表达不了、但租户/属主语义必须保持的 SQL |
+| `(*db.DB).Unsafe(ctx)` | tx-aware + 无 scope | 基建层：外形表 AutoMigrate、事务内行锁 |
+
+`db.InTx(ctx) bool` 提供无句柄的事务内省；事务上下文的 gorm 载体
+在 `internal/txctx`，用户代码拿不到。
+
+### 7.2 事务模型
+
+`db.RunInTx(ctx, h, fn)` / `h.RunInTx` / `Store.Tx`——context 传播
+是唯一模型：fn 收到 txCtx，store 操作带 txCtx 即自动加入事务，
+嵌套复用最外层。`db.AfterCommit(ctx, fn)` 把回调暂存到事务上下文，
+COMMIT 后按序执行、回滚整体丢弃——`store.WithBus` 的实体事件锚定
+提交，杜绝幻影事件。
+
+### 7.3 store 安全栏（v1 王牌，原样继承）
+
+Query/Update 字段白名单（生产必须显式 `WithQueryFields` /
+`WithUpdateFields`，自动发现仅 dev 且带 warn）、
+`ErrMissingConditions` 防清表、scope 传播进 Preload（失败
+fail-closed `1=0`）、owned 模型自动 OwnerScope（未认证 401、写侧
+owner 强制覆盖）、`Fields` 乐观锁 + 零值强制落库、scope 化 store
+禁 Upsert、RID 双 ID 模型（外部 `pst_xxx`，数字主键不出进程）。
+
+### 7.4 迁移双轨 + 框架表白名单
+
+```yaml
+db:
+  driver: postgres        # sqlite | mysql | postgres（day-one）
+  migrate: versioned      # auto（dev 默认）| versioned | off
+```
+
+- versioned：embedded `migrations/NNNN_name.sql`（forward-only、
+  `schema_migrations` 账本、跨进程迁移锁三分支：PG advisory /
+  MySQL GET_LOCK / SQLite 单写者）；`chok migrate create|up|status`。
+- **AutoMigrate 豁免白名单**：versioned 下 chok 电池自有表
+  （`users`、`identities`、`audit_logs`、`casbin_rule`、
+  `schema_migrations`）仍由各电池 Migrator 管理，
+  `chok migrate status` 如实列出。`migrate: off` ⇒ 框架零 DDL，
+  电池表也不建（fail-closed：casbin 缺表则 LoadPolicy 启动失败）。
+- `SoftUnique` 在 PG 用 partial unique index（`WHERE deleted_at IS
+  NULL`），mysql/sqlite 用 `(cols..., delete_token)` 复合唯一——
+  可观测行为等价。
+- **Reload 不触发 Migrate**；schema 变更须重启（结构保证）。
+
+## 8. 电池
+
+| 电池 | 要点 |
+|---|---|
+| **account** | 注册/登录/refresh/改密/忘记/重置 + 登录限速 + OAuth 四 provider（google/github/facebook/apple）。provider 显式装配：`account.Module(account.WithProviders(google.Provider()))`，yaml `providers.<name>.enabled` 是运行期开关，enabled 而未装配 ⇒ 启动失败。路由守卫 `account.Authn(k)`（Authn + ActiveCheck）。服务面 `Component.Service()`，类型 `account.Service` |
+| **authz** | casbin：自研 adapter、Redis Watcher、bootstrap 播种（Migrate 尾：建表 → NewEngine → watcher → audit hook → 播种 → 原子发布，任一步失败即启动失败）。`casbin.audit_enabled=true` ⇒ audit 硬前置真值表：未装配 / disabled / Init 失败 / Migrate 期同步探针写入失败任一 ⇒ authz 启动失败——「必须审计 policy mutation」绝不静默退化 |
+| **audit** | 异步 DB sink（单 worker 批量 insert，Block/DropOnFull 取舍显式）、purge cron（经 scheduler 软依赖；缺席 ⇒ purge 禁用 + 注记）、`GET /audit/logs` admin API（RequireAuthz("audit","read") fail-closed）。默认 `enabled: false`（合规组件显式 opt-in）。Needs = db + scheduler? + account?（authz/http 关系走 mount/request-time，避免三节点软依赖环） |
+| **scheduler** | robfig cron，panic-safe、重叠策略、统计；实现 `Server`：ctx done 后停调度并有界等待 in-flight（`stop_budget`，默认 15s）再返回——job 收尾期间依赖全部存活 |
+| **cache** | otter 内存层 + redis 层 + Breaker（默认关）。显式层开关：redis 层 enabled 而 redis 模块缺席 ⇒ 启动失败（不再「在场即自动挂」） |
+| **redis** | go-redis + TLS/CA/username（`TLSConfigFor` 导出）；健康探针 |
+
+## 9. 可观测性
+
+- **health**：`/healthz`（并行探针 + fan-in 硬超时 `probe_timeout`，
+  hot）、`/livez`、`/readyz`；draining 先翻 503 再摘流量。
+- **metrics**：Prometheus registry + `/metrics`；HTTP RED 指标由
+  web 中间件打点（路由标签 = ServeMux pattern）。
+- **tracing**：OTel provider（stdout/OTLP），web/db 按角色接入。
+- **debug**：`/componentz` 展示 Descriptor 拓扑、组件状态（含
+  disabled）与生命周期事件环形缓冲（默认关闭）。
+
+健康语义：`Healther` 是 error 型（正常/故障 + disabled 信息态）。
+v1 的 Down/Degraded 分级不再存在——单个 flaky cron job 或 sink
+抖动不该摘流量；细节走日志、Stats() 与 metrics。
+
+## 10. CLI 与生成面（`cmd/chok`）
+
+四件套 + 常规命令：
+
+| 命令 | 职责 |
+|---|---|
+| `chok init <name>` | v2 脚手架：chok.yaml + 生成装配 + main.go + migrations/ 骨架，生成即可 `go run .` |
+| `chok sync [--check]` | chok.yaml ⇒ `chok_modules_gen.go`（幂等、字节稳定；`--check` 做 CI 闸）。定制走 `chok.Override`，永不改生成文件 |
+| `chok migrate create\|up\|status` | 版本化迁移；status 含框架表白名单 |
+| `chok docs gen [--check]` | 组件表（README ×2 + 本文的生成区块）、docs/config.md、docs/chok.schema.json |
+| `chok openapi export` | 取运行中应用的 spec 落 .json/.yaml |
+
+**三道 CI 闸**：`docs gen --check`（生成面漂移即红）+
+`hack/apidiff.sh`（公开 API 变更须伴随 CHANGELOG 条目；基线锚定
+最近 release tag，tag 未发布时 armed-skip）+ examples 冒烟
+（`make smoke`：起 blog、等 `/healthz`、SIGINT、要求干净退出）。
+另有 blog 的 `sync --check` 与 schema 对示例 yaml 的校验（测试内）。
+
+JSON Schema 的立场：**结构化 + 冻结枚举**——类型/默认值/嵌套由
+Options 反射（与 conf 走查器同规则），枚举只收 SPEC 冻结的封闭集，
+行为级校验永远留在 `Validate()`；schema 不可能领先代码。
+
+## 11. 组件总览（生成区块）
 
 <!-- gen:components -->
 | 模块 | 配置段 | 依赖（`?` = 软依赖） | 能力 | 默认启用 | 说明 |
@@ -41,1420 +353,68 @@
 | `account.Module()` | `account` | db, log? | mount, migrate | true | 用户模块：注册/登录/JWT/重置 + 登录限速 + OAuth providers。 |
 <!-- /gen:components -->
 
----
-
-## 1. 定位
-
-chok 是一个 Go Web 框架。三个不可变形容词：
-
-- **全家桶**：HTTP + 数据层 + 缓存 + 认证 + 授权 (RBAC) + 任务调度 + 观测
-  在同一个仓库内，不把能力外推到用户自组装。
-- **配置驱动**：`chok.yaml` 的 `enabled: true/false` 是启停子系统的
-  主要方式，Go 代码改动最小化。
-- **单一官方实现**：每个能力只给一个成熟方案（HTTP=gin、ORM=gorm、
-  缓存=otter+badger+redis 三层、cron=robfig、JWT=golang-jwt、
-  可观测性=prometheus + OpenTelemetry）。
-
-Module path: `github.com/zynthara/chok`
-
----
-
-## 2. 设计公理
-
-1. **Config is the only knob** — 用户 90% 需求靠 yaml 解决，零 Go
-   代码。
-2. **One blessed implementation** — 接口留扩展点，不提供平行选择。
-3. **Internally complex, externally trivial** — Component 抽象内部
-   含拓扑排序 / reload 分发 / 健康聚合；对外是 `app.Register` +
-   `app.Logger()`。
-4. **Everything is a Component** — 所有子系统实现同一契约
-   （Init / Close + 可选 Reload / Health / Router / Migrate）。
-5. **Future-proof registration** — Component 通过 Resolver / Builder
-   模式解耦具体 config schema，新能力纯增量。
-
----
-
-## 3. 架构总览
-
-```
-                        ┌────────────────────────┐
-                        │       chok.App         │
-                        │  (lifecycle owner)     │
-                        └───────┬────────────────┘
-                                │
-              ┌─────────────────┼──────────────────┐
-              │                 │                  │
-         servers []       component.Registry   cleanupFns []
-         (chok.Server)    (Component lifecycle) (legacy hooks)
-                                │
-          ┌────────────┬────────┴──────┬────────────┐
-          ▼            ▼               ▼            ▼
-       parts/       parts/          parts/       user-defined
-       LoggerComp   DBComp          HealthComp    Components
-       (Reloadable) (Migratable)    (Router)
-```
-
-**关键依赖方向**（单向，无循环）：
-
-```
-chok (root) ─── parts ─── component
-   │             │          │
-   │             ├── store  │
-   │             ├── db     │
-   │             ├── cache  │
-   │             ├── redis  │
-   │             ├── auth   │
-   │             ├── swagger│
-   │             └── ...    │
-   │                        │
-   └──── log ◀──────────────┘
-```
-
-`component` 只依赖 `log`；`parts` 依赖 `component` + 各子系统；
-`chok` 根包依赖 `parts`（用于 auto-register 内置 LoggerComponent）。
-
----
-
-## 4. 核心抽象
-
-### 4.1 Component
-
-每个子系统实现的强制契约（仅三个方法）：
-
-```go
-// component/component.go
-type Component interface {
-    Name() string         // 唯一标识，e.g. "db"
-    Init(ctx context.Context, k Kernel) error
-    Close(ctx context.Context) error
-}
-```
-
-**可选能力**（按需实现，Registry 按类型断言调用）：
-
-```go
-type Reloadable        interface{ Reload(ctx) error }                // 热加载配置
-type Healther          interface{ Health(ctx) HealthStatus }         // /healthz 聚合
-type Router            interface{ Mount(router any) error }          // HTTP 路由
-type Migratable        interface{ Migrate(ctx) error }               // 启动期 schema 迁移
-type Dependent         interface{ Dependencies() []string }          // 声明硬依赖
-type OptionalDependent interface{ OptionalDependencies() []string }  // 声明软依赖
-type Optionaler        interface{ Optional() bool }                  // Init 失败不中止启动
-type InitTimeouter     interface{ InitTimeout() time.Duration }      // 自定义 Init 超时
-type CloseTimeouter    interface{ CloseTimeout() time.Duration }     // 自定义 Close 超时
-type ReloadTimeouter   interface{ ReloadTimeout() time.Duration }    // 自定义 Reload 超时
-type ConfigKeyer       interface{ ConfigKey() string }               // yaml 段 key（可选）
-type ReadyChecker      interface{ ReadyCheck(ctx) error }            // warm-up 就绪检查
-type DepsValidator     interface{ ValidateDeps(k Kernel) error }     // Init 前校验依赖
-```
-
-**类型安全访问辅助**：
-
-```go
-component.Get[T](k, "redis")      // → (T, bool)，nil-safe
-component.MustGet[T](k, "redis")  // → T，miss 时 panic
-```
-
-### 4.2 Kernel
-
-Component 看到的 App 视图（依赖倒置）：
-
-```go
-type Kernel interface {
-    Config() any                                 // 应用 config（live 指针，单字段读安全）
-    ConfigSnapshot() any                         // 原子快照（多字段读安全，Resolver 首选）
-    Logger() log.Logger                          // 共享 logger
-    Get(name string) Component                   // 按名取其它组件
-    On(event Event, hook Hook)                   // 订阅事件
-    Health(ctx) HealthReport                     // 聚合健康报告
-    ReadyCheck(ctx) error                        // 聚合就绪检查
-}
-```
-
-Component 在 `Init(ctx, k)` 时捕获 Kernel 引用，后续 `Reload` /
-`Close` / `Health` 都可通过它复用。内置 Resolver 均调用
-`k.ConfigSnapshot()` 读取配置，避免 Reload 期间的 torn read。
-
-**ConfigSnapshot 浅拷贝语义**：`ConfigSnapshot()` 返回 config 结构体
-的**浅拷贝**副本——顶层字段（值类型、指针、slice/map header）是独立
-的，但 slice/map 的底层存储仍与 live config 共享。内置 `*Options` 中
-也已有 slice 字段（如 `HTTPOptions.TrustedProxies`、`SlogOptions.Output
-/Files/AccessFiles`），所以**不应依赖"修改 snapshot 不影响 live"**：
-把 snapshot 当只读。Reload 管线会重新发布 snapshot，读者看到一致视图。
-需要深拷贝时调用方自己 clone slice/map。
-
-### 4.3 Registry
-
-Component 生命周期引擎。
-
-```go
-// component/registry.go
-reg := component.New(cfg, logger)
-reg.Register(&DBComponent{...})
-reg.Register(&AccountComponent{...})  // Dependencies() = ["db", "log"]
-
-reg.Verify()     // dry-run：只验证依赖图，不 Init
-reg.Order()      // 返回拓扑排序后���组件名列表
-
-reg.Start(ctx)           // topo 排序 → Init + Migrate → AfterStart hooks
-reg.StartOnly(ctx, ...)  // 只启动指定组件 + 传递依赖（集成测试用）
-reg.Reload(ctx)          // 只派发给 Reloadable
-reg.Stop(ctx)            // 反序 Close
-reg.Health(ctx)          // 并行聚合状态（带 per-probe 超时）
-reg.ReadyCheck(ctx)      // 聚合 ReadyChecker（warm-up gate）
-
-// 配置（App 设置保守默认值：Init 30s, Close 15s, Health 3s）
-reg.SetDefaultInitTimeout(30 * time.Second) // 每组件 Init 超时
-reg.SetCloseTimeout(15 * time.Second)       // 每组件 Close 超时
-reg.SetHealthTimeout(3 * time.Second)       // 每探针 Health 超时 + 硬 fan-in deadline
-```
-
-**Start 流程**：
-
-1. `EventBeforeStart` hook 触发
-2. 拓扑排序（Kahn 算法），检测循环依赖 / 未知依赖 / 自依赖
-3. 按拓扑层级并行 Init（带 per-component 超时）；同层组件全部 Init
-   完成后，按层序串行调用 Migrate（DDL 对并发通常不安全，串行更可靠）
-4. `Optionaler` 组件 Init/Migrate 失败 → warn 日志，跳过继续
-5. 必需组件 Init 失败 → 进入 `phaseStopping`，回滚已成功的 Component
-   （反序 Close）；期间并发 Reload 被阻断
-6. `EventAfterStart` hook 触发
-
-**Stop 流程**：按拓扑层级逆序 Close，同层组件并行 Close（与 Start
-的并行 Init 对称）；错误 joined 返回（一个失败不阻塞其它）。Stop 接
-受 `phaseStarted` 和 `phaseStopping` 两种进入状态。
-
-**Reload**：按 topo 序派发给 `Reloadable`，**不**触发 `Migratable.Migrate`
-——schema 变更（新增表 / 列 / 索引）需要重启进程才能生效，避免热加载
-路径上的 DDL 与活跃事务冲突。如果业务确实需要热加载 schema，请在
-`reloadFn` 中显式调用 `db.Migrate`，自行承担与 in-flight 查询的并发
-风险。错误收集后一起返回。非
-`phaseStarted` 状态（包括 rollback 期间的 `phaseStopping`）直接拒绝。
-
-**Verify** (`reg.Verify()`)：dry-run 不 Init，依次做 (1) 拓扑排序 +
-依赖完备性校验，(2) 对每个实现 `DepsValidator` 的组件调用
-`ValidateDeps(kernel)` 收集错误。
-
-### 4.4 Event 总线
-
-```go
-const (
-    EventBeforeStart  Event = "before_start"
-    EventAfterStart   Event = "after_start"
-    EventBeforeStop   Event = "before_stop"
-    EventAfterStop    Event = "after_stop"
-    EventBeforeReload Event = "before_reload"
-    EventAfterReload  Event = "after_reload"
-)
-
-type Hook func(ctx context.Context) error
-```
-
-典型用途：`EventAfterStart` 里把所有 `Router` Component 的路由
-Mount 到 HTTP engine 上——此时 Component 都已 Init 就绪。
-
-**注意**：`EventAfterStart` 表示"所有 Component 已 Init + 路由已
-挂载"，**不**表示 HTTP server 已监听。Server 在 `EventAfterStart`
-hook 完成后才开始 `Start(ctx, ready)`。应用真正可接流量的标志是
-HTTP server 调用 `ready()`，反映在 App 日志 `"all servers ready"`。
-
-**双生命周期模型**：Component 管理资源初始化（Init/Close），Server
-管理阻塞监听（Start/Stop）。HTTPComponent 在 Init 时构建 gin
-Engine，App 在 `registry.Start` 后提取 HTTPServer 交给
-`runServers` 管理。两者通过 `extractHTTPServer()` 桥接。
-
----
-
-## 5. App 生命周期
-
-### 5.1 构造与启动
-
-```go
-app := chok.New("myapp",
-    chok.WithConfig(&cfg, "configs/myapp.yaml"),
-    chok.WithSetup(setup),
-)
-app.Execute()   // 加信号处理 + os.Exit
-// or
-app.Run(ctx, chok.WithSignals(), chok.WithConfigWatch())
-```
-
-### 5.2 Run 流程
-
-```
- 1. loadConfig              viper 读 file + env + flag → 填 configPtr
-                            解析后的路径写回 a.configPath（供 watcher 使用）
-                            默认路径依次探测 ./{name}.yaml → ./configs/{name}.yaml
- 2. initLogger              构造 slog + access logger；auto-register
-                            LoggerComponent(WithPreBuilt)
- 3. setupFn                 用户 Register Components / SetDB / AddServer
-                            注意：a.Cacher() 在 setup 阶段返回 nil，缓存由
-                            CacheComponent.Init 构建（可集成 Redis）。
-                            registry.Start 完成后 a.cacher 才可用。
-                            若 setup 需要提前使用缓存，显式调用 SetCacher
- 4. autoRegisterComponents  扫描 configPtr 中已知 Options 类型，自动注册
-                            未被用户显式 Register 的内置 Component
-                            cache 通过 autoRegisterCache 统一处理（pre-built
-                            或 DefaultCacheBuilder 含 Redis 层）
-                            配置歧义 fail-fast：返回错误终止启动
- 5. internalMountHook       只要 HTTP Server 存在就注册 EventAfterStart hook
-                            （不依赖 WithRoutes）：挂载非 swagger Router →
-                            routesFn → swagger（最后）。无 HTTP 时若已注册
-                            Router Component 会打 warn 日志提示
- 6. registry.Start          Components Init + Migrate；AfterStart hooks
-                            失败时调用 registry.Stop 清理已 Init 的组件
- 7. runServers              并行启动每个 chok.Server，等待所有 ready
-                            SIGHUP / file-change → handleReload → Reload(ctx)
-                            SIGINT/SIGTERM → shutdown
- 8. registry.Stop           Components 反序 Close（含 LoggerComponent）
-                            phaseBuild 时为 no-op（topoSort/before_start 失败无需清理）
- 9. runCleanups             旧风格 AddCleanup 回调 LIFO 执行
-```
-
-**关键不变量**：
-
-- setupFn 运行时 registry 尚未构造，用户调 `app.Register(c)` 是 push
-  到 pending 队列；setupFn 结束后统一转入 registry
-- setupFn 里 `app.Logger()` 已就绪；`app.Cacher()` 默认返回 nil，因为
-  缓存由 CacheComponent.Init 在 registry.Start 期间构建。若 setup 中
-  显式 `SetCacher(c)` 注入外部缓存，后续 `Cacher()` 立即返回该实例
-- setupFn 可以 `app.On(event, hook)` 注册 hook（也走 pending 队列）
-- SetCacher 在 setupFn 中可注入外部 cache；autoRegisterCache
-  取 a.cacher 的最终值，确保 CacheComponent 不会持有过期引用
-- 内置 config Options 字段必须用 value embedding（不支持 pointer field），
-  因为 reload 时 Set() 拷贝值到原始内存，pointer field 会导致旧指针
-- 用户显式 Register("db") 等优先于 auto-register
-- autoRegisterComponents 在 setupFn 之后执行，不覆盖用户选择
-- WithRoutes 的回调在 EventAfterStart 中执行，此时所有 Component 已 Init
-- Server.Stop 是 shutdown 唯一触发器，idempotent
-- Run 是 single-use（再次调用返回 error）
-
-### 5.3 构造 Options
-
-来自 `options.go`：
-
-| Option | 作用 |
-|---|---|
-| `WithVersion(version.Info)` | 打印启动日志时的版本标识 |
-| `WithConfig(cfg any, path...)` | 注册 config struct 与可选显式 yaml 路径 |
-| `WithEnvPrefix(string)` | 环境变量前缀（默认由 app name 推出：字母转大写、数字保留、其他字符一律转为 `_`，如 `my-blog` → `MY_BLOG`） |
-| `WithLogConfig(*SlogOptions)` | 显式指定 log options 指针（绕开反射） |
-| `WithCacheConfig(mem, file)` | 同上，指定 cache |
-| `WithLogger(log.Logger)` | 直接注入 logger（最高优先级） |
-| `WithSetup(fn)` | setup 回调（高级：显式 Register 自定义 Component） |
-| `WithTables(...db.TableSpec)` | 声明 DB 迁移表，auto-register 的 DBComponent 使用 |
-| `WithRoutes(fn)` | AfterStart 业务路由回调；框架自动编排 mount 顺序 |
-| `WithCleanup(fn)` | 追加 cleanup 回调 |
-| `WithShutdownTimeout(d)` | 默认 30s |
-| `WithInitTimeout(d)` | 每组件 Init+Migrate 超时，默认 30s（`InitTimeouter` 可覆盖） |
-| `WithCloseTimeout(d)` | 每组件 Close 超时，默认 15s（`CloseTimeouter` 可覆盖） |
-| `WithHealthTimeout(d)` | 每探针 Health 超时，默认 3s |
-| `WithReloadFunc(fn)` | 用户 reload 钩子（Reload 管线的最后一步） |
-| `WithReloadTimeout(d)` | 默认 10s |
-| `WithDrainDelay(d)` | shutdown 时等待 LB 摘流量的延迟（K8s preStop） |
-| `WithHookTimeout(d)` | 生命周期 hook 聚合超时 |
-| `WithComponentReloadTimeout(d)` | 每组件 Reload 超时覆盖 |
-| `WithFlags(*pflag.FlagSet)` | 注入 CLI flag，最高配置优先级 |
-
-**RunOption**：
-
-| RunOption | 作用 |
-|---|---|
-| `WithSignals()` | 监听 SIGINT/SIGTERM/SIGHUP/SIGQUIT |
-| `WithConfigWatch()` | 启用 fsnotify 监听 config 文件变化 → auto Reload |
-
-### 5.4 公开 App API
-
-```go
-// 服务器与清理
-app.AddServer(srv chok.Server)
-app.AddCleanup(func(context.Context) error)
-
-// Component 生命周期
-app.Register(c component.Component)
-app.Registry() *component.Registry
-app.On(event component.Event, hook component.Hook)
-
-// 访问器
-app.Logger() log.Logger
-app.AccessLogger() log.Logger
-app.AccessLogEnabled() bool
-app.Cacher() cache.Cache
-app.DB() any                    // legacy convenience；推荐 component.Get[*parts.DBComponent](k, "db")
-
-// 便捷路由（WithRoutes 回调内使用）
-app.API(path, mw...) *gin.RouterGroup  // 从 HTTPServer 获取 group
-app.AuthMiddleware() gin.HandlerFunc   // 从 AccountComponent 获取 Authn
-
-// 设置器（setupFn 中使用）
-app.SetCacher(c cache.Cache)
-app.SetDB(gdb any)
-
-// 生命周期控制
-app.Run(ctx, ...RunOption) error
-app.Execute()                      // Run + WithSignals + os.Exit
-app.Reload(ctx) error
-app.ReloadConfig() (bool, map[string]bool, error)
-```
-
-### 5.5 Server 契约
-
-```go
-// chok.go
-type Server interface {
-    Start(ctx context.Context, ready func()) error
-    Stop(ctx context.Context) error
-}
-```
-
-- `Start` 阻塞直到 Stop 被调或发生错误
-- `ready()` 在服务器真正可接受请求时调用一次
-- `Stop` 是唯一 shutdown 触发，idempotent
-
-`server.HTTPServer`（基于 gin）是框架提供的标准实现。
-
----
-
-## 6. 配置系统
-
-### 6.1 加载优先级
-
-CLI flag > env var > 配置文件 > struct tag `default`。
-
-文件解析路径顺序：
-
-1. `WithConfig(cfg, "explicit/path.yaml")` 显式路径（找不到报错）
-2. `{PREFIX}_CONFIG` 环境变量（找不到报错）
-3. `./{app.name}.yaml` 默认路径（找不到回退到下一项）
-4. `./configs/{app.name}.yaml` 次级默认（找不到静默跳过）
-
-### 6.2 验证
-
-每个 `*Options` 可实现 `Validate() error`；root `Config` 亦可。
-App 加载后自动递归调用（先叶后根）。
-
-### 6.3 热加载（不可变两阶段 Reload）
-
-```
-SIGHUP ──┐
-fsnotify─┼──▶ handleReload ──▶ App.Reload(ctx)
-手动调用──┘                        │
-                                   ├─ ReloadConfig（两阶段不可变 reload）
-                                   │   1. 创建 config 零值副本
-                                   │   2. 加载 file/env/flag → 副本
-                                   │   3. 验证副本
-                                   │   4. 验证通过 → atomic 拷贝到 live config
-                                   │   5. 验证失败 → live config 完全不变
-                                   ├─ registry.Reload（Reloadable 组件）
-                                   └─ reloadFn（用户钩子，可选）
-```
-
-- **ReloadConfig 保证原子性**：失败时 live config 零字段污染
-- fsnotify 监听**父目录**而非文件路径（抗 atomic-save 编辑器的
-  rename+replace）
-- 100ms debounce 合并短时间内的多次 Write 事件
-- 非 Reloadable Component 被跳过（不报错）
-- 任一步骤失败会短路后续步骤，Reload 整体返回错误
-- **三源合并**（SIGHUP / fsnotify / `App.Reload(ctx)`）：`App.Reload`
-  用 `reloadMu.TryLock()` 串行化；并发触发的第二个调用立即返回
-  `ErrReloadInProgress` 而不是排队。设计假设是 in-flight reload 已经
-  会读到最新的 on-disk 配置，再排一份只是徒增延迟。需要确保某次配置
-  变更被吸收的调用方应在收到 `ErrReloadInProgress` 后退避重试，或
-  直接等下一次触发自然合并
-
-### 6.4 内置 config.Options
-
-定义在 `config/config.go`：
-
-| 类型 | 覆盖 |
-|---|---|
-| `HTTPOptions` | addr / read_timeout / write_timeout / ... |
-| `MySQLOptions` | host / port / user / pass / db / pool |
-| `SQLiteOptions` | path / WAL 自动启用 |
-| `RedisOptions` | addr / password / db |
-| `SlogOptions` | level / format / output / files / access_* |
-| `LogFileOptions` | path / rotation 参数（lumberjack） |
-| `CacheMemoryOptions` | enabled / capacity / TTL |
-| `CacheFileOptions` | enabled / path / TTL（badger） |
-| `SwaggerOptions` | enabled / title / version / prefix / bearer_auth |
-| `AccountOptions` | enabled / signing_key / expirations / login_rate_window+limit / disable_register / link_by_email / allowed_redirect_backs / oauth_callback_frontend_url / providers |
-| `ProviderRawOptions` | enabled + 任意 provider-specific 键(走 mapstructure `,remain` 收集到 `Raw map[string]any`),由 provider 包通过 `raw.Decode(&typed)` 解出强类型配置 |
-
----
-
-## 7. 数据层
-
-### 7.1 db 包
-
-GORM 包装层，提供：
-
-```go
-db.NewMySQL(*config.MySQLOptions) (*gorm.DB, error)
-db.NewSQLite(*config.SQLiteOptions) (*gorm.DB, error)
-db.Close(*gorm.DB) error
-db.Transaction(ctx, gdb, fn) error
-db.RunInTx(ctx, gdb, fn(txCtx)) error  // context-scoped transaction propagation
-
-// Migrate
-db.Table(model, indexes...) TableSpec
-db.SoftUnique(name, columns...) SoftIndex
-db.Migrate(ctx, gdb, specs ...TableSpec) error
-
-// Model mixins
-type Model struct { ID uint; RID string; Version int; CreatedAt/UpdatedAt }
-type SoftDeleteModel struct { Model; DeletedAt; DeleteToken }
-type OwnedModel struct { Model; Owned }
-type OwnedSoftDeleteModel struct { SoftDeleteModel; Owned }
-
-// Model hooks
-(m *Model) BeforeCreate(tx)  // 自动生成 RID + 初始化 Version=1
-```
-
-RID 前缀约束：1-10 小写字母+数字，总长 ≤ 23；非法 panic。
-
-### 7.2 store 包
-
-泛型 CRUD 门面，构建在 gorm + db.Model 之上。
-
-#### 核心 API（6 个方法）
-
-```go
-s := store.New[User](gdb, logger,
-    store.WithQueryFields("id", "name", "email"),
-    store.WithUpdateFields("name", "email"),
-    store.WithScope(store.OwnerScope("admin")),
-)
-
-s.Create(ctx, obj)                                               // INSERT
-s.Get(ctx, locator, ...QueryOption) (*T, error)                  // SELECT 单条（支持 WithPreload）
-s.List(ctx, opts ...where.Option) (*Page[T], error)              // SELECT 列表；Page{Items, Total}
-s.Update(ctx, locator, changes, opts ...UpdateOption) error      // UPDATE
-s.Delete(ctx, locator, opts ...DeleteOption) error               // DELETE
-s.Tx(ctx, fn)                                                    // 事务
-```
-
-`Page[T] = struct{ Items []T; Total int64 }`；`Total` 只有
-`where.WithCount()` 参与时才填充，否则为 0。`ListWithCursor` 返回
-`*CursorPage[T]`（`Items []T; NextCursor string`，`NextCursor` 非空表示还有下一页）。
-
-#### Locator 抽象（"谁"）
-
-```go
-store.RID("usr_abc")            // 按 RID 定位（对外契约）
-store.ID(42)                    // 按内部 PK 定位（join / batch）
-store.Where(where.Options...)   // 按条件定位（批量 / 复杂查询）
-```
-
-`Where` Locator 强制要求至少一个 filter 条件；仅有 order/pagination
-的 Where 返回 `ErrMissingConditions`——防止 `Delete(Where())`
-清表。
-
-#### Changes 抽象（"改什么"）
-
-```go
-store.Set(map[string]any{"name": "Alice"})        // map 形态，无锁
-store.Fields(&user, "name", "email")              // 对象 + 白名单
-store.Fields(&user)                               // 不列字段 = 白名单全集
-store.Fields(&user, "name").NoLock()              // 显式禁用乐观锁
-```
-
-**Fields 的关键特性**：
-
-- 自动从 `obj.Version` 提取乐观锁版本号（obj 嵌入 `db.Model`）
-- 零值**强制落库**（内部用 `Select(cols...).Updates(obj)` 绕过 GORM
-  默认的 skip-zero 行为）
-- 白名单外字段返回 `ErrUnknownUpdateField`
-
-#### UpdateOption / DeleteOption
-
-```go
-store.WithVersion(v int)
-```
-
-为 `Set(map)` 启用乐观锁；覆盖 `Fields` 的自动版本。Update/Delete
-共享此 Option（`versionOpt` 同时实现两个 interface）。
-
-#### 选型决策表
-
-| 场景 | 推荐写法 |
-|---|---|
-| 标准 HTTP 编辑（带乐观锁） | `Update(RID(x), Fields(&obj, ...))` |
-| 拖拽排序（并发覆盖可接受） | `Update(RID(x), Set(cols))` |
-| Worker 回填 | `Update(ID(id), Set(cols))` |
-| 单字段 map + 乐观锁 | `Update(RID(x), Set(m), WithVersion(v))` |
-| 强制覆盖 | `Update(RID(x), Fields(&obj).NoLock())` |
-| 按 RID 读 | `Get(RID(x))` |
-| 按 ID 读（内部 join） | `Get(ID(id))` |
-| 按条件读单条 | `Get(Where(where.WithFilter("email", x)))` |
-| 幂等删除 | `Delete(RID(x))` |
-| 乐观锁删除 | `Delete(RID(x), WithVersion(v))` |
-| 批量删除 | `Delete(Where(opts...))` |
-
-#### Upsert 限制
-
-`Upsert` 在以下情况被禁止（返回 `ErrUpsertScoped`）：
-
-1. Store 注册了任何 scope（`WithScope(...)`）
-2. Store 的模型嵌入 `db.Owned`——即便 `WithoutOwnerScope()` 关闭了
-   自动 OwnerScope，只要模型本身是 Owned，Upsert 仍被拒绝
-
-原因：SQL `INSERT ... ON CONFLICT DO UPDATE` 不会把 scope 产生的
-`WHERE` 条件应用到冲突更新路径，导致租户隔离等安全 scope 被绕过。
-Owned 模型的第二条规则是防御纵深——即使用户"故意"禁用了 OwnerScope，
-攻击者仍不能通过冲突键直达 UPDATE 路径修改他人的行。
-
-需要 upsert 语义时，请用 `Create` + 检测 `ErrDuplicate` + `Update`
-组合，或通过 `s.DB()` 逃生门自行构造带安全约束的 SQL。
-
-#### 其它方法
-
-```go
-s.Exists(ctx, locator) (bool, error)       // 存在性检查（比 Get 高效）
-s.BatchCreate(ctx, []*T)                   // 事务批量插入
-s.ListByIDs(ctx, []uint)                   // 批量按 ID 查
-s.ListQ(ctx, []QueryOption, ...where.Option) // List + WithTrashed/WithPreload
-s.ListWithCursor(ctx, field, dir, cursor, size) // 游标分页（keyset pagination）
-s.ListFromQuery(ctx, url.Values)           // 从 HTTP query 解析分页 + filter
-s.Transaction(ctx, fn)                     // 同 Tx
-s.WithTx(tx *gorm.DB)                      // 绑定外部事务
-s.DB() *gorm.DB                            // 逃生门（无 scope）
-s.ScopedDB(ctx) (*gorm.DB, error)          // 逃生门（含 scope）
-```
-
-#### Scope 系统
-
-```go
-type ScopeFunc func(ctx, db) (*gorm.DB, error)
-
-store.WithScope(scope)                     // 注册自定义 scope
-store.WithoutOwnerScope()                  // 禁用自动 OwnerScope
-
-// 内置
-store.OwnerScope(adminRoles ...string) ScopeFunc
-```
-
-`OwnerScope` 对实现 `db.OwnerAccessor` 的模型自动添加 `WHERE
-owner_id = <principal.Subject>`；admin 角色跳过过滤；未认证 context
-返回 `apierr.ErrUnauthenticated`（fail-closed）。
-
-**写入侧的 owner 强制**：Create/BatchCreate 调用 `fillOwner` 时，
-非管理员 principal 提供的 OwnerID 会被**强制覆盖**为
-`principal.Subject`。这防止攻击者通过请求体伪造 owner_id 字段冒充
-其他用户。管理员（默认角色 `"admin"`，可通过
-`store.SetDefaultAdminRoles(...)` 覆盖）保留显式指定 owner 的能力，
-用于数据导入/跨租户维护等合法场景。无 principal（后台任务/测试）
-时 `fillOwner` 是 no-op——请在 HTTP 层通过 Authn 中间件把关。
-
-### 7.3 where 包
-
-查询 DSL。Option 模式构造 WHERE / ORDER / LIMIT。
-
-```go
-where.WithFilter(field, value)
-where.WithFilterOp(field, op, value)        // op: Eq/Ne/Gt/Gte/Lt/Lte
-where.WithFilterIn(field, values...)
-where.WithFilterLike(field, pattern)        // 自动转义 % _ \
-where.WithFilterLikeRaw(field, pattern)     // 原样透传，仅供受信调用
-where.WithOrder(field, desc...)
-where.WithPage(page, size)
-where.WithOffset(n) / where.WithLimit(n)
-where.WithCount()                           // 触发 COUNT 查询
-```
-
-字段名全部走 Store 的 query whitelist；未注册字段返回
-`ErrUnknownField`。
-
-`WithPage` / `WithLimit` 强制 `1 ≤ size ≤ where.MaxPageSize`（默认
-10000）且 `(page-1)*size` 不能溢出 int32，防止客户端构造异常分页
-参数触发整数溢出或 OOM。`WithOffset` 拒绝负值。`FromQuery` 在
-handler 层再次 clamp `size` 作为 defense-in-depth。
-
-`WithFilterLike` 默认对 pattern 中的 `% _ \` 做转义并加 `ESCAPE '\'`
-子句——用户输入不会扩张匹配集。需要保留原始 LIKE 语义（如内部
-管理工具基于服务端构造的模式）时改用 `WithFilterLikeRaw`，由调用方
-自行负责转义。`WithFilterContains` / `WithFilterStartsWith` /
-`WithFilterEndsWith` 在 `WithFilterLike` 的转义基础上额外注入
-前后置 `%` 通配。
-
-`WithFilterIn` 受 `where.MaxInList`（默认 500）保护，超过返回
-`ErrInvalidParam`——避免 SQLite `max_variable_number` 或 PostgreSQL
-参数上限被触发。
-
-`WithCursor` 要求游标字段**严格唯一**（通常 `id` / `rid`）。对非唯一
-列（如 `created_at`）用 `WithCursorBy(field, direction, fieldCursor,
-idCursor, size)`，内部拼 `(field, id)` 复合 keyset，确保同值行不会在
-分页边界被跳过。
-
-**Preload scope 传播**：`WithPreload(relation)` 在加载关联时会把
-Store 当前 ctx + scopes 链路重新应用到子查询——防止 OwnerScope 对
-主表生效、关联表放行的越权读取。自定义 scope 如果对关联表不适用，
-应通过 ctx 判断后返回 `q` 自身 opt-out。
-
-**安全提示**：`store.New` 未显式指定 `WithQueryFields` /
-`WithUpdateFields` 时，框架从 JSON tag 自动发现并以 warn 级别
-日志输出发现的字段集合。生产环境建议显式声明白名单。
-
----
-
-## 8. HTTP 层
-
-### 8.1 handler 包
-
-泛型化的请求处理器：
-
-```go
-type HandlerFunc[T, R any] func(ctx, req *T) (R, error)
-type ActionFunc[T any]     func(ctx, req *T) error
-type QueryLister[T any]    interface{ ListFromQuery(ctx, url.Values) ([]T, int64, error) }
-
-handler.HandleRequest(fn, opts ...HandleOption) gin.HandlerFunc
-handler.HandleAction(fn, opts ...HandleOption) gin.HandlerFunc
-handler.HandleList[T](lister, opts ...HandleOption) gin.HandlerFunc
-
-// Options
-handler.WithSuccessCode(int)
-handler.WithSummary(string)
-handler.WithTags(...string)
-handler.WithBinders(...Binder)
-```
-
-**请求绑定**默认合并 uri + query + json（按 tag 选择）；最后统一
-validator/v10 校验。
-
-### 8.2 middleware 包
-
-```go
-middleware.Recovery()
-middleware.RequestID()                      // 写入 ctx，access log 关联
-middleware.Logger(log.Logger)               // per-request logger；自动注入 trace_id/span_id
-middleware.AccessLog(log.Logger)            // method/path/status/latency；tracing 激活时含 trace_id
-middleware.CORS(opts ...CORSOption)         // AllowCredentials + "*" 组合在构造时 panic
-middleware.Authn(tokenParser, principalResolver)
-middleware.AttachAuthz(az authz.Authorizer)             // HTTPComponent 自动挂；手动挂用于子路由替换 Authorizer
-middleware.RequireAuthz(obj, act string)                // 单租户 / 全局
-middleware.RequireAuthzInDomain(obj, act, dParam string) // 多租户 (domain 取自 c.Param)；non-DomainAuthorizer 触发 fail-closed 500
-middleware.Timeout(d time.Duration)         // 注入 deadline；deadline 触发且未写响应则写 504
-```
-
-### 8.3 server 包
-
-```go
-srv := server.NewHTTPServer(*config.HTTPOptions)
-srv.Use(middlewares...)
-srv.Engine() *gin.Engine        // 逃生门，给 Router Mount 用
-srv.Group(path, mw...) *gin.RouterGroup
-srv.Start(ctx, ready) / srv.Stop(ctx)
-```
-
-`HTTPServer` 实现 `chok.Server`，直接 `app.AddServer(srv)`。
-
----
-
-## 9. parts 包：15 个内置 Component
-
-所有 Component 都在 `parts/` 下。每个接受一个 **Resolver**（从 app
-config 抽取自己那段）或 **Builder**（用 kernel 构造实例），让
-Component 零耦合具体 config schema。
-
-| Component | 硬依赖 | 软依赖 (optional) | 可选能力 | 关键 API |
-|---|---|---|---|---|
-| `LoggerComponent` | - | - | Reloadable, Healther | `.WithPreBuilt(l, access)`, `Logger()`, `AccessLogger()` |
-| `RedisComponent` | - | - | Healther | `Client() *redis.Client`, `.SetPingTimeout(d)` |
-| `DBComponent` | - | `[tracing]` | Migratable, Healther | `DB() *gorm.DB`, `.WithoutClose()` |
-| `CacheComponent` | - | `[redis]` | Healther | `Cache() cache.Cache`, `.WithHardDependencies(...)`, `.WithoutOptionalDependencies()`, `.WithPreBuilt(c, owned)` |
-| `HTTPComponent` | - | `[metrics, log, tracing]` | - | `Server() *server.HTTPServer`, `Engine() *gin.Engine` |
-| `JWTComponent` | - | - | - | `Manager() *jwt.Manager`；自定义 Name 支持多实例 |
-| `AuthzComponent` | - | - | - | `Authorizer() authz.Authorizer` |
-| `SchedulerComponent` | `[log]` | - | Healther | `Scheduler() *scheduler.Scheduler`；AfterStart 自动 Start |
-| `SwaggerComponent` | - | - | Router | `Spec() *swagger.Spec`；`Mount(engine)` |
-| `AccountComponent` | `[db, log]` | - | Migratable, Router | `Module() *account.Module`；Mount /auth 路由 |
-| `HealthComponent` | - | - | Router | `/healthz` `/livez` `/readyz` JSON 聚合报告 |
-| `MetricsComponent` | - | - | Router | `/metrics` Prometheus；`PrometheusRegistry()` 暴露 |
-| `TracingComponent` | - | - | - | `TracerProvider()` 永远非 nil（禁用时 noop） |
-| `DebugComponent` | - | - | Router | `/componentz` 拓扑/耗时/能力诊断（默认禁用） |
-| `PoolComponent` | - | - | Healther | `Pool() *scheduler.Pool`；异步任务池；`NewPoolComponentWithParent(parent, opts)` 注入长生命周期 parent ctx |
-
-### 9.0 Auto-Register 矩阵
-
-| 组件 | Config 类型 | 默认启用 | Auto-Register | Reloadable | Router | Optional | 配置 key |
-|------|------------|---------|--------------|-----------|--------|---------|---------|
-| Logger | `SlogOptions` | 是 | 是（pre-built） | 是 | - | - | `log` |
-| HTTP | `HTTPOptions` | 是 | 是 | - | - | - | `http` |
-| DB | `DatabaseOptions` | driver 决定 | 是 | - | - | - | `database` |
-| Redis | `RedisOptions` | 是 | 是 | - | - | - | `redis` |
-| Cache | `CacheMemory/FileOptions` | 否 | 是 | - | - | - | `cache` |
-| Account | `AccountOptions` | 否 | 是 | - | 是 | - | `account` |
-| Swagger | `SwaggerOptions` | 否 | 是 | - | 是 | - | `swagger` |
-| Health | `HealthOptions` | 是（需 HTTP） | 是 | - | 是 | - | `health` |
-| Metrics | `MetricsOptions` | 是（需 HTTP） | 是 | - | 是 | - | `metrics` |
-| Debug | `DebugOptions` | 否 | 是 | - | 是 | - | `debug` |
-| Tracing | - | - | **否（显式）** | - | - | 是 | `tracing` |
-| Scheduler | - | - | **否（显式）** | - | - | - | `scheduler` |
-| Pool | - | - | **否（显式）** | - | - | - | `pool` |
-| JWT | - | - | **否（显式）** | - | - | - | `jwt` |
-| Authz | - | - | **否（显式）** | - | - | - | `authz` |
-
-**规则**：有 `config.Options` 类型的组件走 auto-register；无 Options
-的组件必须在 `WithSetup` 中显式 `Register`。
-
-**Config 组织**：auto-register 的字段扫描（`discoverOne[T]`）会遍历整棵
-Config 树，因此扁平和嵌套两种写法都受支持。用户可以按业务直觉把相关
-Options 组织在子结构里：
-
-```go
-// 扁平（可用）
-type Config struct {
-    HTTP        config.HTTPOptions
-    CacheMemory config.CacheMemoryOptions
-    CacheFile   config.CacheFileOptions
-}
-
-// 嵌套（也可用，yaml 可写 cache: { memory, file }）
-type Config struct {
-    HTTP  config.HTTPOptions
-    Cache struct {
-        Memory config.CacheMemoryOptions `mapstructure:"memory"`
-        File   config.CacheFileOptions   `mapstructure:"file"`
-    } `mapstructure:"cache"`
-}
-```
-
-扫描约束：
-- 全树中同一 Options 类型**只允许出现 1 次**，否则启动失败（避免歧义）
-- 指针字段（`*Options`）既不匹配也不下钻——违反 reload 的 value 语义
-  契约，由 `validateNoPointerOptions` 在顶层同步 fail-fast
-- `config.SelfValidating` 类型（如 `DatabaseOptions` 这种
-  discriminator）为不透明边界，扫描不会下钻，这样内嵌的
-  `SQLiteOptions` / `MySQLOptions` 不会被意外匹配
-
-### 9.1 Resolver 模式示例
-
-```go
-// log
-parts.NewLoggerComponent(func(cfg any) *config.SlogOptions {
-    return &cfg.(*MyAppConfig).Log
-})
-
-// redis
-parts.NewRedisComponent(func(cfg any) *config.RedisOptions {
-    return &cfg.(*MyAppConfig).Redis
-})
-```
-
-### 9.2 Builder 模式示例
-
-```go
-// db（用户决定 MySQL/SQLite）
-parts.NewDBComponent(
-    func(k component.Kernel) (*gorm.DB, error) {
-        return db.NewSQLite(&cfg.SQLite)
-    },
-    db.Table(&User{}),
-    db.Table(&Post{}, db.SoftUnique("uk_slug", "slug")),
-)
-
-// account（依赖 db 已就绪）
-parts.NewAccountComponent(
-    func(k component.Kernel, gdb *gorm.DB) (*account.Module, error) {
-        return account.New(gdb, k.Logger(),
-            account.WithSigningKey(cfg.Account.SigningKey))
-    },
-    "/auth",  // group path
-)
-```
-
-#### 9.2.1 OAuth 配置驱动（v0.3.6 / Phase 3）
-
-OAuth provider 走 `chok.yaml` 启用,业务方**零额外 Go 代码** — chok 主包(`providers.go`)默认 import `account/providers/blessed/` curator,curator 通过 blank import 把所有 blessed provider 拉进依赖图,各 provider 包 `init()` 自动注册到全局 factory 表。
-
-**官方 blessed provider 清单**(随 Phase 4-5 逐步落地):
-- ✅ `account/providers/google` — OIDC + ID Token 验签 via `coreos/go-oidc/v3`(Phase 4)
-- ✅ `account/providers/github` — REST `/user` + `/user/emails`,数字 ID 作 ProviderAccountID,Enterprise URL 可配置(Phase 5a)
-- ✅ `account/providers/facebook` — Graph API `/v{X}/me?fields=...`,无 `email_verified` 字段 → Email 非空视为已验证(Phase 5b)
-- ✅ `account/providers/apple` — ES256 客户端动态签 JWT 作 client_secret(并发缓存,180d 上限);form_post 模式;`is_private_email` → IsAliasedEmail(Phase 5c)
-
-每个 provider 自身实现 `account.AuthProvider`(`Name`/`Capabilities`/`BeginAuth`/`CompleteAuth`)以及可选 `account.RedirectURLProvider`(让 Module dev-mode auto-detect 拿到 RedirectURL hint)。
-
-```go
-// main.go — 不需要任何 import
-import "github.com/zynthara/chok/chok"
-
-func main() {
-    chok.New("myapp", chok.WithConfig(&MyConfig{})).Run()
-}
-```
-
-```yaml
-# chok.yaml
-account:
-  enabled: true
-  signing_key: "${JWT_SECRET}"
-  link_by_email: false                       # SPEC §8 默认关
-  allowed_redirect_backs:                    # SPEC §6.1 redirect_back 白名单
-    - "https://app.example.com/"
-  oauth_callback_frontend_url: "https://app.example.com/auth/finish"
-  providers:
-    google:
-      enabled: true
-      client_id:     "${GOOGLE_CLIENT_ID}"
-      client_secret: "${GOOGLE_CLIENT_SECRET}"
-      redirect_url:  "${OAUTH_REDIRECT_BASE}/auth/google/callback"
-```
-
-`parts.DefaultAccountBuilder`(等价 `account.OptionsFromConfig` + `account.RegisterConfiguredProviders`)在 Init 阶段:
-
-1. yaml 字段映射成 `account.With*` Option(`LinkByEmail` / `AllowedRedirectBacks` / `OAuthCallbackFrontendURL`)
-2. 遍历 `opts.Providers`(sorted),`enabled=true` 项查 `account.LookupProviderFactory(name)` → factory(`*config.ProviderRawOptions`) → `m.RegisterProvider(p)`
-3. factory 不存在 → fail-fast,错误消息列出 registry 里全部已注册名字,绝大多数情形是 yaml 里的 provider name 写错(typo)
-
-**Bundle 决策代价**(darwin/arm64 stripped,实测):google+github+facebook 共享 `golang.org/x/oauth2`,边际 +0.1 MB;Apple 加 JWX 库 +1.8 MB。完整 chok app 二进制(`examples/blog`)从 37.88 MB → 39.30 MB,+3.8% 不可感知。"Rails for Go / 全家桶"定位下,功能开关属于 yaml 配置,不外推到 Go import。
-
-需要精简体积的特殊部署可 fork chok 删除 `providers.go` 的 blessed import,改为 main.go 自行 blank import 所需 provider 子集 — `account.RegisterProviderFactory` 仍是公开扩展点。
-
-环境变量可覆盖 yaml 任意子键(包括 provider 内部敏感字段):
-
-```
-$APP_PREFIX_ACCOUNT_PROVIDERS_GOOGLE_CLIENT_SECRET=…  # 覆盖 yaml 里的同名键
-```
-
-`account.Setup` 与 `parts.DefaultAccountBuilder` 共用 `OptionsFromConfig` + `RegisterConfiguredProviders` 路径,两条入口对齐。
-
-`config.Redact(&cfg)` 与 `AccountOptions.GoString` 都对 `Providers[name].Raw` 做基于关键字(`*secret*` / `*password*` / `*private_key*` / `*api_key*` / `*token*`)的 mask,直接 log 整个 config 不会泄密。
-
-### 9.3 特殊模式
-
-**Pre-built 模式**（LoggerComponent / CacheComponent）：
-
-```go
-logger := log.NewSlog(...)  // 已有 logger
-parts.NewLoggerComponent(resolver).WithPreBuilt(logger, accessLogger)
-// Component 在 Init 时采用 logger，跳过 NewSlog；Reload 仍有效
-```
-
-chok App 内部用这模式让 `App.Logger()` 和 registry 里的
-LoggerComponent 共享同一实例。
-
-**Router 挂载**（框架在 `internalMountHook` 中自动编排）：
-
-```go
-// Phase 1: mount all Router components except swagger/http (topo start order).
-for _, c := range a.Registry().StartedComponents() {
-    if c.Name() == "swagger" || c.Name() == "http" { continue }
-    if r, ok := c.(interface{ Mount(any) error }); ok {
-        r.Mount(engine)
-    }
-}
-// Phase 2: user business routes (WithRoutes callback).
-// Phase 3: mount swagger last (sees all routes).
-```
-
----
-
-## 10. 可观测性
-
-### 10.1 Health 聚合
-
-Registry.Health **并行**执行所有 `Healther` 探针（默认 per-probe
-超时 3s），避免串行探活超过 K8s liveness probe 的默认 1s 超时。
-Fan-in 层强制在 timeout+1s 内返回，即使某个 probe 不尊重
-context 也不会卡住 `/healthz`。
-
-聚合规则：
-
-- 任一 Down → 整体 Down（HTTP 503）
-- 非 Down 但有 Degraded → 整体 Degraded（HTTP 200）
-- 全部 OK → OK（HTTP 200）
-
-非 `Healther` Component 默认视为 OK。`Optionaler` 组件 Init
-失败后标记为 `HealthDegraded`（非 Down），不影响 `/readyz`。
-
-HealthComponent 暴露三个 Kubernetes 风格端点：
-
-| 端点 | 语义 | Shutdown 行为 |
-|---|---|---|
-| `GET /healthz` | 完整诊断报告（聚合所有 Healther） | 不变 |
-| `GET /livez` | 进程存活（永远 200，不检查 DB/Redis） | 不变 |
-| `GET /readyz` | 是否可接收流量（聚合 Healther） | 立��返回 503 |
-
-`/readyz` 在 `EventBeforeStop` hook 中自动标记 `shuttingDown`，
-load balancer 摘流量后再关闭连接。
-
-```json
-{
-  "status": "ok",
-  "components": {
-    "db":    { "status": "ok", "details": { "latency_ms": 2 } },
-    "redis": { "status": "ok", "details": { "latency_ms": 1 } },
-    "cache": { "status": "ok" }
-  }
-}
-```
-
-### 10.2 Metrics
-
-MetricsComponent 包装 prometheus.Registry，默认装好 GoCollector +
-ProcessCollector。用户通过 `PrometheusRegistry()` 注册自定义 collector：
-
-```go
-m := parts.NewMetricsComponent("/metrics")
-counter := prometheus.NewCounter(prometheus.CounterOpts{
-    Name: "myapp_requests_total",
-    Help: "Total requests",
-})
-m.PrometheusRegistry().MustRegister(counter)
-```
-
-### 10.3 Tracing
-
-TracingComponent 构建 OpenTelemetry TracerProvider，设置为 otel
-global：
-
-```go
-parts.NewTracingComponent(func(cfg any) *parts.TracingSettings {
-    return &parts.TracingSettings{
-        Enabled:      true,
-        ServiceName:  "myapp",
-        Exporter:     "otlp",
-        OTLPEndpoint: "http://collector:4318",
-    }
-})
-```
-
-Exporter 支持 `stdout`（dev）和 `otlp`（prod）。禁用时
-`TracerProvider()` 返回 noop 实例——instrumentation 代码无需 nil
-check。
-
----
-
-## 11. 辅助子系统
-
-### 11.1 apierr
-
-统一错误模型。默认错误：
-
-```go
-apierr.ErrNotFound        // 404
-apierr.ErrInvalidArgument // 400
-apierr.ErrUnauthenticated // 401
-apierr.ErrPermissionDenied// 403
-apierr.ErrInternal        // 500
-apierr.ErrConflict        // 409
-apierr.ErrMapper(err) *Error  // 全局映射器（store.MapError 常注册到此）
-```
-
-### 11.2 auth
-
-纯上下文 + 密码工具：
-
-```go
-auth.WithPrincipal(ctx, Principal) context.Context
-auth.PrincipalFrom(ctx) (Principal, bool)
-auth.HashPassword(plain) (hash, error)
-auth.ComparePassword(hash, plain) error
-```
-
-### 11.3 auth/jwt
-
-HS256 manager（无全局单例）：
-
-```go
-mgr, _ := jwt.NewManager(jwt.Options{
-    SigningKey: "...",           // >= 32 bytes
-    Issuer:     "myapp",
-    Expiration: 2 * time.Hour,   // defaults to 2h
-    Leeway:     30 * time.Second, // 默认 DefaultLeeway (30s)，容忍时钟偏斜
-})
-token, exp, _ := mgr.Sign(subject, map[string]any{"roles": [...]})
-sub, claims, _ := mgr.Parse(token)
-```
-
-**时钟偏斜**：`Parse` 对 `iat` / `exp` / `nbf` 应用 `Leeway` 容差，
-避免跨节点时钟不完全同步时把刚刚签发的 token 当成"未来时间"拒绝。
-要严格校验时把 `Options.Leeway` 设为负值。
-
-### 11.4 authz
-
-两个接口 + 一个 blessed 实现:
-
-```go
-// authz/authz.go
-type Authorizer interface {
-    Authorize(ctx, subject, object, action string) (bool, error)
-}
-
-// 多租户扩展 — DomainAuthorizer
-type DomainAuthorizer interface {
-    Authorizer
-    AuthorizeInDomain(ctx, subject, domain, object, action string) (bool, error)
-}
-```
-
-**Blessed 实现:`authz/casbin`**(Phase 6,RBAC-with-domains)
-- model:`g = _, _, _`(user, role, domain),支持"A workspace 是 admin、B workspace 是 member"
-- matcher 包含三条 OR 子句:`r.sub == p.sub`(GrantUser 直接授权)/ `g(r.sub, p.sub, r.dom)`(domain 内角色)/ `g(r.sub, p.sub, "*")`(全局角色穿透)
-- domain 规范化:输入 `""` → `"*"`(API 友好别名);拒绝业务方把 `"*"` 当租户 ID(SPEC §7.7 v0.3.4)
-- `*casbinAuthorizer` 同时实现 `Authorizer` / `DomainAuthorizer` / `Service`(GrantRole / RevokeUser / Bootstrap 等管理 API)/ `io.Closer`
-- 通过 `parts.AuthzComponent.WithDependencies("db").WithOptionalDependencies("redis", "audit")` 接入
-
-**Middleware 收敛**(SPEC §7.2 v0.3,删除路由模式):
-- `middleware.RequireAuthz(obj, act)` — 单租户 / 全局
-- `middleware.RequireAuthzInDomain(obj, act, domainParam)` — 多租户,从 URL `c.Param(domainParam)` 取 domain;Authorizer 不实现 `DomainAuthorizer` 时**fail-closed 500**(SPEC §7.2 v0.3.2,绝不静默降级)
-- `middleware.AttachAuthz(az)` — HTTPComponent 通过 `OptionalDependencies + ["authz"]` 在 Init 时自动注入
-
-**配置驱动**(yaml):
-```yaml
-authz:
-  enabled: true
-  driver: casbin                    # 单一 blessed
-  casbin:
-    bootstrap_admin_user_id: "..."  # 启动期幂等播种 (`*`/`*`)
-    redis_watcher: false            # 多实例策略同步,Phase 6 后续 PR 落地
-    audit_enabled: false            # 同上
-```
-
-**Bundle 代价**(darwin/arm64 stripped,实测):chok 自带 Casbin adapter(`authz/casbin/adapter.go`),启用让 `examples/blog` binary 从 37.88 MB → 39.09 MB(**+1.21 MB / +3.2%**)。早期版本依赖第三方 `gorm-adapter v3`,后者会自动拉入 `postgres / sqlserver / glebarez-sqlite / modernc-sqlite / pgx-v5 / mssqldb` 全套 driver(+9.93 MB),chok 自写 adapter 复用应用已配置的 GORM driver,**砍掉 8.72 MB**。
-
-authz 默认 `enabled: false`,未启用部署不付运行成本,但 Casbin 引擎本身仍链入二进制 — 这是单一 blessed 实现路线的固有代价。
-
-### 11.5 account
-
-现成的用户模块（注册 / 登录 / refresh / change / forgot / reset）。
-路由挂载通过 `AccountComponent` 的 Router 实现，依赖 db + log。
-
-### 11.6 scheduler
-
-Cron job 运行器（robfig/cron/v3 包装）：
-
-- panic-safe：每次 Run 带 recover + 堆栈日志
-- 策略：`PolicyDelayIfRunning` / `PolicySkipIfRunning`
-- 统计：RunCount / FailCount / AvgDurMs / LastErr
-- `ErrBusy` 不计入失败
-
-### 11.7 cache
-
-三层缓存：memory(otter) + file(badger) + redis，按 `cache.Build`
-组合。`cache.Chain` 支持任意顺序叠加。Chain.Get 对层级错误降级为
-miss（不中止查找），天然容忍单层故障。
-
-`cache.WithBreaker(c, BreakerOptions{})` 可包裹任意 Cache 后端（通常
-是 Redis）添加熔断保护。连续失败 ≥ threshold 次后 circuit open（Get
-返回 miss，Set/Delete 静默跳过），resetTimeout 后半开探活。
-`cache.Build` 通过 `BuildOptions.Breaker` 字段自动装配。
-
-### 11.8 rid
-
-资源 ID 生成。前缀 + 随机后缀，总长 ≤ 23。
-
-### 11.9 validate
-
-wrap validator/v10；`validate.Func` 返回 plain error 自动包装为
-`apierr.ErrInvalidArgument`。
-
-### 11.10 swagger
-
-自动生成 OpenAPI 3.0，从 `handler.HandleRequest[T, R]` 的泛型类型反射
-获取 schema。注册路由的同时调用 `swagger.Post/Get/...` 把 op 写入
-`Spec`。
-
----
-
-## 12. 使用示例（examples/blog）
-
-### 12.1 入口
-
-```go
-// cmd/blog/main.go
-package main
-
-import "github.com/zynthara/chok/examples/blog/internal/app"
-
-func main() { app.NewApp().Execute() }
-```
-
-### 12.2 Config
-
-```go
-// internal/app/config.go
-type Config struct {
-    HTTP     config.HTTPOptions     `mapstructure:"http"`
-    Log      config.SlogOptions     `mapstructure:"log"`
-    Database config.DatabaseOptions `mapstructure:"database"`
-    Account  config.AccountOptions  `mapstructure:"account"`
-    Swagger  config.SwaggerOptions  `mapstructure:"swagger"`
-}
-```
-
-### 12.3 yaml
-
-```yaml
-# configs/blog.yaml
-http:
-  addr: ":8080"
-log:
-  level: info
-  format: json
-  output: [stdout]
-database:
-  driver: sqlite
-  sqlite:
-    path: "blog.db"
-account:
-  enabled: true
-  signing_key: "CHANGE-ME-generate-with-openssl-rand-base64-32"
-swagger:
-  enabled: true
-  title: "Blog API"
-```
-
-### 12.4 Setup（auto-register 模式）
-
-框架从 Config struct 的字段类型自动发现并注册 Component——用户只需
-提供表定义和业务路由：
-
-```go
-var cfg Config
-
-func NewApp() *chok.App {
-    return chok.New("blog",
-        chok.WithConfig(&cfg),
-        chok.WithErrorMapper(chokstore.MapError),
-        chok.WithTables(
-            db.Table(&model.Post{},
-                db.SoftUnique("uk_post_title_owner", "title", "owner_id")),
-        ),
-        chok.WithRoutes(func(ctx context.Context, a *chok.App) error {
-            api := a.API("/api/v1", a.AuthMiddleware())
-            gdb := a.DB().(*gorm.DB)
-            posts := blogStore.NewPostStore(chokstore.New[model.Post](gdb, a.Logger()))
-            handler.RegisterPostRoutes(api, posts)
-            return nil
-        }),
-    )
-}
-```
-
-**auto-register 做了什么**（用户零代码）：
-
-| Config 字段类型 | 自动注册 |
-|---|---|
-| `config.HTTPOptions` | HTTPServer + Recovery/RequestID/Logger middleware |
-| `config.DatabaseOptions` | DBComponent (driver 决定 SQLite/MySQL) + WithTables 的表 |
-| `config.AccountOptions` | AccountComponent ("/auth")，`enabled: false` 时跳过 |
-| `config.SwaggerOptions` | SwaggerComponent，`enabled: false` 时跳过 |
-| （需 HTTP Server） | HealthComponent ("/healthz") + MetricsComponent ("/metrics") |
-
-用户在 `WithSetup` 中显式 `Register("db")` 等会**优先**于 auto-register。
-
-**WithRoutes 做了什么**（用户零 hook 代码）：
-
-框架在 `EventAfterStart` 中自动编排三阶段 mount（只要存在
-HTTP Server 就会触发，不依赖 `WithRoutes` 是否设置）：
-1. 挂载所有非 swagger 的 Router Component
-2. 执行 `WithRoutes` 回调（用户业务路由，可选）
-3. 最后挂载 swagger（`Populate` 能看到所有路由）
-
-### 12.5 Handler
-
-```go
-// internal/handler/post.go
-func (h *postHandler) update(ctx context.Context, req *updatePostRequest) (*model.Post, error) {
-    p, err := h.posts.Get(ctx, store.RID(req.RID))
-    if err != nil {
-        return nil, err
-    }
-    var cols []string
-    if req.Title != nil {
-        p.Title = *req.Title
-        cols = append(cols, "title")
-    }
-    if req.Status != nil {
-        p.Status = *req.Status
-        cols = append(cols, "status")
-    }
-    if len(cols) == 0 {
-        return p, nil
-    }
-    // Fields 自动从 p.Version 取乐观锁版本号
-    if err := h.posts.Update(ctx, store.RID(p.RID), store.Fields(p, cols...)); err != nil {
-        return nil, err
-    }
-    return p, nil
-}
-```
-
----
-
-## 13. 扩展：写一个新 Component
-
-三步：
-
-1. **实现 Component interface**（必须）+ 可选能力
-2. **接受 Resolver 或 Builder**，解耦具体 config
-3. **暴露一个 accessor**（如 `MyComp.Client()`）
-
-示例（假设做一个 Memcached 缓存后端）：
-
-```go
-// parts/memcached.go（或用户自己的包）
-
-type MemcachedResolver func(any) *MemcachedSettings
-
-type MemcachedSettings struct {
-    Enabled bool
-    Servers []string
-}
-
-type MemcachedComponent struct {
-    resolve MemcachedResolver
-    client  *memcache.Client
-}
-
-func NewMemcachedComponent(r MemcachedResolver) *MemcachedComponent {
-    return &MemcachedComponent{resolve: r}
-}
-
-func (m *MemcachedComponent) Name() string      { return "memcached" }
-func (m *MemcachedComponent) ConfigKey() string { return "memcached" }
-
-func (m *MemcachedComponent) Init(ctx context.Context, k component.Kernel) error {
-    s := m.resolve(k.ConfigSnapshot())
-    if s == nil || !s.Enabled {
-        return nil
-    }
-    m.client = memcache.New(s.Servers...)
-    return nil
-}
-
-func (m *MemcachedComponent) Close(ctx context.Context) error {
-    if m.client != nil {
-        m.client.Close()
-    }
-    return nil
-}
-
-// 可选：Healther
-func (m *MemcachedComponent) Health(ctx context.Context) component.HealthStatus {
-    if m.client == nil {
-        return component.HealthStatus{Status: component.HealthOK}
-    }
-    if err := m.client.Ping(); err != nil {
-        return component.HealthStatus{Status: component.HealthDown, Error: err.Error()}
-    }
-    return component.HealthStatus{Status: component.HealthOK}
-}
-
-func (m *MemcachedComponent) Client() *memcache.Client { return m.client }
-```
-
-用户代码：
-
-```go
-a.Register(NewMemcachedComponent(func(cfg any) *MemcachedSettings {
-    return &cfg.(*MyCfg).Memcached
-}))
-
-// 其它组件依赖它
-type MyWorkerComponent struct{ ... }
-func (w *MyWorkerComponent) Dependencies() []string { return []string{"memcached"} }
-func (w *MyWorkerComponent) Init(ctx, k) error {
-    mc := k.Get("memcached").(*MemcachedComponent).Client()
-    ...
-}
-```
-
----
-
-## 14. 技术选型
-
-| 维度 | 依赖 | 备注 |
-|---|---|---|
-| HTTP | gin | hardcoded；`server.HTTPServer` 包装 |
-| ORM | gorm | hardcoded；`db/store/where` 基于其上 |
-| Config | viper | file + env + flag |
-| Validation | validator/v10 | `validate.ValidateStruct` 统一入口 |
-| Cron | robfig/cron/v3 | `scheduler` 包封装 |
-| JWT | golang-jwt/jwt/v5 | `auth/jwt.Manager` 包装 |
-| 内存缓存 | otter/v2 | `cache.NewMemory` |
-| 文件缓存 | dgraph-io/badger/v4 | `cache.NewFile` |
-| Redis | go-redis/v9 | `cache.NewRedis` + `redis.New` |
-| 日志轮转 | natefinch/lumberjack | `log.NewSlog` 自动装配 |
-| fsnotify | fsnotify/v1 | config 文件监听 |
-| Metrics | prometheus/client_golang | MetricsComponent 核心 |
-| Tracing | OpenTelemetry SDK | stdout + OTLP/HTTP exporter |
-
----
-
-## 15. 项目结构
+各模块配置项全表：[`config.md`](config.md)（生成）。
+
+## 12. 不变量清单（由结构保证）
+
+以下每条由类型系统或控制面结构保证，不依赖文档背诵：
+
+1. 生命周期变更全部经控制 goroutine —— 不存在可写错的锁序。
+2. 配置只有不可变快照 —— 不存在 torn read / 指针字段禁令。
+3. 组件声明是数据（Descriptor）—— 不存在「忘记实现某声明接口」。
+4. 依赖访问只在 Init（经 Kernel 快照）—— Close 拿不到 peer。
+5. disabled 组件有定义良好的四条语义 —— 注册拓扑不随配置漂移。
+6. reload-safe/restart-only 是字段 tag —— 组件不再手写 warn。
+7. gorm/gin 类型不在公开面 —— 两扇 Unsafe 门是仅有的例外且
+   自名其险；`grep "\.Unsafe("` 即见全部越权点。
+8. veto = 组件 Init 返回错误 —— 没有「哪些 hook 能中止启动」的
+   口口相传。
+9. 组件表 / 配置文档 / JSON Schema 由生成器产出 —— 漂移在 CI
+   挂掉而不是靠人巡检。
+
+（store 安全栏、`context.WithoutCancel` shutdown 纪律等 v1 已
+结构化的不变量原样继承。）
+
+## 13. 目录结构
 
 ```
 chok/
-├── chok.go              App 生命周期
-├── options.go           App 构造 Option
-├── config.go            loadConfig + reflect defaults/env
-├── signal.go            SIGHUP/SIGTERM/SIGQUIT 分派
-├── watcher.go           fsnotify 文件监听
-│
-├── component/           Component / Kernel / Registry / Event
-├── parts/               13 个内置 Component
-├── store/               泛型 CRUD + Locator + Changes
-│   └── where/           查询 DSL
-├── config/              所有 *Options 结构
-├── db/                  gorm 包装 + Model / Migrate
-├── cache/               memory/file/redis 三层
-├── redis/               go-redis 包装
-├── auth/                Principal / password
-│   └── jwt/             HS256 Manager
-├── authz/               Authorizer interface
-├── account/             用户模块（注册/登录/...）
-├── scheduler/           cron 运行器
-├── server/              gin HTTP Server（实现 chok.Server）
-├── swagger/             OpenAPI 生成 + UI
-├── handler/             HandleRequest[T,R] 泛型处理器
-├── middleware/          Recovery/Auth/CORS/AccessLog/...
-├── apierr/              统一错误类型
-├── choktest/            测试辅助（NewTestDB / NewTestStore）
-├── rid/                 资源 ID
-├── log/                 Logger interface + slog 实现
-├── validate/            validator/v10 包装
-├── version/             Info 结构
-│
-├── cmd/chok/            脚手架 CLI
-├── internal/ctxval/     context key 存储
-├── examples/blog/       端到端 Component 样板
-└── docs/                本文档
+├── chok.go              App 薄壳：New / Use / Override / Routes / Section / Run
+├── kernel/              Descriptor / 行为接口 / Router 契约 / actor Registry / 事件总线
+├── conf/                装载（viper）+ RCU 快照 + reload tag diff + redact
+├── web/  middleware/  handler/
+├── db/  store/  store/where/
+├── log/  apierr/  rid/  validate/  auth/(jwt)
+├── account/  authz/(casbin)  audit/  scheduler/  cache/  redis/
+├── swagger/  health/  metrics/  tracing/  debug/
+├── cmd/chok/            init / sync / migrate / docs / openapi / version / update
+├── internal/blessed/    模块清单（生成器的事实源入口）
+├── internal/docgen/     组件表 / 配置参考 / JSON Schema 渲染器
+├── choktest/            NewTestDB / NewTestStore / NewTestKernel / StartKernel
+├── examples/blog/       快速上手（验收测试 = README 路径）
+└── docs/                design.md（本文）/ config.md（生成）/ chok.schema.json（生成）
+                         / migration-v1-to-v2.md / changelog.md / roadmap.md
 ```
 
----
+## 14. 测试哲学
 
-## 16. 关键不变量（一页速查）
+- 反 mock：store/db 测试开真数据库（`db/dbtest.Open(t)`——SQLite
+  默认，`CHOK_TEST_DRIVER=postgres` + DSN 走 PG 道；CI 双跑）。
+- `choktest` 是下游可用的测试基建：`NewTestDB`（返回 `*db.DB`）、
+  `NewTestStore`、`NewTestKernel` / `StartKernel`（真装配、真
+  生命周期、TestRouter 真派发）。
+- 验收测试即文档：blog 的 `blog_test.go` 用真实 HTTP 走一遍 README
+  五分钟路径；`chok init` 的自检测试真跑 `go build` + 启动 +
+  SIGINT。
+- 每个 bug fix 同 commit 附回归测试。
 
-- App 是 **single-use**：`Run` / `Execute` 调用一次后拒绝再次调用
-- Register 必须在 registry 构造前（即 setupFn 内或之前），否则 panic
-- Store 的 `Where` Locator 用于 Get/Update/Delete 时必须含 filter
-- `Fields(&obj)` 不传字段 = 白名单全量；零值强制落库
-- `RID(x)` 永远用于对外；`ID(x)` 仅用于内部 join / batch
-- Component 强制接口仅 `Name` / `Init` / `Close`；`ConfigKey` 是可选接口
-- Component Init 失败 → 已成功的反序并行 Close 回滚（`Optionaler` 除外）
-- `Optionaler` 组件 Init 失败 → warn 日志 + 跳过，不中止启动
-- Stop 按拓扑层级逆序，同层并行 Close；在 runServers 结束后、runCleanups 之前
-- Store Before-hooks 可中止操作（返回 error）；After-hooks 是 fire-and-forget
-- **ReloadConfig 保证原子性**：验证失败时 live config 不受影响
-- Reload 失败不中断 App 运行（Run 继续等待）
-- 所有 ctx 在 shutdown 时级联取消
-- Reload 触发源：SIGHUP / fsnotify file-change / 手动 App.Reload()；SIGINT/SIGTERM 是唯一 shutdown 触发
-- Logger / Cache 的 `App.XXX()` 与 Registry 里的 Component 是同一实例
-- Health 探针并行执行，默认 3s per-probe 超时 + 硬 fan-in deadline
-- `/readyz` 在 shutdown 触发时无条件标记 503（在 stopServers 之前）
-- `/readyz` 在 Health OK 后追加 ReadyChecker 检查，warm-up 期间返回 503
-- Optional 组件 Init 失败在 Health 报告中为 Degraded（非 Down）
-- App 默认 Init 30s / Close 15s / Health 3s 超时，单组件可覆盖
-- Config reload 在 `configMu.Lock` 保护下写入，防止并发读 torn read
-- Store 错误携带结构化上下文（locator/version），`errors.Is` 向后兼容
-- `db.RunInTx` 嵌套调用复用外层事务；Store 方法通过 `effectiveDB(ctx)` 自动参与 context 事务
-- `middleware.Logger` 在 tracing 激活时自动注入 `trace_id` / `span_id` 到 per-request logger
-- `middleware.Timeout(d)` 注入 context deadline；handler 同步执行；若返回后 deadline 已触发且未写响应则写 504
+## 15. 版本与发布
 
----
-
-版本历史与每个发布的具体变更见 [`CHANGELOG.md`](../CHANGELOG.md)。
-路线图见 [`docs/roadmap.md`](roadmap.md)。
+- v1 封版 `v0.1.4`（仅安全修复，module proxy 永续可取）。
+- v2 自 `v2.0.0-beta.1` 起走 beta 系列；release **手动**裁切：
+  CHANGELOG 条目 → 全量绿 → tag → push（goreleaser workflow 建
+  产物与 GitHub Release）。release-please 已停用（版本演算无法
+  表达人工节奏的 beta 系，且有历史误算前科）。
+- apidiff 基线随 release tag 前移（`.apidiff-baseline`）；公开 API
+  变更未带 CHANGELOG 条目会被 CI 拒绝。
+- beta tag 一旦推送不可重打（module proxy 永续缓存）。
