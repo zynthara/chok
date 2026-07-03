@@ -1,0 +1,17 @@
+# migrations/
+
+Forward-only SQL migrations for `db.migrate: versioned` mode. Ignored
+while the yaml says `migrate: auto` (dev default: gorm AutoMigrate
+from `db.WithTables`).
+
+Workflow:
+
+    chok migrate create add_notes_index   # scaffolds NNNN_add_notes_index.sql
+    # edit the SQL, commit it — main.go embeds this directory
+    chok migrate up --config chok.yaml    # or let the app apply on start
+    chok migrate status --config chok.yaml
+
+There are no down migrations: correcting a mistake means shipping the
+next forward migration. chok's own battery tables (users, identities,
+audit_logs, casbin_rule, schema_migrations) stay AutoMigrate-managed
+and are listed by `chok migrate status` as the framework whitelist.

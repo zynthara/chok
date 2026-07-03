@@ -1,9 +1,94 @@
+// Command {{.Name}} — scaffolded by chok init.
+//
+// The wiring model in one glance:
+//
+//	chok.yaml            what runs (and what links — see chok sync)
+//	chok_modules_gen.go  generated assembly; never edit by hand
+//	this file            your models, customizations and routes
 package main
 
 import (
-	"{{.Module}}/internal/app"
+	"context"
+	"embed"
+	"io/fs"
+	"net/http"
+
+	"github.com/zynthara/chok/v2"
+	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/handler"
+	"github.com/zynthara/chok/v2/kernel"
+	"github.com/zynthara/chok/v2/log"
+	"github.com/zynthara/chok/v2/store"
 )
 
+// Note is the scaffold's example resource — rename or replace it.
+type Note struct {
+	db.SoftDeleteModel
+	Title string `json:"title" gorm:"size:200;not null"`
+	Body  string `json:"body"  gorm:"type:text"`
+}
+
+// RIDPrefix makes external IDs read note_xxxxx; the numeric primary
+// key never leaves the process.
+func (Note) RIDPrefix() string { return "note" }
+
+// migrations/ ships inside the binary. Inert while db.migrate is
+// `auto`; flip the yaml to `versioned` and the embedded SQL series
+// becomes the schema source of truth (chok migrate create <name>).
+//
+//go:embed all:migrations
+var migrationsRaw embed.FS
+
 func main() {
-	app.NewApp().Execute()
+	migrations, _ := fs.Sub(migrationsRaw, "migrations")
+
+	chok.New("{{.Name}}",
+		chokModules(), // generated from chok.yaml — rerun `chok sync` after editing it
+		chok.WithConfigFile("chok.yaml"),
+		// Override replaces the generated db entry with one that knows
+		// your tables — the pattern for customizing any synced module.
+		chok.Override(db.Module(
+			db.WithTables(db.Table(&Note{})),
+			db.WithMigrations(migrations),
+		)),
+		chok.Routes(routes),
+	).Execute()
+}
+
+func routes(r kernel.Router, k kernel.Kernel) error {
+	notes := store.New[Note](db.From(k), log.From(k),
+		store.WithQueryFields("id", "title", "created_at"),
+		store.WithUpdateFields("title", "body"),
+	)
+
+	api := r.Group("/api/v1")
+	// To require a logged-in user, guard the group instead:
+	//   api := r.Group("/api/v1", account.Authn(k))
+	api.Handle(http.MethodPost, "/notes", handler.HandleRequest(
+		func(ctx context.Context, req *createNote) (*Note, error) {
+			n := &Note{Title: req.Title, Body: req.Body}
+			return n, notes.Create(ctx, n)
+		},
+		handler.WithSuccessCode(http.StatusCreated),
+		handler.WithSummary("Create a note"), handler.WithTags("notes"),
+	))
+	api.Handle(http.MethodGet, "/notes", handler.HandleList[Note](notes,
+		handler.WithSummary("List notes"), handler.WithTags("notes"),
+	))
+	api.Handle(http.MethodGet, "/notes/{rid}", handler.HandleRequest(
+		func(ctx context.Context, req *getNote) (*Note, error) {
+			return notes.Get(ctx, store.RID(req.RID))
+		},
+		handler.WithSummary("Get one note"), handler.WithTags("notes"),
+	))
+	return nil
+}
+
+type createNote struct {
+	Title string `json:"title" binding:"required,max=200"`
+	Body  string `json:"body"`
+}
+
+type getNote struct {
+	RID string `uri:"rid" binding:"required"`
 }

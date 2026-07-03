@@ -1,0 +1,12 @@
+module {{.Module}}
+
+go 1.26
+
+require github.com/zynthara/chok/v2 {{.ChokVersion}}
+{{- if .ChokReplace}}
+
+// Local development against a chok checkout (added by chok init
+// because this scaffold was generated from one). Remove for released
+// chok versions.
+replace github.com/zynthara/chok/v2 => {{.ChokReplace}}
+{{- end}}

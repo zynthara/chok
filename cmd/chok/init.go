@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -21,16 +23,24 @@ var templateFS embed.FS
 type projectData struct {
 	Name        string // project name, e.g. "myapp"
 	Module      string // Go module path, same as Name
-	NameUpper   string // e.g. "MYAPP" (for env prefix docs)
-	ChokVersion string // e.g. "v0.1.0" or "v0.0.0-dev" for local
+	NameUpper   string // e.g. "MYAPP" (env prefix)
+	ChokVersion string // e.g. "v2.0.0-beta.1", or "v2.0.0-dev" for local
 	ChokReplace string // local path for replace directive (empty if published)
+	SigningKey  string // generated dev-only account signing key
 }
 
 func initCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init [name]",
-		Short: "Scaffold a new chok project",
-		Long: `Scaffold a new chok project.
+		Short: "Scaffold a new chok v2 project",
+		Long: `Scaffold a new chok v2 project.
+
+The scaffold is the v2 wiring model in miniature: chok.yaml declares
+the modules, chok_modules_gen.go (generated here by the same engine
+as ` + "`chok sync`" + `) assembles them, main.go holds your models and
+routes. The project boots immediately:
+
+    cd <name> && go mod tidy && go run .
 
 When [name] is provided it is treated as the destination directory;
 the project name is the directory's basename. When omitted, the
@@ -45,11 +55,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 	var dir, name string
 
 	if len(args) > 0 {
-		// args[0] is the target directory; the project *name* (used for
-		// `cmd/<name>/main.go`, env-var prefix, module identifier) is
-		// the basename. Without splitting these, `chok init /tmp/foo`
-		// produced `cmd/tmp/foo/main.go` and a project named "foo" with
-		// scaffolding under a `tmp` subdir — clearly not the intent.
+		// args[0] is the target directory; the project *name* (env-var
+		// prefix, module identifier, binary name) is the basename.
 		dir = args[0]
 		name = filepath.Base(filepath.Clean(dir))
 		if name == "." || name == ".." || name == string(filepath.Separator) || name == "" {
@@ -68,19 +75,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	if !isDirEmpty(dir) {
-		fmt.Printf("Directory %s is not empty. Continue? [y/N] ", dir)
-		reader := bufio.NewReader(os.Stdin)
+		fmt.Fprintf(cmd.OutOrStdout(), "Directory %s is not empty. Continue? [y/N] ", dir)
+		reader := bufio.NewReader(cmd.InOrStdin())
 		answer, _ := reader.ReadString('\n')
-		answer = strings.TrimSpace(answer)
-		if !strings.EqualFold(answer, "y") {
+		if !strings.EqualFold(strings.TrimSpace(answer), "y") {
 			return fmt.Errorf("cancelled")
 		}
 	}
 
 	localPath := detectChokLocalPath()
 	chokVer := detectChokVersion()
-	if localPath != "" && chokVer == "dev" {
-		chokVer = "v0.0.0-dev"
+	if chokVer == "dev" {
+		// go.mod needs valid semver; the replace directive (when a
+		// local checkout was found) is what actually resolves it.
+		chokVer = "v2.0.0-dev"
 	}
 
 	data := projectData{
@@ -89,44 +97,57 @@ func runInit(cmd *cobra.Command, args []string) error {
 		NameUpper:   strings.ToUpper(strings.ReplaceAll(name, "-", "_")),
 		ChokVersion: chokVer,
 		ChokReplace: localPath,
+		SigningKey:  newSigningKey(),
 	}
 
-	// Template → output path mapping.
 	files := []struct {
 		tmpl string
 		out  string
 	}{
-		{"templates/main.go.tmpl", "cmd/" + name + "/main.go"},
-		{"templates/config.go.tmpl", "internal/app/config.go"},
-		{"templates/server.go.tmpl", "internal/app/server.go"},
-		{"templates/handler.go.tmpl", "internal/handler/handler.go"},
-		{"templates/app.yaml.tmpl", "configs/" + name + ".yaml"},
+		{"templates/chok.yaml.tmpl", "chok.yaml"},
+		{"templates/main.go.tmpl", "main.go"},
+		{"templates/gomod.tmpl", "go.mod"},
 		{"templates/Makefile.tmpl", "Makefile"},
 		{"templates/gitignore.tmpl", ".gitignore"},
-		{"templates/golangci.yaml.tmpl", ".golangci.yaml"},
-		{"templates/go.mod.tmpl", "go.mod"},
+		{"templates/migrations-readme.tmpl", "migrations/README.md"},
 	}
-
 	for _, f := range files {
 		if err := renderTemplate(dir, f.tmpl, f.out, data); err != nil {
 			return fmt.Errorf("render %s: %w", f.out, err)
 		}
 	}
 
-	fmt.Printf("\nProject %s created:\n\n", name)
-	printTree(dir, name)
-
-	fmt.Println("\nNext steps:")
-	if len(args) > 0 {
-		// `cd` to the actual destination, not the project name —
-		// `chok init /tmp/foo` should suggest `cd /tmp/foo`, not `cd foo`.
-		fmt.Printf("  cd %s\n", dir)
+	// chok_modules_gen.go comes from the sync engine itself — init and
+	// sync can never drift because they are the same code path.
+	if err := runSync(cmd, filepath.Join(dir, "chok.yaml"), dir, false); err != nil {
+		return fmt.Errorf("generate %s: %w", genFileName, err)
 	}
-	fmt.Println("  go mod tidy")
-	fmt.Println("  make run")
-	fmt.Println()
+
+	fmt.Fprintf(cmd.OutOrStdout(), "\nProject %s created:\n\n", name)
+	printTree(cmd, dir, name)
+
+	fmt.Fprintln(cmd.OutOrStdout(), "\nNext steps:")
+	if len(args) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "  cd %s\n", dir)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "  go mod tidy")
+	fmt.Fprintln(cmd.OutOrStdout(), "  go run .")
+	fmt.Fprintf(cmd.OutOrStdout(), "\nThen: curl localhost:8080/healthz — and http://localhost:8080/swagger for the API docs.\n")
+	fmt.Fprintf(cmd.OutOrStdout(), "Edit chok.yaml to add modules; `chok sync` (or make sync) refreshes the assembly.\n\n")
 
 	return nil
+}
+
+// newSigningKey generates the dev-only account signing key baked into
+// the scaffold yaml (64 hex chars ≥ the 32-byte minimum).
+func newSigningKey() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// rand.Read failing means a broken platform RNG; a fixed and
+		// clearly-marked dev key beats aborting the scaffold.
+		return "dev-only-signing-key-change-me-0000000000000000"
+	}
+	return hex.EncodeToString(b)
 }
 
 func renderTemplate(baseDir, tmplPath, outPath string, data projectData) error {
@@ -134,34 +155,25 @@ func renderTemplate(baseDir, tmplPath, outPath string, data projectData) error {
 	if err != nil {
 		return err
 	}
-
 	t, err := template.New(filepath.Base(tmplPath)).Parse(string(content))
 	if err != nil {
 		return err
 	}
-
 	fullPath := filepath.Join(baseDir, outPath)
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 		return err
 	}
-
 	f, err := os.Create(fullPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
 	return t.Execute(f, data)
 }
 
-// chokModule is the module line a *v1* chok checkout declares. The
-// scaffold templates emit v1 projects until M5 (`require
-// github.com/zynthara/chok ...`), so only a genuine v1 checkout can
-// serve as a local `replace` target. This repository itself is now the
-// /v2 module and must NOT match — hence the exact-line comparison in
-// isChokRoot rather than a substring test (the v1 path is a prefix of
-// the v2 one).
-const chokModule = "module github.com/zynthara/chok"
+// chokModule is the module line of a chok v2 checkout — the only
+// thing a scaffold can use as a local `replace` target.
+const chokModule = "module github.com/zynthara/chok/v2"
 
 func detectChokVersion() string {
 	v := version.Get().Version
@@ -205,7 +217,6 @@ func detectChokLocalPath() string {
 			}
 		}
 	}
-
 	return ""
 }
 
@@ -230,8 +241,9 @@ func isDirEmpty(dir string) bool {
 	return len(entries) == 0
 }
 
-func printTree(dir, name string) {
-	fmt.Printf("  %s/\n", name)
+func printTree(cmd *cobra.Command, dir, name string) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "  %s/\n", name)
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || path == dir {
 			return nil
@@ -240,9 +252,9 @@ func printTree(dir, name string) {
 		depth := strings.Count(rel, string(os.PathSeparator))
 		indent := strings.Repeat("  ", depth)
 		if d.IsDir() {
-			fmt.Printf("  %s├── %s/\n", indent, d.Name())
+			fmt.Fprintf(out, "  %s├── %s/\n", indent, d.Name())
 		} else {
-			fmt.Printf("  %s├── %s\n", indent, d.Name())
+			fmt.Fprintf(out, "  %s├── %s\n", indent, d.Name())
 		}
 		return nil
 	})
