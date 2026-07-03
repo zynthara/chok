@@ -24,17 +24,16 @@ blessed implementation per capability, configuration over code.
    `Reload` / `Health` / `Router` / `Migrate` optional via type
    assertion. New built-in subsystems must follow this shape.
 3. **One official implementation per capability.** Do not add parallel
-   choices (no "use mux instead of gin", no "switch to sqlc"). The
-   blessed stack is gin / gorm / otter+badger+redis / robfig-cron /
-   golang-jwt / Prometheus / OpenTelemetry.
+   choices (no alternative routers, no "switch to sqlc"). The
+   blessed stack is stdlib ServeMux / gorm / otter+redis /
+   robfig-cron / golang-jwt / Prometheus / OpenTelemetry.
 
 ## Architecture invariants — do not violate
 
 > Since M1 the control plane is the v2 kernel (`kernel/` + `conf/`):
 > single-actor lifecycle, RCU config snapshots, Descriptor-declared
-> components. The lock-order / TryLock / lazy-scrub bullets below
-> survive ONLY inside the v1 transition residue (`component/` +
-> `parts/`, used by the 9 not-yet-migrated batteries, M3-M4).
+> components. Since M4 every battery lives on it — the v1 residue
+> (`component/` + `parts/`) is deleted.
 
 - `App` is single-use: `Run` / `Execute` may be called at most once
 - v2 kernel: all lifecycle transitions go through the control
@@ -42,29 +41,27 @@ blessed implementation per capability, configuration over code.
   never add locks or a second lifecycle writer
 - Reload coalesces: overlapping triggers get `ErrReloadInProgress`
   (CAS gate in v2) — do not queue
-- [v1 residue] lock order `reloadMu → mu`; `registry.Get` during
-  `phaseStopping` returns only still-`available` entries
 - Reload does **NOT** trigger `Migrate`. Schema changes require a
   restart. Document this if you add migration-adjacent features.
 - Shutdown contexts use `context.WithoutCancel(parent)` so trace_id /
   request_id stay correlated; never `context.Background()` directly
 - Components close in reverse-topo order, same-level in parallel
-- `AddCleanup` callbacks run AFTER `registry.Stop` — they must not
-  access components (they're already torn down)
 - web `Serve` wind-down bounds `Shutdown` by `http.shutdown_timeout`
   then force-`Close`s so hung handlers can't outlive registry teardown
 
 ## Coding conventions when modifying chok itself
 
-- New `*Options` types implement `config.Validatable`; discriminator
+- New `*Options` types implement `conf.Validatable`; discriminator
   types (one of N branches selected by a field) also implement
-  `config.SelfValidating` so the recursive walker stops descending
-- New `Component` declares `Dependencies` / `OptionalDependencies`;
-  never call `k.Get(peer)` inside `Close` (peer may already be closed)
-- Optional capabilities are exposed via narrow interfaces (`Reloadable`,
-  `Healther`, `Router`, `Migratable`, `ReadyChecker`, ...) — Registry
-  uses type assertion. Add new ones in `component/component.go` only
-  when there's a clear need; prefer composition.
+  `conf.SelfValidating` so the recursive walker stops descending
+- New modules declare `Descriptor.Needs` (soft deps `Optional: true`)
+  and discover peers via `kernel.Get[roleInterface]` at Init; never
+  reach for peers inside `Close` (the kernel view has already shrunk)
+- Optional capabilities are the kernel behaviour interfaces
+  (`Reloader`, `Healther`, `Mounter`, `Migrator`, `Readier`, `Server`,
+  `Drainer`) — the Registry discovers them by type assertion. Add new
+  ones in `kernel/component.go` only when there's a clear need;
+  prefer composition.
 - Use `rid.New(prefix)` for any externally-exposed ID; never leak the
   internal `uint` primary key in API responses
 - Errors: wrap with `fmt.Errorf("...: %w", err)` or build via
@@ -111,7 +108,7 @@ blessed implementation per capability, configuration over code.
   the blog smoke test (`examples/blog` is archived as
   `examples/_v1_blog`, build-ignored; blog is rebuilt on the v2 API
   in M5 and the smoke discipline returns then).
-  Current fixture: `go run ./internal/fixture/m3` (from the repo
+  Current fixture: `go run ./internal/fixture/m4` (from the repo
   root) and Ctrl-C; store/db changes also run the Postgres lane
   (`make test-pg` with `CHOK_TEST_PG_DSN`, or let CI's service run it).
 
@@ -123,17 +120,16 @@ blessed implementation per capability, configuration over code.
 | `options.go` | `WithXxx` constructors |
 | `config.go` | config loading + validation (`SelfValidating` recursion stop) |
 | `kernel/` + `conf/` | v2 control plane: Descriptor / actor Registry / RCU config |
-| `component/` | v1-residue Component core (used by `parts/` until M4) |
-| `parts/` | v1-residue battery glue (db, cache, redis, account, ... — 9 left) |
-| `db/` | v2 data module: Module/From + `*db.DB` thin handle + versioned migration engine (+ v1-residue constructors for `parts/`) |
+| `db/` | v2 data module: Module/From + `*db.DB` thin handle + versioned migration engine |
 | `store/` | generic CRUD; locator + changes + scopes; opt-in `WithBus` events |
 | `store/where/` | query DSL (`resolveField` does identifier validation) |
 | `handler/` | generic `HandleRequest[T,R]` — stdlib http.Handler + Meta |
 | `middleware/` | stdlib middleware set (`func(http.Handler) http.Handler`) |
 | `web/` | v2 HTTP module: Server + Router + default middleware stack |
 | `swagger/` `tracing/` `health/` `metrics/` `debug/` | v2 observability / docs modules |
-| `account/` | ready-to-use user module + login rate limiter |
-| `cache/` | memory + file + redis Chain + circuit Breaker |
+| `account/` | ready-to-use user module (Module/Service/Authn) + login rate limiter |
+| `authz/` `audit/` `scheduler/` `redis/` | v2 battery modules (casbin engine room under `authz/casbin/`) |
+| `cache/` | memory + redis Chain + circuit Breaker |
 | `examples/_v1_blog/` | archived v1 example (build-ignored); blog returns on the v2 API in M5 |
 | `examples/tasker/` | (planned) full-coverage example |
 | `docs/design.md` | architecture source of truth |

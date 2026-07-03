@@ -1,0 +1,38 @@
+# M4 fixture config — the full-battery assembly (SPEC §10 M4 row).
+# Launched from the repo root (go run ./internal/fixture/m4); the
+# acceptance test overrides paths/ports via M4FIXTURE_* env vars.
+
+db:
+  driver: sqlite
+  migrate: auto
+  sqlite:
+    path: m4fixture.db
+
+# Assembled but disabled: the registration-disabled model on display —
+# the component shows up in /componentz as `disabled`, dependants
+# degrade, and no socket is needed to boot the fixture.
+redis:
+  enabled: false
+
+cache:
+  memory:
+    enabled: true
+
+audit:
+  enabled: true
+  retention_days: 30
+
+authz:
+  casbin:
+    # 7.E live: policy mutations (bootstrap seeding included) land in
+    # audit_logs, and a broken audit sink fails the boot.
+    audit_enabled: true
+    bootstrap_admin_user_id: usr_bootstrap_admin
+
+account:
+  signing_key: m4-fixture-signing-key-32-bytes-min!
+  login_rate_window: 15m
+  login_rate_limit: 10
+
+# Everything else rides defaults; debug is flipped on through the env
+# path in main() (same trick as the m2/m3 fixtures).

@@ -221,6 +221,14 @@ func (c *Component) Close(ctx context.Context) error {
 // wiring. nil before Init.
 func (c *Component) Service() *Service { return c.svc }
 
+// Authn is the component-level role surface peers discover
+// structurally (`interface{ Authn() kernel.Middleware }` against kind
+// "account") — the audit admin API rides it. Same semantics as
+// account.Authn(k): token verification + ActiveCheck. Only meaningful
+// after Init (peers capture it there; ordering comes from their
+// account Needs edge).
+func (c *Component) Authn() kernel.Middleware { return c.svc.Authn() }
+
 // Authn returns the blessed authentication middleware (token
 // verification + ActiveCheck — the v1 AuthChain semantics) for
 // protecting application routes:

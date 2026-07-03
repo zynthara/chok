@@ -19,12 +19,14 @@ import (
 // DB sink, the retention purge job (soft scheduler dependency) and
 // the admin query API (fail-closed behind RequireAuthz).
 //
-// Descriptor note: the component does NOT declare a Needs edge to
-// authz even though the admin API is authz-gated — authz soft-depends
-// on audit (decision audit must be live before bootstrap seeding), so
-// a reciprocal edge would be a topology cycle. The admin API's authz
-// relationship is request-time: middleware.RequireAuthz reads the
-// request context and rejects every request when no Authorizer is
+// Descriptor note: the component declares NO Needs edge to authz or
+// http even though §6 lists both — authz soft-depends on audit
+// (decision audit must be live before bootstrap seeding) and web
+// soft-depends on authz, so either reciprocal edge closes a topology
+// cycle the kernel rejects (audit→http→authz→audit). Both
+// relationships are mount/request-time, not Init-time: the router is
+// injected at the mount phase, and middleware.RequireAuthz reads the
+// request context, rejecting every request when no Authorizer is
 // attached (SPEC §6 deviation recorded in the M4 mini-SPEC).
 func Module() kernel.Component { return &Component{} }
 
@@ -38,7 +40,8 @@ type Component struct {
 	h    *db.DB
 	mode string // db migrate mode captured at Init
 
-	purgeWired bool // scheduler present, job registered
+	authn      kernel.Middleware // account's blessed guard, when assembled
+	purgeWired bool              // scheduler present, job registered
 }
 
 // Describe implements kernel.Component.
@@ -50,7 +53,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Needs: []kernel.Dep{
 			{Kind: "db"},
 			{Kind: "scheduler", Optional: true},
-			{Kind: "http", Optional: true},
+			{Kind: "account", Optional: true},
 			{Kind: "log", Optional: true},
 		},
 	}
@@ -109,6 +112,16 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 			"audit_logs will grow unbounded (assemble chok.Use(scheduler.Module()) to enforce retention_days)")
 	}
 
+	// Admin-API authentication rides the account module's blessed
+	// guard when it is assembled (role discovery — audit names no
+	// battery): the Bearer token becomes a principal before
+	// RequireAuthz decides. Absent account (or custom deployments
+	// mounting their own authn globally), requests reach RequireAuthz
+	// principal-less and fail closed with 401.
+	if acc, ok := kernel.Get[interface{ Authn() kernel.Middleware }](k, "account"); ok {
+		c.authn = acc.Authn()
+	}
+
 	c.chok.Info("audit sink started",
 		"async_buffer_size", opts.AsyncBufferSize,
 		"drop_on_full", opts.DropOnFull,
@@ -145,12 +158,16 @@ func (c *Component) Mount(r kernel.Router) error {
 	if !c.opts.Load().EnableAdminAPI {
 		return nil
 	}
+	mws := []kernel.Middleware{middleware.RequireAuthz("audit", "read")}
+	if c.authn != nil {
+		mws = append([]kernel.Middleware{c.authn}, mws...)
+	}
 	r.Handle(http.MethodGet, "/audit/logs",
 		handler.HandleRequest(c.queryLogs,
 			handler.WithSummary("Query audit logs"),
 			handler.WithTags("audit"),
 		),
-		middleware.RequireAuthz("audit", "read"),
+		mws...,
 	)
 	return nil
 }

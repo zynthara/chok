@@ -62,10 +62,10 @@ cover: ## Generate a coverage report at _output/coverage.html
 
 .PHONY: smoke
 smoke: ## Boot the current milestone fixture as a self-check (blog returns in M5)
-	@echo "==> Smoke testing internal/fixture/m3..."
-	@( $(GO) run ./internal/fixture/m3 & \
+	@echo "==> Smoke testing internal/fixture/m4..."
+	@( $(GO) run ./internal/fixture/m4 & \
 	   PID=$$!; sleep 3; kill -INT $$PID 2>/dev/null; wait $$PID 2>/dev/null; \
-	   echo "==> m3 fixture start-up smoke OK" )
+	   echo "==> m4 fixture start-up smoke OK" )
 
 ##@ Lint & Format
 
