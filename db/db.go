@@ -135,16 +135,29 @@ type txCtxKey struct{}
 //	})
 //
 // Nested RunInTx calls reuse the outermost transaction (no savepoints).
+//
+// The derived context also carries an after-commit staging buffer (see
+// AfterCommit): callbacks staged inside fn run — in order, with the
+// parent ctx — only after COMMIT succeeds, and are discarded wholesale
+// on rollback or panic.
 func RunInTx(ctx context.Context, gdb *gorm.DB, fn func(txCtx context.Context) error) error {
-	// If there's already a transaction in context, reuse it.
+	// If there's already a transaction in context, reuse it — including
+	// its staging buffer, so events flush only at the outermost commit.
 	if _, ok := ctx.Value(txCtxKey{}).(*gorm.DB); ok {
 		return fn(ctx)
 	}
 
-	return Transaction(ctx, gdb, func(tx *gorm.DB) error {
+	pending := &txPending{}
+	err := Transaction(ctx, gdb, func(tx *gorm.DB) error {
 		txCtx := context.WithValue(ctx, txCtxKey{}, tx)
+		txCtx = context.WithValue(txCtx, txPendingKey{}, pending)
 		return fn(txCtx)
 	})
+	if err != nil {
+		return err // rollback: staged callbacks are dropped, never run
+	}
+	pending.flush(ctx)
+	return nil
 }
 
 // DBFromContext returns the *gorm.DB stored in ctx by RunInTx, or nil

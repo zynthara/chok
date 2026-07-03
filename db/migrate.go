@@ -169,8 +169,21 @@ func toSnakeCase(s string) string {
 	return string(result)
 }
 
-// createSoftUniqueIndex creates a composite unique index including delete_token.
-// Uses dialect-appropriate SQL: SQLite supports IF NOT EXISTS, MySQL does not.
+// createSoftUniqueIndex creates the dialect-appropriate unique index
+// backing SoftUnique semantics ("unique among live rows"):
+//
+//   - Postgres: a partial unique index over the declared columns with
+//     WHERE deleted_at IS NULL — soft-deleted rows leave the index
+//     entirely, so the delete_token column is not part of the key
+//     (SPEC §5.3, M3).
+//   - MySQL / SQLite / others: composite UNIQUE(cols..., delete_token)
+//     — live rows share the '' token and conflict; a soft delete
+//     rewrites the token to a fresh RID, releasing the slot (v1
+//     mechanism, unchanged).
+//
+// Both shapes yield the same observable behaviour: two live rows with
+// equal values conflict; a soft-deleted row frees the value; deleted
+// rows never conflict with each other.
 func createSoftUniqueIndex(gdb *gorm.DB, model any, idx SoftIndex) error {
 	stmt := &gorm.Statement{DB: gdb}
 	if err := stmt.Parse(model); err != nil {
@@ -180,15 +193,26 @@ func createSoftUniqueIndex(gdb *gorm.DB, model any, idx SoftIndex) error {
 
 	dialect := gdb.Dialector.Name()
 
+	qTable := quoteIdent(tableName, dialect)
+	qIndex := quoteIdent(idx.Name, dialect)
+
+	if dialect == "postgres" {
+		cols := make([]string, 0, len(idx.Columns))
+		for _, c := range idx.Columns {
+			cols = append(cols, quoteIdent(c, dialect))
+		}
+		return gdb.Exec(fmt.Sprintf(
+			"CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s (%s) WHERE %s IS NULL",
+			qIndex, qTable, strings.Join(cols, ", "), quoteIdent("deleted_at", dialect),
+		)).Error
+	}
+
 	cols := make([]string, 0, len(idx.Columns)+1)
 	for _, c := range idx.Columns {
 		cols = append(cols, quoteIdent(c, dialect))
 	}
 	cols = append(cols, quoteIdent("delete_token", dialect))
 	colList := strings.Join(cols, ", ")
-
-	qTable := quoteIdent(tableName, dialect)
-	qIndex := quoteIdent(idx.Name, dialect)
 
 	switch dialect {
 	case "mysql":

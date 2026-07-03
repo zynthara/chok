@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+
+	"github.com/zynthara/chok/v2/db/dbtest"
 )
 
 // --- test models ---
@@ -49,15 +49,11 @@ func (MissingNotNull) RIDPrefix() string { return "mis" }
 
 // --- helpers ---
 
+// openTestDB rides the dbtest lane switch: SQLite by default,
+// Postgres under CHOK_TEST_DRIVER=postgres (M3 dual-run).
 func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
-		Logger: logger.Discard,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return gdb
+	return dbtest.Open(t)
 }
 
 // --- tests ---
