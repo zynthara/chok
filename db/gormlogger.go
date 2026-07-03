@@ -1,4 +1,4 @@
-package log
+package db
 
 import (
 	"context"
@@ -8,18 +8,23 @@ import (
 
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+
+	"github.com/zynthara/chok/v2/log"
 )
 
 // defaultSlowThreshold is the threshold above which queries are logged at Warn.
 const defaultSlowThreshold = 200 * time.Millisecond
 
-// GORMLogger adapts a chok Logger to gorm/logger.Interface.
-func GORMLogger(l Logger) gormlogger.Interface {
+// GORMLogger adapts a chok log.Logger to gorm/logger.Interface.
+// It lives in db since M3: gorm-typed surfaces belong to the data
+// layer (SPEC §5.2), and this adapter's consumers hold a DB handle
+// anyway (h.Unsafe(ctx).Session(&gorm.Session{Logger: ...})).
+func GORMLogger(l log.Logger) gormlogger.Interface {
 	return &gormLog{logger: l, level: gormlogger.Warn, slowThreshold: defaultSlowThreshold}
 }
 
 type gormLog struct {
-	logger        Logger
+	logger        log.Logger
 	level         gormlogger.LogLevel
 	slowThreshold time.Duration
 }
