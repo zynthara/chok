@@ -16,10 +16,10 @@ import (
 // mounts /auth (register/login/refresh/...) on its own; everything
 // under /api/v1 requires the Bearer token those endpoints issue.
 func routes(r kernel.Router, k kernel.Kernel) error {
-	posts := store.New[Post](db.From(k), log.From(k),
-		store.WithQueryFields("id", "title", "status", "created_at", "updated_at"),
-		store.WithUpdateFields("title", "content", "status"),
-	)
+	// Field allowlists ride the `store` tags on Post itself; pass
+	// WithQueryFields / WithUpdateFields here only to narrow that
+	// declaration for a specific consumer.
+	posts := store.New[Post](db.From(k), log.From(k))
 	h := &postHandlers{posts: posts}
 
 	api := r.Group("/api/v1", account.Authn(k))

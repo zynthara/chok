@@ -77,8 +77,9 @@ golang-jwt, casbin, Prometheus, and OpenTelemetry.
   `Store.Unsafe(ctx)` (tx-aware, scopes applied, fail-closed) and
   `(*db.DB).Unsafe(ctx)` (tx-aware, no scopes). `db.InTx(ctx)` answers
   "am I in a transaction" without the handle.
-- Declare `WithQueryFields` / `WithUpdateFields` explicitly for production
-  Stores; do not rely on fragile field auto-discovery.
+- Declare store fields explicitly for production Stores — `store` tags
+  on the model or `WithQueryFields` / `WithUpdateFields` at the call
+  site (options override tags); do not rely on fragile auto-discovery.
 - Use `store.Fields(&obj)` when optimistic locking matters.
 - Do not use `store.Where(...)` without at least one filter.
 - Wrap errors with `fmt.Errorf("...: %w", err)` or return structured

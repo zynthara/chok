@@ -375,6 +375,33 @@ func WithBus(b *event.Bus) StoreOption {
 // The first parameter is the v2 thin handle — obtain it from the db
 // module (db.From(k)) or db.Open; this is the only store signature
 // change from v1 (SPEC §5.1).
+//
+// Field allowlists resolve in priority order, per side (query/update):
+//
+//  1. WithQueryFields / WithUpdateFields — call-site lists. Use these
+//     to narrow a model's declared surface for one consumer (e.g. a
+//     public store that must not write privileged columns).
+//  2. WithAllQueryFields / WithAllUpdateFields — explicit opt-in to
+//     JSON-tag discovery with exclusions.
+//  3. `store` struct tags on the model — the model's own declaration:
+//
+//     type Post struct {
+//         db.OwnedSoftDeleteModel
+//         Title   string `json:"title"   store:"query,update"`
+//         Content string `json:"content" store:"update"`
+//     }
+//
+//     Tag values are "query", "update" or both, comma-separated;
+//     anything else panics at construction. The filter name is the
+//     field's JSON name (snake_case of the Go name when the JSON tag
+//     is absent or "-"). Embedded chok base models (db.Model and
+//     friends) contribute their standard queryable fields (id,
+//     created_at, updated_at) automatically; update lists never
+//     include base-model fields. Tagged models skip the discovery
+//     warning and satisfy WithStrict.
+//  4. JSON-tag auto-discovery — the zero-config fallback. Logs a warn:
+//     the implicit set silently grows with the struct, so production
+//     code should declare fields via tags or options.
 func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[T] {
 	if h == nil {
 		panic("store.New: nil *db.DB handle (use db.From(k) or db.Open)")
@@ -397,16 +424,26 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		o(cfg)
 	}
 
+	// The model's own `store` tag declaration, if any. Resolved before
+	// the per-side switches so both sides agree on whether the model is
+	// tag-declared; panics on malformed tags.
+	tagQuery, tagUpdate, tagged := tagDeclaredFields(t)
+
 	// Build queryFieldMap.
-	// Priority: WithQueryFields (explicit) > WithAllQueryFields (explicit auto) > default auto-discover.
+	// Priority: WithQueryFields (explicit) > WithAllQueryFields
+	// (explicit auto) > `store` tags (model-declared) > auto-discover.
 	var queryFieldMap map[string]string
 	queryExplicit := len(cfg.queryFields) > 0
-	if queryExplicit {
+	queryTagged := tagged && !queryExplicit && !cfg.autoQueryFields
+	switch {
+	case queryExplicit:
 		queryFieldMap = make(map[string]string, len(cfg.queryFields))
 		for _, f := range cfg.queryFields {
 			queryFieldMap[f] = f
 		}
-	} else {
+	case queryTagged:
+		queryFieldMap = tagQuery
+	default:
 		var queryCollisions []string
 		queryFieldMap, queryCollisions = discoverFields(t, cfg.queryFieldsExclude)
 		if len(queryCollisions) > 0 && logger != nil {
@@ -418,15 +455,20 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	}
 
 	// Build updateFieldMap.
-	// Priority: WithUpdateFields (explicit) > default auto-discover.
+	// Priority: WithUpdateFields (explicit) > WithAllUpdateFields
+	// (explicit auto) > `store` tags (model-declared) > auto-discover.
 	var updateFieldMap map[string]string
 	updateExplicit := len(cfg.updateFields) > 0
-	if updateExplicit {
+	updateTagged := tagged && !updateExplicit && !cfg.autoUpdateFields
+	switch {
+	case updateExplicit:
 		updateFieldMap = make(map[string]string, len(cfg.updateFields))
 		for _, f := range cfg.updateFields {
 			updateFieldMap[f] = f
 		}
-	} else {
+	case updateTagged:
+		updateFieldMap = tagUpdate
+	default:
 		var updateCollisions []string
 		updateFieldMap, updateCollisions = discoverUpdateFields(t, cfg.updateFieldsExclude)
 		if len(updateCollisions) > 0 && logger != nil {
@@ -444,26 +486,27 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	// code should generally use explicit WithQueryFields /
 	// WithUpdateFields so the exposed surface is visible in source.
 	if cfg.strict {
-		if !queryExplicit && !cfg.autoQueryFields && len(queryFieldMap) > 0 {
-			panic(fmt.Sprintf("store: strict mode: %s has auto-discovered query fields %v; use WithQueryFields or WithAllQueryFields to declare explicitly", t.Name(), sortedKeys(queryFieldMap)))
+		if !queryExplicit && !queryTagged && !cfg.autoQueryFields && len(queryFieldMap) > 0 {
+			panic(fmt.Sprintf("store: strict mode: %s has auto-discovered query fields %v; declare them with `store` tags, WithQueryFields or WithAllQueryFields", t.Name(), sortedKeys(queryFieldMap)))
 		}
-		if !updateExplicit && !cfg.autoUpdateFields && len(updateFieldMap) > 0 {
-			panic(fmt.Sprintf("store: strict mode: %s has auto-discovered update fields %v; use WithUpdateFields or WithAllUpdateFields to declare explicitly", t.Name(), sortedKeys(updateFieldMap)))
+		if !updateExplicit && !updateTagged && !cfg.autoUpdateFields && len(updateFieldMap) > 0 {
+			panic(fmt.Sprintf("store: strict mode: %s has auto-discovered update fields %v; declare them with `store` tags, WithUpdateFields or WithAllUpdateFields", t.Name(), sortedKeys(updateFieldMap)))
 		}
 	}
 
 	// Warn when fields are auto-discovered so developers know what's
-	// exposed. Use WithQueryFields / WithUpdateFields to restrict. We
-	// intentionally log only the count rather than the field list — a
-	// production log of "which columns are filterable / writable" is a
-	// low-effort inventory an attacker can read off a log aggregator.
+	// exposed. Tag-declared and option-declared lists are explicit and
+	// stay quiet. We intentionally log only the count rather than the
+	// field list — a production log of "which columns are filterable /
+	// writable" is a low-effort inventory an attacker can read off a
+	// log aggregator.
 	if logger != nil {
-		if !queryExplicit && len(queryFieldMap) > 0 {
-			logger.Warn("store: auto-discovered query fields; use WithQueryFields to restrict",
+		if !queryExplicit && !queryTagged && len(queryFieldMap) > 0 {
+			logger.Warn("store: auto-discovered query fields; declare them with `store` tags or WithQueryFields",
 				"model", t.Name(), "count", len(queryFieldMap))
 		}
-		if !updateExplicit && len(updateFieldMap) > 0 {
-			logger.Warn("store: auto-discovered update fields; use WithUpdateFields to restrict",
+		if !updateExplicit && !updateTagged && len(updateFieldMap) > 0 {
+			logger.Warn("store: auto-discovered update fields; declare them with `store` tags or WithUpdateFields",
 				"model", t.Name(), "count", len(updateFieldMap))
 		}
 	}
@@ -991,6 +1034,102 @@ func discoverUpdateFields(t reflect.Type, exclude []string) (map[string]string, 
 	var collisions []string
 	scanJSONFieldsWithCollisions(t, ex, false, result, &collisions)
 	return result, collisions
+}
+
+// storeTagName is the struct tag store.New reads for model-declared
+// field allowlists: `store:"query"`, `store:"update"` or both.
+const storeTagName = "store"
+
+// chokDBPkgPath identifies embedded chok base models (db.Model and
+// friends) during tag scanning without hard-coding the import path.
+var chokDBPkgPath = reflect.TypeFor[db.Model]().PkgPath()
+
+// tagDeclaredFields collects the model's own `store` tag declaration.
+// Returned maps are filter-name → column. tagged reports whether any
+// field carries a store tag — when false both maps are nil and the
+// caller falls back to discovery.
+//
+// The filter name is the field's JSON name; fields hidden from JSON
+// (no tag or json:"-") fall back to snake_case of the Go name, so an
+// internal column can still be declared queryable. Embedded chok base
+// models contribute their standard queryable fields (the JSON-visible
+// set discovery would expose, minus version) to the query side only —
+// update lists never gain base-model fields. Malformed tag values and
+// duplicate names mapping to different columns panic: a declaration
+// typo must fail construction, not silently narrow the surface.
+func tagDeclaredFields(t reflect.Type) (query, update map[string]string, tagged bool) {
+	query = make(map[string]string)
+	update = make(map[string]string)
+	base := make(map[string]string)
+	scanStoreTags(t, query, update, base, &tagged)
+	if !tagged {
+		return nil, nil, false
+	}
+	// Base-model fields join the query side unless the declaration
+	// already claimed the name.
+	for name, col := range base {
+		if _, ok := query[name]; !ok {
+			query[name] = col
+		}
+	}
+	return query, update, true
+}
+
+func scanStoreTags(t reflect.Type, query, update, base map[string]string, tagged *bool) {
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if f.Anonymous {
+			ft := f.Type
+			if ft.Kind() == reflect.Ptr {
+				ft = ft.Elem()
+			}
+			if ft.Kind() != reflect.Struct {
+				continue
+			}
+			if ft.PkgPath() == chokDBPkgPath {
+				scanJSONFieldsWithCollisions(ft, baseQueryExclude, true, base, nil)
+			} else {
+				scanStoreTags(ft, query, update, base, tagged)
+			}
+			continue
+		}
+		tag, ok := f.Tag.Lookup(storeTagName)
+		if !ok {
+			continue
+		}
+		*tagged = true
+		name := storeTagFieldName(f)
+		col := gormColumnName(f)
+		for _, raw := range strings.Split(tag, ",") {
+			switch strings.TrimSpace(raw) {
+			case "query":
+				addDeclaredField(query, name, col, t, f)
+			case "update":
+				addDeclaredField(update, name, col, t, f)
+			default:
+				panic(fmt.Sprintf("store: %s.%s: bad `store:%q` tag value %q — use \"query\", \"update\" or both (remove the tag to keep the field private)",
+					t.Name(), f.Name, tag, strings.TrimSpace(raw)))
+			}
+		}
+	}
+}
+
+func addDeclaredField(m map[string]string, name, col string, t reflect.Type, f reflect.StructField) {
+	if existing, ok := m[name]; ok && existing != col {
+		panic(fmt.Sprintf("store: %s.%s: declared field name %q maps to columns %q and %q — rename the JSON tag or drop one declaration",
+			t.Name(), f.Name, name, existing, col))
+	}
+	m[name] = col
+}
+
+// storeTagFieldName resolves the filter name for a tag-declared field:
+// the JSON name when visible, snake_case of the Go name otherwise.
+func storeTagFieldName(f reflect.StructField) string {
+	name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+	if name == "" || name == "-" {
+		return toSnakeCase(f.Name)
+	}
+	return name
 }
 
 func sortedKeys(m map[string]string) []string {

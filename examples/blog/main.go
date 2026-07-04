@@ -27,9 +27,9 @@ import (
 // access fails closed.
 type Post struct {
 	db.OwnedSoftDeleteModel
-	Title   string `json:"title"   gorm:"size:200;not null"`
-	Content string `json:"content" gorm:"type:text;not null"`
-	Status  string `json:"status"  gorm:"size:20;default:'draft';not null"`
+	Title   string `json:"title"   store:"query,update" gorm:"size:200;not null"`
+	Content string `json:"content" store:"update"       gorm:"type:text;not null"`
+	Status  string `json:"status"  store:"query,update" gorm:"size:20;default:'draft';not null"`
 }
 
 // RIDPrefix exposes posts as pst_xxx; the numeric key stays internal.

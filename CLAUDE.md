@@ -82,8 +82,10 @@ blessed implementation per capability, configuration over code.
 - **DON'T** bypass the store with raw `*gorm.DB` unless going through
   the `s.Unsafe(ctx)` escape hatch (tx-aware, scopes applied,
   fail-closed on scope errors) or the handle-level `h.Unsafe(ctx)`
-- **DON'T** rely on store auto-discovery in production — always declare
-  `WithQueryFields` / `WithUpdateFields` explicitly. Auto-discovery
+- **DON'T** rely on store auto-discovery in production — declare
+  fields with `store:"query,update"` tags on the model (preferred) or
+  `WithQueryFields` / `WithUpdateFields` at the call site (which
+  override tags, e.g. to narrow a privileged surface). Auto-discovery
   emits a warn log because the implicit set is fragile.
 - **DON'T** use `store.Set(map)` when optimistic locking matters —
   prefer `store.Fields(&obj)`, which extracts `obj.Version` automatically
