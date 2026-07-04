@@ -10,6 +10,20 @@
 
 ---
 
+## 2.0.0-beta.4 — 一行到位的路由动词
+
+> 主题:「对 gin 式极简的回答是越过它」。`web.GET/POST/PUT/PATCH/
+> DELETE` 把路由与类型化绑定层融成一行——一行 = 路由 + 请求绑定 +
+> 响应编码 + 错误映射 + OpenAPI 登记;gin 的闭包里仍要手写 bind 与
+> JSON,样板真正消失在类型层。每个 helper 严格等于 `r.Handle +
+> handler.HandleRequest`(DELETE 走 `HandleAction`,204,REST 惯例),
+> 零绕行:Meta 依旧进路由表(测试钉住防未来绕行),中间件依旧走
+> Group。配套把「零 yaml、单文件 21 行、`go run .` 即起且自带访问
+> 日志/优雅关停」的实测 hello world 放上双语 README 首屏——极简的
+> 另一半本来就在(缺省路径缺 yaml 不报错、`Execute()` 即
+> `r.Run()`),这次把它亮出来。装配仪式(`chok.Use`)是显式装配
+> 公理的自觉代价,由 `chok init` 生成而非删除。
+
 ## 2.0.0-beta.3 — SQLite 并发默认值拉满
 
 > 主题:「嵌入式数据库也不该让用户背 DSN 咒语」。文件库 SQLite 现在
