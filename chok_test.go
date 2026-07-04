@@ -470,6 +470,15 @@ func TestWithErrorMapper_ReachesAttachConsumer(t *testing.T) {
 		t.Fatalf("attached registry must carry the WithErrorMapper mapper, got %v", got)
 	}
 
+	// The attach lands during assembly, before startup completes — a
+	// cancel fired right here races the starting sequence and Run
+	// reports "context canceled while command executes". Wait for
+	// readiness so the shutdown below exercises a started app.
+	waitTrue(t, func() bool {
+		k := app.Kernel()
+		return k != nil && k.Ready(context.Background()) == nil
+	}, "kernel never became ready")
+
 	cancel()
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run: %v", err)
