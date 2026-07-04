@@ -33,14 +33,27 @@ func TestMetrics_ExposesRuntimeAndLifecycle(t *testing.T) {
 	body := scrape(t, tk, "/metrics")
 
 	for _, want := range []string{
-		"go_goroutines",                            // GoCollector wired
-		"chok_uptime_seconds",                      // uptime gauge
-		`chok_component_up{component="metrics"} 1`, // lifecycle gauge fed by the bus
+		"go_goroutines",       // GoCollector wired
+		"chok_uptime_seconds", // uptime gauge
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("scrape missing %q", want)
 		}
 	}
+
+	// The lifecycle gauge is fed by the bus asynchronously (gauge
+	// updates carry no veto and may lag startup), so a scrape right
+	// after boot can race the subscriber — poll like the
+	// reload-counter test does.
+	want := `chok_component_up{component="metrics"} 1`
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(scrape(t, tk, "/metrics"), want) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("scrape missing %q", want)
 }
 
 func TestMetrics_PathFromConfig(t *testing.T) {
