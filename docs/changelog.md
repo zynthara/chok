@@ -10,6 +10,18 @@
 
 ---
 
+## 2.0.0-beta.3 — SQLite 并发默认值拉满
+
+> 主题:「嵌入式数据库也不该让用户背 DSN 咒语」。文件库 SQLite 现在
+> 默认注入 `_txlock=immediate`(写事务 BEGIN 即取写锁,消灭 deferred
+> 读写升级在竞争下不吃 busy_timeout 直接 SQLITE_BUSY 的经典陷阱——
+> 反证实验 3/3 必现,回归测试钉住排队行为)与 `_synchronous=NORMAL`
+> (WAL 下安全,写吞吐数倍于 FULL);WAL 沿 v1 已内建,busy_timeout
+> 经核实为驱动自带 5000ms 默认、不再重复注入。用户显式 DSN 参数
+> (含别名拼写)恒优先。新增 `sqlite.max_open_conns`(idle 跟随),
+> 写重场景压 1 让写者在 Go 侧排队。配套:`docs/db.md` 新增 §16
+> 项目组织与分层、故障排除补 "database is locked" 条目。
+
 ## 2.0.0-beta.2 — 数据层的声明式收口
 
 > beta.1 后的第一轮增量,主题是「**定义模型即定义操作面**」——把
