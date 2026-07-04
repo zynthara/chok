@@ -16,6 +16,7 @@ type Reader[T db.Modeler] interface {
 	ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, error)
 	ListByIDs(ctx context.Context, ids []uint) ([]T, error)
 	Exists(ctx context.Context, by Locator) (bool, error)
+	Count(ctx context.Context, opts ...where.Option) (int64, error)
 }
 
 // Writer is a write-only view of a Store. Business code that only mutates

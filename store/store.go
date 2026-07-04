@@ -751,18 +751,9 @@ func (s *Store[T]) listInternal(ctx context.Context, qopts []QueryOption, opts [
 
 	var total int64
 	if cfg.Count {
-		// COUNT with filters only — pagination/order stripped so total is unaffected.
-		countBase, err := s.applyScopes(ctx, s.effectiveDB(ctx).Model(new(T)))
+		total, err = s.countInternal(ctx, qopts, opts)
 		if err != nil {
 			return nil, err
-		}
-		countBase = s.applyQueryOpts(ctx, countBase, qopts)
-		countQuery, err := where.ApplyFiltersOnly(countBase, s.queryFieldMap, opts)
-		if err != nil {
-			return nil, mapQueryError(err)
-		}
-		if err := countQuery.Count(&total).Error; err != nil {
-			return nil, mapError(err)
 		}
 	}
 
@@ -777,6 +768,39 @@ func (s *Store[T]) listInternal(ctx context.Context, qopts []QueryOption, opts [
 	}
 
 	return &Page[T]{Items: items, Total: total}, nil
+}
+
+// Count returns the number of rows matching the filter options under
+// the Store's scopes and the active soft-delete rules. Pagination and
+// order options are stripped (COUNT is total-shaped by definition);
+// filters resolve against the query allowlist like every read. With no
+// options it counts everything the caller's scope can see — cheaper
+// than List when only the number matters, and cheaper than
+// List(WithCount) when the rows themselves aren't needed.
+func (s *Store[T]) Count(ctx context.Context, opts ...where.Option) (int64, error) {
+	return s.countInternal(ctx, nil, opts)
+}
+
+// countInternal is the COUNT path shared by Count and listInternal's
+// WithCount branch: scopes, then filters only — pagination/order
+// stripped so the total is unaffected. qopts lets list callers honour
+// soft-delete visibility options (WithTrashed / WithOnlyTrashed) in
+// their totals; the public Count passes none.
+func (s *Store[T]) countInternal(ctx context.Context, qopts []QueryOption, opts []where.Option) (int64, error) {
+	base, err := s.applyScopes(ctx, s.effectiveDB(ctx).Model(new(T)))
+	if err != nil {
+		return 0, err
+	}
+	base = s.applyQueryOpts(ctx, base, qopts)
+	q, err := where.ApplyFiltersOnly(base, s.queryFieldMap, opts)
+	if err != nil {
+		return 0, mapQueryError(err)
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return 0, mapError(err)
+	}
+	return total, nil
 }
 
 // ListFromQuery parses URL query parameters and returns a paginated list.
