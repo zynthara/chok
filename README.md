@@ -163,6 +163,7 @@ scheduler and custom components is on the roadmap.
 | Topic | Where |
 |---|---|
 | Architecture & contracts (Chinese) | [`docs/design.md`](docs/design.md) |
+| Data-layer usage guide (Chinese) | [`docs/db.md`](docs/db.md) |
 | Configuration reference (generated) | [`docs/config.md`](docs/config.md) |
 | v1 → v2 migration guide | [`docs/migration-v1-to-v2.md`](docs/migration-v1-to-v2.md) |
 | Design changelog | [`docs/changelog.md`](docs/changelog.md) |

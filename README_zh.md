@@ -155,6 +155,7 @@ chok update [--ref vX.Y]    # 经 go install 升级本地 CLI
 | 主题 | 位置 |
 |---|---|
 | 架构与契约（中文） | [`docs/design.md`](docs/design.md) |
+| 数据层使用指南 | [`docs/db.md`](docs/db.md) |
 | 配置参考（生成） | [`docs/config.md`](docs/config.md) |
 | v1 → v2 迁移指南 | [`docs/migration-v1-to-v2.md`](docs/migration-v1-to-v2.md) |
 | 设计变更日志 | [`docs/changelog.md`](docs/changelog.md) |
