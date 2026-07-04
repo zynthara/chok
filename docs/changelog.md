@@ -10,6 +10,26 @@
 
 ---
 
+## 2.0.0-beta.2 — 数据层的声明式收口
+
+> beta.1 后的第一轮增量,主题是「**定义模型即定义操作面**」——把
+> 数据层的日常使用成本再往下压,同时保持全部 fail-closed 语义。
+
+- **`store` tag 字段声明**:白名单从调用点搬到字段旁
+  (`store:"query,update"`),加字段时声明就在手边;调用点的
+  `WithQueryFields`/`WithUpdateFields` 保留为按消费者收窄的手段
+  (特权/公开双视图场景)。曾评估过「继承 model 即得操作」的
+  ActiveRecord 方向并否决:Go 无 self-type、携带句柄的 model 破坏
+  事务与 scope 语义、且违背单一 blessed 实现公理——声明式 tag 是
+  同一诉求在类型系统内的正确表达。
+- **`Restore` 与 `Count` 补齐常规操作面**:软删恢复由框架持有全部
+  不变量(`delete_token` 归还、SoftUnique 槽冲突映射、scope 不泄露
+  存在性);计数不再借道 `List(WithCount)`。`Reader[T]` 接口随之
+  扩面(对自定义实现者是编译期可见的一行增补)。
+- **使用文档**:[`docs/db.md`](db.md) 按 Diátaxis 四象限组织,
+  安全默认值与故障排除入表;配置表链接生成物而非复制,与三道
+  防漂移闸同一纪律。
+
 ## 2.0.0-beta.1 — v2：把不变量翻译进类型与控制面
 
 > **v2 重写的首个可安装版本**（M0-M5 六个里程碑的产物）。module
