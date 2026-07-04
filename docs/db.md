@@ -535,6 +535,88 @@ Store[T](写)
 
 ---
 
+## 16. 项目组织与分层
+
+`Store[T]` 本身就是数据操作层的实现载体——不需要再手写一层 DAO 包住
+它。分层只回答两个问题:实体定义放哪、要不要在 `Store[T]` 外再包一层
+领域 store。
+
+### 16.1 落位:实体归 model 包,操作归 store 层
+
+```
+myapp/
+├── chok.yaml
+├── chok_modules_gen.go        # chok sync 生成
+├── main.go                    # 装配点
+├── model/                     # ① 实体:纯数据 + 声明,只 import db
+│   ├── post.go
+│   └── tables.go              # 建表清单与实体同包
+├── store/                     # ② 数据操作层(小项目可整层省略,见 16.2)
+│   └── posts.go
+└── api/                       # ③ HTTP handlers
+    └── posts.go
+```
+
+model 包保持单向依赖(只 import `db`),实体靠 `store` tag 自带操作面
+声明(§3.2);建表清单收在同包,`main.go` 只管转交:
+
+```go
+// model/tables.go
+func Tables() []db.TableSpec {
+    return []db.TableSpec{
+        db.Table(&Post{}),
+        db.Table(&Comment{}, db.SoftUnique("uk_comment_slug", "slug")),
+    }
+}
+
+// main.go
+chok.Use(db.Module(db.WithTables(model.Tables()...)))
+```
+
+### 16.2 store 层的两种形态
+
+**形态 A(起步默认):`Store[T]` 就是 store 层。** 装配点构造、注入
+handler,不写任何包装——`examples/blog` 即此形态,单实体 CRUD 的
+项目到此为止就够了。
+
+**形态 B(领域词汇出现后):内嵌包装。** 当你需要 `PublishedSince`
+这类带业务语义的查询名时再包一层。关键是**内嵌透出**——常规 CRUD
+免费获得,只写领域方法,绝不手抄转发:
+
+```go
+// store/posts.go
+type PostStore struct {
+    *store.Store[model.Post]   // Get/List/Create/.../Restore/Count 直接透出
+}
+
+func NewPostStore(h *db.DB, l log.Logger) *PostStore {
+    return &PostStore{Store: store.New[model.Post](h, l)}
+}
+
+// 名字属于业务;实现仍走白名单与 scope,安全栏不因包装而松动
+func (s *PostStore) PublishedSince(ctx context.Context, t time.Time) (*store.Page[model.Post], error) {
+    return s.List(ctx,
+        where.WithFilter("status", "published"),
+        where.WithFilterOp("created_at", where.Gte, t),
+        where.WithOrder("created_at", true))
+}
+```
+
+### 16.3 构造纪律与依赖注入
+
+- **store 构造是进程级一次**(routes 回调或应用构造函数里),然后注入
+  handler 共享——`Store` 是无状态配置对象,并发安全;构造走反射,
+  **不要每请求 `store.New`**(有成本,discovery warn 也会刷屏)。
+- **依赖声明用接口视图**:消费方写 `store.Reader[model.Post]` /
+  `store.ReadWriter[model.Post]` 而非 `*store.Store[model.Post]`——
+  只读消费者拿不到写方法,测试替身只需实现窄面。
+- **service 层的存在理由是跨实体编排**:多 store 同事务走
+  `h.RunInTx`(§7),事务随 `txCtx` 传播——这是 handler 不该直接干、
+  单实体 store 也管不到的那一层。只有单实体 CRUD 时不需要 service
+  层,别为分层而分层。
+
+---
+
 ## 相关文档
 
 - [`config.md`](config.md) —— db 段全部配置项(生成,永不漂移)
