@@ -498,6 +498,7 @@ func TestPostFlow(t *testing.T) {
 | `store: operation called without conditions` | `Update`/`Delete` 传了空 `Where()` | 补条件;真要全表操作走逃生门 |
 | `Restore` 报 `ErrDuplicate` | 唯一槽已被新活跃行占用 | 业务决策:删新行、改字段后重试,或放弃恢复 |
 | 启动报 `db: BeforeCreate: invalid RID` | 手工构造/导入的 RID 形状非法 | 用 `rid.New(prefix)` 生成;导入数据先校验 |
+| SQLite 并发下 `database is locked` | 框架默认已注入 `_txlock=immediate` + WAL + 5s busy_timeout,常规读改写会排队不报错;仍然出现说明写压超出单写者吞吐,或 DSN 显式改回了 deferred | 写重场景设 `db.sqlite.max_open_conns: 1` 让写者在 Go 侧排队;持续超载则换 `driver: postgres` |
 | `versioned` 模式下写入报表不存在 | 忘了 `chok migrate up`,或 SQL 文件没 embed | 检查 `WithMigrations` 与 `migrate status` |
 
 ---

@@ -198,3 +198,135 @@ func TestOpen_MemorySQLiteSurvivesConcurrentPoolUse(t *testing.T) {
 		t.Fatalf("concurrent pool use over :memory: must not lose the schema: %v", err)
 	}
 }
+
+// TestOpenSQLite_InjectsConcurrencyDefaults pins the file-database DSN
+// defaults: synchronous lands on NORMAL (WAL-safe, several times FULL's
+// write throughput) and the driver's own busy_timeout default stays at
+// 5000ms — a driver upgrade silently dropping either should fail here.
+func TestOpenSQLite_InjectsConcurrencyDefaults(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	ctx := context.Background()
+
+	var sync int
+	if err := h.Unsafe(ctx).Raw("PRAGMA synchronous").Scan(&sync).Error; err != nil {
+		t.Fatal(err)
+	}
+	if sync != 1 { // 1 = NORMAL
+		t.Fatalf("synchronous = %d, want 1 (NORMAL)", sync)
+	}
+	var busy int
+	if err := h.Unsafe(ctx).Raw("PRAGMA busy_timeout").Scan(&busy).Error; err != nil {
+		t.Fatal(err)
+	}
+	if busy != 5000 {
+		t.Fatalf("busy_timeout = %d, want the driver default 5000", busy)
+	}
+	var journal string
+	if err := h.Unsafe(ctx).Raw("PRAGMA journal_mode").Scan(&journal).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(journal, "wal") {
+		t.Fatalf("journal_mode = %q, want wal", journal)
+	}
+}
+
+// TestOpenSQLite_UserDSNOverridesDefaults: explicit DSN parameters win
+// over the injected defaults, alias spellings included.
+func TestOpenSQLite_UserDSNOverridesDefaults(t *testing.T) {
+	for name, tc := range map[string]struct {
+		params string
+		want   int
+	}{
+		"canonical": {"_synchronous=2", 2}, // FULL
+		"alias":     {"_sync=0", 0},        // OFF
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "d.db") + "?" + tc.params
+			h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: path}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			var sync int
+			if err := h.Unsafe(context.Background()).Raw("PRAGMA synchronous").Scan(&sync).Error; err != nil {
+				t.Fatal(err)
+			}
+			if sync != tc.want {
+				t.Fatalf("synchronous = %d, want %d (user DSN must win)", sync, tc.want)
+			}
+		})
+	}
+}
+
+// TestOpenSQLite_ConcurrentReadModifyWrite_NoBusy is the behavioural
+// proof of _txlock=immediate: transactions that read before writing
+// take the write lock at BEGIN and queue under busy_timeout. Under the
+// driver default (deferred) the mid-transaction lock upgrade fails
+// SQLITE_BUSY immediately — ten writers hammering one row made that
+// near-certain before the DSN default landed.
+func TestOpenSQLite_ConcurrentReadModifyWrite_NoBusy(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	ctx := context.Background()
+	if err := h.Migrate(ctx, Table(&TestItem{})); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Unsafe(ctx).Create(&TestItem{Code: "seed"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 10)
+	for g := range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 5 {
+				err := h.RunInTx(ctx, func(txCtx context.Context) error {
+					var item TestItem
+					if err := h.Unsafe(txCtx).Where("id = ?", 1).First(&item).Error; err != nil {
+						return err
+					}
+					return h.Unsafe(txCtx).Model(&TestItem{}).Where("id = ?", 1).
+						Update("code", fmt.Sprintf("g%d-%d", g, i)).Error
+				})
+				if err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	if err := <-errCh; err != nil {
+		t.Fatalf("read-modify-write transactions must queue, not fail busy: %v", err)
+	}
+}
+
+// TestOpenSQLite_MaxOpenConnsApplied: the pool cap (and the matching
+// idle cap) reaches database/sql.
+func TestOpenSQLite_MaxOpenConnsApplied(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{
+		Path:         filepath.Join(t.TempDir(), "d.db"),
+		MaxOpenConns: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	sqlDB, err := h.Unsafe(context.Background()).DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sqlDB.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1", got)
+	}
+}

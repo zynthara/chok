@@ -523,6 +523,9 @@
               "sqlite": {
                 "additionalProperties": false,
                 "properties": {
+                  "max_open_conns": {
+                    "type": "integer"
+                  },
                   "path": {
                     "default": "app.db",
                     "type": "string"
@@ -663,6 +666,9 @@
         "sqlite": {
           "additionalProperties": false,
           "properties": {
+            "max_open_conns": {
+              "type": "integer"
+            },
             "path": {
               "default": "app.db",
               "type": "string"

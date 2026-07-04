@@ -102,6 +102,7 @@ Named instances: sections marked *multi-instance* accept an
 | `driver` | string | — | restart | one of: sqlite \| mysql \| postgres |
 | `migrate` | string | `auto` | restart | one of: auto \| versioned \| off |
 | `sqlite.path` | string | `app.db` | restart | — |
+| `sqlite.max_open_conns` | int | — | restart | — |
 | `mysql.host` | string | `127.0.0.1` | restart | — |
 | `mysql.port` | int | `3306` | restart | — |
 | `mysql.username` | string | — | restart | — |

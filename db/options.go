@@ -38,6 +38,14 @@ type Options struct {
 // SQLiteOptions configures the sqlite driver branch.
 type SQLiteOptions struct {
 	Path string `mapstructure:"path" default:"app.db"`
+
+	// MaxOpenConns caps the connection pool (0 = unlimited). SQLite
+	// has a single writer per database file: write-heavy services
+	// should set 1 so writers queue in Go instead of colliding on the
+	// file lock. Idle connections follow the same cap — reopening a
+	// SQLite connection re-parses the schema, keeping them warm is
+	// free.
+	MaxOpenConns int `mapstructure:"max_open_conns"`
 }
 
 // MySQLOptions configures the mysql driver branch. TLS and CACert are
@@ -114,6 +122,9 @@ func (o *Options) Validate() error {
 	case "sqlite":
 		if o.SQLite.Path == "" {
 			return fmt.Errorf("db: sqlite: path must not be empty")
+		}
+		if o.SQLite.MaxOpenConns < 0 {
+			return fmt.Errorf("db: sqlite: max_open_conns must be >= 0, got %d", o.SQLite.MaxOpenConns)
 		}
 		return nil
 	case "mysql":

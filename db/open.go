@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -32,7 +33,11 @@ func openGorm(o *Options) (*gorm.DB, error) {
 }
 
 func openSQLite(o *SQLiteOptions) (*gorm.DB, error) {
-	gdb, err := gorm.Open(sqlite.Open(o.Path), &gorm.Config{
+	dsn := o.Path
+	if !sqliteIsMemory(o.Path) {
+		dsn = sqliteDSNWithDefaults(o.Path)
+	}
+	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: logger.Discard,
 	})
 	if err != nil {
@@ -52,11 +57,55 @@ func openSQLite(o *SQLiteOptions) (*gorm.DB, error) {
 		}
 		return gdb, nil
 	}
-	// WAL mode for concurrency (v1 behaviour carried over).
+	// WAL mode for concurrency (v1 behaviour carried over). The pragma
+	// persists in the database file, so setting it once here covers
+	// every connection — unlike the per-connection DSN defaults above.
 	if err := gdb.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
 		return nil, fmt.Errorf("db: sqlite enable WAL: %w", err)
 	}
+	if o.MaxOpenConns > 0 {
+		if sqlDB, derr := gdb.DB(); derr == nil {
+			sqlDB.SetMaxOpenConns(o.MaxOpenConns)
+			sqlDB.SetMaxIdleConns(o.MaxOpenConns)
+		}
+	}
 	return gdb, nil
+}
+
+// sqliteDSNWithDefaults injects the per-connection concurrency defaults
+// into a file-database DSN unless the user's path already sets them
+// (driver aliases included):
+//
+//   - _txlock=immediate — write transactions take the write lock at
+//     BEGIN. Under the driver default (deferred) a transaction that
+//     reads first upgrades to the write lock mid-flight, and an
+//     upgrade that loses the race fails SQLITE_BUSY immediately,
+//     without honouring busy_timeout — the classic read-modify-write
+//     trap under concurrency.
+//   - _synchronous=NORMAL — safe under WAL (a crash can lose the last
+//     checkpoint window, never corrupt the file) and several times
+//     the write throughput of SQLite's default FULL.
+//
+// busy_timeout is not injected: the driver already defaults to 5000ms.
+// A malformed query string is handed to the driver untouched — DSN
+// error reporting stays the driver's job.
+func sqliteDSNWithDefaults(path string) string {
+	base, query, _ := strings.Cut(path, "?")
+	vals, err := url.ParseQuery(query)
+	if err != nil {
+		return path
+	}
+	inject := func(key, val string, aliases ...string) {
+		for _, k := range append(aliases, key) {
+			if vals.Has(k) {
+				return
+			}
+		}
+		vals.Set(key, val)
+	}
+	inject("_txlock", "immediate")
+	inject("_synchronous", "NORMAL", "_sync")
+	return base + "?" + vals.Encode()
 }
 
 // sqliteIsMemory reports whether the path denotes an in-memory SQLite
