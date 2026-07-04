@@ -79,6 +79,39 @@ func main() {
 带前缀的 RID（数字主键不外泄）、乐观锁走 version 列、日志里密钥
 自动脱敏、raw SQL 只有两扇门 —— 都叫 `Unsafe`。
 
+## 30 秒 hello world
+
+零 yaml、单文件、`go run .` 即起——而且起来的是生产形态:带
+request_id 的结构化访问日志、SIGINT 优雅关停、环境变量配置覆盖,
+全在默认值里。
+
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/zynthara/chok/v2"
+	"github.com/zynthara/chok/v2/kernel"
+	"github.com/zynthara/chok/v2/web"
+)
+
+func main() {
+	chok.New("hello",
+		chok.Use(web.Module()),
+		chok.Routes(func(r kernel.Router, _ kernel.Kernel) error {
+			web.GET(r, "/ping", func(context.Context, *struct{}) (string, error) {
+				return "pong", nil
+			})
+			return nil
+		}),
+	).Execute()
+}
+```
+
+`web.GET/POST/PUT/PATCH/DELETE` 把路由与类型化绑定层融成一行:
+一行 = 路由 + 请求绑定 + 响应编码 + 错误映射 + OpenAPI 登记。
+
 ## 快速开始
 
 ```bash

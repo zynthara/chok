@@ -85,6 +85,40 @@ models fail closed, external IDs are prefixed RIDs (numeric keys never
 leak), optimistic locking rides a version column, secrets are redacted
 in logs, raw SQL has exactly two doors — both named `Unsafe`.
 
+## 30-second hello world
+
+No yaml, one file, `go run .` — and what boots is production-shaped:
+structured access logs with request IDs, graceful drain on SIGINT,
+env-var config overrides, all on defaults.
+
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/zynthara/chok/v2"
+	"github.com/zynthara/chok/v2/kernel"
+	"github.com/zynthara/chok/v2/web"
+)
+
+func main() {
+	chok.New("hello",
+		chok.Use(web.Module()),
+		chok.Routes(func(r kernel.Router, _ kernel.Kernel) error {
+			web.GET(r, "/ping", func(context.Context, *struct{}) (string, error) {
+				return "pong", nil
+			})
+			return nil
+		}),
+	).Execute()
+}
+```
+
+`web.GET/POST/PUT/PATCH/DELETE` fuse routing with the typed binding
+layer: one line is route + request binding + response encoding +
+error mapping + OpenAPI registration.
+
 ## Quick start
 
 ```bash

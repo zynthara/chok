@@ -10,6 +10,7 @@ import (
 	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store"
+	"github.com/zynthara/chok/v2/web"
 )
 
 // routes wires the post CRUD behind the blessed auth guard. account
@@ -23,17 +24,17 @@ func routes(r kernel.Router, k kernel.Kernel) error {
 	h := &postHandlers{posts: posts}
 
 	api := r.Group("/api/v1", account.Authn(k))
-	api.Handle(http.MethodPost, "/posts", handler.HandleRequest(h.create,
+	web.POST(api, "/posts", h.create,
 		handler.WithSuccessCode(http.StatusCreated),
-		handler.WithSummary("Create a post"), handler.WithTags("posts")))
+		handler.WithSummary("Create a post"), handler.WithTags("posts"))
 	api.Handle(http.MethodGet, "/posts", handler.HandleList[Post](posts,
 		handler.WithSummary("List my posts"), handler.WithTags("posts")))
-	api.Handle(http.MethodGet, "/posts/{rid}", handler.HandleRequest(h.get,
-		handler.WithSummary("Get one post"), handler.WithTags("posts")))
-	api.Handle(http.MethodPut, "/posts/{rid}", handler.HandleRequest(h.update,
-		handler.WithSummary("Update a post"), handler.WithTags("posts")))
-	api.Handle(http.MethodDelete, "/posts/{rid}", handler.HandleAction(h.delete,
-		handler.WithSummary("Delete a post"), handler.WithTags("posts")))
+	web.GET(api, "/posts/{rid}", h.get,
+		handler.WithSummary("Get one post"), handler.WithTags("posts"))
+	web.PUT(api, "/posts/{rid}", h.update,
+		handler.WithSummary("Update a post"), handler.WithTags("posts"))
+	web.DELETE(api, "/posts/{rid}", h.delete,
+		handler.WithSummary("Delete a post"), handler.WithTags("posts"))
 	return nil
 }
 
