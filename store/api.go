@@ -340,6 +340,57 @@ func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption)
 	return nil
 }
 
+// Restore un-deletes the soft-deleted record(s) matched by the locator:
+// deleted_at is cleared and delete_token returns to the live sentinel
+// (''), so the row re-enters every SoftUnique slot — when a new live
+// row has taken the slot in the meantime, the write maps to
+// ErrDuplicate and the record stays deleted. Only soft-delete models
+// (db.SoftDeleteModel embedders) can restore; calling Restore on a
+// hard-delete model is a programming error and returns an error.
+//
+// Scopes apply: a principal can only restore rows its scope can see,
+// and a foreign row reports ErrNotFound rather than confirming its
+// existence. Idempotence mirrors Delete: a locator matching only live
+// rows is a no-op nil, a locator matching nothing at all returns
+// ErrNotFound.
+func (s *Store[T]) Restore(ctx context.Context, by Locator) error {
+	if !s.soft {
+		return fmt.Errorf("store: Restore: %s is not a soft-delete model (embed db.SoftDeleteModel to restore)", reflect.TypeFor[T]().Name())
+	}
+
+	q, err := s.applyScopes(ctx, s.effectiveDB(ctx).Unscoped())
+	if err != nil {
+		return err
+	}
+	q, err = by.apply(q, s.queryFieldMap)
+	if err != nil {
+		return mapQueryError(err)
+	}
+
+	result := q.Where("deleted_at IS NOT NULL").Model(new(T)).Updates(map[string]any{
+		"deleted_at":   nil,
+		"delete_token": "",
+	})
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		// Distinguish "row is alive" (idempotent nil) from "no such
+		// row under this scope" (ErrNotFound). The scoped probe keeps
+		// foreign rows indistinguishable from absent ones.
+		exists, err := s.existsByLocatorUnscoped(ctx, by)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return newNotFoundError(by)
+		}
+		return nil
+	}
+	s.publishChanged(ctx, EntityChanged[T]{Op: OpRestore, Locator: by})
+	return nil
+}
+
 // Exists checks whether any record matches the locator under the Store's
 // scopes. More efficient than Get when you only need presence, not the data.
 func (s *Store[T]) Exists(ctx context.Context, by Locator) (bool, error) {

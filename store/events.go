@@ -13,10 +13,14 @@ type Op string
 // Write operations carried by EntityChanged.Op. Upsert publishes
 // OpCreate — mirroring v1's after-create hook semantics for upserts —
 // regardless of whether the row was inserted or updated on conflict.
+// Restore publishes OpRestore with the locator: subscribers tracking
+// row liveness (caches, projections) treat it as the inverse of
+// OpDelete rather than a field update.
 const (
-	OpCreate Op = "create"
-	OpUpdate Op = "update"
-	OpDelete Op = "delete"
+	OpCreate  Op = "create"
+	OpUpdate  Op = "update"
+	OpDelete  Op = "delete"
+	OpRestore Op = "restore"
 )
 
 // EntityChanged is the typed event a WithBus store publishes after a
