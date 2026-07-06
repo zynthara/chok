@@ -110,15 +110,17 @@ fmt: ## Format code (gofmt + go mod tidy)
 .PHONY: snapshot
 snapshot: ## Run goreleaser locally without publishing (output under dist/)
 	@which goreleaser > /dev/null || (echo "goreleaser not installed: brew install goreleaser" && exit 1)
+	@which syft > /dev/null || (echo "syft not installed (SBOM generation): brew install syft" && exit 1)
 	goreleaser release --snapshot --clean --skip=publish
 
 .PHONY: tag
 tag: ## Print the manual release workflow
-	@echo "Release workflow (manual since v2):"
-	@echo "  1. update CHANGELOG.md with the release entry"
-	@echo "  2. full suite green: make test && go vet ./..."
-	@echo "  3. git tag vX.Y.Z[-pre.N] && git push origin <tag>"
-	@echo "  4. the tag push triggers goreleaser to build and publish a GitHub Release"
+	@echo "Release workflow (manual since v2) — canonical runbook: CONTRIBUTING.md, 'Releasing':"
+	@echo "  1. full suite green: make test && go vet ./..."
+	@echo "  2. one release commit 'chore(release): vX.Y.Z — <punchline>': promote the"
+	@echo "     CHANGELOG.md Unreleased entry, add the docs/changelog.md note, bump .apidiff-baseline"
+	@echo "  3. git tag vX.Y.Z[-pre.N] && git push origin main vX.Y.Z"
+	@echo "  4. the tag push triggers goreleaser (binaries + SBOMs + checksums -> GitHub Release)"
 
 ##@ Clean
 

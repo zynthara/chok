@@ -1,0 +1,32 @@
+# Dependabot: dependency and GitHub Actions update PRs.
+#
+# gomod: weekly; minor+patch updates arrive grouped in a single PR to
+# keep the noise down, majors arrive individually so breaking upgrades
+# get their own review.
+#
+# github-actions: keeps the SHA-pinned `uses:` lines current —
+# dependabot understands the `<sha> # vX.Y.Z` convention and bumps the
+# SHA and the version comment together.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore"
+      include: scope
+    groups:
+      go-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore"
+      include: scope

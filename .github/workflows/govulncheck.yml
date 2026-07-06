@@ -1,0 +1,40 @@
+# Vulnerability gate. govulncheck analyses which vulnerable symbols
+# are actually *reachable* from chok's code, so a red run means "known
+# vulnerability, reachable from this module" — not merely "a dependency
+# has a CVE somewhere".
+#
+# Two triggers, two failure modes:
+#   - push/PR: a change introduces (or newly reaches) a vulnerable path
+#   - weekly schedule: a new disclosure lands against unchanged deps
+#
+# The tool version is pinned (same discipline as hack/apidiff.sh):
+# bump deliberately, not via @latest drift.
+
+name: govulncheck
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC — new-disclosure sweep
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
