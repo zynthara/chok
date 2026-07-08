@@ -1,6 +1,7 @@
 package web
 
 import (
+	"maps"
 	"net/http"
 
 	"github.com/zynthara/chok/v2/apierr"
@@ -123,9 +124,7 @@ func (r *router) serveUnmatched(w http.ResponseWriter, req *http.Request) {
 		}
 		handler.WriteError(w, req, errMethodNotAllowed)
 	default:
-		for k, vs := range probe.header {
-			w.Header()[k] = vs
-		}
+		maps.Copy(w.Header(), probe.header)
 		w.WriteHeader(probe.status)
 		_, _ = w.Write(probe.body)
 	}
