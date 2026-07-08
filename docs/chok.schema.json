@@ -368,7 +368,7 @@
     },
     "db": {
       "additionalProperties": false,
-      "description": "Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off).",
+      "description": "Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off); sqlite runs the pure-Go split-pool production shape.",
       "properties": {
         "driver": {
           "enum": [
@@ -523,8 +523,24 @@
               "sqlite": {
                 "additionalProperties": false,
                 "properties": {
+                  "checkpoint_interval": {
+                    "default": "5m",
+                    "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
                   "max_open_conns": {
                     "type": "integer"
+                  },
+                  "optimize_interval": {
+                    "default": "1h",
+                    "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
                   },
                   "path": {
                     "default": "app.db",
@@ -666,8 +682,24 @@
         "sqlite": {
           "additionalProperties": false,
           "properties": {
+            "checkpoint_interval": {
+              "default": "5m",
+              "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
             "max_open_conns": {
               "type": "integer"
+            },
+            "optimize_interval": {
+              "default": "1h",
+              "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+              "type": [
+                "string",
+                "integer"
+              ]
             },
             "path": {
               "default": "app.db",

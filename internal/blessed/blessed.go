@@ -122,8 +122,8 @@ func Modules() []Module {
 		{
 			ImportPath: root + "db", Pkg: "db", Constructor: "db.Module()",
 			New:    func() kernel.Component { return db.Module() },
-			DescEN: "Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off).",
-			DescZH: "数据库连接池（sqlite/mysql/postgres）+ 迁移（auto/versioned/off）。",
+			DescEN: "Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off); sqlite runs the pure-Go split-pool production shape.",
+			DescZH: "数据库连接池（sqlite/mysql/postgres）+ 迁移（auto/versioned/off）。sqlite 为纯 Go 驱动 + 读写分池 + 内建维护循环（§7.5）。",
 			Enums: map[string][]string{
 				"driver":  {"sqlite", "mysql", "postgres"},
 				"migrate": {"auto", "versioned", "off"},

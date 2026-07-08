@@ -92,7 +92,7 @@ Named instances: sections marked *multi-instance* accept an
 | `exporter` | string | `stdout` | restart | one of: stdout \| otlp |
 | `otlp_endpoint` | string | — | restart | — |
 
-## `db` — Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off).
+## `db` — Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off); sqlite runs the pure-Go split-pool production shape.
 
 *Multi-instance.*
 
@@ -101,10 +101,10 @@ Named instances: sections marked *multi-instance* accept an
 | `enabled` | bool | `true` | restart | — |
 | `driver` | string | — | restart | one of: sqlite \| mysql \| postgres |
 | `migrate` | string | `auto` | restart | one of: auto \| versioned \| off |
-| `sqlite.path` | string | `app.db` | restart | file path, optionally with `?_pragma=...`/`_txlock=` DSN params (mattn-era `_synchronous=` spellings are rejected at startup) |
-| `sqlite.max_open_conns` | int | `max(4, NumCPU)` | restart | READ pool cap; the write side is always a single connection (fair Go-side write queueing) |
-| `sqlite.checkpoint_interval` | duration | `5m` | restart | background `PRAGMA wal_checkpoint(TRUNCATE)`; `0` disables |
-| `sqlite.optimize_interval` | duration | `1h` | restart | background `PRAGMA optimize` (plus once at close); `0` disables |
+| `sqlite.path` | string | `app.db` | restart | — |
+| `sqlite.max_open_conns` | int | — | restart | — |
+| `sqlite.checkpoint_interval` | duration | `5m` | restart | — |
+| `sqlite.optimize_interval` | duration | `1h` | restart | — |
 | `mysql.host` | string | `127.0.0.1` | restart | — |
 | `mysql.port` | int | `3306` | restart | — |
 | `mysql.username` | string | — | restart | — |
