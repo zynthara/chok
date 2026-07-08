@@ -231,7 +231,7 @@ func TestRouter_GroupPrefixAndMiddlewareCompose(t *testing.T) {
 	c := newWebComponent(t, "", nil)
 	r := c.ProvideRouter()
 
-	tag := func(name string) Middleware {
+	tag := func(name string) kernel.Middleware {
 		return func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				w.Header().Add("X-Chain", name)

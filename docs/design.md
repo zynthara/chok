@@ -202,9 +202,13 @@ type Options struct {
 
 ## 6. HTTP 层（`web/` + `middleware/` + `handler/`）
 
-- **契约在 kernel、实现在 web**：`kernel.Router`（`Handle` /
-  `Group`，`Middleware = func(http.Handler) http.Handler`）只依赖
-  net/http；web 提供 ServeMux 实现并保有**路由表**。
+- **契约在 kernel、实现在 web、应用拼写在 chok**：`kernel.Router`
+  （`Handle` / `Group`，`Middleware = func(http.Handler) http.Handler`）
+  只依赖 net/http；web 提供 ServeMux 实现并保有**路由表**。根包
+  `chok` 对出现在自身签名里的契约做类型别名（`chok.Router` /
+  `chok.Kernel` / `chok.Middleware` / `chok.Component`），应用代码
+  只写 chok 词汇、不 import kernel；模块作者（Descriptor / Mounter
+  等扩展面）保持 kernel 拼写。别名是恒等类型，两种拼写可互换。
 - **路由表是 swagger 的数据源**：泛型 handler 构造产物实现
   `web.HandlerMeta`（`Meta()` 携带 req/resp 类型、summary、tags、
   success code），`Handle` 注册时断言入表；swagger 从表生成

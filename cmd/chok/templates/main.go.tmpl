@@ -17,7 +17,6 @@ import (
 	"github.com/zynthara/chok/v2"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/handler"
-	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store"
 )
@@ -61,7 +60,7 @@ func main() {
 	).Execute()
 }
 
-func routes(r kernel.Router, k kernel.Kernel) error {
+func routes(r chok.Router, k chok.Kernel) error {
 	notes := store.New[Note](db.From(k), log.From(k),
 		store.WithQueryFields("id", "title", "created_at"),
 		store.WithUpdateFields("title", "body"),

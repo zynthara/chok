@@ -9,14 +9,6 @@ import (
 	"github.com/zynthara/chok/v2/kernel"
 )
 
-// Router / Middleware are the kernel contracts; user code sees the web
-// spellings (SPEC §3.2 — the definition lives in kernel so the mount
-// phase never depends on this package).
-type Router = kernel.Router
-
-// Middleware is a plain http.Handler decorator.
-type Middleware = kernel.Middleware
-
 // HandlerMeta is the optional interface a registered http.Handler may
 // implement to contribute route metadata (request/response types,
 // summary, tags) to the route table. handler.HandleRequest /
@@ -40,11 +32,12 @@ var errMethodNotAllowed = apierr.New(http.StatusMethodNotAllowed, "MethodNotAllo
 
 // router implements kernel.Router on http.ServeMux, owning the route
 // table swagger generates from. Groups share the root state; only the
-// prefix and middleware chain differ.
+// prefix and middleware chain differ. App code spells the contract
+// chok.Router; this package uses the kernel definition directly.
 type router struct {
 	root   *routerRoot
 	prefix string
-	mw     []Middleware
+	mw     []kernel.Middleware
 }
 
 type routerRoot struct {
@@ -64,7 +57,7 @@ func newRouter() *router {
 // Invalid or conflicting patterns panic at registration time (ServeMux
 // semantics) — same fail-fast class as gin's route-conflict panics,
 // surfacing during the mount phase, not at request time.
-func (r *router) Handle(method, pattern string, h http.Handler, mw ...Middleware) {
+func (r *router) Handle(method, pattern string, h http.Handler, mw ...kernel.Middleware) {
 	full := r.prefix + pattern
 	if meta, ok := h.(HandlerMeta); ok {
 		m := meta.Meta()
@@ -73,7 +66,7 @@ func (r *router) Handle(method, pattern string, h http.Handler, mw ...Middleware
 		r.root.routes = append(r.root.routes, Route{Method: method, Pattern: full})
 	}
 
-	chain := append(append([]Middleware{}, r.mw...), mw...)
+	chain := append(append([]kernel.Middleware{}, r.mw...), mw...)
 	for i := len(chain) - 1; i >= 0; i-- {
 		h = chain[i](h)
 	}
@@ -87,11 +80,11 @@ func (r *router) Handle(method, pattern string, h http.Handler, mw ...Middleware
 
 // Group implements kernel.Router: prefix concatenation plus middleware
 // inheritance. An empty prefix makes a middleware-only group.
-func (r *router) Group(prefix string, mw ...Middleware) Router {
+func (r *router) Group(prefix string, mw ...kernel.Middleware) kernel.Router {
 	return &router{
 		root:   r.root,
 		prefix: r.prefix + prefix,
-		mw:     append(append([]Middleware{}, r.mw...), mw...),
+		mw:     append(append([]kernel.Middleware{}, r.mw...), mw...),
 	}
 }
 

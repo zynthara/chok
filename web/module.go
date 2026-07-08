@@ -34,7 +34,7 @@ type ModOpt func(*Component)
 // (Recovery → RequestID → ClientIP → [Tracing] → Logger → [Timeout] →
 // [Metrics] → [AccessLog] → [AttachAuthz] → [error mappers]), just
 // before the router.
-func WithMiddleware(mw ...Middleware) ModOpt {
+func WithMiddleware(mw ...kernel.Middleware) ModOpt {
 	return func(c *Component) { c.extra = append(c.extra, mw...) }
 }
 
@@ -56,7 +56,7 @@ type Component struct {
 	opts    Options
 	router  *router
 	handler http.Handler
-	extra   []Middleware
+	extra   []kernel.Middleware
 
 	mappers      *apierr.MapperRegistry
 	accessCloser io.Closer
@@ -125,7 +125,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 		return fmt.Errorf("web: %w", err)
 	}
 
-	mws := []Middleware{
+	mws := []kernel.Middleware{
 		middleware.Recovery(c.logger),
 		middleware.RequestID(),
 		middleware.ClientIP(resolver),

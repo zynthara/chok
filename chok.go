@@ -29,8 +29,28 @@ import (
 	"github.com/zynthara/chok/v2/version"
 )
 
+// Application code speaks the chok vocabulary: the kernel contracts
+// that appear in root-package signatures are aliased here so an app
+// never imports kernel just to write its Routes callback. Module
+// authors (Descriptor, Mounter, ...) keep the kernel spelling — that
+// is the extension surface, not the assembly surface.
+type (
+	// Router is the route-registration contract handed to the Routes
+	// callback (contract in kernel, implementation in web).
+	Router = kernel.Router
+	// Kernel is the component-lookup handle passed to Routes and
+	// consumed by the battery accessors (db.From, log.From, ...).
+	Kernel = kernel.Kernel
+	// Middleware is the framework-wide middleware shape: a plain
+	// http.Handler decorator.
+	Middleware = kernel.Middleware
+	// Component is what Use assembles; built-in modules construct
+	// theirs via their Module() functions.
+	Component = kernel.Component
+)
+
 // Get re-exports kernel.Get: typed (kind, instance) component access.
-func Get[T any](k kernel.Kernel, kind string, instance ...string) (T, bool) {
+func Get[T any](k Kernel, kind string, instance ...string) (T, bool) {
 	return kernel.Get[T](k, kind, instance...)
 }
 
@@ -40,9 +60,9 @@ type App struct {
 	envPrefix string
 	version   version.Info
 
-	modules   []kernel.Component
-	overrides []kernel.Component
-	routes    func(r kernel.Router, k kernel.Kernel) error
+	modules   []Component
+	overrides []Component
+	routes    func(r Router, k Kernel) error
 	reloadFn  kernel.PostReloadFunc
 
 	errorMappers *apierr.MapperRegistry
@@ -152,7 +172,7 @@ func (a *App) ErrorMappers() *apierr.MapperRegistry { return a.errorMappers }
 
 // Kernel returns the running kernel (nil before Run) — mainly for
 // tests and advanced integrations; components receive it in Init.
-func (a *App) Kernel() kernel.Kernel {
+func (a *App) Kernel() Kernel {
 	if r := a.regRef(); r != nil {
 		return r
 	}
@@ -380,7 +400,7 @@ func (a *App) assemble() error {
 
 	var routes kernel.RoutesFunc
 	if a.routes != nil {
-		routes = func(r kernel.Router) error { return a.routes(r, a.regRef()) }
+		routes = func(r Router) error { return a.routes(r, a.regRef()) }
 	}
 
 	reg, err := kernel.New(kernel.Config{
@@ -406,7 +426,7 @@ func (a *App) assemble() error {
 // explicit (non-zero) App option first, then the http section's
 // drain_delay when a component owning the "http" section is assembled
 // and enabled (v1 autoRegisterHTTP inheritance, SPEC §9).
-func inheritDrainDelay(explicit time.Duration, comps []kernel.Component, snap *conf.Snapshot) time.Duration {
+func inheritDrainDelay(explicit time.Duration, comps []Component, snap *conf.Snapshot) time.Duration {
 	if explicit != 0 {
 		return explicit
 	}
@@ -430,9 +450,9 @@ func inheritDrainDelay(explicit time.Duration, comps []kernel.Component, snap *c
 
 // resolveModules merges Use and Override: duplicates inside Use fail
 // fast; each Override must replace an existing key (typo guard).
-func (a *App) resolveModules() ([]kernel.Component, error) {
+func (a *App) resolveModules() ([]Component, error) {
 	seen := make(map[kernel.Key]int, len(a.modules))
-	out := make([]kernel.Component, 0, len(a.modules))
+	out := make([]Component, 0, len(a.modules))
 	for _, c := range a.modules {
 		d := c.Describe()
 		if d.Kind == "" {

@@ -11,7 +11,7 @@ import (
 // line — the shortest path from a Routes callback to a bound,
 // documented endpoint:
 //
-//	chok.Routes(func(r kernel.Router, k kernel.Kernel) error {
+//	chok.Routes(func(r chok.Router, k chok.Kernel) error {
 //	    web.GET(r, "/ping", func(ctx context.Context, _ *struct{}) (string, error) {
 //	        return "pong", nil
 //	    })

@@ -4,10 +4,10 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/zynthara/chok/v2"
 	"github.com/zynthara/chok/v2/account"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/handler"
-	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store"
 	"github.com/zynthara/chok/v2/web"
@@ -16,7 +16,7 @@ import (
 // routes wires the post CRUD behind the blessed auth guard. account
 // mounts /auth (register/login/refresh/...) on its own; everything
 // under /api/v1 requires the Bearer token those endpoints issue.
-func routes(r kernel.Router, k kernel.Kernel) error {
+func routes(r chok.Router, k chok.Kernel) error {
 	// Field allowlists ride the `store` tags on Post itself; pass
 	// WithQueryFields / WithUpdateFields here only to narrow that
 	// declaration for a specific consumer.

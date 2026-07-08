@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/zynthara/chok/v2/apierr"
-	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/version"
 )
@@ -18,20 +17,20 @@ type Option func(*App)
 // Use assembles modules. The one registration surface: duplicate
 // (kind, instance) keys fail startup — intentional replacement is
 // spelled chok.Override (SPEC §3.1).
-func Use(modules ...kernel.Component) Option {
+func Use(modules ...Component) Option {
 	return func(a *App) { a.modules = append(a.modules, modules...) }
 }
 
 // Override replaces a previously Use'd module with the same
 // (kind, instance) key. A key that matches nothing fails startup —
 // silent-miss typos are the failure mode this guards.
-func Override(c kernel.Component) Option {
+func Override(c Component) Option {
 	return func(a *App) { a.overrides = append(a.overrides, c) }
 }
 
 // Routes registers the business route callback, invoked during the
 // mount phase between MountOrder ≤ 0 and > 0 mounters.
-func Routes(f func(r kernel.Router, k kernel.Kernel) error) Option {
+func Routes(f func(r Router, k Kernel) error) Option {
 	return func(a *App) { a.routes = f }
 }
 

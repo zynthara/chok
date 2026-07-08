@@ -44,7 +44,7 @@ func main() {
     chok.New("myapp",
         chokModules(), // chok_modules_gen.go —— `chok sync` 重新生成
         chok.Override(db.Module(db.WithTables(db.Table(&Note{})))),
-        chok.Routes(func(r kernel.Router, k kernel.Kernel) error {
+        chok.Routes(func(r chok.Router, k chok.Kernel) error {
             notes := store.New[Note](db.From(k), log.From(k),
                 store.WithQueryFields("id", "title", "created_at"),
                 store.WithUpdateFields("title", "body"))
@@ -92,14 +92,13 @@ import (
 	"context"
 
 	"github.com/zynthara/chok/v2"
-	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/web"
 )
 
 func main() {
 	chok.New("hello",
 		chok.Use(web.Module()),
-		chok.Routes(func(r kernel.Router, _ kernel.Kernel) error {
+		chok.Routes(func(r chok.Router, _ chok.Kernel) error {
 			web.GET(r, "/ping", func(context.Context, *struct{}) (string, error) {
 				return "pong", nil
 			})
