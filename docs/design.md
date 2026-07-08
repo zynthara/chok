@@ -285,6 +285,34 @@ db:
   可观测行为等价。
 - **Reload 不触发 Migrate**；schema 变更须重启（结构保证）。
 
+### 7.5 SQLite 单机生产形态
+
+Web 服务常驻单进程、独占数据库文件，恰好取消了 SQLite 并发难点的
+前提——进程自己充当缺失的"协调者"。db 模块把这套形态做成默认：
+
+- **驱动**：`github.com/glebarez/sqlite`（modernc 纯 Go 转译，免
+  CGO——交叉编译 / Windows / scratch 镜像开箱即用）。mattn 拼法的
+  DSN 参数启动即拒（新驱动会静默忽略，fail-fast 防调优悄悄失效）。
+- **读写分池**（文件库）：写侧单连接 + `_txlock=immediate`——SQLite
+  物理上单写者，写请求在 Go 池上公平排队，且 `BEGIN` 即取写锁，
+  杜绝先读后写事务升锁时不吃 busy_timeout 的 `SQLITE_BUSY`；读侧
+  `max(4, NumCPU)` 连接池走 WAL 快照与写者并行。
+  `gorm.io/plugin/dbresolver` 按回调路由（查询→读池，写/事务/raw
+  非 SELECT→写池；`INSERT ... RETURNING` 因按回调而非 SQL 动词
+  路由，稳落写侧）。读池由句柄持有、随 Close 关闭。`:memory:`
+  无法分池（每连接一个新库），维持钉单连接。
+- **每连接默认**：`foreign_keys(1)`（与 PG 双跑行为对齐）、
+  `synchronous(NORMAL)`；busy_timeout 5s（驱动默认）；文件级
+  `journal_mode=WAL`。用户 DSN 参数优先。
+- **内建维护**：`wal_checkpoint(TRUNCATE)` 每 `checkpoint_interval`
+  （默认 5m）、`PRAGMA optimize` 每 `optimize_interval`（默认 1h，
+  Close 前再补一次）；0 关闭。模块管理生命周期，库级 `db.Open`
+  不起后台 goroutine。
+- **不做 writer goroutine 组提交**：WAL + NORMAL 下 COMMIT 不逐笔
+  fsync，组提交收益远小于独立应用场景；框架层保持 store 直写模型，
+  批量吞吐走 `BatchCreate` / `RunInTx` 合并。多实例部署 =
+  前提失效，换 LiteFS 只读副本或 `driver: postgres`。
+
 ## 8. 电池
 
 | 电池 | 要点 |
@@ -344,7 +372,7 @@ Options 反射（与 conf 走查器同规则），枚举只收 SPEC 冻结的封
 | `debug.Module()` | `debug` | — | mount | false | /componentz 拓扑与生命周期事件视图（默认关闭）。 |
 | `swagger.Module()` | `swagger` | http | mount | true | 由路由表生成 OpenAPI 3 spec + Swagger UI。 |
 | `tracing.Module()` | `tracing` | — | — | false | OpenTelemetry tracer provider（stdout/OTLP 导出）。 |
-| `db.Module()` | `db` | log?, tracing? | health, migrate | true | 数据库连接池（sqlite/mysql/postgres）+ 迁移（auto/versioned/off）。 |
+| `db.Module()` | `db` | log?, tracing? | health, migrate | true | 数据库连接池（sqlite/mysql/postgres）+ 迁移（auto/versioned/off）。sqlite 为纯 Go 驱动 + 读写分池 + 内建维护循环（§7.5）。 |
 | `redis.Module()` | `redis` | log? | health | true | go-redis 客户端（TLS/CA 支持）；健康探针。 |
 | `cache.Module()` | `cache` | redis?, log? | — | true | 分层缓存：otter 内存层 + redis 层 + 熔断器。 |
 | `scheduler.Module()` | `scheduler` | log? | health, serve | true | robfig cron（panic 防护、重叠策略、统计）。 |

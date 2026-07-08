@@ -108,6 +108,12 @@ type Component struct {
 	// handle is published atomically so Health probes racing Close
 	// observe either a live handle or nil, never a torn one.
 	handle atomic.Pointer[DB]
+
+	// maint is the sqlite background caretaker (WAL checkpoint +
+	// optimize); nil for other drivers, memory databases, or when
+	// both intervals are disabled. Init/Close only — no concurrent
+	// access.
+	maint *sqliteMaintenance
 }
 
 // Describe implements kernel.Component.
@@ -159,6 +165,12 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	// pattern).
 	if tc, ok := kernel.Get[interface{ Enabled() bool }](k, "tracing"); ok && tc.Enabled() {
 		EnableTracing(h.gdb)
+	}
+
+	// A long-lived process must play the maintenance role a database
+	// server would otherwise own — file-backed sqlite only.
+	if c.opts.Driver == "sqlite" && !sqliteIsMemory(c.opts.SQLite.Path) {
+		c.maint = startSQLiteMaintenance(h, &c.opts.SQLite, c.logger, displayInstance(c.instance))
 	}
 
 	c.handle.Store(h)
@@ -230,10 +242,16 @@ func (c *Component) Health(ctx context.Context) error {
 }
 
 // Close terminates the pool. Idempotent; Health racing Close sees nil.
+// The maintenance loop stops (synchronously, with a parting PRAGMA
+// optimize) before the pools go away.
 func (c *Component) Close(ctx context.Context) error {
 	h := c.handle.Swap(nil)
 	if h == nil {
 		return nil
+	}
+	if c.maint != nil {
+		c.maint.close()
+		c.maint = nil
 	}
 	return h.Close()
 }

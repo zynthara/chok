@@ -3,47 +3,75 @@ package db
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	gomysql "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	"gorm.io/plugin/dbresolver"
 )
 
-// openGorm dispatches on the validated driver discriminator.
-func openGorm(o *Options) (*gorm.DB, error) {
+// openGorm dispatches on the validated driver discriminator. The
+// second return is an auxiliary pool the handle must close alongside
+// the primary one (the sqlite read pool); nil for the network drivers.
+func openGorm(o *Options) (*gorm.DB, *sql.DB, error) {
 	switch o.Driver {
 	case "sqlite":
 		return openSQLite(&o.SQLite)
 	case "mysql":
-		return openMySQL(&o.MySQL)
+		gdb, err := openMySQL(&o.MySQL)
+		return gdb, nil, err
 	case "postgres":
-		return openPostgres(&o.Postgres)
+		gdb, err := openPostgres(&o.Postgres)
+		return gdb, nil, err
 	default:
 		// Unreachable after Validate; keep the error for direct callers.
-		return nil, fmt.Errorf("db: unsupported driver %q", o.Driver)
+		return nil, nil, fmt.Errorf("db: unsupported driver %q", o.Driver)
 	}
 }
 
-func openSQLite(o *SQLiteOptions) (*gorm.DB, error) {
-	dsn := o.Path
-	if !sqliteIsMemory(o.Path) {
-		dsn = sqliteDSNWithDefaults(o.Path)
-	}
-	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		Logger: logger.Discard,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("db: open sqlite: %w", err)
-	}
+// openSQLite opens the pure-Go SQLite stack (glebarez / modernc — no
+// CGO). A file database gets the single-process production shape:
+//
+//   - a WRITE pool pinned to one connection with _txlock=immediate.
+//     SQLite physically allows one writer per file; a second write
+//     connection could only ever spin in busy_timeout. One connection
+//     turns the Go pool into the fair write queue, and IMMEDIATE
+//     takes the write lock at BEGIN so read-then-write transactions
+//     never hit the un-retryable mid-flight lock upgrade.
+//   - a READ pool of max(4, NumCPU) connections (max_open_conns
+//     overrides): under WAL readers run on snapshots, in parallel
+//     with the writer and each other.
+//   - gorm.io/plugin/dbresolver routes per gorm callback — queries to
+//     the read pool; creates/updates/deletes, transactions and raw
+//     non-SELECT statements to the write pool. Callers see a single
+//     handle; INSERT ... RETURNING stays on the write side because
+//     routing keys on the callback, not on the SQL verb.
+//
+// A memory database cannot be split — every extra connection is a
+// fresh empty database — so it keeps the pinned single-connection
+// pool and no read replica.
+func openSQLite(o *SQLiteOptions) (*gorm.DB, *sql.DB, error) {
 	if sqliteIsMemory(o.Path) {
+		dsn, err := sqliteDSN(o.Path, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+			Logger: logger.Discard,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("db: open sqlite: %w", err)
+		}
 		// A memory database lives and dies with its connection: every
 		// extra pool connection is a fresh empty database, and closing
 		// the last one drops the data. Pin the pool to one immortal
@@ -55,57 +83,137 @@ func openSQLite(o *SQLiteOptions) (*gorm.DB, error) {
 			sqlDB.SetConnMaxLifetime(0)
 			sqlDB.SetConnMaxIdleTime(0)
 		}
-		return gdb, nil
+		return gdb, nil, nil
 	}
-	// WAL mode for concurrency (v1 behaviour carried over). The pragma
-	// persists in the database file, so setting it once here covers
-	// every connection — unlike the per-connection DSN defaults above.
+
+	writeDSN, err := sqliteDSN(o.Path, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	readDSN, err := sqliteDSN(o.Path, false)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	gdb, err := gorm.Open(sqlite.Open(writeDSN), &gorm.Config{
+		Logger: logger.Discard,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("db: open sqlite: %w", err)
+	}
+	writePool, err := gdb.DB()
+	if err != nil {
+		return nil, nil, fmt.Errorf("db: sqlite write pool: %w", err)
+	}
+	writePool.SetMaxOpenConns(1)
+	writePool.SetMaxIdleConns(1)
+	writePool.SetConnMaxLifetime(0)
+	writePool.SetConnMaxIdleTime(0)
+
+	// WAL mode: readers run on snapshots instead of blocking the
+	// writer. The pragma persists in the database file, so setting it
+	// once on the write pool covers the read pool too — unlike the
+	// per-connection DSN defaults above.
 	if err := gdb.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
-		return nil, fmt.Errorf("db: sqlite enable WAL: %w", err)
+		_ = writePool.Close()
+		return nil, nil, fmt.Errorf("db: sqlite enable WAL: %w", err)
 	}
-	if o.MaxOpenConns > 0 {
-		if sqlDB, derr := gdb.DB(); derr == nil {
-			sqlDB.SetMaxOpenConns(o.MaxOpenConns)
-			sqlDB.SetMaxIdleConns(o.MaxOpenConns)
-		}
+
+	readPool, err := sql.Open(sqlite.DriverName, readDSN)
+	if err != nil {
+		_ = writePool.Close()
+		return nil, nil, fmt.Errorf("db: sqlite read pool: %w", err)
 	}
-	return gdb, nil
+	readConns := o.MaxOpenConns
+	if readConns <= 0 {
+		readConns = max(4, runtime.NumCPU())
+	}
+	readPool.SetMaxOpenConns(readConns)
+	readPool.SetMaxIdleConns(readConns) // reopening re-parses the schema; warm is free
+	readPool.SetConnMaxLifetime(0)
+	readPool.SetConnMaxIdleTime(0)
+
+	if err := gdb.Use(dbresolver.Register(dbresolver.Config{
+		Replicas: []gorm.Dialector{&sqlite.Dialector{Conn: readPool}},
+	})); err != nil {
+		_ = readPool.Close()
+		_ = writePool.Close()
+		return nil, nil, fmt.Errorf("db: sqlite read/write split: %w", err)
+	}
+	return gdb, readPool, nil
 }
 
-// sqliteDSNWithDefaults injects the per-connection concurrency defaults
-// into a file-database DSN unless the user's path already sets them
-// (driver aliases included):
+// sqliteLegacyParams maps mattn/go-sqlite3 DSN spellings (the CGO
+// driver chok used before the pure-Go swap) to the pragma names the
+// glebarez driver understands. They are rejected loudly at Open: the
+// new driver ignores parameters it does not know, so a path carried
+// over from the CGO era would otherwise silently lose its tuning.
+var sqliteLegacyParams = map[string]string{
+	"_busy_timeout": "busy_timeout",
+	"_timeout":      "busy_timeout",
+	"_journal_mode": "journal_mode",
+	"_journal":      "journal_mode",
+	"_synchronous":  "synchronous",
+	"_sync":         "synchronous",
+	"_foreign_keys": "foreign_keys",
+	"_fk":           "foreign_keys",
+}
+
+// sqliteDSN renders the path with chok's per-connection defaults
+// injected, respecting anything the user's own query string already
+// sets:
 //
-//   - _txlock=immediate — write transactions take the write lock at
-//     BEGIN. Under the driver default (deferred) a transaction that
-//     reads first upgrades to the write lock mid-flight, and an
-//     upgrade that loses the race fails SQLITE_BUSY immediately,
-//     without honouring busy_timeout — the classic read-modify-write
-//     trap under concurrency.
-//   - _synchronous=NORMAL — safe under WAL (a crash can lose the last
-//     checkpoint window, never corrupt the file) and several times
-//     the write throughput of SQLite's default FULL.
+//   - _pragma=foreign_keys(1) — referential integrity on. Postgres
+//     always enforces declared constraints; SQLite's default (off)
+//     would let the two lanes diverge silently.
+//   - _pragma=synchronous(NORMAL) — safe under WAL (a crash can lose
+//     the last checkpoint window, never corrupt the file) and several
+//     times the write throughput of SQLite's default FULL. File
+//     databases only; meaningless for memory.
+//   - _txlock=immediate — write side only (see openSQLite).
 //
-// busy_timeout is not injected: the driver already defaults to 5000ms.
-// A malformed query string is handed to the driver untouched — DSN
-// error reporting stays the driver's job.
-func sqliteDSNWithDefaults(path string) string {
+// busy_timeout is not injected: the driver already defaults to 5000ms
+// (glebarez matches mattn here). A malformed query string is handed
+// to the driver untouched — DSN error reporting stays the driver's
+// job.
+func sqliteDSN(path string, write bool) (string, error) {
 	base, query, _ := strings.Cut(path, "?")
 	vals, err := url.ParseQuery(query)
 	if err != nil {
-		return path
+		return path, nil
 	}
-	inject := func(key, val string, aliases ...string) {
-		for _, k := range append(aliases, key) {
-			if vals.Has(k) {
-				return
+	for k, canonical := range sqliteLegacyParams {
+		if vals.Has(k) {
+			return "", fmt.Errorf("db: sqlite: DSN parameter %q is a mattn/go-sqlite3 spelling the pure-Go driver silently ignores; use _pragma=%s(...) instead", k, canonical)
+		}
+	}
+	pragma := func(name, arg string) {
+		for _, v := range vals["_pragma"] {
+			if sqlitePragmaName(v) == name {
+				return // the user's setting wins
 			}
 		}
-		vals.Set(key, val)
+		vals.Add("_pragma", name+"("+arg+")")
 	}
-	inject("_txlock", "immediate")
-	inject("_synchronous", "NORMAL", "_sync")
-	return base + "?" + vals.Encode()
+	if !sqliteIsMemory(path) {
+		if write && !vals.Has("_txlock") {
+			vals.Set("_txlock", "immediate")
+		}
+		pragma("synchronous", "NORMAL")
+	}
+	pragma("foreign_keys", "1")
+	return base + "?" + vals.Encode(), nil
+}
+
+// sqlitePragmaName extracts the pragma identifier from a _pragma DSN
+// value: "busy_timeout(5000)", "busy_timeout=5000" and a bare
+// "busy_timeout" all name busy_timeout.
+func sqlitePragmaName(v string) string {
+	v = strings.TrimSpace(v)
+	if i := strings.IndexAny(v, "(= \t"); i >= 0 {
+		v = v[:i]
+	}
+	return strings.ToLower(v)
 }
 
 // sqliteIsMemory reports whether the path denotes an in-memory SQLite

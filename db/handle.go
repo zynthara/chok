@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"gorm.io/gorm"
@@ -16,6 +18,12 @@ import (
 // Unsafe is the single escape hatch.
 type DB struct {
 	gdb *gorm.DB
+
+	// readPool is the sqlite read pool when the file-database
+	// read/write split is active (nil otherwise — memory sqlite and
+	// the network drivers). dbresolver owns the routing; the handle
+	// owns the lifetime.
+	readPool *sql.DB
 }
 
 // Open builds a handle from Options — the same constructor the db
@@ -36,11 +44,11 @@ func Open(opts Options) (*DB, error) {
 	if err := o.Validate(); err != nil {
 		return nil, err
 	}
-	gdb, err := openGorm(&o)
+	gdb, readPool, err := openGorm(&o)
 	if err != nil {
 		return nil, err
 	}
-	return &DB{gdb: gdb}, nil
+	return &DB{gdb: gdb, readPool: readPool}, nil
 }
 
 // Unsafe returns the effective raw gorm handle: the context's
@@ -72,17 +80,29 @@ func (h *DB) Migrate(ctx context.Context, specs ...TableSpec) error {
 	return Migrate(ctx, h.gdb, specs...)
 }
 
-// Ping verifies connectivity (health probes).
+// Ping verifies connectivity (health probes) — both pools when the
+// sqlite read/write split is active, so a broken read DSN fails
+// startup rather than the first query.
 func (h *DB) Ping(ctx context.Context) error {
 	sqlDB, err := h.gdb.DB()
 	if err != nil {
 		return fmt.Errorf("db: get underlying sql.DB: %w", err)
 	}
-	return sqlDB.PingContext(ctx)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return err
+	}
+	if h.readPool != nil {
+		return h.readPool.PingContext(ctx)
+	}
+	return nil
 }
 
-// Close terminates the underlying connection pool. Idempotent at the
+// Close terminates the underlying connection pools. Idempotent at the
 // sql.DB layer.
 func (h *DB) Close() error {
-	return Close(h.gdb)
+	err := Close(h.gdb)
+	if h.readPool != nil {
+		err = errors.Join(err, h.readPool.Close())
+	}
+	return err
 }

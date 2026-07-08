@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -155,7 +156,6 @@ func TestOpen_ValidatesFirst(t *testing.T) {
 	}
 }
 
-
 // TestOpen_MemorySQLiteSurvivesConcurrentPoolUse pins the :memory:
 // pool fix: without capping the pool to one immortal connection, every
 // connection database/sql opens beyond the first is a fresh empty
@@ -200,9 +200,11 @@ func TestOpen_MemorySQLiteSurvivesConcurrentPoolUse(t *testing.T) {
 }
 
 // TestOpenSQLite_InjectsConcurrencyDefaults pins the file-database DSN
-// defaults: synchronous lands on NORMAL (WAL-safe, several times FULL's
-// write throughput) and the driver's own busy_timeout default stays at
-// 5000ms — a driver upgrade silently dropping either should fail here.
+// defaults on both pools: synchronous lands on NORMAL (WAL-safe,
+// several times FULL's write throughput), foreign_keys is enforced
+// (Postgres-lane parity), and the driver's own busy_timeout default
+// stays at 5000ms (glebarez matches mattn) — a driver upgrade
+// silently dropping any of these should fail here.
 func TestOpenSQLite_InjectsConcurrencyDefaults(t *testing.T) {
 	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
 	if err != nil {
@@ -211,6 +213,7 @@ func TestOpenSQLite_InjectsConcurrencyDefaults(t *testing.T) {
 	t.Cleanup(func() { _ = h.Close() })
 	ctx := context.Background()
 
+	// Write pool (PRAGMA rides the write side — see maintenance.go).
 	var sync int
 	if err := h.Unsafe(ctx).Raw("PRAGMA synchronous").Scan(&sync).Error; err != nil {
 		t.Fatal(err)
@@ -232,17 +235,38 @@ func TestOpenSQLite_InjectsConcurrencyDefaults(t *testing.T) {
 	if !strings.EqualFold(journal, "wal") {
 		t.Fatalf("journal_mode = %q, want wal", journal)
 	}
+	var fk int
+	if err := h.Unsafe(ctx).Raw("PRAGMA foreign_keys").Scan(&fk).Error; err != nil {
+		t.Fatal(err)
+	}
+	if fk != 1 {
+		t.Fatalf("foreign_keys = %d, want 1 (write pool)", fk)
+	}
+
+	// Read pool: per-connection pragmas must land there too.
+	if h.readPool == nil {
+		t.Fatal("file database must run the read/write split")
+	}
+	for pragma, want := range map[string]int{"foreign_keys": 1, "busy_timeout": 5000} {
+		var got int
+		if err := h.readPool.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("read pool %s = %d, want %d", pragma, got, want)
+		}
+	}
 }
 
-// TestOpenSQLite_UserDSNOverridesDefaults: explicit DSN parameters win
-// over the injected defaults, alias spellings included.
+// TestOpenSQLite_UserDSNOverridesDefaults: explicit _pragma DSN
+// parameters win over the injected defaults, both value spellings.
 func TestOpenSQLite_UserDSNOverridesDefaults(t *testing.T) {
 	for name, tc := range map[string]struct {
 		params string
 		want   int
 	}{
-		"canonical": {"_synchronous=2", 2}, // FULL
-		"alias":     {"_sync=0", 0},        // OFF
+		"parens": {"_pragma=synchronous(2)", 2}, // FULL
+		"equals": {"_pragma=synchronous=0", 0},  // OFF
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "d.db") + "?" + tc.params
@@ -257,6 +281,52 @@ func TestOpenSQLite_UserDSNOverridesDefaults(t *testing.T) {
 			}
 			if sync != tc.want {
 				t.Fatalf("synchronous = %d, want %d (user DSN must win)", sync, tc.want)
+			}
+		})
+	}
+}
+
+// TestOpenSQLite_LegacyMattnParamsRejected: mattn/go-sqlite3 DSN
+// spellings fail Open with a pointer to the _pragma form. The pure-Go
+// driver ignores parameters it does not know, so accepting them would
+// silently drop the user's tuning — fail-fast beats silent drift.
+func TestOpenSQLite_LegacyMattnParamsRejected(t *testing.T) {
+	for _, params := range []string{
+		"_synchronous=NORMAL", "_sync=2", "_busy_timeout=100",
+		"_journal_mode=WAL", "_foreign_keys=1",
+	} {
+		path := filepath.Join(t.TempDir(), "d.db") + "?" + params
+		_, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: path}})
+		if err == nil || !strings.Contains(err.Error(), "_pragma") {
+			t.Fatalf("params %q: want rejection pointing at _pragma, got %v", params, err)
+		}
+	}
+}
+
+// TestOpenSQLite_ForeignKeysEnforced: declared references reject
+// orphan rows — the same behaviour the Postgres lane always had.
+// Covers both the file and the memory shape (the test lane).
+func TestOpenSQLite_ForeignKeysEnforced(t *testing.T) {
+	for name, path := range map[string]string{
+		"file":   filepath.Join(t.TempDir(), "d.db"),
+		"memory": ":memory:",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: path}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			ctx := context.Background()
+			if err := h.Unsafe(ctx).Exec(`CREATE TABLE fk_parents (id INTEGER PRIMARY KEY)`).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Unsafe(ctx).Exec(`CREATE TABLE fk_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES fk_parents(id))`).Error; err != nil {
+				t.Fatal(err)
+			}
+			err = h.Unsafe(ctx).Exec(`INSERT INTO fk_children (id, parent_id) VALUES (1, 42)`).Error
+			if err == nil || !strings.Contains(err.Error(), "FOREIGN KEY") {
+				t.Fatalf("orphan insert must fail the FOREIGN KEY constraint, got %v", err)
 			}
 		})
 	}
@@ -311,22 +381,111 @@ func TestOpenSQLite_ConcurrentReadModifyWrite_NoBusy(t *testing.T) {
 	}
 }
 
-// TestOpenSQLite_MaxOpenConnsApplied: the pool cap (and the matching
-// idle cap) reaches database/sql.
-func TestOpenSQLite_MaxOpenConnsApplied(t *testing.T) {
+// TestOpenSQLite_SplitPoolSizes: the write pool is always exactly one
+// connection (that is what makes writers queue fairly in Go instead
+// of colliding on the file lock); max_open_conns sizes the read pool,
+// defaulting to max(4, NumCPU).
+func TestOpenSQLite_SplitPoolSizes(t *testing.T) {
 	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{
 		Path:         filepath.Join(t.TempDir(), "d.db"),
-		MaxOpenConns: 1,
+		MaxOpenConns: 3,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
-	sqlDB, err := h.Unsafe(context.Background()).DB()
+
+	writePool, err := h.Unsafe(context.Background()).DB()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := sqlDB.Stats().MaxOpenConnections; got != 1 {
-		t.Fatalf("MaxOpenConnections = %d, want 1", got)
+	if got := writePool.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("write pool MaxOpenConnections = %d, want the single writer", got)
+	}
+	if h.readPool == nil {
+		t.Fatal("file database must run the read/write split")
+	}
+	if got := h.readPool.Stats().MaxOpenConnections; got != 3 {
+		t.Fatalf("read pool MaxOpenConnections = %d, want max_open_conns (3)", got)
+	}
+
+	hDef, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hDef.Close() })
+	if got, want := hDef.readPool.Stats().MaxOpenConnections, max(4, runtime.NumCPU()); got != want {
+		t.Fatalf("default read pool MaxOpenConnections = %d, want max(4, NumCPU) = %d", got, want)
+	}
+}
+
+// TestOpenSQLite_ReadsBypassTheWriteQueue is the behavioural proof of
+// the read/write split: while an open transaction occupies the single
+// write connection, plain queries must still answer — dbresolver
+// routes them to the read pool, where WAL snapshots do not care about
+// the writer. If routing regressed to the write pool, the read below
+// would block behind the held connection until its context expired.
+func TestOpenSQLite_ReadsBypassTheWriteQueue(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	ctx := context.Background()
+	if err := h.Migrate(ctx, Table(&TestItem{})); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Unsafe(ctx).Create(&TestItem{Code: "seed"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	txErr := make(chan error, 1)
+	go func() {
+		txErr <- h.RunInTx(ctx, func(txCtx context.Context) error {
+			if err := h.Unsafe(txCtx).Create(&TestItem{Code: "writer"}).Error; err != nil {
+				return err
+			}
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var n int64
+	err = h.Unsafe(readCtx).Model(&TestItem{}).Count(&n).Error
+	close(release)
+	if err != nil {
+		t.Fatalf("read must bypass the occupied write connection: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("snapshot read saw %d rows, want 1 (uncommitted write invisible)", n)
+	}
+	if err := <-txErr; err != nil {
+		t.Fatalf("held transaction: %v", err)
+	}
+}
+
+// TestOpenSQLite_CloseClosesReadPool pins the split's lifetime: the
+// read pool dies with the handle (dbresolver has no close of its own
+// — leaking it would bleed file descriptors across Open/Close cycles,
+// tests above all).
+func TestOpenSQLite_CloseClosesReadPool(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.readPool == nil {
+		t.Fatal("file database must run the read/write split")
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.readPool.Ping(); err == nil {
+		t.Fatal("read pool must be closed with the handle")
 	}
 }

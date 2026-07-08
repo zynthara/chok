@@ -444,6 +444,38 @@ gdb := h.Unsafe(ctx)               // 句柄级:无 scope,自己负责
 | 通配转义 | `WithFilterContains` 等对 `%`/`_` 转义 | `WithFilterLikeRaw`(自己负责) |
 | 敏感配置 | DSN/密码带 `sensitive` 标注,日志输出自动掩码 | 无 |
 
+### SQLite 单机生产形态(默认生效)
+
+`driver: sqlite` 时框架自动落成单进程生产形态,零配置:
+
+- **纯 Go 驱动**(glebarez/modernc):无 CGO,交叉编译、Windows 开发机、
+  scratch 镜像开箱即用。注意 mattn 拼法的 DSN 参数(`_synchronous=` 等)
+  会在启动时被拒绝——新驱动会静默忽略它们,fail-fast 好过悄悄失效;
+  改写成 `_pragma=synchronous(NORMAL)` 形式。
+- **读写分池**:写侧固定单连接 + `_txlock=immediate`(`BEGIN` 即取写锁,
+  杜绝"先读后写"事务升锁时那个不吃 busy_timeout 的 `SQLITE_BUSY`)。
+  SQLite 物理上只允许一个写者——单连接让写请求在 Go 侧公平排队,
+  而不是多连接撞文件锁空转。读侧独立连接池(`max_open_conns`,默认
+  `max(4, NumCPU)`)靠 WAL 快照与写者并行。路由按 gorm 回调自动分流
+  (查询走读池,写/事务/raw 非 SELECT 走写池),业务代码无感知;
+  `:memory:` 库无法分池,维持钉单连接。
+- **每连接默认**:`foreign_keys(1)`(外键真正生效,与 Postgres 双跑
+  行为对齐)、`synchronous(NORMAL)`(WAL 下安全)、busy_timeout 5s;
+  文件级 `journal_mode=WAL`。自己写在 `path` 里的 DSN 参数永远优先。
+- **后台维护**:db 模块每 `checkpoint_interval`(默认 5m)跑
+  `wal_checkpoint(TRUNCATE)` 防长读者让 WAL 无界膨胀,每
+  `optimize_interval`(默认 1h)跑 `PRAGMA optimize` 刷新查询计划
+  统计,Close 前再补一次;设 0 关闭。备份挂 litestream 边车即可,
+  WAL 模式天然适配。
+- **纪律**:写事务保持短小;`Rows()` 流式读及时 Close(长快照会顶住
+  checkpoint);批量写走 `BatchCreate` 或一个 `RunInTx` 合并提交;
+  事务内的所有操作必须传 `txCtx`(Store 已自动)——拿根 ctx 在事务内
+  再发写,会在池上排队等那个被外层事务占着的唯一写连接。
+
+边界:这套形态的前提是**单进程独占数据库文件**。多实例部署时前提
+被打破——用 LiteFS/litestream 做只读副本、写仍回单点,或者那就是换
+`driver: postgres` 的时刻。
+
 ---
 
 ## 12. 错误处理
@@ -498,7 +530,9 @@ func TestPostFlow(t *testing.T) {
 | `store: operation called without conditions` | `Update`/`Delete` 传了空 `Where()` | 补条件;真要全表操作走逃生门 |
 | `Restore` 报 `ErrDuplicate` | 唯一槽已被新活跃行占用 | 业务决策:删新行、改字段后重试,或放弃恢复 |
 | 启动报 `db: BeforeCreate: invalid RID` | 手工构造/导入的 RID 形状非法 | 用 `rid.New(prefix)` 生成;导入数据先校验 |
-| SQLite 并发下 `database is locked` | 框架默认已注入 `_txlock=immediate` + WAL + 5s busy_timeout,常规读改写会排队不报错;仍然出现说明写压超出单写者吞吐,或 DSN 显式改回了 deferred | 写重场景设 `db.sqlite.max_open_conns: 1` 让写者在 Go 侧排队;持续超载则换 `driver: postgres` |
+| SQLite 并发下 `database is locked` | 框架默认已是读写分池(写侧单连接排队)+ `_txlock=immediate` + WAL + 5s busy_timeout,常规并发读写会排队不报错;仍出现说明某个写事务持锁超 5s,或 DSN 显式改了 `_txlock` | 缩短写事务;查有没有长事务/未 Close 的 `Rows()`;持续写超载则换 `driver: postgres`(§11 SQLite 小节) |
+| SQLite 写操作不报错但一直不返回 | `RunInTx` 里拿根 ctx(而非 `txCtx`)又发了写——外层事务占着唯一写连接,这笔在池上排队等它,直到 ctx 超时 | 事务内所有操作传 `txCtx`;确要旁路写就放到事务外 |
+| 启动报 `DSN parameter "_synchronous" is a mattn/go-sqlite3 spelling` | 驱动已换纯 Go 构建(glebarez),mattn 拼法参数会被静默忽略,框架选择 fail-fast | 改成 `_pragma=synchronous(NORMAL)` 形式(`_txlock` 拼法不变) |
 | `versioned` 模式下写入报表不存在 | 忘了 `chok migrate up`,或 SQL 文件没 embed | 检查 `WithMigrations` 与 `migrate status` |
 
 ---

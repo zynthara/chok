@@ -35,17 +35,37 @@ type Options struct {
 	Postgres PostgresOptions `mapstructure:"postgres"`
 }
 
-// SQLiteOptions configures the sqlite driver branch.
+// SQLiteOptions configures the sqlite driver branch (pure-Go
+// glebarez/modernc build — no CGO). File databases run a read/write
+// split: writes serialize on one dedicated connection (fair Go-side
+// queueing — SQLite physically allows a single writer per file),
+// reads run in parallel on a WAL-snapshot pool. Memory databases pin
+// a single connection and skip the split and the maintenance loop.
 type SQLiteOptions struct {
 	Path string `mapstructure:"path" default:"app.db"`
 
-	// MaxOpenConns caps the connection pool (0 = unlimited). SQLite
-	// has a single writer per database file: write-heavy services
-	// should set 1 so writers queue in Go instead of colliding on the
-	// file lock. Idle connections follow the same cap — reopening a
-	// SQLite connection re-parses the schema, keeping them warm is
-	// free.
+	// MaxOpenConns caps the READ pool (0 = max(4, NumCPU)). The write
+	// side is always exactly one connection — that is what makes
+	// writers queue fairly in Go instead of colliding on the file
+	// lock — so this knob only tunes read parallelism. Idle
+	// connections follow the same cap: reopening a SQLite connection
+	// re-parses the schema, keeping them warm is free.
 	MaxOpenConns int `mapstructure:"max_open_conns"`
+
+	// CheckpointInterval is the cadence of the background
+	// PRAGMA wal_checkpoint(TRUNCATE): it folds the WAL back into the
+	// main file and truncates the log, so a busy writer next to
+	// long-lived readers cannot grow the -wal file without bound.
+	// 0 disables. Module-managed — library-level db.Open runs no
+	// background maintenance.
+	CheckpointInterval time.Duration `mapstructure:"checkpoint_interval" default:"5m"`
+
+	// OptimizeInterval is the cadence of PRAGMA optimize — refreshes
+	// the query planner's statistics, a cheap no-op when nothing
+	// changed (SQLite's own recommendation for long-lived
+	// connections). A final optimize also runs at module Close.
+	// 0 disables. Module-managed, like CheckpointInterval.
+	OptimizeInterval time.Duration `mapstructure:"optimize_interval" default:"1h"`
 }
 
 // MySQLOptions configures the mysql driver branch. TLS and CACert are
@@ -125,6 +145,12 @@ func (o *Options) Validate() error {
 		}
 		if o.SQLite.MaxOpenConns < 0 {
 			return fmt.Errorf("db: sqlite: max_open_conns must be >= 0, got %d", o.SQLite.MaxOpenConns)
+		}
+		if o.SQLite.CheckpointInterval < 0 {
+			return fmt.Errorf("db: sqlite: checkpoint_interval must be >= 0 (0 disables), got %s", o.SQLite.CheckpointInterval)
+		}
+		if o.SQLite.OptimizeInterval < 0 {
+			return fmt.Errorf("db: sqlite: optimize_interval must be >= 0 (0 disables), got %s", o.SQLite.OptimizeInterval)
 		}
 		return nil
 	case "mysql":

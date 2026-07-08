@@ -32,9 +32,9 @@ import (
 //
 // The adapter delegates to the same *gorm.DB chok's domain models
 // already use, so it works on whichever driver the application
-// configured (gorm.io/driver/sqlite, /mysql, or any future driver
-// the operator pulls in via blank import). gorm.AutoMigrate handles
-// the table creation portably.
+// configured (the blessed pure-Go sqlite build, mysql, postgres, or
+// any future driver the operator pulls in via blank import).
+// gorm.AutoMigrate handles the table creation portably.
 type CasbinRule struct {
 	ID    uint   `gorm:"primaryKey;autoIncrement"`
 	Ptype string `gorm:"size:100;uniqueIndex:unique_index"`
