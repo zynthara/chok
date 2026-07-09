@@ -268,6 +268,21 @@ fail-closed `1=0`）、owned 模型自动 OwnerScope（未认证 401、写侧
 owner 强制覆盖）、`Fields` 乐观锁 + 零值强制落库、scope 化 store
 禁 Upsert、RID 双 ID 模型（外部 `pst_xxx`，数字主键不出进程）。
 
+**投影与跨表读的钦定形态**（下游遥测驱动的补强）：
+
+- `store.Pluck[F]` / `PluckDistinct[F]` 单列投影——列名走查询白名单
+  （拿不到 `password_hash` 这类未声明列），scope / 软删规则全程生效；
+  `"id"` 字段沿用 id→rid 常设别名产出公共 RID。
+- `store.PluckIDs`（`ListByIDs` 的逆操作）投影内部数字主键，服务端
+  专用。**两步 IN 是跨表读的钦定模式**：
+  `PluckIDs(父, 条件)` → `子.List(where.WithFilterIn("fk", ids))`——
+  两侧白名单都在场，超过 `where.MaxInList`（500）由调用方分块。
+- `store.WithRowsAffected(&n)` 同时实现 UpdateOption/DeleteOption，
+  观测 Where locator 批量写的命中行数；纯观测，不改变语义。
+- **刻意不做**：JOIN DSL（单表 store 的边界；跨表读走两步 IN）、
+  表达式 ORDER BY（无法白名单化）——这两类是 `Unsafe` 舱口的正当
+  用途，逃逸应当稀少而非为零。
+
 ### 7.4 迁移双轨 + 框架表白名单
 
 ```yaml

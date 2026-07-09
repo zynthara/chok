@@ -522,6 +522,16 @@ func ApplyFiltersOnly(db *gorm.DB, fieldMap map[string]string, opts []Option) (*
 	return db, nil
 }
 
+// ResolveField maps a public field name to its DB column via the query
+// whitelist, applying the same identifier-safety validation as the
+// field-based options (WithFilter, WithOrder, ...). Exported for store
+// internals and advanced integrations that need a validated column name
+// for SQL fragments built outside the Option pipeline (e.g. the column
+// a Pluck projects); application code normally never calls it.
+func ResolveField(fieldMap map[string]string, field string) (string, error) {
+	return resolveField(fieldMap, field)
+}
+
 // resolveField maps a public field name to a DB column via the whitelist.
 // The resolved column name is validated as a SQL identifier before being
 // returned: only ASCII letters/digits/underscore plus a single optional

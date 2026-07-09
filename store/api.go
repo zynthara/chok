@@ -28,11 +28,13 @@ type DeleteOption interface {
 type updateConfig struct {
 	version    int
 	versionSet bool
+	affected   *int64
 }
 
 type deleteConfig struct {
 	version    int
 	versionSet bool
+	affected   *int64
 }
 
 // WithVersion enables optimistic locking by asserting the row's current
@@ -59,6 +61,47 @@ func (v versionOpt) applyUpdate(c *updateConfig) {
 func (v versionOpt) applyDelete(c *deleteConfig) {
 	c.version = int(v)
 	c.versionSet = true
+}
+
+// WithRowsAffected reports how many rows the statement touched into
+// *dst. Like WithVersion it satisfies both UpdateOption and
+// DeleteOption — the observability story for bulk writes through the
+// Where locator, where "how many" is the caller's business outcome:
+//
+//	var n int64
+//	err := s.Delete(ctx, store.Where(
+//	    where.WithFilterOp("updated_at", where.Lt, cutoff),
+//	), store.WithRowsAffected(&n))
+//
+// *dst is written on every execution: the affected count when the SQL
+// ran (0 together with ErrNotFound / ErrStaleVersion when nothing
+// matched), 0 when the statement itself failed. The option observes —
+// it never changes Update/Delete semantics.
+//
+// Panics if dst is nil (configuration error, caught at construction).
+func WithRowsAffected(dst *int64) rowsAffectedOpt {
+	if dst == nil {
+		panic("store: WithRowsAffected dst must not be nil")
+	}
+	return rowsAffectedOpt{dst: dst}
+}
+
+type rowsAffectedOpt struct{ dst *int64 }
+
+func (o rowsAffectedOpt) applyUpdate(c *updateConfig) { c.affected = o.dst }
+func (o rowsAffectedOpt) applyDelete(c *deleteConfig) { c.affected = o.dst }
+
+// recordAffected writes result's row count to dst (0 on statement
+// error) — shared by the Update payload branches and Delete.
+func recordAffected(dst *int64, result *gorm.DB) {
+	if dst == nil {
+		return
+	}
+	if result.Error != nil {
+		*dst = 0
+		return
+	}
+	*dst = result.RowsAffected
 }
 
 // --- Query options (shared by Get and List) ---------------------------------
@@ -248,6 +291,7 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 			m = cloned
 		}
 		result := q.Model(new(T)).Select(cols).Updates(m)
+		recordAffected(cfg.affected, result)
 		return s.finalizeUpdate(ctx, by, result, lockVer, changes)
 	}
 
@@ -269,6 +313,7 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 		modelPtr.Version = lockVer + 1
 	}
 	result := q.Model(new(T)).Select(cols).Updates(payload)
+	recordAffected(cfg.affected, result)
 	if lockVer > 0 && (result.Error != nil || result.RowsAffected == 0) {
 		modelPtr.Version = lockVer
 	}
@@ -314,6 +359,7 @@ func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption)
 	} else {
 		result = q.Delete(new(T))
 	}
+	recordAffected(cfg.affected, result)
 
 	if result.Error != nil {
 		return mapError(result.Error)
