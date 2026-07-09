@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 
 	"gorm.io/gorm"
@@ -284,9 +285,7 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 			// caller's map. Re-using the same map across retries would
 			// double-apply version + 1 and break optimistic locking.
 			cloned := make(map[string]any, len(m)+1)
-			for k, v := range m {
-				cloned[k] = v
-			}
+			maps.Copy(cloned, m)
 			cloned["version"] = gorm.Expr("version + 1")
 			m = cloned
 		}
