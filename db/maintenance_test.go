@@ -75,13 +75,13 @@ func TestSQLiteMaintenance_CheckpointTruncatesWAL(t *testing.T) {
 
 	o := &SQLiteOptions{CheckpointInterval: 10 * time.Millisecond}
 	rec := newTickRecorder()
-	m := newSQLiteMaintenance(h, o, nopKernelLogger{}, "default")
+	m := newSQLiteMaintenance(ctx, h, o, nopKernelLogger{}, "default")
 	if m == nil {
 		t.Fatal("maintenance must run when an interval is enabled")
 	}
 	m.onTick = rec.record
 	m.start(o)
-	defer m.close()
+	defer m.close(ctx)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -115,11 +115,12 @@ func TestSQLiteMaintenance_CloseStopsLoopAndRunsPartingOptimize(t *testing.T) {
 
 	o := &SQLiteOptions{OptimizeInterval: time.Hour} // ticks never fire; only close's parting run
 	rec := newTickRecorder()
-	m := newSQLiteMaintenance(h, o, nopKernelLogger{}, "default")
+	ctx := context.Background()
+	m := newSQLiteMaintenance(ctx, h, o, nopKernelLogger{}, "default")
 	m.onTick = rec.record
 	m.start(o)
 
-	m.close()
+	m.close(ctx)
 	select {
 	case <-m.done:
 	default:
@@ -128,7 +129,7 @@ func TestSQLiteMaintenance_CloseStopsLoopAndRunsPartingOptimize(t *testing.T) {
 	if n, err := rec.snapshot("optimize"); n != 1 || err != nil {
 		t.Fatalf("parting optimize: runs=%d err=%v, want exactly one clean run", n, err)
 	}
-	m.close() // second close must be a no-op, not a panic
+	m.close(ctx) // second close must be a no-op, not a panic
 	if n, _ := rec.snapshot("optimize"); n != 1 {
 		t.Fatalf("idempotent close reran optimize (%d runs)", n)
 	}
@@ -142,7 +143,113 @@ func TestStartSQLiteMaintenance_DisabledReturnsNil(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
-	if m := startSQLiteMaintenance(h, &SQLiteOptions{}, nopKernelLogger{}, "default"); m != nil {
+	if m := startSQLiteMaintenance(context.Background(), h, &SQLiteOptions{}, nopKernelLogger{}, "default"); m != nil {
 		t.Fatal("disabled maintenance must not start")
+	}
+}
+
+// TestSQLiteMaintenance_CloseAbandonsOverrunningJob (db-layer review
+// #6): a job that overruns the shutdown budget gets its SQL
+// interrupted and, failing that, the goroutine abandoned — close
+// returns within budget+grace instead of hanging registry teardown.
+// The job is pinned inside the onTick seam, which cancellation cannot
+// unblock, so this exercises the abandon path deterministically.
+func TestSQLiteMaintenance_CloseAbandonsOverrunningJob(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	o := &SQLiteOptions{OptimizeInterval: 5 * time.Millisecond}
+	m := newSQLiteMaintenance(context.Background(), h, o, nopKernelLogger{}, "default")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	m.onTick = func(string, error) {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	m.start(o)
+	<-entered // a job is now in flight and will not finish on its own
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	m.close(ctx)
+	if elapsed := time.Since(start); elapsed > maintCloseGrace+2*time.Second {
+		t.Fatalf("close took %v — did not honor its budget", elapsed)
+	}
+	select {
+	case <-m.done:
+		t.Fatal("loop cannot have exited while the job is pinned")
+	default:
+	}
+
+	close(release) // let the pinned job return; the loop must then exit
+	select {
+	case <-m.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop never exited after the abandoned job returned")
+	}
+	m.close(ctx) // still idempotent after the abandon path
+}
+
+// TestSQLiteMaintenance_CloseSpentBudgetSkipsPartingOptimize
+// (db-layer review #6): when the budget is already gone the loop
+// still stops synchronously, but the parting optimize is skipped
+// rather than run outside any deadline.
+func TestSQLiteMaintenance_CloseSpentBudgetSkipsPartingOptimize(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	o := &SQLiteOptions{OptimizeInterval: time.Hour}
+	rec := newTickRecorder()
+	m := newSQLiteMaintenance(context.Background(), h, o, nopKernelLogger{}, "default")
+	m.onTick = rec.record
+	m.start(o)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.close(ctx)
+	select {
+	case <-m.done:
+	default:
+		t.Fatal("close must not return before the loop exited")
+	}
+	if n, _ := rec.snapshot("optimize"); n != 0 {
+		t.Fatalf("parting optimize ran %d times under a spent budget, want 0", n)
+	}
+}
+
+// TestSQLiteMaintenance_JobsHonorContext (db-layer review #6): the
+// job SQL actually rides the context it is given — a cancelled one
+// must surface as an error instead of running unbounded.
+func TestSQLiteMaintenance_JobsHonorContext(t *testing.T) {
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: filepath.Join(t.TempDir(), "d.db")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	o := &SQLiteOptions{OptimizeInterval: time.Hour}
+	rec := newTickRecorder()
+	m := newSQLiteMaintenance(context.Background(), h, o, nopKernelLogger{}, "default")
+	m.onTick = rec.record
+	m.start(o)
+	defer m.close(context.Background())
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.checkpoint(cancelled)
+	m.optimize(cancelled)
+	if _, err := rec.snapshot("checkpoint"); err == nil {
+		t.Fatal("checkpoint ignored its cancelled context")
+	}
+	if _, err := rec.snapshot("optimize"); err == nil {
+		t.Fatal("optimize ignored its cancelled context")
 	}
 }

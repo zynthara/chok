@@ -170,7 +170,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	// A long-lived process must play the maintenance role a database
 	// server would otherwise own — file-backed sqlite only.
 	if c.opts.Driver == "sqlite" && !sqliteIsMemory(c.opts.SQLite.Path) {
-		c.maint = startSQLiteMaintenance(h, &c.opts.SQLite, c.logger, displayInstance(c.instance))
+		c.maint = startSQLiteMaintenance(ctx, h, &c.opts.SQLite, c.logger, displayInstance(c.instance))
 	}
 
 	c.handle.Store(h)
@@ -242,15 +242,17 @@ func (c *Component) Health(ctx context.Context) error {
 }
 
 // Close terminates the pool. Idempotent; Health racing Close sees nil.
-// The maintenance loop stops (synchronously, with a parting PRAGMA
-// optimize) before the pools go away.
+// The maintenance loop stops first — within ctx's budget, with a
+// parting PRAGMA optimize when time allows; a stuck statement is
+// interrupted rather than allowed to outlive registry teardown — then
+// the pools go away.
 func (c *Component) Close(ctx context.Context) error {
 	h := c.handle.Swap(nil)
 	if h == nil {
 		return nil
 	}
 	if c.maint != nil {
-		c.maint.close()
+		c.maint.close(ctx)
 		c.maint = nil
 	}
 	return h.Close()
