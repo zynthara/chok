@@ -201,6 +201,14 @@ type storeConfig struct {
 	beforeCreate        []any // []func(ctx, *T) error — stored as any to avoid generic storeConfig
 	beforeUpdate        []any // []func(ctx, Locator, Changes) error
 	beforeDelete        []any // []func(ctx, Locator) error
+
+	// *Set flags distinguish "the construction site chose" from "left
+	// unset": unset knobs inherit the handle's db.store policy, set
+	// ones — including the Without* opt-outs — always win.
+	strictSet           bool
+	requirePrincipalSet bool
+	defaultPageSizeSet  bool
+	maxPageSizeSet      bool
 }
 
 // WithScope registers a scope function applied to every read/update/delete
@@ -230,9 +238,19 @@ func WithoutOwnerScope() StoreOption {
 //     apierr.ErrInvalidArgument instead of silently dropping them.
 //
 // Intended for production configs where the implicit "discover from JSON tags"
-// behavior is too permissive.
+// behavior is too permissive. The app-wide way to say the same thing is
+// the handle's db.store policy (db.store.strict: true in chok.yaml),
+// which this option — and WithoutStrict — override per store.
 func WithStrict() StoreOption {
-	return func(c *storeConfig) { c.strict = true }
+	return func(c *storeConfig) { c.strict = true; c.strictSet = true }
+}
+
+// WithoutStrict opts this Store out of a strict default inherited from
+// the handle's db.store policy. The opt-out is deliberate call-site
+// noise: a store that ships an implicit field surface inside a strict
+// app should say so where it is built. No-op when nothing set strict.
+func WithoutStrict() StoreOption {
+	return func(c *storeConfig) { c.strict = false; c.strictSet = true }
 }
 
 // WithRequirePrincipal makes Create / BatchCreate / Upsert reject contexts
@@ -242,18 +260,31 @@ func WithStrict() StoreOption {
 //
 // Background jobs and tests that legitimately write Owned rows without a
 // principal must either:
-//   - Not enable this option on those stores, or
+//   - Not enable this option on those stores (WithoutRequirePrincipal
+//     when the handle's db.store policy turns it on app-wide), or
 //   - Attach a system principal to ctx via auth.WithPrincipal before Create.
 //
-// Non-Owned models are unaffected.
+// Non-Owned models are unaffected. The app-wide counterpart is
+// db.store.require_principal: true in chok.yaml.
 func WithRequirePrincipal() StoreOption {
-	return func(c *storeConfig) { c.requirePrincipal = true }
+	return func(c *storeConfig) { c.requirePrincipal = true; c.requirePrincipalSet = true }
+}
+
+// WithoutRequirePrincipal opts this Store out of a require-principal
+// default inherited from the handle's db.store policy — for background
+// jobs and system flows that legitimately write db.Owned rows without
+// an authenticated principal. Explicit at the call site by design; the
+// quieter alternative is attaching a system principal to ctx. No-op
+// when nothing set require-principal.
+func WithoutRequirePrincipal() StoreOption {
+	return func(c *storeConfig) { c.requirePrincipal = false; c.requirePrincipalSet = true }
 }
 
 // WithMaxPageSize sets a hard cap on page size for List / ListFromQuery.
-// Requests exceeding this limit are silently clamped. Zero disables the cap.
+// Requests exceeding this limit are silently clamped. Zero disables the
+// cap — including one inherited from the handle's db.store policy.
 func WithMaxPageSize(n int) StoreOption {
-	return func(c *storeConfig) { c.maxPageSize = n }
+	return func(c *storeConfig) { c.maxPageSize = n; c.maxPageSizeSet = true }
 }
 
 // WithQueryFields declares which fields are queryable/sortable. Column name defaults to the field name.
@@ -313,8 +344,10 @@ func WithAllUpdateFields(exclude ...string) StoreOption {
 
 // WithDefaultPageSize sets the default page size for ListFromQuery
 // when the client does not provide a "size" parameter. Default is 20.
+// Zero restores that package default — including over a handle-policy
+// value.
 func WithDefaultPageSize(size int) StoreOption {
-	return func(c *storeConfig) { c.defaultPageSize = size }
+	return func(c *storeConfig) { c.defaultPageSize = size; c.defaultPageSizeSet = true }
 }
 
 // WithBeforeCreate registers a callback that runs before a Create writes to
@@ -376,6 +409,13 @@ func WithBus(b *event.Bus) StoreOption {
 // module (db.From(k)) or db.Open; this is the only store signature
 // change from v1 (SPEC §5.1).
 //
+// The handle carries the app-level db.store policy (strict /
+// require-principal / page-size caps, see db.StorePolicy): every knob
+// the construction site leaves unset inherits it, so flipping
+// db.store.strict: true in chok.yaml hardens every store at once.
+// Options here override the policy per store; the explicit opt-outs
+// are WithoutStrict and WithoutRequirePrincipal.
+//
 // Field allowlists resolve in priority order, per side (query/update):
 //
 //  1. WithQueryFields / WithUpdateFields — call-site lists. Use these
@@ -422,6 +462,27 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	cfg := &storeConfig{}
 	for _, o := range opts {
 		o(cfg)
+	}
+
+	// The handle's db.store policy fills every knob the construction
+	// site left unset — production posture is a config flip, not a
+	// per-call-site reminder (db-layer review #2). Explicit options,
+	// including the WithoutStrict / WithoutRequirePrincipal opt-outs,
+	// always win.
+	pol := h.StorePolicy()
+	strictFromPolicy := false
+	if !cfg.strictSet {
+		cfg.strict = pol.Strict
+		strictFromPolicy = pol.Strict
+	}
+	if !cfg.requirePrincipalSet {
+		cfg.requirePrincipal = pol.RequirePrincipal
+	}
+	if !cfg.maxPageSizeSet {
+		cfg.maxPageSize = pol.MaxPageSize
+	}
+	if !cfg.defaultPageSizeSet {
+		cfg.defaultPageSize = pol.DefaultPageSize
 	}
 
 	// The model's own `store` tag declaration, if any. Resolved before
@@ -486,11 +547,17 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	// code should generally use explicit WithQueryFields /
 	// WithUpdateFields so the exposed surface is visible in source.
 	if cfg.strict {
+		// Name the origin so a config-flipped strict (db.store.strict)
+		// panicking an app points operators at the yaml, not the code.
+		mode := "strict mode"
+		if strictFromPolicy {
+			mode = "strict mode (from db.store policy)"
+		}
 		if !queryExplicit && !queryTagged && !cfg.autoQueryFields && len(queryFieldMap) > 0 {
-			panic(fmt.Sprintf("store: strict mode: %s has auto-discovered query fields %v; declare them with `store` tags, WithQueryFields or WithAllQueryFields", t.Name(), sortedKeys(queryFieldMap)))
+			panic(fmt.Sprintf("store: %s: %s has auto-discovered query fields %v; declare them with `store` tags, WithQueryFields or WithAllQueryFields", mode, t.Name(), sortedKeys(queryFieldMap)))
 		}
 		if !updateExplicit && !updateTagged && !cfg.autoUpdateFields && len(updateFieldMap) > 0 {
-			panic(fmt.Sprintf("store: strict mode: %s has auto-discovered update fields %v; declare them with `store` tags, WithUpdateFields or WithAllUpdateFields", t.Name(), sortedKeys(updateFieldMap)))
+			panic(fmt.Sprintf("store: %s: %s has auto-discovered update fields %v; declare them with `store` tags, WithUpdateFields or WithAllUpdateFields", mode, t.Name(), sortedKeys(updateFieldMap)))
 		}
 	}
 

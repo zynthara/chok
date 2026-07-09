@@ -30,9 +30,60 @@ type Options struct {
 	//               tables included; operations own DDL entirely
 	Migrate string `mapstructure:"migrate" default:"auto"`
 
+	// Store is the app-level default posture for every Store built
+	// over this instance's handle (SPEC §5.1; db-layer review #2).
+	Store StorePolicy `mapstructure:"store"`
+
 	SQLite   SQLiteOptions   `mapstructure:"sqlite"`
 	MySQL    MySQLOptions    `mapstructure:"mysql"`
 	Postgres PostgresOptions `mapstructure:"postgres"`
+}
+
+// StorePolicy is the "db.store" block (and per instance,
+// "db.instances.<name>.store"): application-wide defaults applied to
+// every store.New over this instance's handle, so production
+// hardening is a config flip instead of a WithStrict() reminder at
+// each construction site. Construction options override it per store
+// — the explicit opt-outs are store.WithoutStrict and
+// store.WithoutRequirePrincipal; store.WithMaxPageSize(0) /
+// store.WithDefaultPageSize(0) restore the package defaults.
+//
+// The policy is baked into each Store at construction, so like every
+// db field it is restart-only. The zero value changes nothing.
+type StorePolicy struct {
+	// Strict rejects auto-discovered field surfaces at store
+	// construction (models must declare `store` tags, WithQueryFields /
+	// WithUpdateFields, or explicitly consent via WithAllQueryFields /
+	// WithAllUpdateFields) and makes ListFromQuery reject unknown
+	// query parameters instead of dropping them.
+	Strict bool `mapstructure:"strict"`
+
+	// RequirePrincipal fail-closes Create / BatchCreate / Upsert on
+	// db.Owned models when the context has no authenticated principal.
+	// Background jobs that legitimately write Owned rows attach a
+	// system principal or opt out per store.
+	RequirePrincipal bool `mapstructure:"require_principal"`
+
+	// MaxPageSize caps List / ListFromQuery page sizes; requests above
+	// it are clamped. 0 = unlimited.
+	MaxPageSize int `mapstructure:"max_page_size"`
+
+	// DefaultPageSize is the page size when the client sends none.
+	// 0 = the store package default (20).
+	DefaultPageSize int `mapstructure:"default_page_size"`
+}
+
+func (p *StorePolicy) validate() error {
+	if p.MaxPageSize < 0 {
+		return fmt.Errorf("db: store: max_page_size must be >= 0 (0 = unlimited), got %d", p.MaxPageSize)
+	}
+	if p.DefaultPageSize < 0 {
+		return fmt.Errorf("db: store: default_page_size must be >= 0 (0 = package default), got %d", p.DefaultPageSize)
+	}
+	if p.MaxPageSize > 0 && p.DefaultPageSize > p.MaxPageSize {
+		return fmt.Errorf("db: store: default_page_size %d exceeds max_page_size %d", p.DefaultPageSize, p.MaxPageSize)
+	}
+	return nil
 }
 
 // SQLiteOptions configures the sqlite driver branch (pure-Go
@@ -137,6 +188,9 @@ func (o *Options) Validate() error {
 	case MigrateAuto, MigrateVersioned, MigrateOff:
 	default:
 		return fmt.Errorf("db: migrate must be one of auto|versioned|off, got %q", o.Migrate)
+	}
+	if err := o.Store.validate(); err != nil {
+		return err
 	}
 	switch o.Driver {
 	case "sqlite":

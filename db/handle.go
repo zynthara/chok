@@ -24,7 +24,18 @@ type DB struct {
 	// the network drivers). dbresolver owns the routing; the handle
 	// owns the lifetime.
 	readPool *sql.DB
+
+	// storePolicy is the db.store config block this handle was opened
+	// with — plain data the store package reads as its defaults, not a
+	// kernel dependency (the bus stays explicitly injected, SPEC §3.5).
+	storePolicy StorePolicy
 }
+
+// StorePolicy reports the app-level store defaults this handle was
+// opened with (the "db.store" config block). store.New consults it
+// for every knob the construction site leaves unset; the zero value
+// leaves store behaviour exactly as documented on store.New.
+func (h *DB) StorePolicy() StorePolicy { return h.storePolicy }
 
 // Open builds a handle from Options — the same constructor the db
 // module uses at Init. Library-level use (tests, tools, kernel-less
@@ -48,7 +59,7 @@ func Open(opts Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DB{gdb: gdb, readPool: readPool}, nil
+	return &DB{gdb: gdb, readPool: readPool, storePolicy: o.Store}, nil
 }
 
 // Unsafe returns the effective raw gorm handle: the context's

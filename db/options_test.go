@@ -61,6 +61,18 @@ func TestOptions_Validate(t *testing.T) {
 			o.Driver = "postgres"
 			o.Postgres = PostgresOptions{Host: "h", Port: 5432, SSLMode: "disable"}
 		}, "database must not be empty"},
+		{"store policy valid", func(o *Options) {
+			o.Store = StorePolicy{Strict: true, RequirePrincipal: true, MaxPageSize: 100, DefaultPageSize: 20}
+		}, ""},
+		{"store negative max page size", func(o *Options) {
+			o.Store = StorePolicy{MaxPageSize: -1}
+		}, "max_page_size must be >= 0"},
+		{"store negative default page size", func(o *Options) {
+			o.Store = StorePolicy{DefaultPageSize: -1}
+		}, "default_page_size must be >= 0"},
+		{"store default exceeds max", func(o *Options) {
+			o.Store = StorePolicy{MaxPageSize: 10, DefaultPageSize: 50}
+		}, "exceeds max_page_size"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

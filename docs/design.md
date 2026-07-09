@@ -268,6 +268,18 @@ fail-closed `1=0`）、owned 模型自动 OwnerScope（未认证 401、写侧
 owner 强制覆盖）、`Fields` 乐观锁 + 零值强制落库、scope 化 store
 禁 Upsert、RID 双 ID 模型（外部 `pst_xxx`，数字主键不出进程）。
 
+**安全策略应用级默认（`db.store` 块）**：strict /
+require_principal / 分页上限不再依赖每个构造点记得写
+`WithStrict()`——`db.store`（及 `db.instances.<name>.store`）随
+`*db.DB` 句柄下发，`store.New` 对构造点未显式设置的开关取策略值；
+显式选项永远胜出，局部逃逸必须写成看得见的
+`WithoutStrict()` / `WithoutRequirePrincipal()`（review 要求：
+opt-out 是刻意的调用点噪音）。策略在构造期烙进 Store，故与 db
+其余字段一样 restart-only。bus/logger 仍显式注入——SPEC §3.5 的
+"store 对 kernel 仅一个显式接触点"不因此松动；策略是纯数据，
+不构成 kernel 依赖。电池 store 全部显式声明字段面，开启 strict
+不影响电池。
+
 **投影与跨表读的钦定形态**（下游遥测驱动的补强）：
 
 - `store.Pluck[F]` / `PluckDistinct[F]` 单列投影——列名走查询白名单

@@ -19,7 +19,9 @@ import (
 func routes(r chok.Router, k chok.Kernel) error {
 	// Field allowlists ride the `store` tags on Post itself; pass
 	// WithQueryFields / WithUpdateFields here only to narrow that
-	// declaration for a specific consumer.
+	// declaration for a specific consumer. The db.store block in
+	// chok.yaml sets the app-wide posture (strict, require_principal,
+	// page cap) — no per-store options needed to be production-safe.
 	posts := store.New[Post](db.From(k), log.From(k))
 	h := &postHandlers{posts: posts}
 

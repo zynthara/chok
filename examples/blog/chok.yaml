@@ -17,6 +17,14 @@ db:
   migrate: auto
   sqlite:
     path: blog.db
+  # App-level store posture: every store on this handle inherits it.
+  # strict — field surfaces must be declared (Post does, via `store`
+  # tags); require_principal — creating owned rows without a login
+  # fails closed. Per-store opt-out: store.WithoutStrict / -Principal.
+  store:
+    strict: true
+    require_principal: true
+    max_page_size: 100
 
 health:
   path: /healthz
