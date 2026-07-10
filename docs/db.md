@@ -413,8 +413,10 @@ var migrations embed.FS
 db.Module(db.WithMigrations(migrations))
 ```
 
-框架自有表(`users`、`identities`、`audit_logs`、`casbin_rule`、
-`schema_migrations`)在白名单内由各模块自管,不占用你的迁移序号。
+框架自有表由各内建组件的 `Descriptor.Schema` 声明，并由
+`chok docs gen` 聚合成字母序的 `db.FrameworkTables()` 目录；已装配组件
+自行演进这些表，不占用你的迁移序号。该目录与具体装配及 named DB
+instance 无关，因此不表示列出的每张表都存在于当前数据库。
 
 ---
 

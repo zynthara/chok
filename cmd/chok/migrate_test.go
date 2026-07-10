@@ -84,7 +84,7 @@ func writeProject(t *testing.T) (cfgPath, migDir string) {
 func TestMigrateUpAndStatus_EndToEnd(t *testing.T) {
 	cfgPath, migDir := writeProject(t)
 
-	// Fresh project: status shows pending + the whitelist.
+	// Fresh project: status shows pending + the built-in table catalog.
 	out, err := runMigrate(t, "status", "--config", cfgPath, "--dir", migDir)
 	if err != nil {
 		t.Fatalf("status: %v\n%s", err, out)
@@ -92,9 +92,9 @@ func TestMigrateUpAndStatus_EndToEnd(t *testing.T) {
 	if !strings.Contains(out, "pending  0001_widgets") {
 		t.Fatalf("status must list the pending migration:\n%s", out)
 	}
-	for _, tbl := range []string{"users", "identities", "audit_logs", "casbin_rule", "schema_migrations"} {
+	for _, tbl := range db.FrameworkTables() {
 		if !strings.Contains(out, tbl) {
-			t.Fatalf("status must present the framework whitelist (missing %s):\n%s", tbl, out)
+			t.Fatalf("status must present the framework table catalog (missing %s):\n%s", tbl, out)
 		}
 	}
 

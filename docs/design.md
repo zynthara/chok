@@ -300,7 +300,7 @@ opt-out 是刻意的调用点噪音）。策略在构造期烙进 Store，故与
   表达式 ORDER BY（无法白名单化）——这两类是 `Unsafe` 舱口的正当
   用途，逃逸应当稀少而非为零。
 
-### 7.4 迁移双轨 + 框架表白名单
+### 7.4 迁移双轨 + 框架表 ownership
 
 ```yaml
 db:
@@ -323,11 +323,12 @@ db:
   `accept-drift`（接受当前文件基线）；不自动猜测 MySQL 的部分提交状态。
   旧三列账本第一次 `up` 采用 trust-on-first-use 建立 checksum 基线，
   审计保证从该时刻开始，无法追溯基线建立前的历史改写。
-- **AutoMigrate 豁免白名单**：versioned 下 chok 电池自有表
-  （`users`、`identities`、`audit_logs`、`casbin_rule`、
-  `schema_migrations`）仍由各电池 Migrator 管理，
-  `chok migrate status` 如实列出。`migrate: off` ⇒ 框架零 DDL，
-  电池表也不建（fail-closed：casbin 缺表则 LoadPolicy 启动失败）。
+- **框架表 ownership**：每个内建组件通过 `Descriptor.Schema` 声明自己
+  负责演进的表，`chok docs gen` 聚合并生成 `db.FrameworkTables()` 的
+  字母序目录。该目录描述所有内建组件的潜在 ownership，与本次装配及
+  所选 named DB instance 无关，不代表目录中每张表都存在于当前数据库。
+  versioned 下已装配电池仍由各自 Migrator 管理 schema，不占应用迁移序号；
+  `migrate: off` ⇒ 框架零 DDL（casbin 缺表则 LoadPolicy 启动失败）。
 - `SoftUnique` 在 PG 用 partial unique index（`WHERE deleted_at IS
   NULL`），mysql/sqlite 用 `(cols..., delete_token)` 复合唯一——
   可观测行为等价。
@@ -395,7 +396,7 @@ v1 的 Down/Degraded 分级不再存在——单个 flaky cron job 或 sink
 | `chok init <name>` | v2 脚手架：chok.yaml + 生成装配 + main.go + migrations/ 骨架，生成即可 `go run .` |
 | `chok sync [--check]` | chok.yaml ⇒ `chok_modules_gen.go`（幂等、字节稳定；`--check` 做 CI 闸）。定制走 `chok.Override`，永不改生成文件 |
 | `chok migrate create\|up\|status\|repair` | 带 checksum / dirty 审计的版本化迁移；`status --check` 可作 CI 闸 |
-| `chok docs gen [--check]` | 组件表（README ×2 + 本文的生成区块）、docs/config.md、docs/chok.schema.json |
+| `chok docs gen [--check]` | 组件表（README ×2 + 本文生成区块）、docs/config.md、docs/chok.schema.json、db/framework_tables_gen.go |
 | `chok openapi export` | 取运行中应用的 spec 落 .json/.yaml |
 
 **三道 CI 闸**：`docs gen --check`（生成面漂移即红）+

@@ -2,6 +2,8 @@ package docgen
 
 import (
 	"encoding/json"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,21 @@ import (
 	"github.com/zynthara/chok/v2/internal/blessed"
 	"github.com/zynthara/chok/v2/kernel"
 )
+
+func TestFrameworkTablesSource_IsFormattedGo(t *testing.T) {
+	source, err := FrameworkTablesSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.ParseFile(token.NewFileSet(), "framework_tables_gen.go", source, parser.AllErrors); err != nil {
+		t.Fatalf("generated framework table source must parse: %v\n%s", err, source)
+	}
+	for _, table := range []string{"audit_logs", "casbin_rule", "identities", "schema_migrations", "users"} {
+		if !strings.Contains(string(source), `"`+table+`"`) {
+			t.Errorf("generated framework table source missing %q", table)
+		}
+	}
+}
 
 func TestComponentsTable_CoversEveryBlessedModule(t *testing.T) {
 	en := ComponentsTable("en")

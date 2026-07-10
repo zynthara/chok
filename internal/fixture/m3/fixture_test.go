@@ -90,8 +90,8 @@ func TestM3Fixture_EndToEnd(t *testing.T) {
 	}, "EntityChanged[Note] never reached the bus subscriber")
 
 	// The ledger recorded the embedded migration set — same status the
-	// CLI renders, whitelist included (M3 DoD: versioned boot presents
-	// the framework-table exemption honestly).
+	// CLI renders, built-in catalog included (M3 DoD: versioned boot presents
+	// the framework-owned schema boundary honestly).
 	sub, err := fs.Sub(migrationsFS, "migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -104,9 +104,9 @@ func TestM3Fixture_EndToEnd(t *testing.T) {
 	if len(st.Applied) != 1 || st.Applied[0].Name != "notes" || len(st.Pending) != 0 {
 		t.Fatalf("versioned boot must have applied 0001_notes: %+v", st)
 	}
-	want := []string{"users", "identities", "audit_logs", "casbin_rule", "schema_migrations"}
+	want := []string{"audit_logs", "casbin_rule", "identities", "schema_migrations", "users"}
 	if strings.Join(st.FrameworkTables, ",") != strings.Join(want, ",") {
-		t.Fatalf("framework whitelist drifted: %v", st.FrameworkTables)
+		t.Fatalf("framework table catalog drifted: %v", st.FrameworkTables)
 	}
 
 	// Clean stop.

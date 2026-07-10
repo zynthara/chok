@@ -138,7 +138,7 @@ func (c *Component) Handle() *DB { return c.handle.Load() }
 // MigrateMode reports this instance's schema strategy (MigrateAuto /
 // MigrateVersioned / MigrateOff) once Init has decoded the section.
 // Battery modules consult it from their own Migrators to honour the
-// SPEC §5.3 whitelist semantics uniformly: battery tables AutoMigrate
+// SPEC §5.3 ownership semantics uniformly: battery tables AutoMigrate
 // in auto and versioned modes; in off mode the framework — battery
 // tables included — touches no schema.
 func (c *Component) MigrateMode() string { return c.opts.Migrate }
@@ -223,7 +223,7 @@ func (c *Component) Migrate(ctx context.Context) error {
 			"applied_now", len(report.Applied),
 			"checksums_adopted", len(report.Adopted),
 			"duration", time.Since(start).String(),
-			"automigrate_exempt_framework_tables", FrameworkTables())
+			"framework_owned_tables", FrameworkTables())
 		return nil
 
 	default: // MigrateAuto — validated enum, the zero-config dev path

@@ -14,7 +14,7 @@
 //	    --config internal/fixture/m3/chok.yaml \
 //	    --dir internal/fixture/m3/migrations
 //
-// prints the ledger plus the framework-table AutoMigrate whitelist.
+// prints the ledger plus the built-in framework-owned table catalog.
 //
 // Endpoints: everything m2 had, plus /api/v1/notes (POST create,
 // GET by rid, GET list) backed by store.New[Note], and

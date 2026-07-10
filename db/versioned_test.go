@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,21 @@ import (
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
+
+func TestFrameworkTables_ReturnsSortedCallerSafeCopy(t *testing.T) {
+	tables := FrameworkTables()
+	if !slices.IsSorted(tables) {
+		t.Fatalf("framework table catalog must be sorted: %v", tables)
+	}
+	if len(tables) == 0 {
+		t.Fatal("framework table catalog must not be empty")
+	}
+	wantFirst := tables[0]
+	tables[0] = "caller_mutation"
+	if got := FrameworkTables()[0]; got != wantFirst {
+		t.Fatalf("caller mutation changed generated catalog: got %q want %q", got, wantFirst)
+	}
+}
 
 func migFS(files map[string]string) fstest.MapFS {
 	out := fstest.MapFS{}
@@ -132,10 +148,10 @@ func TestApplyMigrations_AppliesOnceAndLedgers(t *testing.T) {
 	if st.Applied[0].AppliedAt.IsZero() {
 		t.Fatal("applied_at must be recorded")
 	}
-	// The whitelist must ride along on every status surface.
+	// The built-in table catalog must ride along on every status surface.
 	want := strings.Join(FrameworkTables(), ",")
 	if got := strings.Join(st.FrameworkTables, ","); got != want {
-		t.Fatalf("framework whitelist missing from status: %s", got)
+		t.Fatalf("framework table catalog missing from status: %s", got)
 	}
 }
 

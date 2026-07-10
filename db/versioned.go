@@ -27,8 +27,8 @@ import (
 // file's SQL plus clean transition atomic; MySQL retains the dirty marker
 // across its auto-committing DDL so an operator can resolve partial effects.
 
-// ledgerTable is the migration ledger. It is also a member of the
-// framework-table whitelist below.
+// ledgerTable is the migration ledger. It is also a member of the generated
+// framework-owned table catalog.
 const ledgerTable = "schema_migrations"
 
 const (
@@ -43,14 +43,15 @@ const (
 	maxMigrationErrorRunes  = 4096
 )
 
-// FrameworkTables lists the tables chok batteries own and keep
-// managing via AutoMigrate even under migrate: versioned — the
-// documented whitelist exemption (SPEC §5.3, review H2). Under
-// migrate: off nothing is created, these included. The forward-only
-// audit guarantee of versioned mode therefore covers application
-// tables; framework tables evolve with the framework version.
+// FrameworkTables returns the alphabetically sorted catalog of tables owned
+// by chok's built-in components and evolved outside the application's
+// versioned migration history. The catalog is generated from
+// Descriptor.Schema declarations and is independent of which modules are
+// assembled or which named database instance is being inspected; it does not
+// assert that every listed table exists in that database. The returned slice
+// is a copy and may be modified by the caller.
 func FrameworkTables() []string {
-	return []string{"users", "identities", "audit_logs", "casbin_rule", ledgerTable}
+	return append([]string(nil), frameworkTables...)
 }
 
 // Migration is one parsed, not-necessarily-applied migration file.
@@ -111,8 +112,8 @@ type MigrationStatus struct {
 	OutOfOrder []Migration
 	NameDrift  []MigrationNameDrift
 	Fence      *MigrationFenceStatus
-	// FrameworkTables echoes the AutoMigrate-exempt whitelist so every
-	// status surface presents it honestly next to the ledger.
+	// FrameworkTables echoes the built-in framework-owned table catalog next
+	// to the application migration ledger.
 	FrameworkTables []string
 }
 

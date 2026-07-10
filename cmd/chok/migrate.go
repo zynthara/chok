@@ -237,7 +237,7 @@ func migrateStatusCmd() *cobra.Command {
 				fmt.Fprintln(out, "no migrations found")
 			}
 			fmt.Fprintf(out,
-				"\nframework tables (AutoMigrate-managed by chok batteries, exempt from versioned mode):\n  %s\n",
+				"\nbuilt-in framework-owned table catalog (outside application migration history):\n  %s\n",
 				strings.Join(st.FrameworkTables, ", "))
 			if check && !st.Clean() {
 				return fmt.Errorf("migration status is not clean")

@@ -319,13 +319,13 @@ Update/Delete 保留 RowsAffected>0 门控。**sync → async 是有意的
 删除：v2 构造 = `db.Open(db.Options)` 或 `db.Module()`；关闭 =
 `h.Close()`。
 
-### #24 / #27 版本化迁移 + 框架表白名单
+### #24 / #27 版本化迁移 + 框架表 ownership
 
 `migrate: versioned` 下应用表 schema 出自嵌入的
 `migrations/NNNN_name.sql`（forward-only、`schema_migrations`
-账本、跨进程迁移锁）；电池表白名单（users / identities /
-audit_logs / casbin_rule / schema_migrations）仍由电池
-AutoMigrate 管理并在 `chok migrate status` 呈现。`migrate: off`
+账本、跨进程迁移锁）；内建组件通过 `Descriptor.Schema` 声明框架表
+ownership，生成的 `db.FrameworkTables()` 目录在 `chok migrate status`
+呈现，已装配电池仍自行演进其 schema。`migrate: off`
 ⇒ 框架零 DDL（电池表也不建）。CLI：
 `chok migrate create|up|status|repair`（up/status/repair 经 conf 装载栈读
 `--config`，env 覆盖 opt-in `--env-prefix`）。
