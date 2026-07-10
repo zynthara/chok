@@ -9,10 +9,17 @@ import (
 )
 
 func main() {
+	if err := rootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func rootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:     "chok",
-		Short:   "chok CLI — scaffold and manage chok projects",
-		Version: version.Get().String(),
+		Use:          "chok",
+		Short:        "chok CLI — scaffold and manage chok projects",
+		Version:      version.Get().String(),
+		SilenceUsage: true,
 	}
 	// `chok --version` prints the same compact line as `chok version`
 	// (no cobra-default "chok version X.Y.Z" prefix).
@@ -26,7 +33,5 @@ func main() {
 	root.AddCommand(updateCmd())
 	root.AddCommand(migrateCmd())
 
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
-	}
+	return root
 }

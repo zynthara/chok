@@ -22,6 +22,17 @@ func runMigrate(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
+func runRoot(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	cmd := rootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(args)
+	err := cmd.ExecuteContext(context.Background())
+	return out.String(), err
+}
+
 func TestMigrateCreate_SequencesFiles(t *testing.T) {
 	dir := t.TempDir()
 
@@ -117,8 +128,15 @@ func TestMigrateUpAndStatus_EndToEnd(t *testing.T) {
 
 func TestMigrateStatusCheckAndRepairAcceptDrift(t *testing.T) {
 	cfgPath, migDir := writeProject(t)
-	if out, err := runMigrate(t, "status", "--check", "--config", cfgPath, "--dir", migDir); err == nil || !strings.Contains(out, "pending") {
+	out, err := runRoot(t, "migrate", "status", "--check", "--config", cfgPath, "--dir", migDir)
+	if err == nil || !strings.Contains(out, "pending") {
 		t.Fatalf("pending status --check must fail after rendering state: err=%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "migration status is not clean") {
+		t.Fatalf("status --check must retain the semantic error: err=%v\n%s", err, out)
+	}
+	if strings.Contains(out, "Usage:") {
+		t.Fatalf("semantic errors must not print cobra usage:\n%s", out)
 	}
 	if out, err := runMigrate(t, "up", "--config", cfgPath, "--dir", migDir); err != nil {
 		t.Fatalf("up: %v\n%s", err, out)
@@ -138,7 +156,7 @@ func TestMigrateStatusCheckAndRepairAcceptDrift(t *testing.T) {
 	if out, err := runMigrate(t, "status", "--check", "--config", cfgPath, "--dir", migDir); err == nil || !strings.Contains(out, "drift") {
 		t.Fatalf("drifted status --check must fail: err=%v\n%s", err, out)
 	}
-	out, err := runMigrate(t,
+	out, err = runMigrate(t,
 		"repair", "accept-drift", "1",
 		"--checksum", files[0].Checksum,
 		"--reason", "reviewed comment-only migration change",
