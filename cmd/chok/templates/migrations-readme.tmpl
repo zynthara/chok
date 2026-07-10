@@ -9,7 +9,18 @@ Workflow:
     chok migrate create add_notes_index   # scaffolds NNNN_add_notes_index.sql
     # edit the SQL, commit it — main.go embeds this directory
     chok migrate up --config chok.yaml    # or let the app apply on start
-    chok migrate status --config chok.yaml
+    chok migrate status --check --config chok.yaml
+
+Applied files are SHA-256 audited (CRLF and LF hash identically). A dirty
+attempt fails startup until an operator inspects the actual schema and runs
+one version-scoped repair action with the ledger checksum and a reason:
+
+    chok migrate repair retry <version> --checksum <sha256> --reason "..."
+    chok migrate repair mark-applied <version> --checksum <sha256> --reason "..."
+    chok migrate repair accept-drift <version> --checksum <sha256> --reason "..."
+
+On MySQL, never choose retry until every implicitly committed DDL effect has
+been inspected and the database has been restored to the pre-migration state.
 
 There are no down migrations: correcting a mistake means shipping the
 next forward migration. chok's own battery tables (users, identities,

@@ -71,7 +71,9 @@ blessed implementation per capability, configuration over code.
 - Tests open a real database via `db/dbtest.Open(t)` — SQLite by
   default, Postgres when `CHOK_TEST_DRIVER=postgres` +
   `CHOK_TEST_PG_DSN` are set (M3 dual-run; store/db test setups all
-  ride it). `choktest` is the exported harness for downstream apps
+  ride it). The MySQL migration audit lane uses `CHOK_TEST_MYSQL_DSN`
+  for its real implicit-DDL regression. `choktest` is the exported
+  harness for downstream apps
   (`NewTestDB` returns `*db.DB`); in-repo it also backs db module
   tests. In-package registry tests use the `mkReg()` helper
 
@@ -109,7 +111,8 @@ blessed implementation per capability, configuration over code.
   after framework-level changes — `make smoke` boots it, waits for
   `/healthz` and SIGINTs (the blog acceptance test walks the full
   README path in CI too). store/db changes also run the Postgres lane
-  (`make test-pg` with `CHOK_TEST_PG_DSN`, or let CI's service run it).
+  (`make test-pg` with `CHOK_TEST_PG_DSN`); migration-engine changes run
+  `make test-mysql` with `CHOK_TEST_MYSQL_DSN` (CI provides both services).
   `internal/fixture/m1-m4` stay as milestone regression tests; they
   are no longer the smoke vehicle.
 

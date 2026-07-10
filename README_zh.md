@@ -166,7 +166,7 @@ yaml 段，跑 `chok sync`，完事。
 ```bash
 chok init <name>            # 脚手架一个 v2 项目（生成即可启动）
 chok sync [--check]         # chok.yaml → chok_modules_gen.go（可做 CI 闸）
-chok migrate create|up|status   # forward-only 版本化迁移
+chok migrate create|up|status|repair   # 带审计的 forward-only 版本化迁移
 chok docs gen [--check]     # 组件表 + 配置参考 + JSON Schema
 chok openapi export         # 运行中应用的 OpenAPI spec → .json/.yaml
 chok version [--json]       # 构建 / VCS / 运行时元数据

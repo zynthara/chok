@@ -205,8 +205,12 @@ func (c *Component) Migrate(ctx context.Context) error {
 			return fmt.Errorf("db: migrate: versioned requires db.WithMigrations(embedded fs) on the module")
 		}
 		start := time.Now()
-		applied, err := ApplyMigrations(ctx, h, c.migrations)
-		for _, m := range applied {
+		report, err := ApplyMigrationsWithReport(ctx, h, c.migrations)
+		for _, a := range report.Adopted {
+			c.logger.Info("db: migration checksum baseline adopted", "instance", displayInstance(c.instance),
+				"version", a.Version, "checksum", a.Checksum)
+		}
+		for _, m := range report.Applied {
 			c.logger.Info("db: migration applied", "instance", displayInstance(c.instance),
 				"version", m.Version, "file", m.File)
 		}
@@ -215,7 +219,8 @@ func (c *Component) Migrate(ctx context.Context) error {
 		}
 		c.logger.Info("db: versioned migrations up to date",
 			"instance", displayInstance(c.instance),
-			"applied_now", len(applied),
+			"applied_now", len(report.Applied),
+			"checksums_adopted", len(report.Adopted),
 			"duration", time.Since(start).String(),
 			"automigrate_exempt_framework_tables", FrameworkTables())
 		return nil

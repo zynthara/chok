@@ -118,6 +118,16 @@ func (c *mounterComp) Mount(r Router) error {
 	return nil
 }
 
+type migratorComp struct {
+	fake
+	migrateErr error
+}
+
+func (c *migratorComp) Migrate(context.Context) error {
+	c.rec.add("migrate:" + KeyOf(c.d).String())
+	return c.migrateErr
+}
+
 type serverComp struct {
 	fake
 	failBeforeReady error
@@ -286,6 +296,25 @@ func TestStart_InitFailure_RollsBackReverse(t *testing.T) {
 	if rec.has("close:b") {
 		t.Fatalf("failed component must not be closed: %v", rec.events())
 	}
+}
+
+func TestStart_MigrateFailure_ClosesInitializedComponent(t *testing.T) {
+	rec := &recorder{}
+	boom := errors.New("migration boom")
+	c := &migratorComp{
+		fake:       fake{d: Descriptor{Kind: "db"}, rec: rec},
+		migrateErr: boom,
+	}
+	r := mkRegistry(t, Config{Components: []Component{c}})
+
+	err := r.Start(context.Background())
+	if err == nil || !errors.Is(err, boom) {
+		t.Fatalf("want migration boom, got %v", err)
+	}
+	if !rec.has("close:db") {
+		t.Fatalf("component whose Init succeeded must close after Migrate failure: %v", rec.events())
+	}
+	rec.assertBefore(t, "migrate:db", "close:db")
 }
 
 func TestStart_OptionalInitFailure_Degrades(t *testing.T) {

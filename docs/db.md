@@ -375,8 +375,34 @@ err := h.RunInTx(ctx, func(txCtx context.Context) error {
 chok migrate create add_posts_table   # 生成 migrations/0001_add_posts_table.sql
 # 编辑 SQL 后:
 chok migrate up                       # 跨进程锁下执行全部 pending
-chok migrate status                   # 已应用/待应用 + 框架表豁免白名单
+chok migrate status --check           # 全景状态；非 clean 时退出 1
 ```
+
+每个文件按 CRLF→LF 归一化后计算 SHA-256。执行任何 SQL 前，框架先
+提交 `dirty=true` 账本行与临时兼容 fence；因此进程死亡、MySQL DDL
+部分提交以及回滚旧 chok 二进制都不会把半成品误认为成功。`status`
+严格只读，展示 applied / pending / dirty / drift / missing / unverified /
+out-of-order / name-drift / fenced。旧三列账本第一次执行 `up` 时按当前文件建立
+checksum 基线；这只能保证此后的改写可检测，不能追溯基线前的历史。
+
+dirty 不能自动判断为“该重跑”还是“其实已全部生效”。先人工核对数据库，
+再针对一个版本执行显式 repair（checksum 从 `status` 输出复制）：
+
+```bash
+# 已恢复到迁移前状态，下次 up 整文件重跑
+chok migrate repair retry 12 --checksum <ledger-sha256> --reason "restored partial DDL"
+
+# 已确认或手工补齐全部效果，只清 dirty
+chok migrate repair mark-applied 12 --checksum <ledger-sha256> --reason "completed manually"
+
+# 已应用文件的改写经过审核，接受当前字节作为新基线
+chok migrate repair accept-drift 7 --checksum <old-ledger-sha256> --reason "approved rewrite"
+```
+
+repair 使用 version + checksum 做 compare-and-swap，并返回包含 old/current
+checksum、reason、时间的结构化报告。v2 不额外创建 repair history 表；有
+合规留存要求时应把该报告写入部署平台或集中审计日志。MySQL 尤其不能在
+未核对已提交 DDL 的情况下直接选择 retry。
 
 应用侧把目录嵌进二进制:
 
@@ -512,6 +538,8 @@ func TestPostFlow(t *testing.T) {
 - 需要 Postgres 行为差异时跑双道:
   `CHOK_TEST_DRIVER=postgres CHOK_TEST_PG_DSN=... go test ./...`
   (CI 的 PG service 自动跑同一套)。
+- MySQL 隐式 DDL 提交的 dirty/repair 主路径跑
+  `CHOK_TEST_MYSQL_DSN=... make test-mysql`（CI 提供 MySQL 8.4 service）。
 - 属主隔离的测试给 ctx 注入用户:
   `auth.WithPrincipal(ctx, auth.Principal{Subject: "usr_alice"})`。
 
@@ -534,6 +562,8 @@ func TestPostFlow(t *testing.T) {
 | SQLite 写操作不报错但一直不返回 | `RunInTx` 里拿根 ctx(而非 `txCtx`)又发了写——外层事务占着唯一写连接,这笔在池上排队等它,直到 ctx 超时 | 事务内所有操作传 `txCtx`;确要旁路写就放到事务外 |
 | 启动报 `DSN parameter "_synchronous" is a mattn/go-sqlite3 spelling` | 驱动已换纯 Go 构建(glebarez),mattn 拼法参数会被静默忽略,框架选择 fail-fast | 改成 `_pragma=synchronous(NORMAL)` 形式(`_txlock` 拼法不变) |
 | `versioned` 模式下写入报表不存在 | 忘了 `chok migrate up`,或 SQL 文件没 embed | 检查 `WithMigrations` 与 `migrate status` |
+| 启动报 `dirty migration attempt` | 上次迁移失败或进程在 clean 前退出 | `migrate status` 核对实际 schema，再按 §8 选择 repair retry 或 mark-applied |
+| `status --check` 报 `unverified` | 旧三列账本尚未建立 checksum 基线 | 使用当前可信发布执行一次 `migrate up` 完成 trust-on-first-use adoption |
 
 ---
 
@@ -545,6 +575,11 @@ func TestPostFlow(t *testing.T) {
   db.As(name)  db.WithTables(specs...)  db.WithMigrations(fs)
   h.RunInTx(ctx, fn)  h.Migrate(ctx, specs...)  h.Ping(ctx)  h.Unsafe(ctx)
   db.InTx(ctx)  db.Table(model, indexes...)  db.SoftUnique(name, cols...)
+
+版本化迁移
+  db.LoadMigrations(fs)  db.ApplyMigrations(ctx, h, fs)
+  db.ApplyMigrationsWithReport(ctx, h, fs)  db.MigrationsStatus(ctx, h, fs)
+  db.RepairMigration(ctx, h, fs, db.RepairOptions)
 
 Store[T](读)
   Get(ctx, loc, ...QueryOption)         List(ctx, ...where.Option)

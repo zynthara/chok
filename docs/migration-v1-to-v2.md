@@ -327,7 +327,7 @@ Update/Delete 保留 RowsAffected>0 门控。**sync → async 是有意的
 audit_logs / casbin_rule / schema_migrations）仍由电池
 AutoMigrate 管理并在 `chok migrate status` 呈现。`migrate: off`
 ⇒ 框架零 DDL（电池表也不建）。CLI：
-`chok migrate create|up|status`（up/status 经 conf 装载栈读
+`chok migrate create|up|status|repair`（up/status/repair 经 conf 装载栈读
 `--config`，env 覆盖 opt-in `--env-prefix`）。
 
 ### #25 SoftUnique 在 Postgres 用 partial unique index

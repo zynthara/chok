@@ -309,8 +309,20 @@ db:
 ```
 
 - versioned：embedded `migrations/NNNN_name.sql`（forward-only、
-  `schema_migrations` 账本、跨进程迁移锁三分支：PG advisory /
-  MySQL GET_LOCK / SQLite 单写者）；`chok migrate create|up|status`。
+  `schema_migrations` 审计账本、跨进程迁移锁三分支：PG advisory /
+  MySQL GET_LOCK / SQLite ledger lease）；`chok migrate
+  create|up|status|repair`。
+- **迁移审计状态机**：文件按 CRLF→LF 归一化后记录 SHA-256；任何 SQL
+  执行前先提交 `dirty=true` 行与临时 version-zero fence，旧二进制在
+  dirty 期间也会 fail-closed。PG/SQLite 把 SQL 与 clean 转换放在同一
+  事务；MySQL 的隐式 DDL 提交由 dirty 行保留人工判定点。status 只读并
+  如实分类 pending / dirty / drift / missing / unverified /
+  out-of-order / name-drift / fenced，`status --check` 任一非净态退出 1。
+- repair 必须指定单个版本、已观察到的 checksum 与 reason，并显式选择
+  `retry`（已恢复迁移前状态）、`mark-applied`（已确认全部效果存在）或
+  `accept-drift`（接受当前文件基线）；不自动猜测 MySQL 的部分提交状态。
+  旧三列账本第一次 `up` 采用 trust-on-first-use 建立 checksum 基线，
+  审计保证从该时刻开始，无法追溯基线建立前的历史改写。
 - **AutoMigrate 豁免白名单**：versioned 下 chok 电池自有表
   （`users`、`identities`、`audit_logs`、`casbin_rule`、
   `schema_migrations`）仍由各电池 Migrator 管理，
@@ -382,7 +394,7 @@ v1 的 Down/Degraded 分级不再存在——单个 flaky cron job 或 sink
 |---|---|
 | `chok init <name>` | v2 脚手架：chok.yaml + 生成装配 + main.go + migrations/ 骨架，生成即可 `go run .` |
 | `chok sync [--check]` | chok.yaml ⇒ `chok_modules_gen.go`（幂等、字节稳定；`--check` 做 CI 闸）。定制走 `chok.Override`，永不改生成文件 |
-| `chok migrate create\|up\|status` | 版本化迁移；status 含框架表白名单 |
+| `chok migrate create\|up\|status\|repair` | 带 checksum / dirty 审计的版本化迁移；`status --check` 可作 CI 闸 |
 | `chok docs gen [--check]` | 组件表（README ×2 + 本文的生成区块）、docs/config.md、docs/chok.schema.json |
 | `chok openapi export` | 取运行中应用的 spec 落 .json/.yaml |
 

@@ -175,7 +175,7 @@ Custom components implement `kernel.Component` (`Describe` / `Init` /
 ```bash
 chok init <name>            # scaffold a v2 project (boots immediately)
 chok sync [--check]         # chok.yaml → chok_modules_gen.go (CI-gateable)
-chok migrate create|up|status   # forward-only versioned migrations
+chok migrate create|up|status|repair   # audited forward-only migrations
 chok docs gen [--check]     # components tables + config reference + JSON Schema
 chok openapi export         # running app's OpenAPI spec → .json/.yaml
 chok version [--json]       # build / VCS / runtime metadata

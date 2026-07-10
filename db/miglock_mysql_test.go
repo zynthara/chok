@@ -15,10 +15,9 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// The MySQL migration-lock branch can't run against a live server in
-// this repo's test matrix (the CI database service is Postgres-only,
-// §12.6 budget). This fake driver pins the branch structurally: the
-// exact GET_LOCK / RELEASE_LOCK statement sequence, the same-session
+// The live MySQL lane covers partial DDL in versioned_test.go. This fake
+// driver separately pins the lock protocol itself: the exact GET_LOCK /
+// RELEASE_LOCK statement sequence, the same-session
 // requirement, and the timeout-derivation and lock-denied paths.
 // Store-behaviour tests never mock the database (CLAUDE.md); this is
 // a protocol-sequence test of our own lock statements, disclosed as
@@ -122,11 +121,11 @@ func TestMigrationLock_MySQLStatementSequence(t *testing.T) {
 	fake := &fakeMySQLDriver{getLockResult: 1}
 	gdb := newFakeMySQLGorm(t, fake)
 
-	release, err := acquireMigrationLock(context.Background(), gdb)
+	lock, err := acquireMigrationLock(context.Background(), gdb)
 	if err != nil {
 		t.Fatal(err)
 	}
-	release()
+	lock.release()
 
 	qs := fake.recorded()
 	var got []string
@@ -156,11 +155,11 @@ func TestMigrationLock_MySQLTimeoutFromDeadline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	release, err := acquireMigrationLock(ctx, gdb)
+	lock, err := acquireMigrationLock(ctx, gdb)
 	if err != nil {
 		t.Fatal(err)
 	}
-	release()
+	lock.release()
 	// The driver saw the interpolated GET_LOCK query; the numeric
 	// timeout itself rides as a bind arg, so just pin that the deadline
 	// path executed without falling back to the 60s default failing.

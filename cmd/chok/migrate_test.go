@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zynthara/chok/v2/db"
 )
 
 func runMigrate(t *testing.T, args ...string) (string, error) {
@@ -110,6 +112,43 @@ func TestMigrateUpAndStatus_EndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(out, "applied  0001_widgets") || strings.Contains(out, "pending") {
 		t.Fatalf("status after up must show applied and nothing pending:\n%s", out)
+	}
+}
+
+func TestMigrateStatusCheckAndRepairAcceptDrift(t *testing.T) {
+	cfgPath, migDir := writeProject(t)
+	if out, err := runMigrate(t, "status", "--check", "--config", cfgPath, "--dir", migDir); err == nil || !strings.Contains(out, "pending") {
+		t.Fatalf("pending status --check must fail after rendering state: err=%v\n%s", err, out)
+	}
+	if out, err := runMigrate(t, "up", "--config", cfgPath, "--dir", migDir); err != nil {
+		t.Fatalf("up: %v\n%s", err, out)
+	}
+	files, err := db.LoadMigrations(os.DirFS(migDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runMigrate(t, "status", "--check", "--config", cfgPath, "--dir", migDir); err != nil {
+		t.Fatalf("clean status --check: %v\n%s", err, out)
+	}
+
+	path := filepath.Join(migDir, "0001_widgets.sql")
+	if err := os.WriteFile(path, []byte("CREATE TABLE cli_widgets (id BIGINT PRIMARY KEY, label VARCHAR(100)); -- reviewed drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runMigrate(t, "status", "--check", "--config", cfgPath, "--dir", migDir); err == nil || !strings.Contains(out, "drift") {
+		t.Fatalf("drifted status --check must fail: err=%v\n%s", err, out)
+	}
+	out, err := runMigrate(t,
+		"repair", "accept-drift", "1",
+		"--checksum", files[0].Checksum,
+		"--reason", "reviewed comment-only migration change",
+		"--config", cfgPath, "--dir", migDir,
+	)
+	if err != nil || !strings.Contains(out, "action=accept-drift") {
+		t.Fatalf("repair accept-drift: err=%v\n%s", err, out)
+	}
+	if out, err := runMigrate(t, "status", "--check", "--config", cfgPath, "--dir", migDir); err != nil {
+		t.Fatalf("accepted drift must pass --check: %v\n%s", err, out)
 	}
 }
 

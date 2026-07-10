@@ -77,7 +77,7 @@ const (
 	StateDegraded State = "degraded" // Optional component whose Init failed
 	StateDisabled State = "disabled" // enabled:false at startup
 	StateClosed   State = "closed"   // Close completed (or rolled back)
-	StateFailed   State = "failed"   // required Init failure (pre-rollback)
+	StateFailed   State = "failed"   // required startup-phase failure (pre-rollback)
 )
 
 // ComponentStatus is the observable record for one component —

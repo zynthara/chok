@@ -73,13 +73,14 @@ type Registry struct {
 }
 
 type slot struct {
-	comp      Component
-	desc      Descriptor
-	key       Key
-	configKey string // derived section key ("" = none)
-	enabled   bool
-	state     State
-	lastErr   string
+	comp        Component
+	desc        Descriptor
+	key         Key
+	configKey   string // derived section key ("" = none)
+	enabled     bool
+	initialized bool // Init completed successfully; Close is required even if a later phase failed.
+	state       State
+	lastErr     string
 }
 
 // SectionKeyOf resolves the config section key a Descriptor addresses
@@ -568,6 +569,7 @@ func (r *Registry) initLevel(ctx context.Context, level []*slot) error {
 			})
 			d := time.Since(start)
 			if err == nil {
+				s.initialized = true
 				s.state = StateReady
 				r.logger.Info("kernel: component initialized", "component", s.key.String(), "duration", d)
 				event.Publish(ctx, r.bus, ComponentInitialized{Key: s.key, Duration: d})
@@ -891,12 +893,10 @@ func (r *Registry) closeAll(ctx context.Context) error {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		for _, s := range level {
-			if s.state != StateReady && s.state != StateDegraded {
-				continue
-			}
-			if s.state == StateDegraded && s.lastErr != "" && s.desc.Optional {
-				// Degraded = Init failed: nothing to close.
-				s.state = StateClosed
+			if !s.initialized {
+				if s.state == StateDegraded {
+					s.state = StateClosed
+				}
 				continue
 			}
 			wg.Add(1)
