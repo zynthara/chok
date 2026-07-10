@@ -32,13 +32,15 @@ import (
 const ledgerTable = "schema_migrations"
 
 const (
-	migrationFenceVersion   int64 = 0
-	migrationFenceName            = "__chok_migration_fence__"
-	sqliteLeasePrefix             = "__chok_migration_lease__:"
-	sqliteLeaseTTL                = 30 * time.Second
-	sqliteLeasePoll               = 100 * time.Millisecond
-	migrationCleanupTimeout       = 5 * time.Second
-	maxMigrationErrorRunes        = 4096
+	migrationFenceVersion int64 = 0
+	migrationFenceName          = "__chok_migration_fence__"
+	sqliteLeasePrefix           = "__chok_migration_lease__:"
+	// sqliteLeaseTTL only bounds unlocked gaps between ledger transactions;
+	// transaction-end refresh makes migration-file runtime irrelevant.
+	sqliteLeaseTTL          = 30 * time.Second
+	sqliteLeasePoll         = 100 * time.Millisecond
+	migrationCleanupTimeout = 5 * time.Second
+	maxMigrationErrorRunes  = 4096
 )
 
 // FrameworkTables lists the tables chok batteries own and keep
@@ -400,15 +402,9 @@ func ApplyMigrationsWithReport(ctx context.Context, h *DB, fsys fs.FS) (*ApplyRe
 	if err := ensureLedgerColumns(gdb); err != nil {
 		return report, err
 	}
-	if err := refreshMigrationLease(gdb, lock.owner); err != nil {
-		return report, err
-	}
 
 	ledger, err := appliedMigrations(gdb)
 	if err != nil {
-		return report, err
-	}
-	if err := refreshMigrationLease(gdb, lock.owner); err != nil {
 		return report, err
 	}
 	st := diffMigrations(files, ledger)
@@ -446,9 +442,6 @@ func ApplyMigrationsWithReport(ctx context.Context, h *DB, fsys fs.FS) (*ApplyRe
 	}
 
 	for _, m := range st.Pending {
-		if err := refreshMigrationLease(gdb, lock.owner); err != nil {
-			return report, err
-		}
 		if err := applyOne(ctx, gdb, m, lock.owner); err != nil {
 			return report, err
 		}
@@ -495,30 +488,39 @@ func adoptLegacyChecksums(gdb *gorm.DB, files []Migration, rows []AppliedMigrati
 		byVersion[f.Version] = f
 	}
 	adopted := make([]AppliedMigration, 0, len(rows))
-	for _, a := range rows {
-		if err := refreshMigrationLease(gdb, owner); err != nil {
-			return nil, err
+	adopt := func(exec *gorm.DB) error {
+		for _, a := range rows {
+			f, ok := byVersion[a.Version]
+			if !ok || f.Name != a.Name {
+				continue
+			}
+			res := exec.Exec(
+				"UPDATE "+ledgerTable+" SET checksum = ?, finished_at = CASE WHEN finished_at IS NULL THEN applied_at ELSE finished_at END "+
+					"WHERE version = ? AND dirty = FALSE AND checksum = ''",
+				f.Checksum, a.Version,
+			)
+			if res.Error != nil {
+				return fmt.Errorf("db: adopt checksum for migration %d: %w", a.Version, res.Error)
+			}
+			if res.RowsAffected != 1 {
+				return fmt.Errorf("db: adopt checksum for migration %d: ledger changed concurrently", a.Version)
+			}
+			a.Checksum = f.Checksum
+			if a.FinishedAt.IsZero() {
+				a.FinishedAt = a.AppliedAt
+			}
+			adopted = append(adopted, a)
 		}
-		f, ok := byVersion[a.Version]
-		if !ok || f.Name != a.Name {
-			continue
-		}
-		res := gdb.Exec(
-			"UPDATE "+ledgerTable+" SET checksum = ?, finished_at = CASE WHEN finished_at IS NULL THEN applied_at ELSE finished_at END "+
-				"WHERE version = ? AND dirty = FALSE AND checksum = ''",
-			f.Checksum, a.Version,
-		)
-		if res.Error != nil {
-			return nil, fmt.Errorf("db: adopt checksum for migration %d: %w", a.Version, res.Error)
-		}
-		if res.RowsAffected != 1 {
-			return nil, fmt.Errorf("db: adopt checksum for migration %d: ledger changed concurrently", a.Version)
-		}
-		a.Checksum = f.Checksum
-		if a.FinishedAt.IsZero() {
-			a.FinishedAt = a.AppliedAt
-		}
-		adopted = append(adopted, a)
+		return nil
+	}
+	var err error
+	if owner == "" {
+		err = adopt(gdb)
+	} else {
+		err = withMigrationLeaseTransaction(gdb, owner, adopt)
+	}
+	if err != nil {
+		return nil, err
 	}
 	return adopted, nil
 }
@@ -535,10 +537,7 @@ func applyOne(ctx context.Context, gdb *gorm.DB, m Migration, owner string) erro
 		return fmt.Errorf("db: mark migration %s dirty: %w", m.File, err)
 	}
 
-	err := gdb.Transaction(func(tx *gorm.DB) error {
-		if err := verifyMigrationLease(tx, owner); err != nil {
-			return err
-		}
+	err := withMigrationLeaseTransaction(gdb, owner, func(tx *gorm.DB) error {
 		for i, stmt := range stmts {
 			if err := tx.Exec(stmt).Error; err != nil {
 				return fmt.Errorf("statement %d: %w", i+1, err)
@@ -572,13 +571,11 @@ func applyOne(ctx context.Context, gdb *gorm.DB, m Migration, owner string) erro
 
 func insertDirtyMarker(gdb *gorm.DB, m Migration, owner string) error {
 	now := time.Now().UTC()
-	return gdb.Transaction(func(tx *gorm.DB) error {
+	return withMigrationLeaseTransaction(gdb, owner, func(tx *gorm.DB) error {
 		if owner == "" {
 			if err := ensureMigrationFence(tx, ""); err != nil {
 				return err
 			}
-		} else if err := verifyMigrationLease(tx, owner); err != nil {
-			return err
 		}
 		return tx.Exec(
 			"INSERT INTO "+ledgerTable+" (version, name, applied_at, checksum, started_at, dirty, last_error) "+
@@ -681,6 +678,25 @@ func refreshMigrationLease(gdb *gorm.DB, owner string) error {
 	return nil
 }
 
+func withMigrationLeaseTransaction(gdb *gorm.DB, owner string, work func(*gorm.DB) error) error {
+	return gdb.Transaction(func(tx *gorm.DB) error {
+		if err := verifyMigrationLease(tx, owner); err != nil {
+			return err
+		}
+		// The first write obtains SQLite's write lock even if the DSN no
+		// longer uses _txlock=immediate.
+		if err := refreshMigrationLease(tx, owner); err != nil {
+			return err
+		}
+		if err := work(tx); err != nil {
+			return err
+		}
+		// Stamp at the transaction boundary: a long migration must not expose
+		// an already-expired timestamp at the instant its commit becomes visible.
+		return refreshMigrationLease(tx, owner)
+	})
+}
+
 // MigrationsStatus is strictly read-only. It tolerates a missing, legacy, or
 // partially-upgraded ledger and reports every mismatch instead of converting
 // diagnostic state into an error.
@@ -751,9 +767,6 @@ func RepairMigration(ctx context.Context, h *DB, fsys fs.FS, opts RepairOptions)
 	if err := ensureLedgerColumns(gdb); err != nil {
 		return nil, err
 	}
-	if err := refreshMigrationLease(gdb, lock.owner); err != nil {
-		return nil, err
-	}
 
 	ledger, err := appliedMigrations(gdb)
 	if err != nil {
@@ -787,10 +800,7 @@ func RepairMigration(ctx context.Context, h *DB, fsys fs.FS, opts RepairOptions)
 	}
 
 	now := time.Now().UTC()
-	err = gdb.Transaction(func(tx *gorm.DB) error {
-		if err := verifyMigrationLease(tx, lock.owner); err != nil {
-			return err
-		}
+	err = withMigrationLeaseTransaction(gdb, lock.owner, func(tx *gorm.DB) error {
 		var res *gorm.DB
 		switch opts.Action {
 		case RepairRetry:

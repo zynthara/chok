@@ -471,6 +471,45 @@ func TestApplyMigrations_FinalizationRequiresDirtyRow(t *testing.T) {
 	}
 }
 
+func TestApplyOne_SQLiteRefreshesLeaseAtTransactionEnd(t *testing.T) {
+	if testlane.Driver() != "sqlite" {
+		t.Skip("sqlite-lane only")
+	}
+	h := wrapForTest(openTestDB(t))
+	ctx := context.Background()
+	if err := ensureLedgerBase(h.gdb); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireMigrationLock(ctx, h.gdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.release()
+	if err := ensureLedgerColumns(h.gdb); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := LoadMigrations(migFS(map[string]string{
+		"0001_refresh.sql": "UPDATE schema_migrations SET applied_at = '1970-01-01T00:00:00Z' WHERE version = 0; CREATE TABLE lease_refresh_guard (id BIGINT PRIMARY KEY);",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if err := applyOne(ctx, h.gdb, migrations[0], lock.owner); err != nil {
+		t.Fatal(err)
+	}
+	var refreshed time.Time
+	if err := h.gdb.Raw(
+		"SELECT applied_at FROM schema_migrations WHERE version = 0 AND name = ?",
+		lock.owner,
+	).Scan(&refreshed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Before(started) {
+		t.Fatalf("transaction-end refresh did not replace the stale in-transaction timestamp: got %s, started %s", refreshed, started)
+	}
+}
+
 // --- statement splitter ------------------------------------------------
 
 func TestSplitSQLStatements(t *testing.T) {
