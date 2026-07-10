@@ -14,6 +14,7 @@ import (
 	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/internal/clientip"
+	"github.com/zynthara/chok/v2/internal/testschema"
 	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/middleware"
 	"github.com/zynthara/chok/v2/store"
@@ -73,13 +74,9 @@ func TestModule_MountsAuthSurface_RegisterLoginFlow(t *testing.T) {
 }
 
 func TestModule_TablesCreatedAtMigrate_BackfillIncluded(t *testing.T) {
-	tk := choktest.NewTestKernel(t, moduleYAML, db.Module(), account.Module())
-	gdb := db.From(tk).Unsafe(t.Context())
-	for _, table := range []string{"users", "identities"} {
-		if !gdb.Migrator().HasTable(table) {
-			t.Fatalf("%s must exist after startup — the account Migrator owns it (SPEC §5.3)", table)
-		}
-	}
+	component := account.Module()
+	tk := choktest.NewTestKernel(t, moduleYAML, db.Module(), component)
+	testschema.AssertOwnership(t, db.From(tk), component)
 }
 
 func TestModule_MigrateOff_SchemaUntouched(t *testing.T) {

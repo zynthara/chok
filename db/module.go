@@ -123,6 +123,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Instance:  c.instance,
 		ConfigKey: "db",
 		Options:   Options{},
+		Schema:    kernel.SchemaOwner{Tables: []string{ledgerTable}},
 		Needs: []kernel.Dep{
 			{Kind: "log", Optional: true},
 			{Kind: "tracing", Optional: true},

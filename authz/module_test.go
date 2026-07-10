@@ -16,6 +16,7 @@ import (
 	"github.com/zynthara/chok/v2/authz/casbin"
 	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/internal/testschema"
 	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/redis"
 )
@@ -126,12 +127,9 @@ func TestModule_GrantAndAuthorize_FailClosedDefault(t *testing.T) {
 }
 
 func TestModule_CasbinRuleCreatedAtMigratePhase(t *testing.T) {
-	tk := choktest.NewTestKernel(t, sqliteYAML, db.Module(), authz.Module())
-
-	h := db.From(tk)
-	if !h.Unsafe(context.Background()).Migrator().HasTable("casbin_rule") {
-		t.Fatal("casbin_rule must exist after startup — the authz Migrator owns its creation (SPEC §5.3)")
-	}
+	component := authz.Module()
+	tk := choktest.NewTestKernel(t, sqliteYAML, db.Module(), component)
+	testschema.AssertOwnership(t, db.From(tk), component)
 }
 
 func TestModule_WebRoleInterface_Satisfied(t *testing.T) {

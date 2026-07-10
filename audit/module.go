@@ -50,6 +50,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Kind:      "audit",
 		ConfigKey: "audit",
 		Options:   Options{},
+		Schema:    kernel.SchemaOwner{Tables: []string{(Log{}).TableName()}},
 		Needs: []kernel.Dep{
 			{Kind: "db"},
 			{Kind: "scheduler", Optional: true},

@@ -11,6 +11,7 @@ import (
 	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/conf"
 	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/internal/testschema"
 	"github.com/zynthara/chok/v2/kernel"
 )
 
@@ -84,6 +85,21 @@ db:
 	if len(st.Applied) != 1 || len(st.Pending) != 0 {
 		t.Fatalf("ledger after start: %+v", st)
 	}
+}
+
+func TestModule_SchemaOwnershipMatchesVersionedLedger(t *testing.T) {
+	fsys := fstest.MapFS{
+		"README.txt": &fstest.MapFile{Data: []byte("no application migrations")},
+	}
+	component := db.Module(db.WithMigrations(fsys))
+	tk := choktest.NewTestKernel(t, `
+db:
+  driver: sqlite
+  migrate: versioned
+  sqlite:
+    path: ":memory:"
+`, component)
+	testschema.AssertOwnership(t, db.From(tk), component)
 }
 
 func TestModule_VersionedWithoutSourceFailsStartup(t *testing.T) {

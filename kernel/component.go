@@ -53,6 +53,13 @@ type Descriptor struct {
 	// nil = the section stays untyped (ad-hoc decode only).
 	Options any
 
+	// Schema describes database tables this component owns and is
+	// responsible for evolving. It is descriptive metadata only: declaring
+	// a table does not execute migration behavior. Repository generators
+	// aggregate the declarations of chok's built-in modules; downstream
+	// components remain responsible for consuming their own declarations.
+	Schema SchemaOwner
+
 	// Needs declares dependencies on other components by (Kind,
 	// Instance). Hard dependencies gate startup ordering and fail
 	// startup when missing or disabled; Optional ones degrade to
@@ -74,6 +81,13 @@ type Descriptor struct {
 	// swagger) declares a large positive value itself — the kernel
 	// has no name-based special cases.
 	MountOrder int
+}
+
+// SchemaOwner is a component's static database-schema declaration. Tables
+// must be non-empty and uniquely owned when declarations are aggregated.
+// Empty means the component owns no database schema.
+type SchemaOwner struct {
+	Tables []string
 }
 
 // Dep is a dependency edge in Descriptor.Needs.

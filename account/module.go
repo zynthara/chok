@@ -62,6 +62,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Kind:      "account",
 		ConfigKey: "account",
 		Options:   Options{},
+		Schema:    kernel.SchemaOwner{Tables: []string{"users", "identities"}},
 		Needs: []kernel.Dep{
 			{Kind: "db"},
 			{Kind: "log", Optional: true},

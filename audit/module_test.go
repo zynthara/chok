@@ -14,6 +14,7 @@ import (
 	"github.com/zynthara/chok/v2/authz"
 	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/internal/testschema"
 	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/middleware"
 	"github.com/zynthara/chok/v2/scheduler"
@@ -48,15 +49,14 @@ db:
 }
 
 func TestModule_SinkRoundTrip_TableAtMigrate(t *testing.T) {
-	tk := choktest.NewTestKernel(t, auditYAML, db.Module(), audit.Module())
+	component := audit.Module()
+	tk := choktest.NewTestKernel(t, auditYAML, db.Module(), component)
 
 	ac, ok := kernel.Get[*audit.Component](tk, "audit")
 	if !ok {
 		t.Fatal("audit component not visible")
 	}
-	if !db.From(tk).Unsafe(context.Background()).Migrator().HasTable("audit_logs") {
-		t.Fatal("audit_logs must exist after startup — the audit Migrator owns its creation (SPEC §5.3)")
-	}
+	testschema.AssertOwnership(t, db.From(tk), component)
 
 	ctx := context.Background()
 	if err := ac.LogEventSync(ctx, "user.login", "user", audit.ResultSuccess, map[string]string{"method": "password"}); err != nil {

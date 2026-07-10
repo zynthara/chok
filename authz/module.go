@@ -78,6 +78,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Kind:      "authz",
 		ConfigKey: "authz",
 		Options:   Options{},
+		Schema:    kernel.SchemaOwner{Tables: []string{(casbin.CasbinRule{}).TableName()}},
 		Needs: []kernel.Dep{
 			{Kind: "db"},
 			{Kind: "redis", Optional: true},
