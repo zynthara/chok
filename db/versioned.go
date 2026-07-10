@@ -241,10 +241,34 @@ func ensureLedgerBase(gdb *gorm.DB) error {
 	).Error
 }
 
+type ledgerColumns map[string]bool
+
+func inspectLedgerColumns(gdb *gorm.DB) (ledgerColumns, error) {
+	types, err := gdb.Migrator().ColumnTypes(ledgerTable)
+	if err != nil {
+		return nil, fmt.Errorf("db: inspect %s columns: %w", ledgerTable, err)
+	}
+	columns := make(ledgerColumns, len(types))
+	for _, column := range types {
+		columns[strings.ToLower(column.Name())] = true
+	}
+	return columns, nil
+}
+
+// has treats nil as the complete current schema. Callers may use nil only
+// after ensureLedgerColumns succeeds under the migration lock.
+func (columns ledgerColumns) has(name string) bool {
+	return columns == nil || columns[strings.ToLower(name)]
+}
+
 // ensureLedgerColumns upgrades a legacy ledger additively. Callers must hold
-// the migration lock: HasColumn plus ALTER is idempotent across retries, not
-// an atomic concurrency primitive.
+// the migration lock: introspection plus ALTER is idempotent across retries,
+// not an atomic concurrency primitive.
 func ensureLedgerColumns(gdb *gorm.DB) error {
+	existing, err := inspectLedgerColumns(gdb)
+	if err != nil {
+		return err
+	}
 	columns := []struct {
 		name string
 		ddl  string
@@ -256,22 +280,24 @@ func ensureLedgerColumns(gdb *gorm.DB) error {
 		{"last_error", "TEXT"},
 	}
 	for _, col := range columns {
-		if gdb.Migrator().HasColumn(ledgerTable, col.name) {
+		if existing.has(col.name) {
 			continue
 		}
 		if err := gdb.Exec("ALTER TABLE " + ledgerTable + " ADD COLUMN " + col.name + " " + col.ddl).Error; err != nil {
 			return fmt.Errorf("db: upgrade %s add %s: %w", ledgerTable, col.name, err)
 		}
+		existing[col.name] = true
 	}
 	return nil
 }
 
 // appliedMigrations reads every real migration row while tolerating the old
-// three-column ledger and partially-completed additive upgrades. Version zero
-// is the internal compatibility fence and is deliberately invisible here.
-func appliedMigrations(gdb *gorm.DB) ([]AppliedMigration, error) {
+// three-column ledger and partially-completed additive upgrades. Passing nil
+// columns means the current schema is known to be complete. Version zero is
+// the internal compatibility fence and is deliberately invisible here.
+func appliedMigrations(gdb *gorm.DB, columns ledgerColumns) ([]AppliedMigration, error) {
 	expr := func(column, fallback string) string {
-		if gdb.Migrator().HasColumn(ledgerTable, column) {
+		if columns.has(column) {
 			return column
 		}
 		return fallback
@@ -403,7 +429,7 @@ func ApplyMigrationsWithReport(ctx context.Context, h *DB, fsys fs.FS) (*ApplyRe
 		return report, err
 	}
 
-	ledger, err := appliedMigrations(gdb)
+	ledger, err := appliedMigrations(gdb, nil)
 	if err != nil {
 		return report, err
 	}
@@ -424,21 +450,17 @@ func ApplyMigrationsWithReport(ctx context.Context, h *DB, fsys fs.FS) (*ApplyRe
 	}
 
 	if len(st.Unverified) > 0 {
-		adopted, err := adoptLegacyChecksums(gdb, files, st.Unverified, lock.owner)
+		adopted, err := adoptLegacyChecksums(gdb, files, ledger, st.Unverified, lock.owner)
 		if err != nil {
 			return report, err
 		}
 		report.Adopted = adopted
-		ledger, err = appliedMigrations(gdb)
-		if err != nil {
-			return report, err
-		}
 		st = diffMigrations(files, ledger)
 	}
 	if len(st.Drift) > 0 {
 		return report, fmt.Errorf(
 			"db: checksum drift at migration version(s) %s; inspect with chok migrate status and resolve explicitly with chok migrate repair accept-drift",
-			checksumDriftVersions(st.Drift))
+			versionList(st.Drift, func(d ChecksumDrift) int64 { return d.Version }))
 	}
 
 	for _, m := range st.Pending {
@@ -454,13 +476,13 @@ func structuralMigrationError(st *MigrationStatus) error {
 	if len(st.Missing) > 0 {
 		return fmt.Errorf(
 			"db: ledger has version(s) %s but no matching migration file — refusing to continue on drifted history",
-			appliedVersions(st.Missing))
+			versionList(st.Missing, func(m AppliedMigration) int64 { return m.Version }))
 	}
 	if len(st.NameDrift) > 0 {
-		return fmt.Errorf("db: migration name drift at version(s) %s; restore the original filename", nameDriftVersions(st.NameDrift))
+		return fmt.Errorf("db: migration name drift at version(s) %s; restore the original filename", versionList(st.NameDrift, func(d MigrationNameDrift) int64 { return d.Version }))
 	}
 	if len(st.OutOfOrder) > 0 {
-		return fmt.Errorf("db: out-of-order pending migration version(s) %s are below the applied frontier; renumber them after the latest applied version", migrationVersions(st.OutOfOrder))
+		return fmt.Errorf("db: out-of-order pending migration version(s) %s are below the applied frontier; renumber them after the latest applied version", versionList(st.OutOfOrder, func(m Migration) int64 { return m.Version }))
 	}
 	return nil
 }
@@ -482,10 +504,14 @@ func dirtyMigrationsError(dirty []AppliedMigration) error {
 		strings.Join(parts, ", "))
 }
 
-func adoptLegacyChecksums(gdb *gorm.DB, files []Migration, rows []AppliedMigration, owner string) ([]AppliedMigration, error) {
+func adoptLegacyChecksums(gdb *gorm.DB, files []Migration, ledger, rows []AppliedMigration, owner string) ([]AppliedMigration, error) {
 	byVersion := make(map[int64]Migration, len(files))
 	for _, f := range files {
 		byVersion[f.Version] = f
+	}
+	ledgerIndex := make(map[int64]int, len(ledger))
+	for i := range ledger {
+		ledgerIndex[ledger[i].Version] = i
 	}
 	adopted := make([]AppliedMigration, 0, len(rows))
 	adopt := func(exec *gorm.DB) error {
@@ -508,6 +534,9 @@ func adoptLegacyChecksums(gdb *gorm.DB, files []Migration, rows []AppliedMigrati
 			a.Checksum = f.Checksum
 			if a.FinishedAt.IsZero() {
 				a.FinishedAt = a.AppliedAt
+			}
+			if i, ok := ledgerIndex[a.Version]; ok {
+				ledger[i] = a
 			}
 			adopted = append(adopted, a)
 		}
@@ -709,7 +738,11 @@ func MigrationsStatus(ctx context.Context, h *DB, fsys fs.FS) (*MigrationStatus,
 	if !gdb.Migrator().HasTable(ledgerTable) {
 		return diffMigrations(files, nil), nil
 	}
-	ledger, err := appliedMigrations(gdb)
+	columns, err := inspectLedgerColumns(gdb)
+	if err != nil {
+		return nil, err
+	}
+	ledger, err := appliedMigrations(gdb, columns)
 	if err != nil {
 		return nil, err
 	}
@@ -768,7 +801,7 @@ func RepairMigration(ctx context.Context, h *DB, fsys fs.FS, opts RepairOptions)
 		return nil, err
 	}
 
-	ledger, err := appliedMigrations(gdb)
+	ledger, err := appliedMigrations(gdb, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -777,15 +810,12 @@ func RepairMigration(ctx context.Context, h *DB, fsys fs.FS, opts RepairOptions)
 			return nil, err
 		}
 	}
-	var row *AppliedMigration
-	for i := range ledger {
-		if ledger[i].Version == opts.Version {
-			copy := ledger[i]
-			row = &copy
-			break
-		}
+	ledgerByVersion := make(map[int64]AppliedMigration, len(ledger))
+	for _, applied := range ledger {
+		ledgerByVersion[applied.Version] = applied
 	}
-	if row == nil {
+	row, ok := ledgerByVersion[opts.Version]
+	if !ok {
 		return nil, fmt.Errorf("db: repair migration %d: no ledger row", opts.Version)
 	}
 	if row.Checksum != opts.ExpectedChecksum {
@@ -879,34 +909,10 @@ func validateRepairOptions(opts RepairOptions) error {
 	return nil
 }
 
-func migrationVersions(ms []Migration) string {
-	parts := make([]string, len(ms))
-	for i, m := range ms {
-		parts[i] = strconv.FormatInt(m.Version, 10)
-	}
-	return strings.Join(parts, ",")
-}
-
-func appliedVersions(ms []AppliedMigration) string {
-	parts := make([]string, len(ms))
-	for i, m := range ms {
-		parts[i] = strconv.FormatInt(m.Version, 10)
-	}
-	return strings.Join(parts, ",")
-}
-
-func checksumDriftVersions(ms []ChecksumDrift) string {
-	parts := make([]string, len(ms))
-	for i, m := range ms {
-		parts[i] = strconv.FormatInt(m.Version, 10)
-	}
-	return strings.Join(parts, ",")
-}
-
-func nameDriftVersions(ms []MigrationNameDrift) string {
-	parts := make([]string, len(ms))
-	for i, m := range ms {
-		parts[i] = strconv.FormatInt(m.Version, 10)
+func versionList[T any](items []T, version func(T) int64) string {
+	parts := make([]string, len(items))
+	for i, item := range items {
+		parts[i] = strconv.FormatInt(version(item), 10)
 	}
 	return strings.Join(parts, ",")
 }
@@ -986,12 +992,24 @@ func acquireMigrationLock(ctx context.Context, gdb *gorm.DB) (migrationLock, err
 			})
 		return migrationLock{release: release}, err
 	case "sqlite":
+		// The lease lives in the ledger; self-ensure keeps direct internal callers safe.
 		if err := ensureLedgerBase(gdb); err != nil {
 			return migrationLock{}, fmt.Errorf("db: ensure %s for sqlite migration lease: %w", ledgerTable, err)
 		}
 		return acquireSQLiteMigrationLease(ctx, gdb)
 	default:
 		return migrationLock{release: func() {}}, nil
+	}
+}
+
+func sqliteLeaseLock(ctx context.Context, gdb *gorm.DB, owner string) migrationLock {
+	return migrationLock{
+		owner: owner,
+		release: func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), migrationCleanupTimeout)
+			defer cancel()
+			_ = releaseSQLiteMigrationLease(gdb.WithContext(cleanupCtx), owner)
+		},
 	}
 }
 
@@ -1009,14 +1027,7 @@ func acquireSQLiteMigrationLease(ctx context.Context, gdb *gorm.DB) (migrationLo
 			migrationFenceVersion, owner, now,
 		)
 		if res.Error == nil && res.RowsAffected == 1 {
-			return migrationLock{
-				owner: owner,
-				release: func() {
-					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), migrationCleanupTimeout)
-					defer cancel()
-					_ = releaseSQLiteMigrationLease(gdb.WithContext(cleanupCtx), owner)
-				},
-			}, nil
+			return sqliteLeaseLock(ctx, gdb, owner), nil
 		}
 		if res.Error != nil && !sqliteLockContention(res.Error) {
 			return migrationLock{}, fmt.Errorf("db: acquire sqlite migration lease: %w", res.Error)
@@ -1036,14 +1047,7 @@ func acquireSQLiteMigrationLease(ctx context.Context, gdb *gorm.DB) (migrationLo
 				owner, now, migrationFenceVersion, existing.Name, existing.AppliedAt,
 			)
 			if takeover.Error == nil && takeover.RowsAffected == 1 {
-				return migrationLock{
-					owner: owner,
-					release: func() {
-						cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), migrationCleanupTimeout)
-						defer cancel()
-						_ = releaseSQLiteMigrationLease(gdb.WithContext(cleanupCtx), owner)
-					},
-				}, nil
+				return sqliteLeaseLock(ctx, gdb, owner), nil
 			}
 			if takeover.Error != nil && !sqliteLockContention(takeover.Error) {
 				return migrationLock{}, fmt.Errorf("db: take over stale sqlite migration lease: %w", takeover.Error)
