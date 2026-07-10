@@ -291,6 +291,11 @@ opt-out 是刻意的调用点噪音）。策略在构造期烙进 Store，故与
   两侧白名单都在场，超过 `where.MaxInList`（500）由调用方分块。
 - `store.WithRowsAffected(&n)` 同时实现 UpdateOption/DeleteOption，
   观测 Where locator 批量写的命中行数；纯观测，不改变语义。
+- **分页信封同源**：`where.Config` 产出 `PageInfo`（生效
+  page/size/offset，钳制时 offset 按生效 size 重算，保持三者自洽）；
+  `Page[T].Meta` 与 `ListFromQuery` 第三返回值携带它，
+  `handler.HandleList` 只渲染不重新解析请求——信封与 SQL
+  LIMIT/OFFSET 出自同一份 Config，结构上无法漂移。
 - **刻意不做**：JOIN DSL（单表 store 的边界；跨表读走两步 IN）、
   表达式 ORDER BY（无法白名单化）——这两类是 `Unsafe` 舱口的正当
   用途，逃逸应当稀少而非为零。

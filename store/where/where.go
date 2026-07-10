@@ -49,8 +49,37 @@ type Config struct {
 	// can inspect this flag to refuse the operation.
 	DegenerateFilter bool
 	MaxPageSize      int  // when > 0, LIMIT is clamped to this value
-	limit            int  // tracks the effective LIMIT for MaxPageSize clamping
+	page             int  // 1-based page from WithPage (0 = offset/limit/cursor pagination)
+	offset           int  // effective OFFSET rendered into the query
+	limit            int  // effective LIMIT rendered into the query (0 = none)
 	countOnly        bool // internal: when true, pagination/order/count options become no-ops
+}
+
+// PageInfo is the pagination a query actually executed with — produced
+// by the same layer that renders LIMIT/OFFSET, so response envelopes
+// cannot drift from the SQL (a handler echoing the requested size lies
+// as soon as a store cap clamps it). Size and Offset are the effective
+// values after Apply's MaxPageSize clamp.
+type PageInfo struct {
+	// Page is the 1-based page number when page-based pagination was
+	// used (WithPage / FromQuery); 0 under raw offset/limit or cursor
+	// pagination.
+	Page int `json:"page,omitempty"`
+	// Size is the effective LIMIT (0 = unlimited).
+	Size int `json:"size,omitempty"`
+	// Offset is the effective OFFSET.
+	Offset int `json:"offset,omitempty"`
+	// HasMore reports whether rows exist past this page. It needs the
+	// total, so it is only meaningful when the query counted
+	// (WithCount) — the store fills it; false otherwise.
+	HasMore bool `json:"has_more"`
+}
+
+// PageInfo reports the effective pagination after Apply ran. HasMore
+// is left false — it needs the result count and total, which the
+// caller (store) owns.
+func (c *Config) PageInfo() PageInfo {
+	return PageInfo{Page: c.page, Size: c.limit, Offset: c.offset}
 }
 
 // Option modifies a GORM query and/or query config.
@@ -91,6 +120,8 @@ func WithPage(page, size int) Option {
 			return nil, fmt.Errorf("%w: page %d size %d produces offset overflow", ErrInvalidParam, page, size)
 		}
 		cfg.HasPage = true
+		cfg.page = page
+		cfg.offset = int(offset64)
 		cfg.limit = size
 		if cfg.countOnly {
 			return db, nil
@@ -106,6 +137,7 @@ func WithOffset(offset int) Option {
 			return nil, fmt.Errorf("%w: offset %d, must be >= 0", ErrInvalidParam, offset)
 		}
 		cfg.HasPage = true
+		cfg.offset = offset
 		if cfg.countOnly {
 			return db, nil
 		}
@@ -501,9 +533,20 @@ func Apply(db *gorm.DB, fieldMap map[string]string, opts []Option) (*gorm.DB, *C
 	}
 	// Enforce max page size: only clamp when the requested limit exceeds
 	// the cap (or no explicit limit was set). This preserves smaller limits
-	// requested by WithPage / WithLimit.
+	// requested by WithPage / WithLimit. cfg tracks the effective values so
+	// PageInfo cannot drift from the SQL; page-based pagination recomputes
+	// the offset in clamped units — "page 2 of size-100 pages", not the
+	// self-contradictory page=2/size=100/offset=5000 the requested size
+	// would imply.
 	if cfg.MaxPageSize > 0 && (cfg.limit == 0 || cfg.limit > cfg.MaxPageSize) {
-		db = db.Limit(cfg.MaxPageSize)
+		cfg.limit = cfg.MaxPageSize
+		if cfg.page > 0 {
+			// No overflow check needed: (page-1)*limit shrank versus the
+			// requested size WithPage already vetted.
+			cfg.offset = (cfg.page - 1) * cfg.limit
+			db = db.Offset(cfg.offset)
+		}
+		db = db.Limit(cfg.limit)
 	}
 	return db, cfg, nil
 }

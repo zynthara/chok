@@ -834,7 +834,13 @@ func (s *Store[T]) listInternal(ctx context.Context, qopts []QueryOption, opts [
 		items = []T{}
 	}
 
-	return &Page[T]{Items: items, Total: total}, nil
+	// The effective pagination comes from the same Config that rendered
+	// LIMIT/OFFSET — the only place an honest envelope can come from.
+	meta := cfg.PageInfo()
+	if cfg.Count {
+		meta.HasMore = int64(meta.Offset)+int64(len(items)) < total
+	}
+	return &Page[T]{Items: items, Total: total, Meta: meta}, nil
 }
 
 // Count returns the number of rows matching the filter options under
@@ -875,11 +881,16 @@ func (s *Store[T]) countInternal(ctx context.Context, qopts []QueryOption, opts 
 // declared via WithQueryFields as an equality filter.
 // Fixed filters should be applied via WithScope at Store construction time.
 //
+// The returned where.PageInfo is the pagination the query actually
+// executed with — after the store's max-page-size cap and default page
+// size — so envelope renderers (handler.HandleList) never re-derive
+// page/size from the raw request and drift from the SQL.
+//
 // Unknown query parameters are silently ignored unless the Store was
 // constructed with WithStrict, in which case they return
 // apierr.ErrInvalidArgument so clients get immediate feedback instead of
 // silent "my filter didn't apply, why?" debugging.
-func (s *Store[T]) ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, error) {
+func (s *Store[T]) ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, where.PageInfo, error) {
 	var opts []where.Option
 	var err error
 	if s.strict {
@@ -888,21 +899,28 @@ func (s *Store[T]) ListFromQuery(ctx context.Context, query url.Values) ([]T, in
 		opts, err = where.FromQuery(query, s.queryFieldMap, s.defaultPageSize)
 	}
 	if err != nil {
-		return nil, 0, mapQueryError(err)
+		return nil, 0, where.PageInfo{}, mapQueryError(err)
 	}
 	page, err := s.List(ctx, opts...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, where.PageInfo{}, err
 	}
-	return page.Items, page.Total, nil
+	return page.Items, page.Total, page.Meta, nil
 }
 
 // Page is the result of a paginated list query. Items is guaranteed non-nil.
 // Total is the total number of matching records when where.WithCount() is
 // included in the query options; zero when count is not requested.
+//
+// Meta carries the pagination the query actually executed with — the
+// effective LIMIT/OFFSET after store caps, same-sourced with the SQL,
+// so envelopes render it instead of re-deriving values from the
+// request. Meta.HasMore is only computed when the query counted
+// (WithCount); zero-value Meta means the query was not paginated.
 type Page[T any] struct {
-	Items []T   `json:"items"`
-	Total int64 `json:"total"`
+	Items []T            `json:"items"`
+	Total int64          `json:"total"`
+	Meta  where.PageInfo `json:"meta,omitzero"`
 }
 
 // CursorPage is the result of a cursor-based paginated query. NextCursor

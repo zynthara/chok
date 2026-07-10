@@ -5,15 +5,18 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
-	"strconv"
 
 	"github.com/zynthara/chok/v2/store/where"
 )
 
 // QueryLister is implemented by store.Store[T] (and wrappers that embed it).
-// The interface decouples handler from store — handler never imports the store package.
+// The interface decouples handler from store — handler never imports the
+// store package (where is the shared query layer both already speak).
+// The where.PageInfo return is the pagination the query actually executed
+// with; HandleList renders the envelope from it instead of re-deriving
+// values from the raw request.
 type QueryLister[T any] interface {
-	ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, error)
+	ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, where.PageInfo, error)
 }
 
 // HandleList creates an http.Handler that parses page/size/order/filter
@@ -37,7 +40,7 @@ func HandleList[T any](lister QueryLister[T], opts ...HandleOption) http.Handler
 
 	return &metaHandler{
 		serve: func(w http.ResponseWriter, r *http.Request) {
-			items, total, err := lister.ListFromQuery(r.Context(), r.URL.Query())
+			items, total, pageInfo, err := lister.ListFromQuery(r.Context(), r.URL.Query())
 			if err != nil {
 				WriteResponse(w, r, 0, nil, err)
 				return
@@ -46,29 +49,15 @@ func HandleList[T any](lister QueryLister[T], opts ...HandleOption) http.Handler
 			if items == nil {
 				items = []T{}
 			}
-			// Parse page/size from query for the response envelope.
-			// Bounds were already enforced by where.FromQuery; clamp here
-			// only for the envelope's own display values. int64 math guards
-			// against overflow if clients send arbitrary integers.
-			q := r.URL.Query()
-			page, _ := strconv.Atoi(q.Get("page"))
-			size, _ := strconv.Atoi(q.Get("size"))
-			if page < 1 {
-				page = 1
-			}
-			if size < 1 {
-				size = 20
-			}
-			if size > where.MaxPageSize {
-				size = where.MaxPageSize
-			}
-			hasMore := total > 0 && int64(page)*int64(size) < total
+			// The envelope renders the pagination the query executed with
+			// — same-sourced with the SQL LIMIT/OFFSET, so store caps and
+			// defaults show up instead of an echo of the raw request.
 			WriteResponse(w, r, http.StatusOK, &ListResult[T]{
 				Items:   items,
 				Total:   total,
-				Page:    page,
-				Size:    size,
-				HasMore: hasMore,
+				Page:    pageInfo.Page,
+				Size:    pageInfo.Size,
+				HasMore: pageInfo.HasMore,
 			}, nil)
 		},
 		meta: Meta{

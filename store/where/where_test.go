@@ -21,6 +21,57 @@ func testDB(t *testing.T) *gorm.DB {
 }
 
 // ---------------------------------------------------------------------------
+// Apply pagination coherence (HandleList envelope fix)
+// ---------------------------------------------------------------------------
+
+// TestApply_ClampKeepsPageInfoCoherent: when MaxPageSize clamps a
+// page-based request, the effective size AND the offset move together
+// ("page 2 of clamped-size pages") and Config.PageInfo reports exactly
+// what was rendered into the SQL — the envelope's single source.
+func TestApply_ClampKeepsPageInfoCoherent(t *testing.T) {
+	db := testDB(t)
+	_, cfg, err := Apply(db, nil, []Option{WithMaxPageSize(100), WithPage(2, 5000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.PageInfo()
+	want := PageInfo{Page: 2, Size: 100, Offset: 100}
+	if got != want {
+		t.Fatalf("clamped PageInfo = %+v, want %+v", got, want)
+	}
+}
+
+// TestApply_UnclampedPageInfoPassesThrough: below the cap nothing moves.
+func TestApply_UnclampedPageInfoPassesThrough(t *testing.T) {
+	db := testDB(t)
+	_, cfg, err := Apply(db, nil, []Option{WithMaxPageSize(100), WithPage(3, 10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.PageInfo()
+	want := PageInfo{Page: 3, Size: 10, Offset: 20}
+	if got != want {
+		t.Fatalf("PageInfo = %+v, want %+v", got, want)
+	}
+}
+
+// TestApply_OffsetPaginationPageInfo: raw offset/limit report Page 0 —
+// there is no page number to lie about — and the clamp still applies
+// to the limit without touching the caller's offset.
+func TestApply_OffsetPaginationPageInfo(t *testing.T) {
+	db := testDB(t)
+	_, cfg, err := Apply(db, nil, []Option{WithMaxPageSize(50), WithOffset(7), WithLimit(200)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.PageInfo()
+	want := PageInfo{Page: 0, Size: 50, Offset: 7}
+	if got != want {
+		t.Fatalf("PageInfo = %+v, want %+v", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // WithCursor tests
 // ---------------------------------------------------------------------------
 

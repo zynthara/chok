@@ -13,7 +13,7 @@ import (
 type Reader[T db.Modeler] interface {
 	Get(ctx context.Context, by Locator, opts ...QueryOption) (*T, error)
 	List(ctx context.Context, opts ...where.Option) (*Page[T], error)
-	ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, error)
+	ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, where.PageInfo, error)
 	ListByIDs(ctx context.Context, ids []uint) ([]T, error)
 	Exists(ctx context.Context, by Locator) (bool, error)
 	Count(ctx context.Context, opts ...where.Option) (int64, error)

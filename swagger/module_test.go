@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/zynthara/chok/v2/handler"
+	"github.com/zynthara/chok/v2/store/where"
 	"github.com/zynthara/chok/v2/web"
 )
 
@@ -128,6 +129,7 @@ func TestBuildSpec_ListOperationEnvelope(t *testing.T) {
 // listerFunc adapts a func to handler.QueryLister for tests.
 type listerFunc[T any] func(context.Context) ([]T, int64, error)
 
-func (f listerFunc[T]) ListFromQuery(ctx context.Context, _ url.Values) ([]T, int64, error) {
-	return f(ctx)
+func (f listerFunc[T]) ListFromQuery(ctx context.Context, _ url.Values) ([]T, int64, where.PageInfo, error) {
+	items, total, err := f(ctx)
+	return items, total, where.PageInfo{}, err
 }
