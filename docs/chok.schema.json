@@ -548,6 +548,24 @@
                   }
                 },
                 "type": "object"
+              },
+              "store": {
+                "additionalProperties": false,
+                "properties": {
+                  "default_page_size": {
+                    "type": "integer"
+                  },
+                  "max_page_size": {
+                    "type": "integer"
+                  },
+                  "require_principal": {
+                    "type": "boolean"
+                  },
+                  "strict": {
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
               }
             },
             "type": "object"
@@ -704,6 +722,24 @@
             "path": {
               "default": "app.db",
               "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "store": {
+          "additionalProperties": false,
+          "properties": {
+            "default_page_size": {
+              "type": "integer"
+            },
+            "max_page_size": {
+              "type": "integer"
+            },
+            "require_principal": {
+              "type": "boolean"
+            },
+            "strict": {
+              "type": "boolean"
             }
           },
           "type": "object"

@@ -101,6 +101,10 @@ Named instances: sections marked *multi-instance* accept an
 | `enabled` | bool | `true` | restart | — |
 | `driver` | string | — | restart | one of: sqlite \| mysql \| postgres |
 | `migrate` | string | `auto` | restart | one of: auto \| versioned \| off |
+| `store.strict` | bool | — | restart | — |
+| `store.require_principal` | bool | — | restart | — |
+| `store.max_page_size` | int | — | restart | — |
+| `store.default_page_size` | int | — | restart | — |
 | `sqlite.path` | string | `app.db` | restart | — |
 | `sqlite.max_open_conns` | int | — | restart | — |
 | `sqlite.checkpoint_interval` | duration | `5m` | restart | — |
