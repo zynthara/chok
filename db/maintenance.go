@@ -21,6 +21,12 @@ const maintCloseTimeout = 5 * time.Second
 // still exits on its own once the statement finally returns).
 const maintCloseGrace = time.Second
 
+const (
+	maintenanceOK       = "ok"
+	maintenanceError    = "error"
+	maintenanceDeferred = "deferred"
+)
+
 // sqliteMaintenance is the background caretaker a long-lived process
 // owes an embedded database — the jobs a database server would run
 // for itself:
@@ -55,16 +61,18 @@ type sqliteMaintenance struct {
 	done     chan struct{}
 	stopOnce sync.Once
 
-	// onTick is a test seam: observes every job run and its result.
-	// Set before start; never touched afterwards.
-	onTick func(job string, err error)
+	// onTick observes every job run and its classified result. Production
+	// metrics and tests share the same seam; carrying the explicit result is
+	// necessary because a deferred checkpoint has err == nil.
+	onTick func(job, result string)
 }
 
 // startSQLiteMaintenance launches the loop; nil when both intervals
 // are disabled (nothing to run — no goroutine either).
-func startSQLiteMaintenance(ctx context.Context, h *DB, o *SQLiteOptions, logger kernel.Logger, instance string) *sqliteMaintenance {
+func startSQLiteMaintenance(ctx context.Context, h *DB, o *SQLiteOptions, logger kernel.Logger, instance string, observer func(job, result string)) *sqliteMaintenance {
 	m := newSQLiteMaintenance(ctx, h, o, logger, instance)
 	if m != nil {
+		m.onTick = observer
 		m.start(o)
 	}
 	return m
@@ -157,6 +165,7 @@ func (m *sqliteMaintenance) checkpoint(ctx context.Context) {
 	var busy, logFrames, checkpointed int
 	row := m.h.gdb.WithContext(ctx).Clauses(dbresolver.Write).Raw("PRAGMA wal_checkpoint(TRUNCATE)").Row()
 	err := row.Scan(&busy, &logFrames, &checkpointed)
+	result := maintenanceResult(err, busy == 1)
 	switch {
 	case err != nil:
 		m.logger.Warn("db: sqlite wal checkpoint failed",
@@ -169,17 +178,28 @@ func (m *sqliteMaintenance) checkpoint(ctx context.Context) {
 			"instance", m.instance, "wal_frames", logFrames)
 	}
 	if m.onTick != nil {
-		m.onTick("checkpoint", err)
+		m.onTick("checkpoint", result)
 	}
 }
 
 func (m *sqliteMaintenance) optimize(ctx context.Context) {
 	err := m.h.gdb.WithContext(ctx).Clauses(dbresolver.Write).Exec("PRAGMA optimize").Error
+	result := maintenanceResult(err, false)
 	if err != nil {
 		m.logger.Warn("db: sqlite optimize failed",
 			"instance", m.instance, "error", err)
 	}
 	if m.onTick != nil {
-		m.onTick("optimize", err)
+		m.onTick("optimize", result)
 	}
+}
+
+func maintenanceResult(err error, deferred bool) string {
+	if err != nil {
+		return maintenanceError
+	}
+	if deferred {
+		return maintenanceDeferred
+	}
+	return maintenanceOK
 }

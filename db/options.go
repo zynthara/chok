@@ -30,6 +30,11 @@ type Options struct {
 	//               tables included; operations own DDL entirely
 	Migrate string `mapstructure:"migrate" default:"auto"`
 
+	// MigrationStatusInterval refreshes versioned-migration metrics while
+	// the process is running. The initial post-migrate sample always runs;
+	// 0 disables subsequent refreshes.
+	MigrationStatusInterval time.Duration `mapstructure:"migration_status_interval" default:"30s"`
+
 	// Store is the app-level default posture for every Store built
 	// over this instance's handle (SPEC §5.1; db-layer review #2).
 	Store StorePolicy `mapstructure:"store"`
@@ -188,6 +193,9 @@ func (o *Options) Validate() error {
 	case MigrateAuto, MigrateVersioned, MigrateOff:
 	default:
 		return fmt.Errorf("db: migrate must be one of auto|versioned|off, got %q", o.Migrate)
+	}
+	if o.MigrationStatusInterval < 0 {
+		return fmt.Errorf("db: migration_status_interval must be >= 0 (0 disables periodic refresh), got %s", o.MigrationStatusInterval)
 	}
 	if err := o.Store.validate(); err != nil {
 		return err

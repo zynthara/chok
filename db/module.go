@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/zynthara/chok/v2/kernel"
 )
 
@@ -114,6 +116,11 @@ type Component struct {
 	// both intervals are disabled. Init/Close only — no concurrent
 	// access.
 	maint *sqliteMaintenance
+
+	// metrics is nil when the optional metrics module is absent. migmon
+	// refreshes versioned migration state after the initial Migrate sample.
+	metrics *dbMetrics
+	migmon  *migrationMonitor
 }
 
 // Describe implements kernel.Component.
@@ -127,6 +134,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Needs: []kernel.Dep{
 			{Kind: "log", Optional: true},
 			{Kind: "tracing", Optional: true},
+			{Kind: "metrics", Optional: true},
 		},
 	}
 }
@@ -161,6 +169,19 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 		return fmt.Errorf("db: connectivity check (%s): %w", c.opts.Driver, err)
 	}
 
+	if provider, ok := kernel.Get[interface{ Registry() *prometheus.Registry }](k, "metrics"); ok {
+		m, metricErr := newDBMetrics(provider.Registry(), h, displayInstance(c.instance))
+		c.metrics = m
+		if metricErr != nil {
+			c.logger.Warn("db: metrics registration incomplete",
+				"instance", displayInstance(c.instance), "error", metricErr)
+		}
+		if err := enableQueryMetrics(h.gdb, m); err != nil {
+			c.logger.Warn("db: query metrics callbacks incomplete",
+				"instance", displayInstance(c.instance), "error", err)
+		}
+	}
+
 	// Query tracing rides the tracing module when it is assembled and
 	// enabled — discovery by role interface, never by import (M2
 	// pattern).
@@ -171,7 +192,11 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	// A long-lived process must play the maintenance role a database
 	// server would otherwise own — file-backed sqlite only.
 	if c.opts.Driver == "sqlite" && !sqliteIsMemory(c.opts.SQLite.Path) {
-		c.maint = startSQLiteMaintenance(ctx, h, &c.opts.SQLite, c.logger, displayInstance(c.instance))
+		var observer func(string, string)
+		if c.metrics != nil {
+			observer = c.metrics.observeMaintenance
+		}
+		c.maint = startSQLiteMaintenance(ctx, h, &c.opts.SQLite, c.logger, displayInstance(c.instance), observer)
 	}
 
 	c.handle.Store(h)
@@ -218,6 +243,19 @@ func (c *Component) Migrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if c.metrics != nil {
+			files, loadErr := LoadMigrations(c.migrations)
+			if loadErr != nil {
+				return loadErr // Apply already loaded these; defensive consistency.
+			}
+			c.metrics.setExpectedMigrationVersion(files)
+			if metricErr := c.metrics.observeMigrationStatus(ctx, h, c.migrations); metricErr != nil {
+				c.logger.Warn("db: initial migration metrics sample failed",
+					"instance", displayInstance(c.instance), "error", metricErr)
+			}
+			c.migmon = startMigrationMonitor(ctx, c.opts.MigrationStatusInterval,
+				h, c.migrations, c.metrics, c.logger)
+		}
 		c.logger.Info("db: versioned migrations up to date",
 			"instance", displayInstance(c.instance),
 			"applied_now", len(report.Applied),
@@ -248,18 +286,26 @@ func (c *Component) Health(ctx context.Context) error {
 }
 
 // Close terminates the pool. Idempotent; Health racing Close sees nil.
-// The maintenance loop stops first — within ctx's budget, with a
-// parting PRAGMA optimize when time allows; a stuck statement is
-// interrupted rather than allowed to outlive registry teardown — then
-// the pools go away.
+// Background migration sampling stops first, followed by the maintenance
+// loop — within ctx's budget, with a parting PRAGMA optimize when time
+// allows; a stuck statement is interrupted rather than allowed to outlive
+// registry teardown — then metrics detach and the pools go away.
 func (c *Component) Close(ctx context.Context) error {
 	h := c.handle.Swap(nil)
 	if h == nil {
 		return nil
 	}
+	if c.migmon != nil {
+		c.migmon.close(ctx)
+		c.migmon = nil
+	}
 	if c.maint != nil {
 		c.maint.close(ctx)
 		c.maint = nil
+	}
+	if c.metrics != nil {
+		c.metrics.close()
+		c.metrics = nil
 	}
 	return h.Close()
 }

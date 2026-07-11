@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/zynthara/chok/v2/internal/ctxval"
+	"github.com/zynthara/chok/v2/internal/promutil"
 )
 
 // Metrics returns a middleware that instruments HTTP requests with
@@ -44,9 +45,9 @@ func Metrics(reg prometheus.Registerer) func(http.Handler) http.Handler {
 		Help: "Number of HTTP requests currently being processed.",
 	})
 
-	requestsTotal = registerOrReuseCounterVec(reg, requestsTotal)
-	requestDuration = registerOrReuseHistogramVec(reg, requestDuration)
-	requestsInFlight = registerOrReuseGauge(reg, requestsInFlight)
+	requestsTotal, _ = promutil.RegisterOrReuseCounterVec(reg, requestsTotal)
+	requestDuration, _ = promutil.RegisterOrReuseHistogramVec(reg, requestDuration)
+	requestsInFlight, _ = promutil.RegisterOrReuseGauge(reg, requestsInFlight)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,43 +70,4 @@ func Metrics(reg prometheus.Registerer) func(http.Handler) http.Handler {
 			requestDuration.WithLabelValues(method, path).Observe(elapsed)
 		})
 	}
-}
-
-// registerOrReuseCounterVec registers cv with reg. On
-// AlreadyRegisteredError it returns the existing collector so writes
-// reach the same instance that's being scraped. Returns the input on
-// success, the existing one on collision, or cv (unregistered) if an
-// unexpected error occurs — in the last case the middleware still
-// functions but the metric is not exported.
-func registerOrReuseCounterVec(reg prometheus.Registerer, cv *prometheus.CounterVec) *prometheus.CounterVec {
-	if err := reg.Register(cv); err != nil {
-		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
-			if existing, ok := are.ExistingCollector.(*prometheus.CounterVec); ok {
-				return existing
-			}
-		}
-	}
-	return cv
-}
-
-func registerOrReuseHistogramVec(reg prometheus.Registerer, hv *prometheus.HistogramVec) *prometheus.HistogramVec {
-	if err := reg.Register(hv); err != nil {
-		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
-			if existing, ok := are.ExistingCollector.(*prometheus.HistogramVec); ok {
-				return existing
-			}
-		}
-	}
-	return hv
-}
-
-func registerOrReuseGauge(reg prometheus.Registerer, g prometheus.Gauge) prometheus.Gauge {
-	if err := reg.Register(g); err != nil {
-		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
-			if existing, ok := are.ExistingCollector.(prometheus.Gauge); ok {
-				return existing
-			}
-		}
-	}
-	return g
 }

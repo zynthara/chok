@@ -154,7 +154,7 @@ generated from the source of truth — `chok docs gen` keeps it honest.
 | `debug.Module()` | `debug` | — | mount | false | /componentz topology and lifecycle-event dump (off by default). |
 | `swagger.Module()` | `swagger` | http | mount | true | OpenAPI 3 spec generated from the route table + Swagger UI. |
 | `tracing.Module()` | `tracing` | — | — | false | OpenTelemetry tracer provider (stdout/OTLP exporters). |
-| `db.Module()` | `db` | log?, tracing? | health, migrate | true | Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off); sqlite runs the pure-Go split-pool production shape. |
+| `db.Module()` | `db` | log?, tracing?, metrics? | health, migrate | true | Database pool (sqlite/mysql/postgres) + migrations (auto/versioned/off); sqlite runs the pure-Go split-pool production shape. |
 | `redis.Module()` | `redis` | log? | health | true | go-redis client with TLS/CA support; health probe. |
 | `cache.Module()` | `cache` | redis?, log? | — | true | Layered cache: otter memory + redis + circuit breaker. |
 | `scheduler.Module()` | `scheduler` | log? | health, serve | true | robfig cron with panic-safety, overlap policies and stats. |

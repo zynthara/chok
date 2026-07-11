@@ -145,7 +145,7 @@ yaml 段，跑 `chok sync`，完事。
 | `debug.Module()` | `debug` | — | mount | false | /componentz 拓扑与生命周期事件视图（默认关闭）。 |
 | `swagger.Module()` | `swagger` | http | mount | true | 由路由表生成 OpenAPI 3 spec + Swagger UI。 |
 | `tracing.Module()` | `tracing` | — | — | false | OpenTelemetry tracer provider（stdout/OTLP 导出）。 |
-| `db.Module()` | `db` | log?, tracing? | health, migrate | true | 数据库连接池（sqlite/mysql/postgres）+ 迁移（auto/versioned/off）。sqlite 为纯 Go 驱动 + 读写分池 + 内建维护循环（§7.5）。 |
+| `db.Module()` | `db` | log?, tracing?, metrics? | health, migrate | true | 数据库连接池（sqlite/mysql/postgres）+ 迁移（auto/versioned/off）。sqlite 为纯 Go 驱动 + 读写分池 + 内建维护循环（§7.5）。 |
 | `redis.Module()` | `redis` | log? | health | true | go-redis 客户端（TLS/CA 支持）；健康探针。 |
 | `cache.Module()` | `cache` | redis?, log? | — | true | 分层缓存：otter 内存层 + redis 层 + 熔断器。 |
 | `scheduler.Module()` | `scheduler` | log? | health, serve | true | robfig cron（panic 防护、重叠策略、统计）。 |

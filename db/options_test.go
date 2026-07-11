@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zynthara/chok/v2/conf"
 )
@@ -24,6 +25,7 @@ func TestOptions_Validate(t *testing.T) {
 		{"empty driver", func(o *Options) { o.Driver = "" }, "driver must be set"},
 		{"unknown driver", func(o *Options) { o.Driver = "oracle" }, "unsupported driver"},
 		{"bad migrate mode", func(o *Options) { o.Migrate = "sometimes" }, "migrate must be one of"},
+		{"negative migration status interval", func(o *Options) { o.MigrationStatusInterval = -time.Second }, "migration_status_interval must be >= 0"},
 		{"sqlite empty path", func(o *Options) { o.SQLite.Path = "" }, "path must not be empty"},
 		{"mysql missing host", func(o *Options) {
 			o.Driver = "mysql"

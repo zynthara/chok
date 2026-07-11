@@ -27,26 +27,24 @@ func (nopKernelLogger) ErrorContext(context.Context, string, ...any) {}
 type tickRecorder struct {
 	mu   sync.Mutex
 	runs map[string]int
-	errs map[string]error
+	last map[string]string
 }
 
 func newTickRecorder() *tickRecorder {
-	return &tickRecorder{runs: map[string]int{}, errs: map[string]error{}}
+	return &tickRecorder{runs: map[string]int{}, last: map[string]string{}}
 }
 
-func (r *tickRecorder) record(job string, err error) {
+func (r *tickRecorder) record(job, result string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.runs[job]++
-	if err != nil {
-		r.errs[job] = err
-	}
+	r.last[job] = result
 }
 
-func (r *tickRecorder) snapshot(job string) (int, error) {
+func (r *tickRecorder) snapshot(job string) (int, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.runs[job], r.errs[job]
+	return r.runs[job], r.last[job]
 }
 
 // TestSQLiteMaintenance_CheckpointTruncatesWAL: the periodic
@@ -85,9 +83,9 @@ func TestSQLiteMaintenance_CheckpointTruncatesWAL(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if n, err := rec.snapshot("checkpoint"); n >= 2 {
-			if err != nil {
-				t.Fatalf("checkpoint reported an error: %v", err)
+		if n, result := rec.snapshot("checkpoint"); n >= 2 {
+			if result != maintenanceOK {
+				t.Fatalf("checkpoint result = %q, want %q", result, maintenanceOK)
 			}
 			break
 		}
@@ -126,8 +124,8 @@ func TestSQLiteMaintenance_CloseStopsLoopAndRunsPartingOptimize(t *testing.T) {
 	default:
 		t.Fatal("close must not return before the loop exited")
 	}
-	if n, err := rec.snapshot("optimize"); n != 1 || err != nil {
-		t.Fatalf("parting optimize: runs=%d err=%v, want exactly one clean run", n, err)
+	if n, result := rec.snapshot("optimize"); n != 1 || result != maintenanceOK {
+		t.Fatalf("parting optimize: runs=%d result=%q, want exactly one clean run", n, result)
 	}
 	m.close(ctx) // second close must be a no-op, not a panic
 	if n, _ := rec.snapshot("optimize"); n != 1 {
@@ -143,7 +141,7 @@ func TestStartSQLiteMaintenance_DisabledReturnsNil(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
-	if m := startSQLiteMaintenance(context.Background(), h, &SQLiteOptions{}, nopKernelLogger{}, "default"); m != nil {
+	if m := startSQLiteMaintenance(context.Background(), h, &SQLiteOptions{}, nopKernelLogger{}, "default", nil); m != nil {
 		t.Fatal("disabled maintenance must not start")
 	}
 }
@@ -166,7 +164,7 @@ func TestSQLiteMaintenance_CloseAbandonsOverrunningJob(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	m.onTick = func(string, error) {
+	m.onTick = func(string, string) {
 		once.Do(func() { close(entered) })
 		<-release
 	}
@@ -246,10 +244,19 @@ func TestSQLiteMaintenance_JobsHonorContext(t *testing.T) {
 	cancel()
 	m.checkpoint(cancelled)
 	m.optimize(cancelled)
-	if _, err := rec.snapshot("checkpoint"); err == nil {
+	if _, result := rec.snapshot("checkpoint"); result != maintenanceError {
 		t.Fatal("checkpoint ignored its cancelled context")
 	}
-	if _, err := rec.snapshot("optimize"); err == nil {
+	if _, result := rec.snapshot("optimize"); result != maintenanceError {
 		t.Fatal("optimize ignored its cancelled context")
+	}
+}
+
+func TestMaintenanceResult_DeferredIsNotOK(t *testing.T) {
+	if got := maintenanceResult(nil, true); got != maintenanceDeferred {
+		t.Fatalf("deferred checkpoint classified as %q", got)
+	}
+	if got := maintenanceResult(context.Canceled, true); got != maintenanceError {
+		t.Fatalf("errors must win over deferred, got %q", got)
 	}
 }

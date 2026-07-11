@@ -101,6 +101,7 @@ Named instances: sections marked *multi-instance* accept an
 | `enabled` | bool | `true` | restart | — |
 | `driver` | string | — | restart | one of: sqlite \| mysql \| postgres |
 | `migrate` | string | `auto` | restart | one of: auto \| versioned \| off |
+| `migration_status_interval` | duration | `30s` | restart | — |
 | `store.strict` | bool | — | restart | — |
 | `store.require_principal` | bool | — | restart | — |
 | `store.max_page_size` | int | — | restart | — |

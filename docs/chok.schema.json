@@ -404,6 +404,14 @@
                   "off"
                 ]
               },
+              "migration_status_interval": {
+                "default": "30s",
+                "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              },
               "mysql": {
                 "additionalProperties": false,
                 "properties": {
@@ -579,6 +587,14 @@
             "auto",
             "versioned",
             "off"
+          ]
+        },
+        "migration_status_interval": {
+          "default": "30s",
+          "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+          "type": [
+            "string",
+            "integer"
           ]
         },
         "mysql": {

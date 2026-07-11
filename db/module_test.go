@@ -8,6 +8,8 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/conf"
 	"github.com/zynthara/chok/v2/db"
@@ -22,6 +24,19 @@ type Widget struct {
 	db.Model
 	Label string `json:"label" gorm:"size:100"`
 }
+
+type metricsProvider struct{ registry *prometheus.Registry }
+
+func newMetricsProvider() *metricsProvider {
+	return &metricsProvider{registry: prometheus.NewRegistry()}
+}
+
+func (m *metricsProvider) Describe() kernel.Descriptor {
+	return kernel.Descriptor{Kind: "metrics"}
+}
+func (m *metricsProvider) Init(context.Context, kernel.Kernel) error { return nil }
+func (m *metricsProvider) Close(context.Context) error               { return nil }
+func (m *metricsProvider) Registry() *prometheus.Registry            { return m.registry }
 
 func (Widget) RIDPrefix() string { return "wgt" }
 
@@ -55,6 +70,36 @@ func TestModule_AutoMigratesAndServesHandle(t *testing.T) {
 	// Healther contract: bounded ping.
 	if err := c.Health(ctx); err != nil {
 		t.Fatalf("Health on a live pool: %v", err)
+	}
+}
+
+func TestModule_WiresOptionalRuntimeMetrics(t *testing.T) {
+	provider := newMetricsProvider()
+	tk := choktest.NewTestKernel(t, sqliteAutoYAML,
+		provider,
+		db.Module(db.WithTables(db.Table(&Widget{}))),
+	)
+	if err := db.From(tk).Unsafe(context.Background()).Create(&Widget{Label: "observed"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	families, err := provider.registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"db_query_duration_seconds": false,
+		"db_pool_connections":       false,
+	}
+	for _, family := range families {
+		if _, ok := want[family.GetName()]; ok {
+			want[family.GetName()] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Fatalf("module did not export %s through the optional metrics provider", name)
+		}
 	}
 }
 
