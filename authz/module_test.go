@@ -126,6 +126,27 @@ func TestModule_GrantAndAuthorize_FailClosedDefault(t *testing.T) {
 	}
 }
 
+func TestModule_ReadOnlyDBFailsFast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authz-readonly.db")
+	h, err := db.Open(db.Options{Driver: "sqlite", SQLite: db.SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Ping(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close()
+	_, err = choktest.StartKernel(t, fmt.Sprintf(`
+db:
+  driver: sqlite
+  read_only: true
+  sqlite: {path: %q}
+`, path), db.Module(), authz.Module())
+	if err == nil || !strings.Contains(err.Error(), "authz requires a writable database") {
+		t.Fatalf("want authz read-only fail-fast, got %v", err)
+	}
+}
+
 func TestModule_CasbinRuleCreatedAtMigratePhase(t *testing.T) {
 	component := authz.Module()
 	tk := choktest.NewTestKernel(t, sqliteYAML, db.Module(), component)

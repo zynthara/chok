@@ -338,7 +338,8 @@ db:
 - **只读实例**：`read_only: true` 将有效 migrate 模式强制为 off；
   `RunInTx` / `Migrate` / store 写返回 `db.ErrReadOnly`，raw GORM 写由最前置
   callback 拒绝。SQLite 使用 `mode=ro`，PG/MySQL 设置 session 只读默认；
-  数据库只读账号/物理副本仍是防恶意绕过的最终权限边界。
+  数据库只读账号/物理副本仍是防恶意绕过的最终权限边界。account/audit/
+  authz 依赖运行期写表，绑定只读默认实例时 Init fail-fast。
 
 ### 7.5 SQLite 单机生产形态
 

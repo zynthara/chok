@@ -3,8 +3,10 @@ package audit_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +97,29 @@ audit:
 	ac, _ := kernel.Get[*audit.Component](tk, "audit")
 	if err := ac.LogEventSync(context.Background(), "x", "y", audit.ResultSuccess, nil); err == nil {
 		t.Fatal("synchronous write against a missing table should error")
+	}
+}
+
+func TestModule_ReadOnlyDBFailsFast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit-readonly.db")
+	h, err := db.Open(db.Options{Driver: "sqlite", SQLite: db.SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Ping(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close()
+	_, err = choktest.StartKernel(t, fmt.Sprintf(`
+db:
+  driver: sqlite
+  read_only: true
+  sqlite: {path: %q}
+audit:
+  enabled: true
+`, path), db.Module(), audit.Module())
+	if err == nil || !strings.Contains(err.Error(), "audit requires a writable database") {
+		t.Fatalf("want audit read-only fail-fast, got %v", err)
 	}
 }
 

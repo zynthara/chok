@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -92,6 +93,29 @@ account:
 	gdb := db.From(tk).Unsafe(t.Context())
 	if gdb.Migrator().HasTable("users") || gdb.Migrator().HasTable("identities") {
 		t.Fatal("migrate off must leave the account schema untouched")
+	}
+}
+
+func TestModule_ReadOnlyDBFailsFast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "account-readonly.db")
+	h, err := db.Open(db.Options{Driver: "sqlite", SQLite: db.SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Ping(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close()
+	_, err = choktest.StartKernel(t, fmt.Sprintf(`
+db:
+  driver: sqlite
+  read_only: true
+  sqlite: {path: %q}
+account:
+  signing_key: this-is-a-test-signing-key-32bytes!
+`, path), db.Module(), account.Module())
+	if err == nil || !strings.Contains(err.Error(), "account requires a writable database") {
+		t.Fatalf("want account read-only fail-fast, got %v", err)
 	}
 }
 

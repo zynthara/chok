@@ -126,6 +126,9 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	if c.h == nil {
 		return fmt.Errorf("authz: db handle not initialised")
 	}
+	if c.h.ReadOnly() {
+		return fmt.Errorf("authz: db instance is read_only — authz requires a writable database")
+	}
 	c.mode = dbc.MigrateMode()
 
 	if c.opts.Casbin.RedisWatcher {

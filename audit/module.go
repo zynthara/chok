@@ -87,6 +87,9 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	if c.h == nil {
 		return fmt.Errorf("audit: db handle not initialised")
 	}
+	if c.h.ReadOnly() {
+		return fmt.Errorf("audit: db instance is read_only — audit requires a writable database")
+	}
 	c.mode = dbc.MigrateMode()
 
 	// The sink worker outlives Init (Registry cancels the Init ctx on

@@ -92,6 +92,9 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	if c.h == nil {
 		return fmt.Errorf("account: db handle not initialised")
 	}
+	if c.h.ReadOnly() {
+		return fmt.Errorf("account: db instance is read_only — account requires a writable database")
+	}
 	c.mode = dbc.MigrateMode()
 
 	modOpts := c.optionsFromConfig()
