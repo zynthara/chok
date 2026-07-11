@@ -429,6 +429,7 @@ db:
   instances:
     analytics:
       driver: postgres
+      read_only: true
       postgres: { dsn: "postgres://.../olap" }
 ```
 
@@ -439,6 +440,16 @@ main := db.From(k)                 // 默认实例
 olap := db.From(k, "analytics")    // 具名实例
 ```
 
+`read_only: true` 是实例能力而不只是命名：有效迁移模式强制为 `off`，
+`RunInTx` / `Migrate` 返回 `db.ErrReadOnly`；只读句柄不会加入其他实例
+放进 context 的事务。
+
+`Unsafe` 仍可作复杂查询，但只放行以 `SELECT` 开头且不带行锁的 raw SQL；
+`WITH`、`FOR UPDATE` 和全部 ORM/Exec 写在 GORM callback 层拒绝。SQLite
+还用 `mode=ro` 打开文件；Postgres/MySQL 为每条新连接设置只读 session
+默认。应用层判定用于防误用，**数据库只读账号或物理副本才是权限边界**。
+需要同一 DSN 的管理写时，装配另一个可写具名实例，而不是运行时开逃逸门。
+
 ---
 
 ## 10. 逃生门(危险区)
@@ -447,8 +458,8 @@ raw gorm 只有两扇门,**都叫 Unsafe**,选哪扇看你要不要租户语义:
 
 | 门 | 事务感知 | scope | 用途 |
 |---|---|---|---|
-| `Store.Unsafe(ctx)` | ✅ | ✅ 已应用,scope 失败 fail-closed | store DSL 写不出的 SQL,但 owner/租户过滤必须保持 |
-| `(*db.DB).Unsafe(ctx)` | ✅ | ❌ 无 | 基建层:外形表 AutoMigrate、事务内行锁 |
+| `Store.Unsafe(ctx)` | ✅（仅同句柄事务） | ✅ 已应用,scope 失败 fail-closed | store DSL 写不出的 SQL,但 owner/租户过滤必须保持 |
+| `(*db.DB).Unsafe(ctx)` | ✅（仅同句柄事务） | ❌ 无 | 基建层:外形表 AutoMigrate、事务内行锁 |
 
 ```go
 gdb, err := posts.Unsafe(ctx)      // 注意:会返回 error(scope 解析失败即拒)

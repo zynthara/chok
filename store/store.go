@@ -747,7 +747,7 @@ func (s *Store[T]) BatchCreate(ctx context.Context, objs []*T) error {
 	// transaction. Otherwise open one so a mid-batch failure rolls the
 	// whole batch back (v1 semantics).
 	var err error
-	if txctx.DB(ctx) != nil || s.txDB != nil {
+	if txctx.DB(ctx, s.h) != nil || s.txDB != nil {
 		err = s.effectiveDB(ctx).CreateInBatches(objs, 100).Error
 	} else {
 		err = s.h.RunInTx(ctx, func(txCtx context.Context) error {
@@ -998,11 +998,11 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 // transaction no matter which context they are called with, and its
 // WithBus events stage on the transaction's after-commit buffer.
 //
-// If a context-scoped transaction is already active (via db.RunInTx),
-// Tx reuses it instead of opening a nested transaction. Cross-store
-// atomic writes are context propagation's job: inside a db.RunInTx
-// callback, call any store with txCtx and it joins the same
-// transaction — v1's WithTx wiring is gone (SPEC §5.1).
+// If a context-scoped transaction owned by this Store's database handle is
+// already active (via db.RunInTx), Tx reuses it instead of opening a nested
+// transaction. Cross-store atomic writes on the same handle are context
+// propagation's job: inside a db.RunInTx callback, call those stores with
+// txCtx and they join the same transaction. Transactions never cross handles.
 func (s *Store[T]) Tx(ctx context.Context, fn func(tx *Store[T]) error) error {
 	return db.RunInTx(ctx, s.h, func(txCtx context.Context) error {
 		return fn(s.txClone(txCtx))
@@ -1010,7 +1010,7 @@ func (s *Store[T]) Tx(ctx context.Context, fn func(tx *Store[T]) error) error {
 }
 
 // Unsafe returns a raw *gorm.DB — transaction-aware (context
-// transaction first, then a Tx clone's binding, then the root pool)
+// same-handle context transaction first, then a Tx clone's binding, then the root pool)
 // with WithContext(ctx) and every registered scope (auto-detected
 // OwnerScope included) applied. It replaces v1's DB()/ScopedDB() pair
 // as the single escape hatch (SPEC §5.2); the name is the warning:
@@ -1037,7 +1037,7 @@ func (s *Store[T]) Unsafe(ctx context.Context) (*gorm.DB, error) {
 // requirePrincipal was one such drift bug in v1 review round 6).
 func (s *Store[T]) txClone(txCtx context.Context) *Store[T] {
 	cp := *s
-	cp.txDB = txctx.DB(txCtx)
+	cp.txDB = txctx.DB(txCtx, s.h)
 	cp.txCtx = txCtx
 	return &cp
 }
@@ -1048,7 +1048,7 @@ func (s *Store[T]) txClone(txCtx context.Context) *Store[T] {
 // the root pool. The ordering matches v1: an explicit transactional
 // context always wins.
 func (s *Store[T]) effectiveDB(ctx context.Context) *gorm.DB {
-	if tx := txctx.DB(ctx); tx != nil {
+	if tx := txctx.DB(ctx, s.h); tx != nil {
 		return tx.WithContext(ctx)
 	}
 	if s.txDB != nil {

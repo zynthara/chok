@@ -16,6 +16,10 @@ import (
 type Options struct {
 	Enabled bool `mapstructure:"enabled" default:"true"`
 
+	// ReadOnly removes schema and write capabilities from this instance.
+	// The zero value preserves the historical read/write behaviour.
+	ReadOnly bool `mapstructure:"read_only"`
+
 	// Driver selects the blessed backend: sqlite | mysql | postgres.
 	Driver string `mapstructure:"driver"`
 
@@ -200,6 +204,9 @@ func (o *Options) Validate() error {
 	default:
 		return fmt.Errorf("db: migrate must be one of auto|versioned|off, got %q", o.Migrate)
 	}
+	if o.ReadOnly && o.Migrate == MigrateVersioned {
+		return fmt.Errorf("db: read_only cannot be combined with migrate: versioned; use migrate: off")
+	}
 	if o.SlowThreshold < 0 {
 		return fmt.Errorf("db: slow_threshold must be >= 0 (0 disables slow-query logs), got %s", o.SlowThreshold)
 	}
@@ -222,6 +229,9 @@ func (o *Options) Validate() error {
 		}
 		if o.SQLite.OptimizeInterval < 0 {
 			return fmt.Errorf("db: sqlite: optimize_interval must be >= 0 (0 disables), got %s", o.SQLite.OptimizeInterval)
+		}
+		if o.ReadOnly && sqliteIsMemory(o.SQLite.Path) {
+			return fmt.Errorf("db: sqlite: read_only requires a file database; an in-memory database is always empty")
 		}
 		return nil
 	case "mysql":

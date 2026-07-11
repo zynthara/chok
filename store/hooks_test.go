@@ -430,6 +430,45 @@ func TestWithBus_RunInTxContextPropagation(t *testing.T) {
 	}
 }
 
+// TestWithBus_ForeignHandleTx_PublishesImmediately pins the event side
+// of transaction handle affinity: a store bound to handle B, called
+// inside handle A's RunInTx, writes on B's own pool (autocommit) — so
+// its event must publish immediately instead of staging on A's buffer,
+// where A's rollback would drop the event of a committed write.
+func TestWithBus_ForeignHandleTx_PublishesImmediately(t *testing.T) {
+	ctx := context.Background()
+	a := setupHookDB(t)
+	b := setupHookDB(t)
+	if err := b.Migrate(ctx, db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+	bus, seen := busAndLog(t)
+	sb := New[Item](b, log.Empty(),
+		WithQueryFields("id", "code"),
+		WithBus(bus),
+	)
+
+	boom := errors.New("boom")
+	err := a.RunInTx(ctx, func(txCtx context.Context) error {
+		if err := sb.Create(txCtx, &Item{Code: "FOREIGN"}); err != nil {
+			return err
+		}
+		if len(*seen) != 1 {
+			t.Errorf("write outside A's tx must publish immediately, got %+v", *seen)
+		}
+		return boom // roll A back — B's committed write keeps its event
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected rollback error, got %v", err)
+	}
+	if n, err := sb.Count(ctx); err != nil || n != 1 {
+		t.Fatalf("write must have committed on B, n=%d err=%v", n, err)
+	}
+	if len(*seen) != 1 || (*seen)[0].Object.Code != "FOREIGN" {
+		t.Fatalf("foreign rollback must not drop the committed write's event, got %+v", *seen)
+	}
+}
+
 // Without WithBus the store publishes nothing — opt-in means opt-in.
 func TestWithBus_NotConfigured_NoPublish(t *testing.T) {
 	gdb := setupHookDB(t)

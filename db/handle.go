@@ -19,6 +19,8 @@ import (
 type DB struct {
 	gdb *gorm.DB
 
+	readOnly bool
+
 	// readPool is the sqlite read pool when the file-database
 	// read/write split is active (nil otherwise — memory sqlite and
 	// the network drivers). dbresolver owns the routing; the handle
@@ -36,6 +38,9 @@ type DB struct {
 // for every knob the construction site leaves unset; the zero value
 // leaves store behaviour exactly as documented on store.New.
 func (h *DB) StorePolicy() StorePolicy { return h.storePolicy }
+
+// ReadOnly reports whether this handle was opened with read_only: true.
+func (h *DB) ReadOnly() bool { return h.readOnly }
 
 // Open builds a handle from Options — the same constructor the db
 // module uses at Init. Library-level use (tests, tools, kernel-less
@@ -55,21 +60,33 @@ func Open(opts Options) (*DB, error) {
 	if err := o.Validate(); err != nil {
 		return nil, err
 	}
+	if o.ReadOnly {
+		o.Migrate = MigrateOff
+	}
 	gdb, readPool, err := openGorm(&o)
 	if err != nil {
 		return nil, err
 	}
-	return &DB{gdb: gdb, readPool: readPool, storePolicy: o.Store}, nil
+	if err := registerReadOnlyCallbacks(gdb, o.ReadOnly); err != nil {
+		_ = Close(gdb)
+		if readPool != nil {
+			_ = readPool.Close()
+		}
+		return nil, fmt.Errorf("db: install read-only guards: %w", err)
+	}
+	return &DB{gdb: gdb, readOnly: o.ReadOnly, readPool: readPool, storePolicy: o.Store}, nil
 }
 
 // Unsafe returns the effective raw gorm handle: the context's
-// transaction when one is active (RunInTx), the root pool otherwise,
-// WithContext applied either way. It is the only sanctioned way to
+// transaction owned by this handle when one is active (RunInTx), the root
+// pool otherwise, WithContext applied either way. Transactions from another
+// database handle are deliberately ignored. It is the only sanctioned way to
 // reach gorm from application code — the name is the warning: nothing
 // above this line (whitelists, scopes, owner enforcement) applies to
-// what you do with it.
+// what you do with it. On a read-only handle, write callbacks still reject
+// GORM writes; database credentials/driver mode are the final raw-SQL guard.
 func (h *DB) Unsafe(ctx context.Context) *gorm.DB {
-	if tx := txctx.DB(ctx); tx != nil {
+	if tx := txctx.DB(ctx, h); tx != nil {
 		return tx.WithContext(ctx)
 	}
 	return h.gdb.WithContext(ctx)
@@ -88,6 +105,9 @@ func (h *DB) RunInTx(ctx context.Context, fn func(txCtx context.Context) error) 
 // Versioned/off scheduling is the module's job; this method always
 // migrates what it is given.
 func (h *DB) Migrate(ctx context.Context, specs ...TableSpec) error {
+	if h.readOnly {
+		return ErrReadOnly
+	}
 	return Migrate(ctx, h.gdb, specs...)
 }
 

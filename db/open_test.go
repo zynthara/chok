@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -20,6 +21,9 @@ import (
 	"time"
 
 	gomysql "github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
+
+	"github.com/zynthara/chok/v2/db/internal/testlane"
 )
 
 // writeTestCA writes a self-signed CA certificate PEM and returns its
@@ -108,7 +112,41 @@ func TestMySQLTLSConfig_BadCA(t *testing.T) {
 	}
 }
 
+func TestReadOnly_DriverSessionDefaults(t *testing.T) {
+	mysqlCfg := mysqlDriverConfig(&MySQLOptions{Host: "h", Port: 3306, Database: "d"}, "", true)
+	if mysqlCfg.Params["transaction_read_only"] != "1" {
+		t.Fatalf("mysql read-only session default missing: %#v", mysqlCfg.Params)
+	}
+	for name, dsn := range map[string]string{
+		"url":     "postgres://u:p@localhost/d?sslmode=disable",
+		"keyword": "host='localhost' user='u' password='p' dbname='d' sslmode='disable'",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := postgresConnConfig(dsn, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.RuntimeParams["default_transaction_read_only"] != "on" {
+				t.Fatalf("postgres read-only runtime param missing: %#v", cfg.RuntimeParams)
+			}
+		})
+	}
+}
+
 var errAbort = errors.New("abort")
+
+type readOnlyHookItem struct {
+	Model
+	Code    string
+	HookRan *bool `gorm:"-"`
+}
+
+func (readOnlyHookItem) RIDPrefix() string { return "roh" }
+
+func (i *readOnlyHookItem) BeforeCreate(*gorm.DB) error {
+	*i.HookRan = true
+	return nil
+}
 
 func TestOpen_SQLiteHandleWorks(t *testing.T) {
 	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: ":memory:"}})
@@ -153,6 +191,177 @@ func TestOpen_ValidatesFirst(t *testing.T) {
 	}
 	if _, err := Open(Options{Driver: "oracle"}); err == nil {
 		t.Fatal("Open must reject unknown drivers")
+	}
+}
+
+func TestReadOnly_SQLiteGuardsEveryWritePath(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "readonly.db")
+	writable, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writable.Migrate(ctx, Table(&TestItem{})); err != nil {
+		t.Fatal(err)
+	}
+	if err := writable.Unsafe(ctx).Create(&TestItem{Code: "seed"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := Open(Options{Driver: "sqlite", ReadOnly: true, SQLite: SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	if !ro.ReadOnly() {
+		t.Fatal("ReadOnly must report configured capability")
+	}
+	hookRan := false
+	if err := ro.Unsafe(ctx).Create(&readOnlyHookItem{Code: "hook", HookRan: &hookRan}).Error; !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("hooked create: want ErrReadOnly, got %v", err)
+	}
+	if hookRan {
+		t.Fatal("read-only callback must run before GORM model hooks")
+	}
+	var count int64
+	if err := ro.Unsafe(ctx).Model(&TestItem{}).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("read query: count=%d err=%v", count, err)
+	}
+	for name, err := range map[string]error{
+		"create":     ro.Unsafe(ctx).Create(&TestItem{Code: "blocked"}).Error,
+		"exec":       ro.Unsafe(ctx).Exec("INSERT INTO test_items (code) VALUES ('blocked')").Error,
+		"raw insert": ro.Unsafe(ctx).Raw("INSERT INTO test_items (code) VALUES ('blocked') RETURNING id").Scan(&struct{ ID uint }{}).Error,
+		"with write": ro.Unsafe(ctx).Raw("WITH x AS (SELECT 1) DELETE FROM test_items RETURNING id").Scan(&struct{ ID uint }{}).Error,
+		"locking":    ro.Unsafe(ctx).Raw("SELECT * FROM test_items FOR UPDATE").Scan(&[]TestItem{}).Error,
+		"transaction": ro.RunInTx(ctx, func(context.Context) error {
+			return nil
+		}),
+		"migrate": ro.Migrate(ctx, Table(&TestItem{})),
+	} {
+		if !errors.Is(err, ErrReadOnly) {
+			t.Errorf("%s: want ErrReadOnly, got %v", name, err)
+		}
+	}
+
+	sqlDB, err := ro.gdb.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA query_only=OFF"); err != nil {
+		t.Fatalf("disabling soft query_only guard should be allowed so mode=ro is tested: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "INSERT INTO test_items (code) VALUES ('raw-bypass')"); err == nil {
+		t.Fatal("mode=ro must reject writes even after query_only is disabled")
+	}
+}
+
+func TestReadOnly_ForeignTransactionDoesNotReplaceHandle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "affinity.db")
+	writable, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writable.Close() })
+	if err := writable.Migrate(ctx, Table(&TestItem{})); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := Open(Options{Driver: "sqlite", ReadOnly: true, SQLite: SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	err = writable.RunInTx(ctx, func(txCtx context.Context) error {
+		var n int64
+		if err := ro.Unsafe(txCtx).Model(&TestItem{}).Count(&n).Error; err != nil {
+			return err
+		}
+		return ro.Unsafe(txCtx).Create(&TestItem{Code: "must-not-hit-primary"}).Error
+	})
+	if !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("foreign writable tx must not bypass read-only handle, got %v", err)
+	}
+}
+
+func TestReadOnly_PostgresDriverBackstop(t *testing.T) {
+	if testlane.Driver() != "postgres" {
+		t.Skip("Postgres lane only")
+	}
+	ctx := context.Background()
+	dsn := testlane.PostgresDSN(t)
+	writable, err := Open(Options{Driver: "postgres", Postgres: PostgresOptions{DSN: dsn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writable.Close() })
+	if err := writable.Migrate(ctx, Table(&TestItem{})); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := Open(Options{Driver: "postgres", ReadOnly: true, Postgres: PostgresOptions{DSN: dsn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	sqlDB, err := ro.gdb.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, "INSERT INTO test_items (code) VALUES ('driver-bypass')"); err == nil {
+		t.Fatal("Postgres startup runtime parameter must reject naked database/sql writes")
+	}
+}
+
+func TestReadOnly_MySQLDriverBackstop(t *testing.T) {
+	dsn := os.Getenv("CHOK_TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("CHOK_TEST_MYSQL_DSN is unset")
+	}
+	cfg, err := gomysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	table := fmt.Sprintf("chok_readonly_%d", time.Now().UnixNano())
+	if _, err := admin.Exec("CREATE TABLE " + table + " (id BIGINT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = admin.Exec("DROP TABLE IF EXISTS " + table) })
+
+	roCfg := cfg.Clone()
+	if roCfg.Params == nil {
+		roCfg.Params = make(map[string]string)
+	}
+	roCfg.Params["transaction_read_only"] = "1"
+	ro, err := sql.Open("mysql", roCfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	if err := ro.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ro.Exec("INSERT INTO " + table + " (id) VALUES (1)"); err == nil {
+		t.Fatal("MySQL transaction_read_only session default must reject naked database/sql writes")
+	}
+}
+
+func TestSQLiteReadOnlyDSN_RejectsWritableMode(t *testing.T) {
+	if _, err := sqliteReadOnlyDSN("file:test.db?mode=rwc"); err == nil {
+		t.Fatal("read_only must reject a conflicting writable SQLite mode")
 	}
 }
 

@@ -79,7 +79,8 @@ func main() {
   用户巨型 Config 结构体。
 - **多实例**按 `(kind, instance)` 二元组注册：yaml 用段内保留子键
   `instances.<name>`（如 `db.instances.read`），代码侧
-  `db.Module(db.As("read"))`，访问 `db.From(k, "read")`。
+  `db.Module(db.As("read"))`，访问 `db.From(k, "read")`。实例配置
+  `read_only: true` 会移除事务、迁移和写能力，而非只靠命名约定。
 
 ## 4. 内核（`kernel/`）
 
@@ -248,14 +249,15 @@ raw SQL 恰有两扇门，名字即警示（M5 §5.2 复评定案）：
 | `Store.Unsafe(ctx)` | tx-aware + **scope 已应用** + scope 失败 fail-closed | store DSL 表达不了、但租户/属主语义必须保持的 SQL |
 | `(*db.DB).Unsafe(ctx)` | tx-aware + 无 scope | 基建层：外形表 AutoMigrate、事务内行锁 |
 
-`db.InTx(ctx) bool` 提供无句柄的事务内省；事务上下文的 gorm 载体
-在 `internal/txctx`，用户代码拿不到。
+`db.InTx(ctx) bool` 提供无句柄的事务内省；事务上下文的 gorm 载体与
+所属 `*db.DB` 身份在 `internal/txctx`，用户代码拿不到。只有同一句柄
+的 store/Unsafe 会加入该事务，跨实例 ctx 不会偷换连接池。
 
 ### 7.2 事务模型
 
 `db.RunInTx(ctx, h, fn)` / `h.RunInTx` / `Store.Tx`——context 传播
-是唯一模型：fn 收到 txCtx，store 操作带 txCtx 即自动加入事务，
-嵌套复用最外层。`db.AfterCommit(ctx, fn)` 把回调暂存到事务上下文，
+是唯一模型：fn 收到 txCtx，同句柄 store 操作带 txCtx 即自动加入事务，
+同句柄嵌套复用最外层。`db.AfterCommit(ctx, fn)` 把回调暂存到事务上下文，
 COMMIT 后按序执行、回滚整体丢弃——`store.WithBus` 的实体事件锚定
 提交，杜绝幻影事件。
 
@@ -333,6 +335,10 @@ db:
   NULL`），mysql/sqlite 用 `(cols..., delete_token)` 复合唯一——
   可观测行为等价。
 - **Reload 不触发 Migrate**；schema 变更须重启（结构保证）。
+- **只读实例**：`read_only: true` 将有效 migrate 模式强制为 off；
+  `RunInTx` / `Migrate` 返回 `db.ErrReadOnly`，raw GORM 写由最前置
+  callback 拒绝。SQLite 使用 `mode=ro`，PG/MySQL 设置 session 只读默认；
+  数据库只读账号/物理副本仍是防恶意绕过的最终权限边界。
 
 ### 7.5 SQLite 单机生产形态
 

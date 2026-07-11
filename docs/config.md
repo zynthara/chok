@@ -99,6 +99,7 @@ Named instances: sections marked *multi-instance* accept an
 | Key | Type | Default | Reload | Notes |
 |---|---|---|---|---|
 | `enabled` | bool | `true` | restart | — |
+| `read_only` | bool | — | restart | — |
 | `driver` | string | — | restart | one of: sqlite \| mysql \| postgres |
 | `migrate` | string | `auto` | restart | one of: auto \| versioned \| off |
 | `slow_threshold` | duration | `200ms` | restart | — |

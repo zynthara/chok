@@ -115,9 +115,10 @@ func TestAfterCommit_NestedTxFlushesOnceAtOuterCommit(t *testing.T) {
 	}
 
 	var order []string
-	err := RunInTx(context.Background(), wrapForTest(gdb), func(outerCtx context.Context) error {
+	h := wrapForTest(gdb)
+	err := RunInTx(context.Background(), h, func(outerCtx context.Context) error {
 		AfterCommit(outerCtx, func(context.Context) { order = append(order, "outer") })
-		innerErr := RunInTx(outerCtx, wrapForTest(gdb), func(innerCtx context.Context) error {
+		innerErr := RunInTx(outerCtx, h, func(innerCtx context.Context) error {
 			AfterCommit(innerCtx, func(context.Context) { order = append(order, "inner") })
 			return nil
 		})

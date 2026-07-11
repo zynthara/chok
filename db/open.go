@@ -13,6 +13,8 @@ import (
 
 	"github.com/glebarez/sqlite"
 	gomysql "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -26,12 +28,12 @@ import (
 func openGorm(o *Options) (*gorm.DB, *sql.DB, error) {
 	switch o.Driver {
 	case "sqlite":
-		return openSQLite(&o.SQLite)
+		return openSQLite(&o.SQLite, o.ReadOnly)
 	case "mysql":
-		gdb, err := openMySQL(&o.MySQL)
+		gdb, err := openMySQL(&o.MySQL, o.ReadOnly)
 		return gdb, nil, err
 	case "postgres":
-		gdb, err := openPostgres(&o.Postgres)
+		gdb, err := openPostgres(&o.Postgres, o.ReadOnly)
 		return gdb, nil, err
 	default:
 		// Unreachable after Validate; keep the error for direct callers.
@@ -60,7 +62,28 @@ func openGorm(o *Options) (*gorm.DB, *sql.DB, error) {
 // A memory database cannot be split — every extra connection is a
 // fresh empty database — so it keeps the pinned single-connection
 // pool and no read replica.
-func openSQLite(o *SQLiteOptions) (*gorm.DB, *sql.DB, error) {
+func openSQLite(o *SQLiteOptions, readOnly bool) (*gorm.DB, *sql.DB, error) {
+	if readOnly {
+		dsn, err := sqliteReadOnlyDSN(o.Path)
+		if err != nil {
+			return nil, nil, err
+		}
+		gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Discard})
+		if err != nil {
+			return nil, nil, fmt.Errorf("db: open read-only sqlite: %w", err)
+		}
+		if sqlDB, derr := gdb.DB(); derr == nil {
+			readConns := o.MaxOpenConns
+			if readConns <= 0 {
+				readConns = max(4, runtime.NumCPU())
+			}
+			sqlDB.SetMaxOpenConns(readConns)
+			sqlDB.SetMaxIdleConns(readConns)
+			sqlDB.SetConnMaxLifetime(0)
+			sqlDB.SetConnMaxIdleTime(0)
+		}
+		return gdb, nil, nil
+	}
 	if sqliteIsMemory(o.Path) {
 		dsn, err := sqliteDSN(o.Path, false)
 		if err != nil {
@@ -141,6 +164,33 @@ func openSQLite(o *SQLiteOptions) (*gorm.DB, *sql.DB, error) {
 		return nil, nil, fmt.Errorf("db: sqlite read/write split: %w", err)
 	}
 	return gdb, readPool, nil
+}
+
+func sqliteReadOnlyDSN(path string) (string, error) {
+	dsn, err := sqliteDSN(path, false)
+	if err != nil {
+		return "", err
+	}
+	base, query, _ := strings.Cut(dsn, "?")
+	vals, err := url.ParseQuery(query)
+	if err != nil {
+		return "", fmt.Errorf("db: sqlite: parse read-only DSN: %w", err)
+	}
+	if mode := vals.Get("mode"); mode != "" && mode != "ro" {
+		return "", fmt.Errorf("db: sqlite: read_only conflicts with mode=%s; use mode=ro", mode)
+	}
+	vals.Set("mode", "ro")
+	pragmas := vals["_pragma"][:0]
+	for _, p := range vals["_pragma"] {
+		if sqlitePragmaName(p) != "query_only" {
+			pragmas = append(pragmas, p)
+		}
+	}
+	vals["_pragma"] = append(pragmas, "query_only(1)")
+	if !strings.HasPrefix(base, "file:") {
+		base = "file:" + base
+	}
+	return base + "?" + vals.Encode(), nil
 }
 
 // sqliteLegacyParams maps mattn/go-sqlite3 DSN spellings (the CGO
@@ -225,26 +275,13 @@ func sqliteIsMemory(path string) bool {
 		strings.Contains(path, "mode=memory")
 }
 
-func openMySQL(o *MySQLOptions) (*gorm.DB, error) {
+func openMySQL(o *MySQLOptions, readOnly bool) (*gorm.DB, error) {
 	tlsName, err := mysqlTLSConfig(o)
 	if err != nil {
 		return nil, err
 	}
 
-	cfg := &gomysql.Config{
-		User:                 o.Username,
-		Passwd:               o.Password,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", o.Host, o.Port),
-		DBName:               o.Database,
-		Params:               map[string]string{"charset": "utf8mb4"},
-		ParseTime:            true,
-		Loc:                  time.Local,
-		AllowNativePasswords: true,
-	}
-	if tlsName != "" {
-		cfg.TLSConfig = tlsName
-	}
+	cfg := mysqlDriverConfig(o, tlsName, readOnly)
 
 	gdb, err := gorm.Open(mysql.Open(cfg.FormatDSN()), &gorm.Config{
 		Logger: logger.Discard,
@@ -254,6 +291,28 @@ func openMySQL(o *MySQLOptions) (*gorm.DB, error) {
 	}
 	applyPool(gdb, o.MaxOpenConns, o.MaxIdleConns, o.ConnMaxLifetime, o.ConnMaxIdleTime)
 	return gdb, nil
+}
+
+func mysqlDriverConfig(o *MySQLOptions, tlsName string, readOnly bool) *gomysql.Config {
+	params := map[string]string{"charset": "utf8mb4"}
+	if readOnly {
+		// go-sql-driver applies arbitrary Params as SET statements whenever a
+		// connection is established. This is a session-level backstop; server
+		// read-only credentials remain authoritative.
+		params["transaction_read_only"] = "1"
+	}
+	return &gomysql.Config{
+		User:                 o.Username,
+		Passwd:               o.Password,
+		Net:                  "tcp",
+		Addr:                 fmt.Sprintf("%s:%d", o.Host, o.Port),
+		DBName:               o.Database,
+		Params:               params,
+		ParseTime:            true,
+		Loc:                  time.Local,
+		AllowNativePasswords: true,
+		TLSConfig:            tlsName,
+	}
 }
 
 // mysqlTLSConfig resolves the value for gomysql.Config.TLSConfig
@@ -287,19 +346,46 @@ func mysqlTLSConfig(o *MySQLOptions) (string, error) {
 	return name, nil
 }
 
-func openPostgres(o *PostgresOptions) (*gorm.DB, error) {
+func openPostgres(o *PostgresOptions, readOnly bool) (*gorm.DB, error) {
 	dsn := o.DSN
 	if dsn == "" {
 		dsn = postgresKeywordDSN(o)
 	}
-	gdb, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+	var dialector gorm.Dialector = postgres.Open(dsn)
+	var ownedPool *sql.DB
+	if readOnly {
+		cfg, err := postgresConnConfig(dsn, true)
+		if err != nil {
+			return nil, fmt.Errorf("db: parse postgres DSN: %w", err)
+		}
+		ownedPool = stdlib.OpenDB(*cfg)
+		dialector = postgres.New(postgres.Config{Conn: ownedPool})
+	}
+	gdb, err := gorm.Open(dialector, &gorm.Config{
 		Logger: logger.Discard,
 	})
 	if err != nil {
+		if ownedPool != nil {
+			_ = ownedPool.Close()
+		}
 		return nil, fmt.Errorf("db: open postgres: %w", err)
 	}
 	applyPool(gdb, o.MaxOpenConns, o.MaxIdleConns, o.ConnMaxLifetime, o.ConnMaxIdleTime)
 	return gdb, nil
+}
+
+func postgresConnConfig(dsn string, readOnly bool) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if readOnly {
+		if cfg.RuntimeParams == nil {
+			cfg.RuntimeParams = make(map[string]string)
+		}
+		cfg.RuntimeParams["default_transaction_read_only"] = "on"
+	}
+	return cfg, nil
 }
 
 // postgresKeywordDSN renders discrete fields as a libpq keyword-value

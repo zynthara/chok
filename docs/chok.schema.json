@@ -528,6 +528,9 @@
                 },
                 "type": "object"
               },
+              "read_only": {
+                "type": "boolean"
+              },
               "slow_threshold": {
                 "default": "200ms",
                 "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
@@ -720,6 +723,9 @@
             }
           },
           "type": "object"
+        },
+        "read_only": {
+          "type": "boolean"
         },
         "slow_threshold": {
           "default": "200ms",

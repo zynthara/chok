@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,6 +226,39 @@ db:
 	}
 	if err := read.Ping(ctx); err != nil {
 		t.Fatalf("read instance ping: %v", err)
+	}
+}
+
+func TestModule_ReadOnlyForcesMigrateOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "module-readonly.db")
+	seed, err := db.Open(db.Options{Driver: "sqlite", SQLite: db.SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Ping(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tk := choktest.NewTestKernel(t, fmt.Sprintf(`
+db:
+  driver: sqlite
+  read_only: true
+  sqlite:
+    path: %q
+`, path), db.Module(db.WithTables(db.Table(&Widget{}))))
+	h := db.From(tk)
+	if !h.ReadOnly() {
+		t.Fatal("module must publish a read-only handle")
+	}
+	c, _ := kernel.Get[*db.Component](tk, "db")
+	if c.MigrateMode() != db.MigrateOff {
+		t.Fatalf("effective migrate mode = %q, want off", c.MigrateMode())
+	}
+	if h.Unsafe(t.Context()).Migrator().HasTable(&Widget{}) {
+		t.Fatal("read-only module must ignore WithTables")
 	}
 }
 

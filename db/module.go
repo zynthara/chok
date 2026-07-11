@@ -38,8 +38,8 @@ func Module(opts ...ModuleOption) kernel.Component {
 type ModuleOption func(*Component)
 
 // As names the instance: the component registers as (db, <name>) and
-// reads its config from db.instances.<name>. Use for read replicas,
-// analytics databases, or any second connection.
+// reads its config from db.instances.<name>. Use for read replicas
+// (with read_only: true), analytics databases, or any second connection.
 func As(instance string) ModuleOption {
 	return func(c *Component) { c.instance = instance }
 }
@@ -160,6 +160,13 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	if err := k.Config().Section(key, &c.opts); err != nil {
 		return fmt.Errorf("db: decode section %s: %w", key, err)
 	}
+	if c.opts.ReadOnly {
+		if c.opts.Migrate == MigrateAuto {
+			c.logger.Info("db: migrate forced off for read-only instance",
+				"instance", displayInstance(c.instance))
+		}
+		c.opts.Migrate = MigrateOff
+	}
 
 	h, err := Open(c.opts)
 	if err != nil {
@@ -198,7 +205,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 
 	// A long-lived process must play the maintenance role a database
 	// server would otherwise own — file-backed sqlite only.
-	if c.opts.Driver == "sqlite" && !sqliteIsMemory(c.opts.SQLite.Path) {
+	if c.opts.Driver == "sqlite" && !c.opts.ReadOnly && !sqliteIsMemory(c.opts.SQLite.Path) {
 		var observer func(string, string)
 		if c.metrics != nil {
 			observer = c.metrics.observeMaintenance
@@ -210,6 +217,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	c.logger.Info("db: connected",
 		"instance", displayInstance(c.instance),
 		"driver", c.opts.Driver,
+		"read_only", c.opts.ReadOnly,
 		"migrate", c.opts.Migrate)
 	return nil
 }
@@ -225,6 +233,11 @@ func (c *Component) Migrate(ctx context.Context) error {
 	}
 	switch c.opts.Migrate {
 	case MigrateOff:
+		if c.opts.ReadOnly && (len(c.tables) > 0 || c.migrations != nil) {
+			c.logger.Warn("db: migration inputs ignored for read-only instance",
+				"instance", displayInstance(c.instance),
+				"tables", len(c.tables), "migrations", c.migrations != nil)
+		}
 		c.logger.Info("db: migrate off — framework touches no schema (battery tables included)",
 			"instance", displayInstance(c.instance))
 		return nil

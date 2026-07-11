@@ -54,8 +54,8 @@ test-pg: ## Run the store/db packages against Postgres (set CHOK_TEST_PG_DSN)
 	CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 ./store/... ./db/...
 
 .PHONY: test-mysql
-test-mysql: ## Run the migration partial-DDL test against MySQL (set CHOK_TEST_MYSQL_DSN)
-	$(GO) test -race -count=1 ./db -run TestApplyMigrations_MySQLPartialDDL
+test-mysql: ## Run MySQL migration and read-only driver tests (set CHOK_TEST_MYSQL_DSN)
+	$(GO) test -race -count=1 ./db -run 'TestApplyMigrations_MySQLPartialDDL|TestReadOnly_MySQLDriverBackstop'
 
 .PHONY: cover
 cover: ## Generate a coverage report at _output/coverage.html

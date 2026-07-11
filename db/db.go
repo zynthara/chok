@@ -83,28 +83,32 @@ func runTransaction(ctx context.Context, gdb *gorm.DB, fn func(tx *gorm.DB) erro
 //	    return nil
 //	})
 //
-// Nested RunInTx calls reuse the outermost transaction (no savepoints).
+// Nested RunInTx calls on the same handle reuse the outermost transaction
+// (no savepoints). A transaction never propagates across database handles.
 //
 // The derived context also carries an after-commit staging buffer (see
 // AfterCommit): callbacks staged inside fn run — in order, with the
 // parent ctx — only after COMMIT succeeds, and are discarded wholesale
 // on rollback or panic.
 func RunInTx(ctx context.Context, h *DB, fn func(txCtx context.Context) error) error {
-	return runInTxGorm(ctx, h.gdb, fn)
+	if h.readOnly {
+		return ErrReadOnly
+	}
+	return runInTxGorm(ctx, h, h.gdb, fn)
 }
 
 // runInTxGorm is RunInTx over a raw handle — shared by the public
 // entrypoint and in-package callers that predate the thin handle.
-func runInTxGorm(ctx context.Context, gdb *gorm.DB, fn func(txCtx context.Context) error) error {
+func runInTxGorm(ctx context.Context, owner *DB, gdb *gorm.DB, fn func(txCtx context.Context) error) error {
 	// If there's already a transaction in context, reuse it — including
 	// its staging buffer, so events flush only at the outermost commit.
-	if txctx.DB(ctx) != nil {
+	if txctx.DB(ctx, owner) != nil {
 		return fn(ctx)
 	}
 
 	pending := &txPending{}
 	err := runTransaction(ctx, gdb, func(tx *gorm.DB) error {
-		txCtx := txctx.WithDB(ctx, tx)
+		txCtx := txctx.WithDB(ctx, owner, tx)
 		txCtx = context.WithValue(txCtx, txPendingKey{}, pending)
 		return fn(txCtx)
 	})
@@ -121,6 +125,11 @@ func runInTxGorm(ctx context.Context, gdb *gorm.DB, fn func(txCtx context.Contex
 // the raw handle: code that needs SQL against the transaction goes
 // through the tx-aware escape hatches — Store.Unsafe (scopes applied)
 // or DB.Unsafe (raw) — the only public gorm doors (M5 §5.2 verdict).
+//
+// InTx is deliberately handle-agnostic, while joining is not: a true
+// result means some handle's transaction is active, not that a given
+// store or handle will execute inside it — only operations on the
+// owning handle join (same-handle affinity).
 func InTx(ctx context.Context) bool {
-	return txctx.DB(ctx) != nil
+	return txctx.AnyDB(ctx) != nil
 }
