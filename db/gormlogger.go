@@ -20,7 +20,11 @@ const defaultSlowThreshold = 200 * time.Millisecond
 // layer (SPEC §5.2), and this adapter's consumers hold a DB handle
 // anyway (h.Unsafe(ctx).Session(&gorm.Session{Logger: ...})).
 func GORMLogger(l log.Logger) gormlogger.Interface {
-	return &gormLog{logger: l, level: gormlogger.Warn, slowThreshold: defaultSlowThreshold}
+	return newGORMLogger(l, defaultSlowThreshold)
+}
+
+func newGORMLogger(l log.Logger, slowThreshold time.Duration) gormlogger.Interface {
+	return &gormLog{logger: l, level: gormlogger.Warn, slowThreshold: slowThreshold}
 }
 
 type gormLog struct {
@@ -31,6 +35,14 @@ type gormLog struct {
 
 func (g *gormLog) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 	return &gormLog{logger: g.logger, level: level, slowThreshold: g.slowThreshold}
+}
+
+// ParamsFilter keeps SQL parameterized before GORM constructs the string
+// passed to Trace. Module-managed error and slow-query logs are on by default,
+// so interpolating passwords, tokens or business data would be an unsafe
+// logging default. The method also protects Session-level GORMLogger users.
+func (g *gormLog) ParamsFilter(_ context.Context, sql string, _ ...any) (string, []any) {
+	return sql, nil
 }
 
 func (g *gormLog) Info(ctx context.Context, msg string, data ...any) {

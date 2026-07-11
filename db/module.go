@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/zynthara/chok/v2/kernel"
+	choklog "github.com/zynthara/chok/v2/log"
 )
 
 // Module returns the db component for chok.Use. One call per database
@@ -168,6 +169,12 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 		_ = h.Close()
 		return fmt.Errorf("db: connectivity check (%s): %w", c.opts.Driver, err)
 	}
+
+	// Library-level Open is deliberately silent. A module-managed pool,
+	// however, participates in the app's logging contract. The adapter keeps
+	// SQL parameterized, logs errors independently, and treats 0 as "slow
+	// logging off" rather than "all query logging off".
+	h.gdb.Logger = newGORMLogger(choklog.From(k), c.opts.SlowThreshold)
 
 	if provider, ok := kernel.Get[interface{ Registry() *prometheus.Registry }](k, "metrics"); ok {
 		m, metricErr := newDBMetrics(provider.Registry(), h, displayInstance(c.instance))

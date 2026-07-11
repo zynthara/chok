@@ -30,6 +30,12 @@ type Options struct {
 	//               tables included; operations own DDL entirely
 	Migrate string `mapstructure:"migrate" default:"auto"`
 
+	// SlowThreshold controls module-managed slow-query logging. Queries
+	// at or above the threshold are logged at Warn with parameter values
+	// removed; query errors are logged independently. 0 disables only
+	// slow-query logs. Library-level Open remains silent.
+	SlowThreshold time.Duration `mapstructure:"slow_threshold" default:"200ms"`
+
 	// MigrationStatusInterval refreshes versioned-migration metrics while
 	// the process is running. The initial post-migrate sample always runs;
 	// 0 disables subsequent refreshes.
@@ -193,6 +199,9 @@ func (o *Options) Validate() error {
 	case MigrateAuto, MigrateVersioned, MigrateOff:
 	default:
 		return fmt.Errorf("db: migrate must be one of auto|versioned|off, got %q", o.Migrate)
+	}
+	if o.SlowThreshold < 0 {
+		return fmt.Errorf("db: slow_threshold must be >= 0 (0 disables slow-query logs), got %s", o.SlowThreshold)
 	}
 	if o.MigrationStatusInterval < 0 {
 		return fmt.Errorf("db: migration_status_interval must be >= 0 (0 disables periodic refresh), got %s", o.MigrationStatusInterval)

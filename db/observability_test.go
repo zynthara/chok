@@ -2,8 +2,11 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -11,6 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"gorm.io/gorm"
+
+	"github.com/zynthara/chok/v2/conf"
+	"github.com/zynthara/chok/v2/kernel"
+	choklog "github.com/zynthara/chok/v2/log"
 )
 
 func metricValue(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) (float64, bool) {
@@ -196,5 +203,164 @@ func TestSQLiteMaintenance_ExportsClassifiedResult(t *testing.T) {
 		"instance": "default", "job": "optimize", "result": maintenanceOK,
 	}); !ok || value != 1 {
 		t.Fatalf("maintenance ok count = %v, present=%v", value, ok)
+	}
+}
+
+type capturedLog struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (l *capturedLog) add(msg string, kv ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, fmt.Sprint(append([]any{msg}, kv...)...))
+}
+
+func (l *capturedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.entries, "\n")
+}
+
+func (l *capturedLog) Debug(msg string, kv ...any) { l.add(msg, kv...) }
+func (l *capturedLog) Info(msg string, kv ...any)  { l.add(msg, kv...) }
+func (l *capturedLog) Warn(msg string, kv ...any)  { l.add(msg, kv...) }
+func (l *capturedLog) Error(msg string, kv ...any) { l.add(msg, kv...) }
+func (l *capturedLog) DebugContext(_ context.Context, msg string, kv ...any) {
+	l.add(msg, kv...)
+}
+func (l *capturedLog) InfoContext(_ context.Context, msg string, kv ...any) {
+	l.add(msg, kv...)
+}
+func (l *capturedLog) WarnContext(_ context.Context, msg string, kv ...any) {
+	l.add(msg, kv...)
+}
+func (l *capturedLog) ErrorContext(_ context.Context, msg string, kv ...any) {
+	l.add(msg, kv...)
+}
+func (l *capturedLog) With(kv ...any) choklog.Logger {
+	return &capturedLogWith{parent: l, prefix: kv}
+}
+func (l *capturedLog) SetLevel(string) error { return nil }
+
+type capturedLogWith struct {
+	parent *capturedLog
+	prefix []any
+}
+
+func (l *capturedLogWith) values(kv []any) []any       { return append(append([]any{}, l.prefix...), kv...) }
+func (l *capturedLogWith) Debug(msg string, kv ...any) { l.parent.Debug(msg, l.values(kv)...) }
+func (l *capturedLogWith) Info(msg string, kv ...any)  { l.parent.Info(msg, l.values(kv)...) }
+func (l *capturedLogWith) Warn(msg string, kv ...any)  { l.parent.Warn(msg, l.values(kv)...) }
+func (l *capturedLogWith) Error(msg string, kv ...any) { l.parent.Error(msg, l.values(kv)...) }
+func (l *capturedLogWith) DebugContext(ctx context.Context, msg string, kv ...any) {
+	l.parent.DebugContext(ctx, msg, l.values(kv)...)
+}
+func (l *capturedLogWith) InfoContext(ctx context.Context, msg string, kv ...any) {
+	l.parent.InfoContext(ctx, msg, l.values(kv)...)
+}
+func (l *capturedLogWith) WarnContext(ctx context.Context, msg string, kv ...any) {
+	l.parent.WarnContext(ctx, msg, l.values(kv)...)
+}
+func (l *capturedLogWith) ErrorContext(ctx context.Context, msg string, kv ...any) {
+	l.parent.ErrorContext(ctx, msg, l.values(kv)...)
+}
+func (l *capturedLogWith) With(kv ...any) choklog.Logger {
+	return &capturedLogWith{parent: l.parent, prefix: l.values(kv)}
+}
+func (l *capturedLogWith) SetLevel(string) error { return nil }
+
+func TestGORMLogger_ParameterizedAndThresholdSemantics(t *testing.T) {
+	ctx := context.Background()
+	h, err := Open(Options{Driver: "sqlite", SQLite: SQLiteOptions{Path: ":memory:"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.Migrate(ctx, Table(&TestItem{})); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "secret-that-must-not-enter-logs"
+	logger := &capturedLog{}
+	h.gdb.Logger = newGORMLogger(logger, time.Nanosecond)
+	if err := h.Unsafe(ctx).Create(&TestItem{Code: secret}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Unsafe(ctx).Exec("SELECT * FROM missing_table WHERE token = ?", secret).Error; err == nil {
+		t.Fatal("bad SQL must fail")
+	}
+	if got := logger.String(); strings.Contains(got, secret) {
+		t.Fatalf("query parameter leaked into module-managed SQL log: %s", got)
+	} else if !strings.Contains(got, "?") {
+		t.Fatalf("parameterized SQL structure was not retained in log: %s", got)
+	}
+
+	silent := &capturedLog{}
+	h.gdb.Logger = newGORMLogger(silent, 0)
+	var missing TestItem
+	if err := h.Unsafe(ctx).Where("code = ?", "absent").First(&missing).Error; err != gorm.ErrRecordNotFound {
+		t.Fatalf("not-found precondition: %v", err)
+	}
+	if got := silent.String(); got != "" {
+		t.Fatalf("threshold 0 or record-not-found produced a log: %s", got)
+	}
+	if err := h.Unsafe(ctx).Exec("SELECT * FROM another_missing_table").Error; err == nil {
+		t.Fatal("bad SQL must fail")
+	}
+	if got := silent.String(); !strings.Contains(got, "gorm") {
+		t.Fatalf("threshold 0 must not disable error logs: %s", got)
+	}
+}
+
+func TestModule_InstallsParameterizedSlowQueryLogger(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "chok.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+db:
+  driver: sqlite
+  slow_threshold: 1ns
+  sqlite:
+    path: ":memory:"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loader := conf.NewLoader("observability", "OBSERVABILITY")
+	loader.SetPath(configPath)
+	if err := loader.Register("db", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := conf.NewStore(loader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := &capturedLog{}
+	registry, err := kernel.New(kernel.Config{
+		Store: store, Logger: logger,
+		Components: []kernel.Component{Module(WithTables(Table(&TestItem{})))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Stop(context.Background()) })
+
+	component, ok := kernel.Get[*Component](registry, "db")
+	if !ok {
+		t.Fatal("managed db component unavailable")
+	}
+	secret := "module-secret-that-must-not-enter-logs"
+	if err := component.Handle().Unsafe(context.Background()).Create(&TestItem{Code: secret}).Error; err != nil {
+		t.Fatal(err)
+	}
+	got := logger.String()
+	if strings.Contains(got, secret) {
+		t.Fatalf("module-managed logger leaked query parameter: %s", got)
+	}
+	if !strings.Contains(got, "gorm slow query") {
+		t.Fatalf("module did not install configured slow-query logger: %s", got)
 	}
 }
