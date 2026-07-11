@@ -152,7 +152,7 @@ type Store[T db.Modeler] struct {
 	txDB  *gorm.DB
 	txCtx context.Context
 
-	bus              *event.Bus // nil unless WithBus was given
+	bus              *event.Bus        // nil unless WithBus was given
 	queryFieldMap    map[string]string // filter + order
 	updateFieldMap   map[string]string // update SET columns
 	soft             bool              // true if T embeds SoftDeleteModel
@@ -161,6 +161,7 @@ type Store[T db.Modeler] struct {
 	maxPageSize      int  // max page size (0 = unlimited)
 	strict           bool // strict mode: reject auto-discovered fields, unknown params
 	requirePrincipal bool // fail-closed: Create/Upsert on Owned models reject no-principal contexts
+	readOnly         bool // blessed write methods fail before hooks or model mutation
 	hooks            hooks[T]
 }
 
@@ -198,6 +199,7 @@ type storeConfig struct {
 	noOwnerScope        bool
 	strict              bool  // when true: reject unknown query params, require explicit whitelist
 	requirePrincipal    bool  // when true: Create/Upsert on Owned models reject no-principal contexts
+	readOnly            bool  // explicit declaration required for read-only db handles
 	beforeCreate        []any // []func(ctx, *T) error — stored as any to avoid generic storeConfig
 	beforeUpdate        []any // []func(ctx, Locator, Changes) error
 	beforeDelete        []any // []func(ctx, Locator) error
@@ -209,6 +211,15 @@ type storeConfig struct {
 	requirePrincipalSet bool
 	defaultPageSizeSet  bool
 	maxPageSizeSet      bool
+}
+
+// WithReadOnly declares that this Store exposes a read-only CRUD surface.
+// It is required when binding a handle configured with db.read_only: true;
+// all blessed write methods then fail with db.ErrReadOnly before hooks or
+// model mutation. Unsafe remains an explicitly unsafe GORM escape hatch and
+// is protected by the underlying read-only handle's callback/driver guards.
+func WithReadOnly() StoreOption {
+	return func(c *storeConfig) { c.readOnly = true }
 }
 
 // WithScope registers a scope function applied to every read/update/delete
@@ -421,14 +432,16 @@ func WithBus(b *event.Bus) StoreOption {
 //  1. WithQueryFields / WithUpdateFields — call-site lists. Use these
 //     to narrow a model's declared surface for one consumer (e.g. a
 //     public store that must not write privileged columns).
+//
 //  2. WithAllQueryFields / WithAllUpdateFields — explicit opt-in to
 //     JSON-tag discovery with exclusions.
+//
 //  3. `store` struct tags on the model — the model's own declaration:
 //
 //     type Post struct {
-//         db.OwnedSoftDeleteModel
-//         Title   string `json:"title"   store:"query,update"`
-//         Content string `json:"content" store:"update"`
+//     db.OwnedSoftDeleteModel
+//     Title   string `json:"title"   store:"query,update"`
+//     Content string `json:"content" store:"update"`
 //     }
 //
 //     Tag values are "query", "update" or both, comma-separated;
@@ -439,6 +452,7 @@ func WithBus(b *event.Bus) StoreOption {
 //     created_at, updated_at) automatically; update lists never
 //     include base-model fields. Tagged models skip the discovery
 //     warning and satisfy WithStrict.
+//
 //  4. JSON-tag auto-discovery — the zero-config fallback. Logs a warn:
 //     the implicit set silently grows with the struct, so production
 //     code should declare fields via tags or options.
@@ -462,6 +476,9 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	cfg := &storeConfig{}
 	for _, o := range opts {
 		o(cfg)
+	}
+	if h.ReadOnly() && !cfg.readOnly {
+		panic("store.New: read-only db handle requires store.WithReadOnly() (or bind a writable instance)")
 	}
 
 	// The handle's db.store policy fills every knob the construction
@@ -654,6 +671,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		maxPageSize:      cfg.maxPageSize,
 		strict:           cfg.strict,
 		requirePrincipal: cfg.requirePrincipal,
+		readOnly:         cfg.readOnly,
 	}
 
 	// Wire hooks from storeConfig (stored as any) into the typed hooks struct.
@@ -688,6 +706,9 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 // from the authenticated principal's Subject.
 // Returns ErrDuplicate on unique constraint violation.
 func (s *Store[T]) Create(ctx context.Context, obj *T) error {
+	if err := s.rejectWrite("Create"); err != nil {
+		return err
+	}
 	if err := fillOwner(ctx, obj, s.requirePrincipal); err != nil {
 		return err
 	}
@@ -709,6 +730,9 @@ func (s *Store[T]) Create(ctx context.Context, obj *T) error {
 // Before-hooks run for each object before the transaction starts.
 // Returns ErrDuplicate on unique constraint violation.
 func (s *Store[T]) BatchCreate(ctx context.Context, objs []*T) error {
+	if err := s.rejectWrite("BatchCreate"); err != nil {
+		return err
+	}
 	if len(objs) == 0 {
 		return nil
 	}
@@ -1055,6 +1079,13 @@ func (s *Store[T]) effectiveDB(ctx context.Context) *gorm.DB {
 		return s.txDB.WithContext(ctx)
 	}
 	return s.h.Unsafe(ctx)
+}
+
+func (s *Store[T]) rejectWrite(op string) error {
+	if !s.readOnly {
+		return nil
+	}
+	return fmt.Errorf("store: %s: %w", op, db.ErrReadOnly)
 }
 
 // applyScopes runs all registered ScopeFuncs against the given DB.

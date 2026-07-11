@@ -441,8 +441,9 @@ olap := db.From(k, "analytics")    // 具名实例
 ```
 
 `read_only: true` 是实例能力而不只是命名：有效迁移模式强制为 `off`，
-`RunInTx` / `Migrate` 返回 `db.ErrReadOnly`；只读句柄不会加入其他实例
-放进 context 的事务。
+`RunInTx` / `Migrate` 与所有 blessed store 写方法返回 `db.ErrReadOnly`；
+构造 store 时必须显式写 `store.WithReadOnly()`，否则启动期 panic。只读
+句柄不会加入其他实例放进 context 的事务。
 
 `Unsafe` 仍可作复杂查询，但只放行以 `SELECT` 开头且不带行锁的 raw SQL；
 `WITH`、`FOR UPDATE` 和全部 ORM/Exec 写在 GORM callback 层拒绝。SQLite
@@ -482,6 +483,7 @@ gdb := h.Unsafe(ctx)               // 句柄级:无 scope,自己负责
 | 大文本防护 | 自动发现不把 text/blob 列放进过滤面 | tag/显式声明可放行 |
 | 通配转义 | `WithFilterContains` 等对 `%`/`_` 转义 | `WithFilterLikeRaw`(自己负责) |
 | 敏感配置 | DSN/密码带 `sensitive` 标注,日志输出自动掩码 | 无 |
+| 只读实例 | `read_only: true` 强制 migrate off，拒绝事务、DDL、store/GORM 写；driver 层再兜底 | 另装配可写具名实例 |
 
 ### SQLite 单机生产形态(默认生效)
 
@@ -533,6 +535,7 @@ chok.New(
 | `store.ErrStaleVersion` | 乐观锁冲突 | 409 |
 | `store.ErrDuplicate` | 唯一约束冲突 | 409 |
 | `store.ErrMissingConditions` | 无条件写操作被拦 | 500(编程错误) |
+| `db.ErrReadOnly` | 只读实例或只读 store 收到写操作 | 500(装配/编程错误) |
 | `where.ErrUnknownField` | 过滤字段未声明 | 400 |
 
 ---

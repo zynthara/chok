@@ -336,7 +336,7 @@ db:
   可观测行为等价。
 - **Reload 不触发 Migrate**；schema 变更须重启（结构保证）。
 - **只读实例**：`read_only: true` 将有效 migrate 模式强制为 off；
-  `RunInTx` / `Migrate` 返回 `db.ErrReadOnly`，raw GORM 写由最前置
+  `RunInTx` / `Migrate` / store 写返回 `db.ErrReadOnly`，raw GORM 写由最前置
   callback 拒绝。SQLite 使用 `mode=ro`，PG/MySQL 设置 session 只读默认；
   数据库只读账号/物理副本仍是防恶意绕过的最终权限边界。
 

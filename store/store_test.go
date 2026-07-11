@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -86,6 +87,76 @@ func TestNew_PointerType_Panics(t *testing.T) {
 	err := db.ValidateModel((**User)(nil))
 	if err == nil {
 		t.Fatal("expected error for pointer-to-pointer model")
+	}
+}
+
+func TestReadOnly_RequiresExplicitBindingAndRejectsWrites(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "store-readonly.db")
+	writable, err := db.Open(db.Options{Driver: "sqlite", SQLite: db.SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writable.Close() })
+	if err := writable.Migrate(ctx, db.Table(&User{}, db.SoftUnique("uk_email", "email"))); err != nil {
+		t.Fatal(err)
+	}
+	writer := New[User](writable, log.Empty(), WithQueryFields("id", "email"), WithUpdateFields("email"))
+	seed := &User{Name: "seed", Email: "seed@example.com"}
+	if err := writer.Create(ctx, seed); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := db.Open(db.Options{Driver: "sqlite", ReadOnly: true, SQLite: db.SQLiteOptions{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "WithReadOnly") {
+				t.Fatalf("read-only handle without declaration must panic with guidance, got %v", r)
+			}
+		}()
+		_ = New[User](ro, log.Empty(), WithQueryFields("id", "email"), WithUpdateFields("email"))
+	}()
+
+	hookRan := false
+	s := New[User](ro, log.Empty(), WithReadOnly(),
+		WithQueryFields("id", "email"), WithUpdateFields("email"),
+		WithBeforeCreate(func(context.Context, *User) error { hookRan = true; return nil }),
+	)
+	if got, err := s.Get(ctx, RID(seed.RID)); err != nil || got.Email != seed.Email {
+		t.Fatalf("read-only store read failed: got=%+v err=%v", got, err)
+	}
+	obj := &User{Name: "blocked", Email: "blocked@example.com"}
+	writes := map[string]func() error{
+		"create":  func() error { return s.Create(ctx, obj) },
+		"batch":   func() error { return s.BatchCreate(ctx, []*User{obj}) },
+		"update":  func() error { return s.Update(ctx, RID(seed.RID), Set(map[string]any{"email": "new@example.com"})) },
+		"delete":  func() error { return s.Delete(ctx, RID(seed.RID)) },
+		"restore": func() error { return s.Restore(ctx, RID(seed.RID)) },
+		"upsert":  func() error { return s.Upsert(ctx, obj, []string{"email"}) },
+	}
+	for name, write := range writes {
+		if err := write(); !errors.Is(err, db.ErrReadOnly) {
+			t.Errorf("%s: want db.ErrReadOnly, got %v", name, err)
+		}
+	}
+	if hookRan || obj.RID != "" {
+		t.Fatalf("read-only rejection must precede hooks/model mutation: hook=%v rid=%q", hookRan, obj.RID)
+	}
+
+	err = writable.RunInTx(ctx, func(txCtx context.Context) error {
+		q, err := s.Unsafe(txCtx)
+		if err != nil {
+			return err
+		}
+		return q.Create(&User{Name: "bypass", Email: "bypass@example.com"}).Error
+	})
+	if !errors.Is(err, db.ErrReadOnly) {
+		t.Fatalf("Store.Unsafe must not adopt a foreign writable transaction, got %v", err)
 	}
 }
 

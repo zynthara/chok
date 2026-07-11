@@ -236,6 +236,9 @@ func (s *Store[T]) Get(ctx context.Context, by Locator, opts ...QueryOption) (*T
 // Zero values in Fields(&obj) ARE persisted — the Store uses Select() to
 // bypass GORM's default "skip zero values" behaviour.
 func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts ...UpdateOption) error {
+	if err := s.rejectWrite("Update"); err != nil {
+		return err
+	}
 	if changes == nil {
 		return ErrMissingColumns
 	}
@@ -326,6 +329,9 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 // With WithVersion, a zero-match row that exists returns ErrStaleVersion;
 // a truly absent row returns ErrNotFound.
 func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption) error {
+	if err := s.rejectWrite("Delete"); err != nil {
+		return err
+	}
 	for _, h := range s.hooks.beforeDelete {
 		if err := h(ctx, by); err != nil {
 			return err
@@ -386,8 +392,8 @@ func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption)
 }
 
 // Restore un-deletes the soft-deleted record(s) matched by the locator:
-// deleted_at is cleared and delete_token returns to the live sentinel
-// (''), so the row re-enters every SoftUnique slot — when a new live
+// deleted_at is cleared and delete_token returns to the empty-string live
+// sentinel, so the row re-enters every SoftUnique slot — when a new live
 // row has taken the slot in the meantime, the write maps to
 // ErrDuplicate and the record stays deleted. Only soft-delete models
 // (db.SoftDeleteModel embedders) can restore; calling Restore on a
@@ -399,6 +405,9 @@ func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption)
 // rows is a no-op nil, a locator matching nothing at all returns
 // ErrNotFound.
 func (s *Store[T]) Restore(ctx context.Context, by Locator) error {
+	if err := s.rejectWrite("Restore"); err != nil {
+		return err
+	}
 	if !s.soft {
 		return fmt.Errorf("store: Restore: %s is not a soft-delete model (embed db.SoftDeleteModel to restore)", reflect.TypeFor[T]().Name())
 	}
@@ -457,6 +466,9 @@ func (s *Store[T]) Exists(ctx context.Context, by Locator) (bool, error) {
 // to another user could mutate the victim's row. Use Create + detect
 // ErrDuplicate + Update as an explicit alternative.
 func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflictColumns []string, updateColumns ...string) error {
+	if err := s.rejectWrite("Upsert"); err != nil {
+		return err
+	}
 	if len(s.scopes) > 0 {
 		return ErrUpsertScoped
 	}
