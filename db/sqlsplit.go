@@ -9,9 +9,10 @@ import "strings"
 //
 // The scanner understands the constructs that legitimately contain
 // semicolons: line comments (--), block comments (/* */),
-// single-quoted strings ('' doubling and backslash escapes), quoted
-// identifiers ("" and MySQL backticks), and Postgres dollar-quoting
-// ($tag$ ... $tag$ — how plpgsql bodies survive). Anything fancier
+// single-quoted strings (a contained quote is doubled; backslash
+// escapes handled), double-quoted and MySQL-backtick identifiers, and
+// Postgres dollar-quoting ($tag$ ... $tag$ — how plpgsql bodies
+// survive). Anything fancier
 // belongs in application tooling, not a migration file.
 func splitSQLStatements(script string) []string {
 	var (

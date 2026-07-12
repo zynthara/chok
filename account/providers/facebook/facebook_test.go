@@ -111,7 +111,7 @@ func (m *mockGraph) stage(code, token string, u fbUser) {
 func newProvider(t *testing.T, mock *mockGraph, opts func(*facebook.Options)) account.AuthProvider {
 	t.Helper()
 	o := facebook.Options{
-				ClientID:     "app-abc",
+		ClientID:     "app-abc",
 		ClientSecret: "shh",
 		RedirectURL:  "https://app.example.test/auth/facebook/callback",
 		APIVersion:   "v18.0",
@@ -137,11 +137,11 @@ func TestOptions_Validate(t *testing.T) {
 		opts facebook.Options
 		ok   bool
 	}{
-		{"missing client_id", facebook.Options{ ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing client_secret", facebook.Options{ ClientID: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing redirect_url", facebook.Options{ ClientID: "x", ClientSecret: "x"}, false},
-		{"relative redirect_url", facebook.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
-		{"ok minimal", facebook.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
+		{"missing client_id", facebook.Options{ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing client_secret", facebook.Options{ClientID: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing redirect_url", facebook.Options{ClientID: "x", ClientSecret: "x"}, false},
+		{"relative redirect_url", facebook.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
+		{"ok minimal", facebook.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

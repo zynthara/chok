@@ -116,6 +116,21 @@ blessed implementation per capability, configuration over code.
   `internal/fixture/m1-m4` stay as milestone regression tests; they
   are no longer the smoke vehicle.
 
+## Formatting
+
+- The tree is kept gofmt-clean under the pinned toolchain (`go.mod`
+  `toolchain`); `make fmt` (`gofmt -s -w .`) is safe to run. CI does
+  **not** enforce gofmt (golangci-lint runs its default linters, no
+  formatter), so a stray unformatted file won't fail CI — keep it clean
+  anyway.
+- **Don't write a bare `''` or `""` quote-pair in a doc comment**
+  (the comment immediately before a declaration). gofmt's doc-comment
+  formatter smart-quotes them (`''` → `”`), which silently corrupts
+  prose that meant a SQL empty-string / doubled-quote literal. Describe
+  it in words ("the empty delete_token", "a contained quote is
+  doubled") — inline comments inside function bodies are exempt. This
+  bit `db/migrate.go` and `db/sqlsplit.go` before.
+
 ## Where things live
 
 | Path | Purpose |

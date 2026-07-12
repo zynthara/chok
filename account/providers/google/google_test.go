@@ -191,7 +191,7 @@ var _ = big.NewInt
 func newProvider(t *testing.T, mock *mockIdP, opts func(*google.Options)) account.AuthProvider {
 	t.Helper()
 	o := google.Options{
-				ClientID:     mock.clientID,
+		ClientID:     mock.clientID,
 		ClientSecret: "mock-secret",
 		RedirectURL:  "https://app.example.test/auth/google/callback",
 		IssuerURL:    mock.issuer,
@@ -217,12 +217,12 @@ func TestOptions_Validate(t *testing.T) {
 		opts google.Options
 		ok   bool
 	}{
-		{"missing client_id", google.Options{ ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing client_secret", google.Options{ ClientID: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing redirect_url", google.Options{ ClientID: "x", ClientSecret: "x"}, false},
-		{"relative redirect_url", google.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
-		{"ok minimal", google.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
-		{"bad issuer_url", google.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", IssuerURL: "not-a-url"}, false},
+		{"missing client_id", google.Options{ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing client_secret", google.Options{ClientID: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing redirect_url", google.Options{ClientID: "x", ClientSecret: "x"}, false},
+		{"relative redirect_url", google.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
+		{"ok minimal", google.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
+		{"bad issuer_url", google.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", IssuerURL: "not-a-url"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -347,7 +347,7 @@ func TestCompleteAuth_RejectsWrongAudience(t *testing.T) {
 	// Point provider at wrongAudMock's issuer (so it discovers the
 	// JWKS there) but with the original clientID.
 	p, err := google.New(context.Background(), google.Options{
-				ClientID:     "client-abc",
+		ClientID:     "client-abc",
 		ClientSecret: "secret",
 		RedirectURL:  "https://app.example.test/cb",
 		IssuerURL:    wrongAudMock.issuer,
@@ -485,4 +485,3 @@ func TestProvider_RejectsInvalidConfig(t *testing.T) {
 		t.Fatal("expected validation error for incomplete provider config")
 	}
 }
-

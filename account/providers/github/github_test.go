@@ -136,7 +136,7 @@ func (m *mockGitHub) stage(code, token string, u githubUser, emails []githubEmai
 func newProvider(t *testing.T, mock *mockGitHub, enterprise bool) account.AuthProvider {
 	t.Helper()
 	opts := github.Options{
-				ClientID:     "client-abc",
+		ClientID:     "client-abc",
 		ClientSecret: "shh",
 		RedirectURL:  "https://app.example.test/auth/github/callback",
 	}
@@ -169,13 +169,13 @@ func TestOptions_Validate(t *testing.T) {
 		opts github.Options
 		ok   bool
 	}{
-		{"missing client_id", github.Options{ ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing client_secret", github.Options{ ClientID: "x", RedirectURL: "https://a/cb"}, false},
-		{"missing redirect_url", github.Options{ ClientID: "x", ClientSecret: "x"}, false},
-		{"relative redirect_url", github.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
-		{"ok minimal", github.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
-		{"bad enterprise_url", github.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", EnterpriseURL: "not-a-url"}, false},
-		{"ok enterprise_url", github.Options{ ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", EnterpriseURL: "https://gh.corp"}, true},
+		{"missing client_id", github.Options{ClientSecret: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing client_secret", github.Options{ClientID: "x", RedirectURL: "https://a/cb"}, false},
+		{"missing redirect_url", github.Options{ClientID: "x", ClientSecret: "x"}, false},
+		{"relative redirect_url", github.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "/cb"}, false},
+		{"ok minimal", github.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb"}, true},
+		{"bad enterprise_url", github.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", EnterpriseURL: "not-a-url"}, false},
+		{"ok enterprise_url", github.Options{ClientID: "x", ClientSecret: "x", RedirectURL: "https://a/cb", EnterpriseURL: "https://gh.corp"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

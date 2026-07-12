@@ -16,8 +16,8 @@ import (
 	"github.com/zynthara/chok/v2/handler"
 	"github.com/zynthara/chok/v2/internal/ctxval"
 	"github.com/zynthara/chok/v2/kernel"
-	"github.com/zynthara/chok/v2/middleware"
 	"github.com/zynthara/chok/v2/metrics"
+	"github.com/zynthara/chok/v2/middleware"
 )
 
 // This file is the SPEC §4.2 behaviour-contract matrix, one test per
@@ -124,8 +124,8 @@ func TestMatrix_UnmatchedRunsFullMiddlewareStack(t *testing.T) {
 func TestMatrix_TrailingSlashIsServeMuxSemantics(t *testing.T) {
 	c := newWebComponent(t, "", nil)
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	c.router.Handle("GET", "/tree/", ok)  // subtree pattern
-	c.router.Handle("GET", "/exact", ok)  // exact pattern
+	c.router.Handle("GET", "/tree/", ok) // subtree pattern
+	c.router.Handle("GET", "/exact", ok) // exact pattern
 
 	// ServeMux behaviour kept: /tree redirects up to the subtree root.
 	w := do(t, c, "GET", "/tree", nil)

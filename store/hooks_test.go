@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/dbtest"
 	"github.com/zynthara/chok/v2/kernel/event"
@@ -515,7 +514,6 @@ func TestWithBus_And_BeforeHooks_PreservedAcrossTxClone(t *testing.T) {
 		t.Fatalf("bus must survive the Tx clone, got %d events", len(*seen))
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // ListWithCursor basic test

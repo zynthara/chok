@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"gorm.io/datatypes"
 	"github.com/glebarez/sqlite"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 

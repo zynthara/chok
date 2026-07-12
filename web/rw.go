@@ -75,8 +75,8 @@ func (rw *responseWriter) Status() int {
 	return rw.status
 }
 
-func (rw *responseWriter) Written() bool      { return rw.wrote }
-func (rw *responseWriter) BytesWritten() int64 { return rw.bytes }
+func (rw *responseWriter) Written() bool               { return rw.wrote }
+func (rw *responseWriter) BytesWritten() int64         { return rw.bytes }
 func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.w }
 
 // Flush implements http.Flusher directly (code that type-asserts

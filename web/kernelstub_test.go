@@ -41,8 +41,8 @@ func (k *testKernel) Lookup(kind string, instance ...string) (kernel.Component, 
 func (k *testKernel) Health(context.Context) kernel.HealthReport {
 	return kernel.HealthReport{Status: kernel.HealthUp}
 }
-func (k *testKernel) Ready(context.Context) error            { return nil }
-func (k *testKernel) Components() []kernel.ComponentStatus   { return nil }
+func (k *testKernel) Ready(context.Context) error          { return nil }
+func (k *testKernel) Components() []kernel.ComponentStatus { return nil }
 
 // newTestKernel builds the stub from a yaml literal, registering the
 // web Options plus every peer component's section, then running the

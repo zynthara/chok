@@ -177,8 +177,8 @@ func toSnakeCase(s string) string {
 //     entirely, so the delete_token column is not part of the key
 //     (SPEC §5.3, M3).
 //   - MySQL / SQLite / others: composite UNIQUE(cols..., delete_token)
-//     — live rows share the '' token and conflict; a soft delete
-//     rewrites the token to a fresh RID, releasing the slot (v1
+//     — live rows share the empty delete_token and conflict; a soft
+//     delete rewrites the token to a fresh RID, releasing the slot (v1
 //     mechanism, unchanged).
 //
 // Both shapes yield the same observable behaviour: two live rows with
