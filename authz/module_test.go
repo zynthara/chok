@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
@@ -150,7 +151,27 @@ db:
 func TestModule_CasbinRuleCreatedAtMigratePhase(t *testing.T) {
 	component := authz.Module()
 	tk := choktest.NewTestKernel(t, sqliteYAML, db.Module(), component)
-	testschema.AssertOwnership(t, db.From(tk), component)
+	testschema.AssertOwnershipForMode(t, db.From(tk), component, db.MigrateAuto)
+}
+
+func TestModule_VersionedUsesOwnedLedger(t *testing.T) {
+	component := authz.Module()
+	tk := choktest.NewTestKernel(t, `
+db:
+  driver: sqlite
+  migrate: versioned
+  sqlite: {path: ":memory:"}
+`, db.Module(db.WithMigrations(fstest.MapFS{
+		"README.txt": &fstest.MapFile{Data: []byte("no application migrations")},
+	})), component)
+	testschema.AssertOwnershipForMode(t, db.From(tk), component, db.MigrateVersioned)
+	st, err := db.SequenceStatus(t.Context(), db.From(tk), authz.MigrationSequence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Applied) != 1 || len(st.Pending) != 0 || st.Ledger != "schema_migrations_chok_authz" {
+		t.Fatalf("authz owned status = %+v", st)
+	}
 }
 
 func TestModule_WebRoleInterface_Satisfied(t *testing.T) {

@@ -57,8 +57,11 @@ type Component struct {
 	opts   Options
 	logger log.Logger
 
-	h       *db.DB
-	mode    string // db migrate mode captured at Init
+	h    *db.DB
+	mode string // db migrate mode captured at Init
+	dbc  interface {
+		ApplyOwnedMigrations(context.Context, db.Sequence) (*db.ApplyReport, error)
+	}
 	rclient *goredis.Client
 	sink    AuditSink // non-nil iff casbin.audit_enabled
 
@@ -78,7 +81,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Kind:      "authz",
 		ConfigKey: "authz",
 		Options:   Options{},
-		Schema:    kernel.SchemaOwner{Tables: []string{(casbin.CasbinRule{}).TableName()}},
+		Schema:    kernel.SchemaOwner{Tables: []string{(casbin.CasbinRule{}).TableName(), "schema_migrations_chok_authz"}},
 		Needs: []kernel.Dep{
 			{Kind: "db"},
 			{Kind: "redis", Optional: true},
@@ -118,6 +121,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	dbc, ok := kernel.Get[interface {
 		Handle() *db.DB
 		MigrateMode() string
+		ApplyOwnedMigrations(context.Context, db.Sequence) (*db.ApplyReport, error)
 	}](k, "db")
 	if !ok {
 		return fmt.Errorf("authz: db module not available")
@@ -130,6 +134,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 		return fmt.Errorf("authz: db instance is read_only — authz requires a writable database")
 	}
 	c.mode = dbc.MigrateMode()
+	c.dbc = dbc
 
 	if c.opts.Casbin.RedisWatcher {
 		rc, ok := kernel.Get[interface{ Client() *goredis.Client }](k, "redis")
@@ -154,6 +159,10 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 func (c *Component) Migrate(ctx context.Context) error {
 	if c.mode == db.MigrateOff {
 		c.logger.Info("authz: migrate mode off — casbin_rule schema untouched (operations own DDL)")
+	} else if c.mode == db.MigrateVersioned {
+		if _, err := c.dbc.ApplyOwnedMigrations(ctx, MigrationSequence()); err != nil {
+			return fmt.Errorf("authz: migrate owned sequence: %w", err)
+		}
 	} else {
 		// casbin_rule is wire-compatible with gorm-adapter v3 — a
 		// foreign-shaped table with no chok RID model, so it rides raw
