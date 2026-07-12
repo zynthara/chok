@@ -150,11 +150,19 @@ func TestMigrationMetrics_RefreshDirtyStateAfterStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.setExpectedMigrationVersion(files)
-	if err := m.observeMigrationStatus(ctx, h, migrations); err != nil {
+	m.setExpectedMigrationVersion("app", files)
+	st, err := MigrationsStatus(ctx, h, migrations)
+	if err != nil {
 		t.Fatal(err)
 	}
-	monitor := startMigrationMonitor(ctx, 5*time.Millisecond, h, migrations, m, nopKernelLogger{})
+	m.observeMigrationStatus("app", st)
+	monitor := startMigrationMonitor(ctx, 5*time.Millisecond, func(sampleCtx context.Context) error {
+		status, statusErr := MigrationsStatus(sampleCtx, h, migrations)
+		if statusErr == nil {
+			m.observeMigrationStatus("app", status)
+		}
+		return statusErr
+	}, m, nopKernelLogger{})
 	defer monitor.close(context.Background())
 
 	if err := h.Unsafe(ctx).Exec(
@@ -166,7 +174,7 @@ func TestMigrationMetrics_RefreshDirtyStateAfterStartup(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if value, ok := metricValue(t, reg, "db_migrations_dirty", map[string]string{"instance": "default"}); ok && value == 1 {
+		if value, ok := metricValue(t, reg, "db_migrations_dirty", map[string]string{"instance": "default", "sequence": "app"}); ok && value == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -174,10 +182,10 @@ func TestMigrationMetrics_RefreshDirtyStateAfterStartup(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if value, ok := metricValue(t, reg, "db_migration_expected_version", map[string]string{"instance": "default"}); !ok || value != 1 {
+	if value, ok := metricValue(t, reg, "db_migration_expected_version", map[string]string{"instance": "default", "sequence": "app"}); !ok || value != 1 {
 		t.Fatalf("expected version = %v, present=%v", value, ok)
 	}
-	if value, ok := metricValue(t, reg, "db_migration_applied_version", map[string]string{"instance": "default"}); !ok || value != 1 {
+	if value, ok := metricValue(t, reg, "db_migration_applied_version", map[string]string{"instance": "default", "sequence": "app"}); !ok || value != 1 {
 		t.Fatalf("applied version = %v, present=%v", value, ok)
 	}
 }

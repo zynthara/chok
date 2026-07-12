@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io/fs"
 	"sync"
 	"time"
 
@@ -57,23 +56,23 @@ func newDBMetrics(reg *prometheus.Registry, h *DB, instance string) (*dbMetrics,
 	m.migrationExpected, _ = registerGaugeVec(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "db_migration_expected_version",
 		Help: "Highest migration version embedded in this process.",
-	}, []string{"instance"}), &errs)
+	}, []string{"instance", "sequence"}), &errs)
 	m.migrationApplied, _ = registerGaugeVec(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "db_migration_applied_version",
 		Help: "Highest clean migration version currently observed in the database.",
-	}, []string{"instance"}), &errs)
+	}, []string{"instance", "sequence"}), &errs)
 	m.migrationsApplied, _ = registerGaugeVec(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "db_migrations_applied",
 		Help: "Number of clean migration ledger entries currently observed.",
-	}, []string{"instance"}), &errs)
+	}, []string{"instance", "sequence"}), &errs)
 	m.migrationsPending, _ = registerGaugeVec(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "db_migrations_pending",
 		Help: "Number of embedded migrations not yet applied to the database.",
-	}, []string{"instance"}), &errs)
+	}, []string{"instance", "sequence"}), &errs)
 	m.migrationsDirty, _ = registerGaugeVec(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "db_migrations_dirty",
 		Help: "Number of dirty migration attempts currently observed in the database.",
-	}, []string{"instance"}), &errs)
+	}, []string{"instance", "sequence"}), &errs)
 
 	m.maintenanceRuns, _ = registerCounterVec(reg, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "db_sqlite_maintenance_runs_total",
@@ -134,32 +133,27 @@ func (m *dbMetrics) observeMaintenance(job, result string) {
 	}
 }
 
-func (m *dbMetrics) setExpectedMigrationVersion(files []Migration) {
+func (m *dbMetrics) setExpectedMigrationVersion(sequence string, files []Migration) {
 	var maxVersion int64
 	for _, migration := range files {
 		if migration.Version > maxVersion {
 			maxVersion = migration.Version
 		}
 	}
-	m.migrationExpected.WithLabelValues(m.instance).Set(float64(maxVersion))
+	m.migrationExpected.WithLabelValues(m.instance, sequence).Set(float64(maxVersion))
 }
 
-func (m *dbMetrics) observeMigrationStatus(ctx context.Context, h *DB, migrations fs.FS) error {
-	st, err := MigrationsStatus(ctx, h, migrations)
-	if err != nil {
-		return err
-	}
+func (m *dbMetrics) observeMigrationStatus(sequence string, st *MigrationStatus) {
 	var maxApplied int64
 	for _, applied := range st.Applied {
 		if applied.Version > maxApplied {
 			maxApplied = applied.Version
 		}
 	}
-	m.migrationApplied.WithLabelValues(m.instance).Set(float64(maxApplied))
-	m.migrationsApplied.WithLabelValues(m.instance).Set(float64(len(st.Applied)))
-	m.migrationsPending.WithLabelValues(m.instance).Set(float64(len(st.Pending)))
-	m.migrationsDirty.WithLabelValues(m.instance).Set(float64(len(st.Dirty)))
-	return nil
+	m.migrationApplied.WithLabelValues(m.instance, sequence).Set(float64(maxApplied))
+	m.migrationsApplied.WithLabelValues(m.instance, sequence).Set(float64(len(st.Applied)))
+	m.migrationsPending.WithLabelValues(m.instance, sequence).Set(float64(len(st.Pending)))
+	m.migrationsDirty.WithLabelValues(m.instance, sequence).Set(float64(len(st.Dirty)))
 }
 
 // enableQueryMetrics mirrors the tracing callback shape. It deliberately
@@ -253,7 +247,7 @@ type migrationMonitor struct {
 	once   sync.Once
 }
 
-func startMigrationMonitor(parent context.Context, interval time.Duration, h *DB, migrations fs.FS, metrics *dbMetrics, logger kernel.Logger) *migrationMonitor {
+func startMigrationMonitor(parent context.Context, interval time.Duration, sample func(context.Context) error, metrics *dbMetrics, logger kernel.Logger) *migrationMonitor {
 	if interval <= 0 || metrics == nil {
 		return nil
 	}
@@ -270,7 +264,7 @@ func startMigrationMonitor(parent context.Context, interval time.Duration, h *DB
 				return
 			case <-ticker.C:
 				queryCtx, queryCancel := context.WithTimeout(ctx, migrationStatusQueryTimeout)
-				err := metrics.observeMigrationStatus(queryCtx, h, migrations)
+				err := sample(queryCtx)
 				queryCancel()
 				if err != nil && !failing {
 					logger.Warn("db: migration metrics refresh failed", "instance", metrics.instance, "error", err)

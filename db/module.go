@@ -2,8 +2,11 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -122,6 +125,8 @@ type Component struct {
 	// refreshes versioned migration state after the initial Migrate sample.
 	metrics *dbMetrics
 	migmon  *migrationMonitor
+	seqMu   sync.RWMutex
+	seqs    map[string]Sequence
 }
 
 // Describe implements kernel.Component.
@@ -147,10 +152,127 @@ func (c *Component) Handle() *DB { return c.handle.Load() }
 // MigrateMode reports this instance's schema strategy (MigrateAuto /
 // MigrateVersioned / MigrateOff) once Init has decoded the section.
 // Battery modules consult it from their own Migrators to honour the
-// SPEC §5.3 ownership semantics uniformly: battery tables AutoMigrate
-// in auto and versioned modes; in off mode the framework — battery
-// tables included — touches no schema.
+// SPEC §5.3 ownership semantics uniformly: battery tables AutoMigrate in auto,
+// use their independent sequences in versioned, and remain untouched in off.
 func (c *Component) MigrateMode() string { return c.opts.Migrate }
+
+// ApplyOwnedMigrations applies a component-owned sequence to this database
+// instance. It is only available under migrate: versioned; auto and off keep
+// their explicit schema ownership semantics.
+func (c *Component) ApplyOwnedMigrations(ctx context.Context, seq Sequence) (*ApplyReport, error) {
+	if c.opts.Migrate != MigrateVersioned {
+		return nil, fmt.Errorf("db: apply owned sequence %s requires migrate: versioned (effective mode %s)", seq.Kind(), c.opts.Migrate)
+	}
+	h := c.handle.Load()
+	if h == nil {
+		return nil, fmt.Errorf("db: apply owned sequence %s: connection not initialised", seq.Kind())
+	}
+	if err := c.registerOwnedSequence(h, seq); err != nil {
+		return nil, fmt.Errorf("db: sequence=%s ledger=%s dialect=%s: %w",
+			seq.Kind(), seq.Ledger(), h.gdb.Dialector.Name(), err)
+	}
+	report, err := ApplySequence(ctx, h, seq)
+	c.logMigrationReport(report)
+	if err == nil && c.metrics != nil {
+		if metricErr := c.sampleOwnedMigrationMetrics(ctx, h, seq); metricErr != nil {
+			c.logger.Warn("db: owned migration metrics sample failed",
+				"instance", displayInstance(c.instance),
+				"sequence", seq.Kind(),
+				"ledger", seq.Ledger(),
+				"dialect", h.gdb.Dialector.Name(),
+				"error", metricErr)
+		}
+	}
+	return report, err
+}
+
+func (c *Component) registerOwnedSequence(h *DB, seq Sequence) error {
+	c.seqMu.Lock()
+	defer c.seqMu.Unlock()
+	if c.seqs == nil {
+		c.seqs = make(map[string]Sequence)
+	}
+	if existing, ok := c.seqs[seq.Kind()]; ok {
+		if existing.Ledger() != seq.Ledger() || !sameBaseline(existing.baseline, seq.baseline) {
+			return fmt.Errorf("db: migration sequence %s registered with conflicting metadata", seq.Kind())
+		}
+		oldEngine, oldErr := resolveOwnedSequence(h, existing)
+		newEngine, newErr := resolveOwnedSequence(h, seq)
+		if oldErr != nil || newErr != nil {
+			return errors.Join(oldErr, newErr)
+		}
+		oldFiles, oldErr := LoadMigrations(oldEngine.seq.fsys)
+		newFiles, newErr := LoadMigrations(newEngine.seq.fsys)
+		if oldErr != nil || newErr != nil {
+			return errors.Join(oldErr, newErr)
+		}
+		if !sameMigrationFiles(oldFiles, newFiles) {
+			return fmt.Errorf("db: migration sequence %s registered with conflicting migration bytes", seq.Kind())
+		}
+		return nil
+	}
+	for kind, existing := range c.seqs {
+		if existing.Ledger() == seq.Ledger() {
+			return fmt.Errorf("db: migration sequences %s and %s claim ledger %s", kind, seq.Kind(), seq.Ledger())
+		}
+	}
+	c.seqs[seq.Kind()] = seq
+	return nil
+}
+
+func sameBaseline(left, right Baseline) bool {
+	if left.EquivalentVersion != right.EquivalentVersion || !sameStringSet(left.Tables, right.Tables) {
+		return false
+	}
+	if len(left.Fingerprints) != len(right.Fingerprints) {
+		return false
+	}
+	for dialect, fingerprint := range left.Fingerprints {
+		if right.Fingerprints[dialect] != fingerprint {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	want := make(map[string]struct{}, len(left))
+	for _, item := range left {
+		want[item] = struct{}{}
+	}
+	for _, item := range right {
+		if _, ok := want[item]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func sameMigrationFiles(left, right []Migration) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].Version != right[i].Version || left[i].Name != right[i].Name || left[i].Checksum != right[i].Checksum {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Component) ownedSequenceSnapshot() []Sequence {
+	c.seqMu.RLock()
+	defer c.seqMu.RUnlock()
+	out := make([]Sequence, 0, len(c.seqs))
+	for _, seq := range c.seqs {
+		out = append(out, seq)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Kind() < out[j].Kind() })
+	return out
+}
 
 // Init decodes the instance's section, opens the pool and verifies
 // connectivity — a wrong DSN must fail startup, not the first query.
@@ -252,32 +374,28 @@ func (c *Component) Migrate(ctx context.Context) error {
 		}
 		start := time.Now()
 		report, err := ApplyMigrationsWithReport(ctx, h, c.migrations)
-		for _, a := range report.Adopted {
-			c.logger.Info("db: migration checksum baseline adopted", "instance", displayInstance(c.instance),
-				"version", a.Version, "checksum", a.Checksum)
-		}
-		for _, m := range report.Applied {
-			c.logger.Info("db: migration applied", "instance", displayInstance(c.instance),
-				"version", m.Version, "file", m.File)
-		}
+		c.logMigrationReport(report)
 		if err != nil {
 			return err
 		}
 		if c.metrics != nil {
-			files, loadErr := LoadMigrations(c.migrations)
-			if loadErr != nil {
-				return loadErr // Apply already loaded these; defensive consistency.
-			}
-			c.metrics.setExpectedMigrationVersion(files)
-			if metricErr := c.metrics.observeMigrationStatus(ctx, h, c.migrations); metricErr != nil {
+			if metricErr := c.sampleMigrationMetrics(ctx, h); metricErr != nil {
 				c.logger.Warn("db: initial migration metrics sample failed",
-					"instance", displayInstance(c.instance), "error", metricErr)
+					"instance", displayInstance(c.instance),
+					"sequence", report.Sequence,
+					"ledger", report.Ledger,
+					"dialect", report.Dialect,
+					"error", metricErr)
 			}
 			c.migmon = startMigrationMonitor(ctx, c.opts.MigrationStatusInterval,
-				h, c.migrations, c.metrics, c.logger)
+				func(sampleCtx context.Context) error { return c.sampleMigrationMetrics(sampleCtx, h) },
+				c.metrics, c.logger)
 		}
 		c.logger.Info("db: versioned migrations up to date",
 			"instance", displayInstance(c.instance),
+			"sequence", report.Sequence,
+			"ledger", report.Ledger,
+			"dialect", report.Dialect,
 			"applied_now", len(report.Applied),
 			"checksums_adopted", len(report.Adopted),
 			"duration", time.Since(start).String(),
@@ -290,6 +408,77 @@ func (c *Component) Migrate(ctx context.Context) error {
 		}
 		return h.Migrate(ctx, c.tables...)
 	}
+}
+
+func (c *Component) logMigrationReport(report *ApplyReport) {
+	if report == nil {
+		return
+	}
+	identity := []any{
+		"instance", displayInstance(c.instance),
+		"sequence", report.Sequence,
+		"ledger", report.Ledger,
+		"dialect", report.Dialect,
+	}
+	for _, adopted := range report.Adopted {
+		c.logger.Info("db: migration baseline adopted", append(identity,
+			"version", adopted.Version,
+			"checksum", adopted.Checksum,
+			"provenance", adopted.Provenance,
+		)...)
+	}
+	for _, migration := range report.Applied {
+		c.logger.Info("db: migration applied", append(identity,
+			"version", migration.Version,
+			"file", migration.File,
+		)...)
+	}
+}
+
+func (c *Component) sampleMigrationMetrics(ctx context.Context, h *DB) error {
+	if c.metrics == nil {
+		return nil
+	}
+	var errs []error
+	if c.migrations != nil {
+		files, err := LoadMigrations(c.migrations)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("sequence=app ledger=%s dialect=%s: %w", ledgerTable, h.gdb.Dialector.Name(), err))
+		} else {
+			c.metrics.setExpectedMigrationVersion("app", files)
+			st, statusErr := MigrationsStatus(ctx, h, c.migrations)
+			if statusErr != nil {
+				errs = append(errs, fmt.Errorf("sequence=app ledger=%s dialect=%s: %w", ledgerTable, h.gdb.Dialector.Name(), statusErr))
+			} else {
+				c.metrics.observeMigrationStatus("app", st)
+			}
+		}
+	}
+	for _, seq := range c.ownedSequenceSnapshot() {
+		if err := c.sampleOwnedMigrationMetrics(ctx, h, seq); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", seq.Kind(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (c *Component) sampleOwnedMigrationMetrics(ctx context.Context, h *DB, seq Sequence) error {
+	e, err := resolveOwnedSequence(h, seq)
+	if err != nil {
+		return err
+	}
+	files, err := LoadMigrations(e.seq.fsys)
+	if err != nil {
+		return err
+	}
+	name := "chok_" + seq.Kind()
+	c.metrics.setExpectedMigrationVersion(name, files)
+	st, err := e.status(ctx, h)
+	if err != nil {
+		return wrapOwnedSequenceError(e, err)
+	}
+	c.metrics.observeMigrationStatus(name, st)
+	return nil
 }
 
 // Health implements kernel.Healther: a bounded ping. (v1's pool

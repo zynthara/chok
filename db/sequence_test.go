@@ -101,6 +101,27 @@ func TestOwnedSequence_RejectsDialectSetDrift(t *testing.T) {
 	}
 }
 
+func TestSameBaseline_RequiresEquivalentVersionAndFingerprints(t *testing.T) {
+	base := Baseline{
+		EquivalentVersion: 1,
+		Tables:            []string{"one", "two"},
+		Fingerprints:      map[string]string{"sqlite": "a", "mysql": "b", "postgres": "c"},
+	}
+	if !sameBaseline(base, cloneBaseline(base)) {
+		t.Fatal("cloned baseline must match")
+	}
+	changedVersion := cloneBaseline(base)
+	changedVersion.EquivalentVersion = 2
+	if sameBaseline(base, changedVersion) {
+		t.Fatal("equivalent version is registration identity")
+	}
+	changedFingerprint := cloneBaseline(base)
+	changedFingerprint.Fingerprints["postgres"] = "different"
+	if sameBaseline(base, changedFingerprint) {
+		t.Fatal("fingerprints are registration identity")
+	}
+}
+
 func TestSequence_DialectMismatchFailsStatusAndRepair(t *testing.T) {
 	h := openTestHandle(t)
 	seq, err := OwnedSequence("dialect_guard", ownedTestFS("CREATE TABLE dialect_guard_item (id INTEGER PRIMARY KEY);"), Baseline{})
