@@ -28,8 +28,8 @@ type Options struct {
 	//               (dev default, v1 behaviour)
 	//   versioned — embedded forward-only migrations/*.sql with a
 	//               schema_migrations ledger and a cross-process lock;
-	//               built-in component schemas remain owner-managed
-	//               (catalog: db.FrameworkTables)
+	//               built-in component schemas use independent owned
+	//               sequences (catalog: db.FrameworkTables)
 	//   off       — the framework touches no schema at all, battery
 	//               tables included; operations own DDL entirely
 	Migrate string `mapstructure:"migrate" default:"auto"`
