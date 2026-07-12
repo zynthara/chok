@@ -10,17 +10,33 @@
 
 ---
 
-## Unreleased — 电池迁移账本独立化
+## 2.0.0-beta.5 — 数据层加固：只读实例 + 电池独立迁移账本
 
-> account、audit、authz 不再在 `migrate: versioned` 下寄生
-> AutoMigrate，而是各自携带三方言迁移集与
-> `schema_migrations_chok_<kind>` 审计账本。应用迁移序号保持纯业务
-> 所有；框架电池也获得 checksum、dirty、repair 与方言身份语义。
-> 存量表只有在完整 catalog 指纹与声明等价版本精确一致时才自动采纳，
-> 不完整或更老的形状 fail-closed。部署可用 `chok migrate up
-> --component` / `--all-owned` 将 DDL 权限移出业务进程。首次引入账本
-> 保持表形状不变；未来不兼容 DDL 必须先排空旧副本或采用
-> expand/contract，不能把账本 fence 当成对仍运行旧进程的保护。
+> 本轮把 db-layer 架构 review 的收敛推进到类型、配置与生成物里。
+>
+> **只读实例**：`db.read_only: true` 让"实例角色"成为受强制的能力而非
+> 命名约定——有效迁移模式降为 off、拒绝显式 versioned、事务/迁移/store
+> 写/GORM 写回调一律 `db.ErrReadOnly`，store 绑定需显式
+> `store.WithReadOnly()`。事务上下文携带句柄亲和，具名实例不再静默搭上
+> 另一实例的事务；SQLite `mode=ro`、PG/MySQL 每连接只读默认为纵深防线，
+> 数据库只读账号/物理副本仍是最终权限边界。
+>
+> **电池独立迁移账本**：account、audit、authz 不再在 `migrate: versioned`
+> 下寄生 AutoMigrate，而是各自携带三方言迁移集与
+> `schema_migrations_chok_<kind>` 审计账本。应用迁移序号保持纯业务所有；
+> 框架电池也获得 checksum、dirty、repair 与方言身份语义。存量表只有在
+> 完整 catalog 指纹与声明等价版本精确一致时才自动采纳，不完整或更老的
+> 形状 fail-closed。部署可用 `chok migrate up --component` / `--all-owned`
+> 将 DDL 权限移出业务进程。首次引入账本保持表形状不变；未来不兼容 DDL
+> 必须先排空旧副本或采用 expand/contract，不能把账本 fence 当成对仍
+> 运行旧进程的保护。
+>
+> **同批收敛**：`db.store` 应用级 store 策略（strict / require_principal /
+> 分页上限，生产硬化变成配置翻转）；versioned 迁移审计链（checksum、
+> crash-persistent dirty、fence、`repair retry|mark-applied|accept-drift`）；
+> db 运行态 Prometheus 观测（查询/连接池/迁移/SQLite maintenance，迁移
+> 指标带 `sequence` 标签）；组件 `Descriptor.Schema` 声明框架表所有权，
+> `db.FrameworkTables()` 由此生成。
 
 ## 2.0.0-beta.4 — 一行到位的路由动词
 
