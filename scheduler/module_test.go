@@ -120,12 +120,21 @@ func TestModule_StopCancelsInFlightJobWithinBudget(t *testing.T) {
 	if err := tk.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
+	elapsed := time.Since(stopStart)
+
+	// Stop delivers cancellation synchronously (Scheduler.Stop calls the
+	// root cancel before returning), but this job was launched via RunNow,
+	// which runs on the caller's goroutine and is not tracked by cron's
+	// drain — so the job closes sawCancel on its own schedule after Stop
+	// returns. Wait for that observation with a bound instead of racing the
+	// return with a non-blocking read (the source of this test's flake under
+	// full-suite load).
 	select {
 	case <-sawCancel:
-	default:
+	case <-time.After(2 * time.Second):
 		t.Fatal("in-flight job never observed cancellation during wind-down")
 	}
-	if elapsed := time.Since(stopStart); elapsed > 4*time.Second {
+	if elapsed > 4*time.Second {
 		t.Fatalf("Stop took %s — wind-down should be prompt once jobs observe cancel", elapsed)
 	}
 }
