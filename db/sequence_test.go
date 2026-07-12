@@ -92,7 +92,6 @@ func TestSequence_DirtyAndRepairStayInOwnedLedger(t *testing.T) {
 
 func TestOwnedSequence_RejectsDialectSetDrift(t *testing.T) {
 	fsys := ownedTestFS("SELECT 1;")
-	fsys["mysql/0001_init.sql"] = &fstest.MapFile{Data: []byte("SELECT 1;")}
 	delete(fsys, "mysql/0001_init.sql")
 	fsys["mysql/0002_other.sql"] = &fstest.MapFile{Data: []byte("SELECT 1;")}
 	_, err := OwnedSequence("drift", fsys, Baseline{})
