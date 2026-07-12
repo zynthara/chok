@@ -64,6 +64,14 @@ type Service struct {
 	limiter         *loginLimiter // nil when rate limiting is disabled
 	disableRegister bool          // true → RegisterRoutes skips POST /register
 
+	// passwordCost is the bcrypt cost every password write uses; dummyHash
+	// is a placeholder computed at that same cost so the constant-time
+	// login path for a non-existent email is indistinguishable from a real
+	// comparison (matching the cost matters — a cost-mismatched padding
+	// would reintroduce the timing oracle it exists to close).
+	passwordCost int
+	dummyHash    string
+
 	// OAuth wiring (Phase 2). Lazily assembled on first RegisterProvider —
 	// pure password deployments never spin up the carrier/store goroutines.
 	oauthMu                  sync.Mutex
@@ -90,6 +98,7 @@ type moduleConfig struct {
 	loginRateWindow time.Duration // 0 = disabled
 	loginRateLimit  int           // max attempts per window
 	disableRegister bool
+	passwordCost    int // 0 = auth.DefaultPasswordCost
 
 	// OAuth (Phase 2). Carrier / Store / AuthCodeStore default to nil so
 	// New() does not spawn background resources for pure-password
@@ -133,6 +142,16 @@ func WithLoginRateLimit(window time.Duration, maxAttempts int) Option {
 		c.loginRateWindow = window
 		c.loginRateLimit = maxAttempts
 	}
+}
+
+// WithPasswordCost overrides the bcrypt cost used for every password
+// write (register, change/reset password, the OAuth placeholder hash) and
+// the constant-time login padding. It defaults to auth.DefaultPasswordCost
+// (12); the value is clamped to auth.HashPasswordCost's supported range.
+// Lower it only for tests that hash in tight loops; raise it for paranoid
+// deployments. Production leaves it unset.
+func WithPasswordCost(cost int) Option {
+	return func(c *moduleConfig) { c.passwordCost = cost }
 }
 
 // WithoutPublicRegister disables the POST /register endpoint. Login and
@@ -221,6 +240,16 @@ func New(h *db.DB, logger log.Logger, opts ...Option) (*Service, error) {
 	for _, o := range opts {
 		o(cfg)
 	}
+	if cfg.passwordCost == 0 {
+		cfg.passwordCost = auth.DefaultPasswordCost
+	}
+
+	// dummyHash is computed at the service's own cost so the non-existent
+	// email login path spends the same bcrypt time as a real comparison.
+	dummyHash, err := auth.HashPasswordCost("dummy-constant-time-padding", cfg.passwordCost)
+	if err != nil {
+		return nil, fmt.Errorf("account: precompute login padding hash: %w", err)
+	}
 
 	jwtMgr, err := jwt.NewManager(jwt.Options{
 		SigningKey: cfg.signingKey,
@@ -293,6 +322,8 @@ func New(h *db.DB, logger log.Logger, opts ...Option) (*Service, error) {
 		sender:                   cfg.sender,
 		logger:                   logger,
 		disableRegister:          cfg.disableRegister,
+		passwordCost:             cfg.passwordCost,
+		dummyHash:                dummyHash,
 		signingKey:               cfg.signingKey,
 		providers:                map[string]AuthProvider{},
 		sessionCarrier:           cfg.sessionCarrier,

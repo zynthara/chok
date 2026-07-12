@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/zynthara/chok/v2/account"
 	"github.com/zynthara/chok/v2/account/internal/testfake"
 	"github.com/zynthara/chok/v2/choktest"
@@ -59,6 +61,7 @@ func setupOAuthFixture(t *testing.T, providerName string, modOpts ...account.Opt
 
 	opts := []account.Option{
 		account.WithSigningKey(e2eSigningKey),
+		account.WithPasswordCost(bcrypt.MinCost),
 		account.WithOAuthCallbackFrontendURL("https://app.example.test/auth/finish"),
 		account.WithSessionCarrier(account.NewCookieCarrier(
 			[]byte("oauth-test-secret-32bytes-padded!!"), "_chok_oauth_sid", account.WithDevMode())),

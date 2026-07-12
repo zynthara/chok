@@ -285,7 +285,7 @@ func (m *Service) ResolveOAuthIdentity(ctx context.Context, pi *ProviderIdentity
 		// to true). PasswordHash is a random unguessable placeholder
 		// because the schema column is NOT NULL; the value is never
 		// actually compared against anything.
-		randomHash, err := auth.HashPassword(randomUnguessableSecret())
+		randomHash, err := auth.HashPasswordCost(randomUnguessableSecret(), m.passwordCost)
 		if err != nil {
 			return err
 		}

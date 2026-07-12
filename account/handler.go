@@ -14,19 +14,6 @@ import (
 	"github.com/zynthara/chok/v2/store/where"
 )
 
-// dummyHash is a pre-computed bcrypt hash used for constant-time comparison
-// when a login request targets a non-existent email. This prevents timing
-// side-channel attacks that could enumerate valid accounts.
-var dummyHash string
-
-func init() {
-	h, err := auth.HashPassword("dummy-constant-time-padding")
-	if err != nil {
-		panic("account: failed to generate dummy hash: " + err.Error())
-	}
-	dummyHash = h
-}
-
 // ---------------------------------------------------------------------------
 // Request / Response types
 // ---------------------------------------------------------------------------
@@ -74,7 +61,7 @@ func (m *Service) register(ctx context.Context, req *registerRequest) (*tokenRes
 		return nil, err
 	}
 
-	hash, err := auth.HashPassword(req.Password)
+	hash, err := auth.HashPasswordCost(req.Password, m.passwordCost)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +121,7 @@ func (m *Service) login(ctx context.Context, req *loginRequest) (*tokenResponse,
 			// Perform a dummy hash comparison to prevent timing-based
 			// email enumeration. Without this, requests for non-existent
 			// emails return faster (no bcrypt work), leaking user existence.
-			auth.ComparePassword(dummyHash, req.Password)
+			auth.ComparePassword(m.dummyHash, req.Password)
 			if m.limiter != nil {
 				m.limiter.record(limitKeys...)
 			}
@@ -244,7 +231,7 @@ func (m *Service) changePassword(ctx context.Context, req *changePasswordRequest
 		return err
 	}
 
-	hash, err := auth.HashPassword(req.NewPassword)
+	hash, err := auth.HashPasswordCost(req.NewPassword, m.passwordCost)
 	if err != nil {
 		return err
 	}
@@ -342,7 +329,7 @@ func (m *Service) resetPassword(ctx context.Context, req *resetPasswordRequest) 
 		return err
 	}
 
-	hash, err := auth.HashPassword(req.NewPassword)
+	hash, err := auth.HashPasswordCost(req.NewPassword, m.passwordCost)
 	if err != nil {
 		return err
 	}

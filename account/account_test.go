@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/log"
@@ -38,7 +40,7 @@ func setupModule(t *testing.T, opts ...Option) (*Service, http.Handler) {
 	t.Helper()
 	h := openTestHandle(t)
 
-	defaults := []Option{WithSigningKey(testSigningKey)}
+	defaults := []Option{WithSigningKey(testSigningKey), WithPasswordCost(bcrypt.MinCost)}
 	defaults = append(defaults, opts...)
 
 	m, err := New(h, log.Empty(), defaults...)
