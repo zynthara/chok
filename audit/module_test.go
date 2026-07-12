@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/zynthara/chok/v2/audit"
@@ -58,7 +59,7 @@ func TestModule_SinkRoundTrip_TableAtMigrate(t *testing.T) {
 	if !ok {
 		t.Fatal("audit component not visible")
 	}
-	testschema.AssertOwnership(t, db.From(tk), component)
+	testschema.AssertOwnershipForMode(t, db.From(tk), component, db.MigrateAuto)
 
 	ctx := context.Background()
 	if err := ac.LogEventSync(ctx, "user.login", "user", audit.ResultSuccess, map[string]string{"method": "password"}); err != nil {
@@ -73,6 +74,28 @@ func TestModule_SinkRoundTrip_TableAtMigrate(t *testing.T) {
 	}
 	if items[0].Resource != "user" || items[0].Result != audit.ResultSuccess {
 		t.Fatalf("stored row mismatch: %+v", items[0])
+	}
+}
+
+func TestModule_VersionedUsesOwnedLedger(t *testing.T) {
+	component := audit.Module()
+	tk := choktest.NewTestKernel(t, `
+db:
+  driver: sqlite
+  migrate: versioned
+  sqlite: {path: ":memory:"}
+audit:
+  enabled: true
+`, db.Module(db.WithMigrations(fstest.MapFS{
+		"README.txt": &fstest.MapFile{Data: []byte("no application migrations")},
+	})), component)
+	testschema.AssertOwnershipForMode(t, db.From(tk), component, db.MigrateVersioned)
+	st, err := db.SequenceStatus(t.Context(), db.From(tk), audit.MigrationSequence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Applied) != 1 || len(st.Pending) != 0 || st.Ledger != "schema_migrations_chok_audit" {
+		t.Fatalf("audit owned status = %+v", st)
 	}
 }
 

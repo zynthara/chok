@@ -39,6 +39,9 @@ type Component struct {
 
 	h    *db.DB
 	mode string // db migrate mode captured at Init
+	dbc  interface {
+		ApplyOwnedMigrations(context.Context, db.Sequence) (*db.ApplyReport, error)
+	}
 
 	authn      kernel.Middleware // account's blessed guard, when assembled
 	purgeWired bool              // scheduler present, job registered
@@ -50,7 +53,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Kind:      "audit",
 		ConfigKey: "audit",
 		Options:   Options{},
-		Schema:    kernel.SchemaOwner{Tables: []string{(Log{}).TableName()}},
+		Schema:    kernel.SchemaOwner{Tables: []string{(Log{}).TableName(), "schema_migrations_chok_audit"}},
 		Needs: []kernel.Dep{
 			{Kind: "db"},
 			{Kind: "scheduler", Optional: true},
@@ -79,6 +82,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	dbc, ok := kernel.Get[interface {
 		Handle() *db.DB
 		MigrateMode() string
+		ApplyOwnedMigrations(context.Context, db.Sequence) (*db.ApplyReport, error)
 	}](k, "db")
 	if !ok {
 		return fmt.Errorf("audit: db module not available")
@@ -91,6 +95,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 		return fmt.Errorf("audit: db instance is read_only — audit requires a writable database")
 	}
 	c.mode = dbc.MigrateMode()
+	c.dbc = dbc
 
 	// The sink worker outlives Init (Registry cancels the Init ctx on
 	// return); its lifetime is bounded by Close. WithoutCancel keeps
@@ -143,6 +148,12 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 func (c *Component) Migrate(ctx context.Context) error {
 	if c.mode == db.MigrateOff {
 		c.chok.Info("audit: migrate mode off — audit_logs schema untouched (operations own DDL)")
+		return nil
+	}
+	if c.mode == db.MigrateVersioned {
+		if _, err := c.dbc.ApplyOwnedMigrations(ctx, MigrationSequence()); err != nil {
+			return fmt.Errorf("audit: migrate owned sequence: %w", err)
+		}
 		return nil
 	}
 	// audit_logs is rid-keyed with its own shape (no db.Model
