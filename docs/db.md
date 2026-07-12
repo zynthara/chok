@@ -375,6 +375,8 @@ err := h.RunInTx(ctx, func(txCtx context.Context) error {
 chok migrate create add_posts_table   # 生成 migrations/0001_add_posts_table.sql
 # 编辑 SQL 后:
 chok migrate up                       # 跨进程锁下执行全部 pending
+chok migrate up --component account   # 只执行 account 内建序列
+chok migrate up --all-owned           # 执行全部内建电池序列
 chok migrate status --check           # 全景状态；非 clean 时退出 1
 ```
 
@@ -396,7 +398,8 @@ chok migrate repair retry 12 --checksum <ledger-sha256> --reason "restored parti
 chok migrate repair mark-applied 12 --checksum <ledger-sha256> --reason "completed manually"
 
 # 已应用文件的改写经过审核，接受当前字节作为新基线
-chok migrate repair accept-drift 7 --checksum <old-ledger-sha256> --reason "approved rewrite"
+chok migrate repair accept-drift 7 --checksum <old-ledger-sha256> \
+  --new-checksum <current-file-sha256> --reason "approved rewrite"
 ```
 
 repair 使用 version + checksum 做 compare-and-swap，并返回包含 old/current
@@ -415,8 +418,25 @@ db.Module(db.WithMigrations(migrations))
 
 框架自有表由各内建组件的 `Descriptor.Schema` 声明，并由
 `chok docs gen` 聚合成字母序的 `db.FrameworkTables()` 目录；已装配组件
-自行演进这些表，不占用你的迁移序号。该目录与具体装配及 named DB
-instance 无关，因此不表示列出的每张表都存在于当前数据库。
+自行演进这些表，不占用你的迁移序号。account/audit/authz 在 versioned
+模式分别使用 `schema_migrations_chok_account`、`_audit`、`_authz`；迁移
+文件按 sqlite/mysql/postgres 选择，账本记录实际方言与 checksum。
+
+存量 AutoMigrate 表只有在**全部 owned tables 均存在且完整 catalog 指纹
+完全一致**时才采纳到该电池声明的 AutoMigrate 等价版本；部分表、旧形状、
+同名应用表或跨方言账本都 fail-closed，并输出结构差异。`auto → versioned`
+使用同一协议；`versioned → auto` 不受支持。
+
+生产建议由有 DDL 权限的 migration job 先执行 `up --all-owned`，业务进程
+只保留 DML 权限。引入独立账本的首个发布保持表形状不变；未来应用不兼容
+电池 DDL 前，必须先排空旧副本或采用 expand/contract。账本 Missing 检查
+只能阻止迁移后重新启动的旧二进制，不能保护迁移发生时仍在运行的旧进程。
+一旦执行不兼容前向迁移，回滚到账本前版本属于明确禁止的操作。
+
+account 的 versioned 回填只运行一次。data-only restore 或旧工具导入 legacy
+用户后，如需补救可显式调用既有 `account.BackfillHasPassword`；auto 模式仍
+保持每启动幂等回填。该目录与具体装配及 named DB instance 无关，因此不
+表示列出的每张表都存在于当前数据库。
 
 ---
 
@@ -440,7 +460,9 @@ main := db.From(k)                 // 默认实例
 olap := db.From(k, "analytics")    // 具名实例
 ```
 
-`read_only: true` 是实例能力而不只是命名：有效迁移模式强制为 `off`，
+`read_only: true` 是实例能力而不只是命名：默认的 `migrate: auto` 会降为
+`off`；若显式配置 `migrate: versioned` 则校验失败，必须由操作者明确改为
+`off`。
 `RunInTx` / `Migrate` 与所有 blessed store 写方法返回 `db.ErrReadOnly`；
 构造 store 时必须显式写 `store.WithReadOnly()`，否则启动期 panic。只读
 句柄不会加入其他实例放进 context 的事务。
@@ -483,7 +505,7 @@ gdb := h.Unsafe(ctx)               // 句柄级:无 scope,自己负责
 | 大文本防护 | 自动发现不把 text/blob 列放进过滤面 | tag/显式声明可放行 |
 | 通配转义 | `WithFilterContains` 等对 `%`/`_` 转义 | `WithFilterLikeRaw`(自己负责) |
 | 敏感配置 | DSN/密码带 `sensitive` 标注,日志输出自动掩码 | 无 |
-| 只读实例 | `read_only: true` 强制 migrate off，拒绝事务、DDL、store/GORM 写；driver 层再兜底 | 另装配可写具名实例 |
+| 只读实例 | `read_only: true` 将默认 auto 降为 off，拒绝显式 versioned，并拒绝事务、DDL、store/GORM 写；driver 层再兜底 | 另装配可写具名实例 |
 
 ### SQLite 单机生产形态(默认生效)
 

@@ -10,6 +10,18 @@
 
 ---
 
+## Unreleased — 电池迁移账本独立化
+
+> account、audit、authz 不再在 `migrate: versioned` 下寄生
+> AutoMigrate，而是各自携带三方言迁移集与
+> `schema_migrations_chok_<kind>` 审计账本。应用迁移序号保持纯业务
+> 所有；框架电池也获得 checksum、dirty、repair 与方言身份语义。
+> 存量表只有在完整 catalog 指纹与声明等价版本精确一致时才自动采纳，
+> 不完整或更老的形状 fail-closed。部署可用 `chok migrate up
+> --component` / `--all-owned` 将 DDL 权限移出业务进程。首次引入账本
+> 保持表形状不变；未来不兼容 DDL 必须先排空旧副本或采用
+> expand/contract，不能把账本 fence 当成对仍运行旧进程的保护。
+
 ## 2.0.0-beta.4 — 一行到位的路由动词
 
 > 主题:「对 gin 式极简的回答是越过它」。`web.GET/POST/PUT/PATCH/
