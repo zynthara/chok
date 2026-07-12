@@ -11,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/zynthara/chok/v2/account"
 	"github.com/zynthara/chok/v2/choktest"
 	"github.com/zynthara/chok/v2/conf"
 	"github.com/zynthara/chok/v2/db"
@@ -130,6 +131,44 @@ db:
 	}
 	if len(st.Applied) != 1 || len(st.Pending) != 0 {
 		t.Fatalf("ledger after start: %+v", st)
+	}
+}
+
+func TestModule_VersionedMetricsIncludeOwnedSequence(t *testing.T) {
+	provider := newMetricsProvider()
+	tk := choktest.NewTestKernel(t, `
+db:
+  driver: sqlite
+  migrate: versioned
+  migration_status_interval: 5ms
+  sqlite: {path: ":memory:"}
+account:
+  signing_key: this-is-a-test-signing-key-32bytes!
+`, provider, db.Module(db.WithMigrations(fstest.MapFS{
+		"README.txt": &fstest.MapFile{Data: []byte("no app migrations")},
+	})), account.Module())
+	_ = db.From(tk)
+	families, err := provider.registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "db_migration_expected_version" {
+			continue
+		}
+		for _, metric := range family.Metric {
+			sequence := ""
+			for _, label := range metric.Label {
+				if label.GetName() == "sequence" {
+					sequence = label.GetValue()
+				}
+			}
+			seen[sequence] = metric.GetGauge().GetValue()
+		}
+	}
+	if seen["app"] != 0 || seen["chok_account"] != 2 {
+		t.Fatalf("sequence expected-version metrics = %v", seen)
 	}
 }
 

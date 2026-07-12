@@ -21,7 +21,15 @@
 package dbtest
 
 import (
+	"database/sql"
+	"fmt"
+	"net"
+	"os"
+	"strconv"
 	"testing"
+	"time"
+
+	gomysql "github.com/go-sql-driver/mysql"
 
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/internal/testlane"
@@ -29,8 +37,9 @@ import (
 
 // Env variable names (also read by CI).
 const (
-	DriverEnv = testlane.DriverEnv
-	PGDSNEnv  = testlane.PGDSNEnv
+	DriverEnv   = testlane.DriverEnv
+	PGDSNEnv    = testlane.PGDSNEnv
+	MySQLDSNEnv = "CHOK_TEST_MYSQL_DSN"
 )
 
 // Driver reports the lane the current process runs in: "sqlite"
@@ -58,6 +67,51 @@ func Open(t testing.TB) *db.DB {
 	}
 	if err != nil {
 		t.Fatalf("dbtest: open %s: %v", testlane.Driver(), err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
+
+// OpenMySQL returns a fresh throwaway MySQL database using
+// CHOK_TEST_MYSQL_DSN. It skips when the environment variable is unset.
+func OpenMySQL(t testing.TB) *db.DB {
+	t.Helper()
+	dsn := os.Getenv(MySQLDSNEnv)
+	if dsn == "" {
+		t.Skipf("dbtest: %s is unset — skipping (no local MySQL)", MySQLDSNEnv)
+	}
+	cfg, err := gomysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("dbtest: parse %s: %v", MySQLDSNEnv, err)
+	}
+	name := fmt.Sprintf("chok_test_%d_%d", os.Getpid(), time.Now().UnixNano())
+	adminCfg := *cfg
+	adminCfg.DBName = ""
+	admin, err := sql.Open("mysql", adminCfg.FormatDSN())
+	if err != nil {
+		t.Fatalf("dbtest: open MySQL admin: %v", err)
+	}
+	if _, err := admin.Exec("CREATE DATABASE `" + name + "`"); err != nil {
+		_ = admin.Close()
+		t.Fatalf("dbtest: create MySQL database: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec("DROP DATABASE `" + name + "`")
+		_ = admin.Close()
+	})
+	host, portText, err := net.SplitHostPort(cfg.Addr)
+	if err != nil {
+		t.Fatalf("dbtest: MySQL address %q: %v", cfg.Addr, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("dbtest: MySQL port %q: %v", portText, err)
+	}
+	h, err := db.Open(db.Options{Driver: "mysql", MySQL: db.MySQLOptions{
+		Host: host, Port: port, Username: cfg.User, Password: cfg.Passwd, Database: name,
+	}})
+	if err != nil {
+		t.Fatalf("dbtest: open MySQL test database: %v", err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	return h

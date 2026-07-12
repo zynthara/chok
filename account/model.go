@@ -65,10 +65,9 @@ func Table() db.TableSpec {
 }
 
 // MigrateSchema runs AutoMigrate for User + Identity tables and then
-// the idempotent has_password backfill. This is the single canonical
-// migration path — the account module's Migrator calls it (honouring
-// the framework migrate mode), and kernel-less embedders can call it
-// directly.
+// the idempotent has_password backfill. The account module uses this path in
+// migrate: auto; migrate: versioned uses MigrationSequence instead.
+// Kernel-less embedders can call it directly.
 func MigrateSchema(ctx context.Context, h *db.DB) error {
 	if err := h.Migrate(ctx, Table(), IdentityTable()); err != nil {
 		return err

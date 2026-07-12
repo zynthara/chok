@@ -23,7 +23,14 @@ func TestFrameworkTablesSource_IsFormattedGo(t *testing.T) {
 	if _, err := parser.ParseFile(token.NewFileSet(), "framework_tables_gen.go", source, parser.AllErrors); err != nil {
 		t.Fatalf("generated framework table source must parse: %v\n%s", err, source)
 	}
-	for _, table := range []string{"audit_logs", "casbin_rule", "identities", "schema_migrations", "users"} {
+	for _, table := range []string{
+		"audit_logs",
+		"casbin_rule",
+		"identities",
+		"schema_migrations",
+		"schema_migrations_chok_account",
+		"users",
+	} {
 		if !strings.Contains(string(source), `"`+table+`"`) {
 			t.Errorf("generated framework table source missing %q", table)
 		}

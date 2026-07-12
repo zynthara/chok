@@ -54,6 +54,9 @@ type Component struct {
 	svc  *Service
 	mode string // db migrate mode captured at Init
 	h    *db.DB
+	dbc  interface {
+		ApplyOwnedMigrations(context.Context, db.Sequence) (*db.ApplyReport, error)
+	}
 }
 
 // Describe implements kernel.Component.
@@ -62,7 +65,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Kind:      "account",
 		ConfigKey: "account",
 		Options:   Options{},
-		Schema:    kernel.SchemaOwner{Tables: []string{"users", "identities"}},
+		Schema:    kernel.SchemaOwner{Tables: []string{"users", "identities", "schema_migrations_chok_account"}},
 		Needs: []kernel.Dep{
 			{Kind: "db"},
 			{Kind: "log", Optional: true},
@@ -84,6 +87,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	dbc, ok := kernel.Get[interface {
 		Handle() *db.DB
 		MigrateMode() string
+		ApplyOwnedMigrations(context.Context, db.Sequence) (*db.ApplyReport, error)
 	}](k, "db")
 	if !ok {
 		return fmt.Errorf("account: db module not available")
@@ -96,6 +100,7 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 		return fmt.Errorf("account: db instance is read_only — account requires a writable database")
 	}
 	c.mode = dbc.MigrateMode()
+	c.dbc = dbc
 
 	modOpts := c.optionsFromConfig()
 	modOpts = append(modOpts, c.extra...)
@@ -190,13 +195,19 @@ func (c *Component) registerProviders(ctx context.Context, m *Service) error {
 	return nil
 }
 
-// Migrate implements kernel.Migrator: users/identities AutoMigrate +
-// the has_password backfill, honouring the framework migrate mode
-// (SPEC §5.3 — off touches neither schema nor maintenance DML;
-// operations own both).
+// Migrate implements kernel.Migrator for the account-owned schema. Auto mode
+// uses AutoMigrate plus the has_password backfill; versioned mode uses the
+// independent account migration sequence. Off touches neither schema nor
+// maintenance DML; operations own both.
 func (c *Component) Migrate(ctx context.Context) error {
 	if c.mode == db.MigrateOff {
 		c.svc.logger.Info("account: migrate mode off — users/identities schema untouched (operations own DDL)")
+		return nil
+	}
+	if c.mode == db.MigrateVersioned {
+		if _, err := c.dbc.ApplyOwnedMigrations(ctx, MigrationSequence()); err != nil {
+			return fmt.Errorf("account: migrate owned sequence: %w", err)
+		}
 		return nil
 	}
 	if err := MigrateSchema(ctx, c.h); err != nil {

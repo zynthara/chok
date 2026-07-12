@@ -50,12 +50,12 @@ test: ## Run the full unit test suite with the race detector
 	$(GO) test -race -count=1 ./...
 
 .PHONY: test-pg
-test-pg: ## Run the store/db packages against Postgres (set CHOK_TEST_PG_DSN)
-	CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 ./store/... ./db/...
+test-pg: ## Run the data and battery schema packages against Postgres (set CHOK_TEST_PG_DSN)
+	CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 ./store/... ./db/... ./account/... ./audit/... ./authz/...
 
 .PHONY: test-mysql
-test-mysql: ## Run MySQL migration and read-only driver tests (set CHOK_TEST_MYSQL_DSN)
-	$(GO) test -race -count=1 ./db -run 'TestApplyMigrations_MySQLPartialDDL|TestReadOnly_MySQLDriverBackstop'
+test-mysql: ## Run MySQL migration, battery-equivalence and read-only tests (set CHOK_TEST_MYSQL_DSN)
+	$(GO) test -race -count=1 ./db ./account ./audit ./authz -run 'TestApplyMigrations_MySQLPartialDDL|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent'
 
 .PHONY: cover
 cover: ## Generate a coverage report at _output/coverage.html

@@ -1,0 +1,43 @@
+CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `rid` varchar(24) NOT NULL,
+  `version` bigint NOT NULL DEFAULT '1',
+  `created_at` datetime(3) DEFAULT NULL,
+  `updated_at` datetime(3) DEFAULT NULL,
+  `deleted_at` datetime(3) DEFAULT NULL,
+  `delete_token` varchar(24) NOT NULL DEFAULT '',
+  `email` varchar(200) NOT NULL,
+  `email_verified` tinyint(1) NOT NULL DEFAULT '0',
+  `password_hash` varchar(128) NOT NULL,
+  `has_password` tinyint(1) NOT NULL DEFAULT '0',
+  `password_version` bigint NOT NULL DEFAULT '0',
+  `name` varchar(100) NOT NULL DEFAULT '',
+  `roles` varchar(500) NOT NULL DEFAULT '',
+  `active` tinyint(1) NOT NULL DEFAULT '1',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_users_r_id` (`rid`),
+  UNIQUE KEY `uk_user_email` (`email`,`delete_token`),
+  KEY `idx_users_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `identities` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `rid` varchar(24) NOT NULL,
+  `version` bigint NOT NULL DEFAULT '1',
+  `created_at` datetime(3) DEFAULT NULL,
+  `updated_at` datetime(3) DEFAULT NULL,
+  `deleted_at` datetime(3) DEFAULT NULL,
+  `delete_token` varchar(24) NOT NULL DEFAULT '',
+  `user_id` varchar(32) NOT NULL,
+  `provider` varchar(32) NOT NULL,
+  `provider_account_id` varchar(200) NOT NULL,
+  `email` varchar(200) NOT NULL DEFAULT '',
+  `profile` json DEFAULT NULL,
+  `last_used_at` datetime(3) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_identities_r_id` (`rid`),
+  UNIQUE KEY `uk_identity_provider` (`provider`,`provider_account_id`,`delete_token`),
+  KEY `idx_identities_deleted_at` (`deleted_at`),
+  KEY `idx_identities_user_id` (`user_id`),
+  KEY `ix_identity_user_provider` (`provider`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

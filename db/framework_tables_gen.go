@@ -9,5 +9,6 @@ var frameworkTables = []string{
 	"casbin_rule",
 	"identities",
 	"schema_migrations",
+	"schema_migrations_chok_account",
 	"users",
 }

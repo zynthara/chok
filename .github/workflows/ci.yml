@@ -67,16 +67,16 @@ jobs:
       - name: test
         run: go test -race -count=1 ./...
 
-      - name: test (store/db on Postgres)
+      - name: test (data and battery schemas on Postgres)
         env:
           CHOK_TEST_DRIVER: postgres
           CHOK_TEST_PG_DSN: postgres://chok:chok@localhost:5432/choktest?sslmode=disable
-        run: go test -race -count=1 ./store/... ./db/...
+        run: go test -race -count=1 ./store/... ./db/... ./account/... ./audit/... ./authz/...
 
-      - name: test (migration audit on MySQL)
+      - name: test (migration audit and battery schemas on MySQL)
         env:
           CHOK_TEST_MYSQL_DSN: root:root@tcp(localhost:3306)/?parseTime=true
-        run: go test -race -count=1 ./db -run TestApplyMigrations_MySQLPartialDDL
+        run: go test -race -count=1 ./db ./account ./audit ./authz -run 'TestApplyMigrations_MySQLPartialDDL|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent'
 
       - name: build
         run: go build ./...

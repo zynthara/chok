@@ -330,16 +330,30 @@ func TestReadOnly_MySQLDriverBackstop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := sql.Open("mysql", cfg.FormatDSN())
+	adminCfg := cfg.Clone()
+	adminCfg.DBName = ""
+	admin, err := sql.Open("mysql", adminCfg.FormatDSN())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = admin.Close() })
-	table := fmt.Sprintf("chok_readonly_%d", time.Now().UnixNano())
-	if _, err := admin.Exec("CREATE TABLE " + table + " (id BIGINT PRIMARY KEY)"); err != nil {
+	database := fmt.Sprintf("chok_readonly_%d", time.Now().UnixNano())
+	if _, err := admin.Exec("CREATE DATABASE `" + database + "`"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = admin.Exec("DROP TABLE IF EXISTS " + table) })
+	t.Cleanup(func() {
+		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
+		_ = admin.Close()
+	})
+	cfg.DBName = database
+	writable, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writable.Close() })
+	table := fmt.Sprintf("chok_readonly_%d", time.Now().UnixNano())
+	if _, err := writable.Exec("CREATE TABLE " + table + " (id BIGINT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
 
 	roCfg := cfg.Clone()
 	if roCfg.Params == nil {

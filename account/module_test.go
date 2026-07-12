@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/zynthara/chok/v2/account"
 	"github.com/zynthara/chok/v2/account/internal/testfake"
@@ -77,7 +78,29 @@ func TestModule_MountsAuthSurface_RegisterLoginFlow(t *testing.T) {
 func TestModule_TablesCreatedAtMigrate_BackfillIncluded(t *testing.T) {
 	component := account.Module()
 	tk := choktest.NewTestKernel(t, moduleYAML, db.Module(), component)
-	testschema.AssertOwnership(t, db.From(tk), component)
+	testschema.AssertOwnershipForMode(t, db.From(tk), component, db.MigrateAuto)
+}
+
+func TestModule_VersionedUsesOwnedLedger(t *testing.T) {
+	component := account.Module()
+	tk := choktest.NewTestKernel(t, `
+db:
+  driver: sqlite
+  migrate: versioned
+  sqlite: {path: ":memory:"}
+account:
+  signing_key: this-is-a-test-signing-key-32bytes!
+`, db.Module(db.WithMigrations(fstest.MapFS{
+		"README.txt": &fstest.MapFile{Data: []byte("no application migrations")},
+	})), component)
+	testschema.AssertOwnershipForMode(t, db.From(tk), component, db.MigrateVersioned)
+	st, err := db.SequenceStatus(t.Context(), db.From(tk), account.MigrationSequence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Applied) != 2 || len(st.Pending) != 0 || st.Ledger != "schema_migrations_chok_account" {
+		t.Fatalf("account owned status = %+v", st)
+	}
 }
 
 func TestModule_MigrateOff_SchemaUntouched(t *testing.T) {

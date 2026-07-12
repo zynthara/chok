@@ -104,7 +104,14 @@ func TestM3Fixture_EndToEnd(t *testing.T) {
 	if len(st.Applied) != 1 || st.Applied[0].Name != "notes" || len(st.Pending) != 0 {
 		t.Fatalf("versioned boot must have applied 0001_notes: %+v", st)
 	}
-	want := []string{"audit_logs", "casbin_rule", "identities", "schema_migrations", "users"}
+	want := []string{
+		"audit_logs",
+		"casbin_rule",
+		"identities",
+		"schema_migrations",
+		"schema_migrations_chok_account",
+		"users",
+	}
 	if strings.Join(st.FrameworkTables, ",") != strings.Join(want, ",") {
 		t.Fatalf("framework table catalog drifted: %v", st.FrameworkTables)
 	}
