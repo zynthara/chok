@@ -54,14 +54,14 @@ func TestMigrationSequence_PostgresSchemaEquivalent(t *testing.T) {
 	if dbtest.Driver() != "postgres" {
 		t.Skip("postgres lane only")
 	}
-	assertAuthzSchemaEquivalent(t, dbtest.Open)
+	assertAuthzSchemaEquivalent(t, dbtest.Open, "postgres")
 }
 
 func TestMigrationSequence_MySQLSchemaEquivalent(t *testing.T) {
-	assertAuthzSchemaEquivalent(t, dbtest.OpenMySQL)
+	assertAuthzSchemaEquivalent(t, dbtest.OpenMySQL, "mysql")
 }
 
-func assertAuthzSchemaEquivalent(t *testing.T, open func(testing.TB) *db.DB) {
+func assertAuthzSchemaEquivalent(t *testing.T, open func(testing.TB) *db.DB, dialect string) {
 	t.Helper()
 	ctx := context.Background()
 	autoDB := open(t)
@@ -77,8 +77,11 @@ func assertAuthzSchemaEquivalent(t *testing.T, open func(testing.TB) *db.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Adopted) != 1 {
-		t.Fatalf("baseline adoption on the real dialect = %+v", report)
+	if len(report.Adopted) != 1 || len(report.Applied) != 0 || report.Dialect != dialect {
+		t.Fatalf("baseline adoption on %s = %+v", dialect, report)
+	}
+	if adopted := report.Adopted[0]; adopted.Provenance != "baseline" || adopted.Dialect != dialect {
+		t.Fatalf("adopted row on %s = %+v", dialect, adopted)
 	}
 	freshDB := open(t)
 	if _, err := db.ApplySequence(ctx, freshDB, authz.MigrationSequence()); err != nil {

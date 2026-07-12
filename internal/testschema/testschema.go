@@ -6,6 +6,7 @@ package testschema
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -60,27 +61,55 @@ func AssertOwnershipForMode(t testing.TB, h *db.DB, component kernel.Component, 
 }
 
 // UpdateBaselineIfRequested rewrites the calling package's embedded baseline
-// fingerprint from the live AutoMigrate schema when CHOK_UPDATE_BASELINES is
-// set, then skips the test: fingerprints are embedded at build time, so the
-// stale compiled-in copy must not fail the regeneration run. Regeneration is
-// therefore a two-pass flow — run the equivalence tests once with the
-// variable set (each reachable lane writes its own dialect file under
-// migrations/baseline/), then rerun without it so the gates verify the
+// fingerprint from the live AutoMigrate schema when CHOK_UPDATE_BASELINES=1
+// is set, then skips the test: fingerprints are embedded at build time, so
+// the stale compiled-in copy must not fail the regeneration run.
+// Regeneration is therefore a two-pass flow — run the equivalence tests once
+// with the variable set (each reachable lane writes its own dialect file
+// under migrations/baseline/), then rerun without it so the gates verify the
 // result. Without the variable this is a no-op.
+//
+// It is a local maintainer flow by construction: any value other than
+// exactly "1" fails loudly instead of silently green-skipping the
+// equivalence gates, and it refuses to run when the CI environment
+// variable is present.
 func UpdateBaselineIfRequested(t testing.TB, fingerprint string) {
 	t.Helper()
-	if os.Getenv("CHOK_UPDATE_BASELINES") == "" {
+	switch value := os.Getenv("CHOK_UPDATE_BASELINES"); value {
+	case "":
 		return
+	case "1":
+	default:
+		t.Fatalf("testschema: CHOK_UPDATE_BASELINES must be unset or exactly %q, got %q — refusing to guess", "1", value)
 	}
-	var head struct {
-		Dialect string `json:"dialect"`
+	if os.Getenv("CI") != "" {
+		t.Fatal("testschema: baseline regeneration is a local maintainer flow — refusing to rewrite fingerprints under CI")
 	}
-	if err := json.Unmarshal([]byte(fingerprint), &head); err != nil || head.Dialect == "" {
-		t.Fatalf("testschema: fingerprint carries no dialect header: %v", err)
+	path, err := baselineUpdateTarget(fingerprint)
+	if err != nil {
+		t.Fatalf("testschema: %v", err)
 	}
-	path := filepath.Join("migrations", "baseline", head.Dialect+".json")
 	if err := os.WriteFile(path, []byte(fingerprint+"\n"), 0o644); err != nil {
 		t.Fatalf("testschema: rewrite %s: %v", path, err)
 	}
 	t.Skipf("testschema: %s rewritten from the live AutoMigrate schema — rerun without CHOK_UPDATE_BASELINES to verify", path)
+}
+
+// baselineUpdateTarget validates the fingerprint's dialect header against
+// the blessed dialect set and derives the baseline file it may rewrite.
+// The allowlist doubles as path-traversal protection: the dialect value
+// never reaches the filesystem unless it is one of the three known names.
+func baselineUpdateTarget(fingerprint string) (string, error) {
+	var head struct {
+		Dialect string `json:"dialect"`
+	}
+	if err := json.Unmarshal([]byte(fingerprint), &head); err != nil {
+		return "", fmt.Errorf("fingerprint is not a catalog snapshot: %w", err)
+	}
+	switch head.Dialect {
+	case "sqlite", "mysql", "postgres":
+		return filepath.Join("migrations", "baseline", head.Dialect+".json"), nil
+	default:
+		return "", fmt.Errorf("fingerprint dialect %q is not one of sqlite|mysql|postgres", head.Dialect)
+	}
 }

@@ -9,15 +9,19 @@ import (
 )
 
 // Baseline fingerprints under migrations/baseline/ are generated from a
-// fresh AutoMigrate database. Regenerate them only for a deliberate model or
-// gorm-introspection change (two-pass — fingerprints embed at build time):
+// fresh AutoMigrate database. Regeneration is a local maintainer flow and
+// two-pass, because fingerprints embed at build time:
 //
 //	CHOK_UPDATE_BASELINES=1 go test ./account ./audit ./authz -run TestMigrationSequence
+//	CHOK_UPDATE_BASELINES=1 CHOK_TEST_DRIVER=postgres CHOK_TEST_PG_DSN=<dsn> go test ./account ./audit ./authz -run TestMigrationSequence
+//	CHOK_UPDATE_BASELINES=1 CHOK_TEST_MYSQL_DSN=<dsn> go test ./account ./audit ./authz -run TestMigrationSequence
 //
-// repeated under the Postgres/MySQL lanes (CHOK_TEST_DRIVER / DSN envs) for
-// the other dialect files, then rerun without the variable: the equivalence
-// gates verify the result, and the baseline change must ship with a matching
-// migration + EquivalentVersion bump.
+// then rerun without the variable so the equivalence gates verify the result.
+// Discipline by cause: a model/schema change ships with a matching migration
+// file and an EquivalentVersion bump; a pure gorm-introspection or
+// normalization change (schema unchanged) regenerates all three dialect
+// files together with the reason recorded in the commit — the version does
+// not move.
 //
 //go:embed migrations/*/*.sql migrations/baseline/*.json
 var migrationAssets embed.FS
