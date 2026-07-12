@@ -8,6 +8,17 @@ import (
 	"github.com/zynthara/chok/v2/db"
 )
 
+// Baseline fingerprints under migrations/baseline/ are generated from a
+// fresh AutoMigrate database. Regenerate them only for a deliberate model or
+// gorm-introspection change (two-pass — fingerprints embed at build time):
+//
+//	CHOK_UPDATE_BASELINES=1 go test ./account ./audit ./authz -run TestMigrationSequence
+//
+// repeated under the Postgres/MySQL lanes (CHOK_TEST_DRIVER / DSN envs) for
+// the other dialect files, then rerun without the variable: the equivalence
+// gates verify the result, and the baseline change must ship with a matching
+// migration + EquivalentVersion bump.
+//
 //go:embed migrations/*/*.sql migrations/baseline/*.json
 var migrationAssets embed.FS
 

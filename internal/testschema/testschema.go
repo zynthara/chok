@@ -5,6 +5,9 @@ package testschema
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -54,4 +57,30 @@ func AssertOwnershipForMode(t testing.TB, h *db.DB, component kernel.Component, 
 	if !slices.Equal(actual, expected) {
 		t.Fatalf("%s schema ownership mismatch: declared=%v actual=%v", component.Describe().Kind, expected, actual)
 	}
+}
+
+// UpdateBaselineIfRequested rewrites the calling package's embedded baseline
+// fingerprint from the live AutoMigrate schema when CHOK_UPDATE_BASELINES is
+// set, then skips the test: fingerprints are embedded at build time, so the
+// stale compiled-in copy must not fail the regeneration run. Regeneration is
+// therefore a two-pass flow — run the equivalence tests once with the
+// variable set (each reachable lane writes its own dialect file under
+// migrations/baseline/), then rerun without it so the gates verify the
+// result. Without the variable this is a no-op.
+func UpdateBaselineIfRequested(t testing.TB, fingerprint string) {
+	t.Helper()
+	if os.Getenv("CHOK_UPDATE_BASELINES") == "" {
+		return
+	}
+	var head struct {
+		Dialect string `json:"dialect"`
+	}
+	if err := json.Unmarshal([]byte(fingerprint), &head); err != nil || head.Dialect == "" {
+		t.Fatalf("testschema: fingerprint carries no dialect header: %v", err)
+	}
+	path := filepath.Join("migrations", "baseline", head.Dialect+".json")
+	if err := os.WriteFile(path, []byte(fingerprint+"\n"), 0o644); err != nil {
+		t.Fatalf("testschema: rewrite %s: %v", path, err)
+	}
+	t.Skipf("testschema: %s rewritten from the live AutoMigrate schema — rerun without CHOK_UPDATE_BASELINES to verify", path)
 }

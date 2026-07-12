@@ -8,6 +8,7 @@ import (
 	"github.com/zynthara/chok/v2/account"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/dbtest"
+	"github.com/zynthara/chok/v2/internal/testschema"
 )
 
 func openAccountMigrationDB(t *testing.T) *db.DB {
@@ -30,6 +31,7 @@ func TestMigrationSequence_AutoBaselineAndFreshSchemaEquivalent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	testschema.UpdateBaselineIfRequested(t, autoFingerprint)
 	report, err := db.ApplySequence(ctx, autoDB, account.MigrationSequence())
 	if err != nil {
 		t.Fatal(err)
@@ -116,14 +118,14 @@ func TestMigrationSequence_PostgresSchemaEquivalent(t *testing.T) {
 	if dbtest.Driver() != "postgres" {
 		t.Skip("postgres lane only")
 	}
-	assertAccountSchemaEquivalent(t, dbtest.Open, false)
+	assertAccountSchemaEquivalent(t, dbtest.Open)
 }
 
 func TestMigrationSequence_MySQLSchemaEquivalent(t *testing.T) {
-	assertAccountSchemaEquivalent(t, dbtest.OpenMySQL, false)
+	assertAccountSchemaEquivalent(t, dbtest.OpenMySQL)
 }
 
-func assertAccountSchemaEquivalent(t *testing.T, open func(testing.TB) *db.DB, expectAdoption bool) {
+func assertAccountSchemaEquivalent(t *testing.T, open func(testing.TB) *db.DB) {
 	t.Helper()
 	ctx := context.Background()
 	autoDB := open(t)
@@ -134,14 +136,13 @@ func assertAccountSchemaEquivalent(t *testing.T, open func(testing.TB) *db.DB, e
 	if err != nil {
 		t.Fatal(err)
 	}
-	if expectAdoption {
-		report, applyErr := db.ApplySequence(ctx, autoDB, account.MigrationSequence())
-		if applyErr != nil {
-			t.Fatal(applyErr)
-		}
-		if len(report.Adopted) != 2 {
-			t.Fatalf("baseline report = %+v", report)
-		}
+	testschema.UpdateBaselineIfRequested(t, want)
+	report, err := db.ApplySequence(ctx, autoDB, account.MigrationSequence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Adopted) != 2 {
+		t.Fatalf("baseline adoption on the real dialect = %+v", report)
 	}
 	freshDB := open(t)
 	if _, err := db.ApplySequence(ctx, freshDB, account.MigrationSequence()); err != nil {

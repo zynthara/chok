@@ -7,6 +7,7 @@ import (
 	"github.com/zynthara/chok/v2/audit"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/dbtest"
+	"github.com/zynthara/chok/v2/internal/testschema"
 )
 
 func TestMigrationSequence_AutoBaselineAndFreshSchemaEquivalent(t *testing.T) {
@@ -27,6 +28,7 @@ func TestMigrationSequence_AutoBaselineAndFreshSchemaEquivalent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	testschema.UpdateBaselineIfRequested(t, want)
 	report, err := db.ApplySequence(ctx, autoDB, audit.MigrationSequence())
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +70,14 @@ func assertAuditSchemaEquivalent(t *testing.T, open func(testing.TB) *db.DB) {
 	want, err := db.SchemaFingerprint(ctx, autoDB, []string{"audit_logs"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	testschema.UpdateBaselineIfRequested(t, want)
+	report, err := db.ApplySequence(ctx, autoDB, audit.MigrationSequence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Adopted) != 1 {
+		t.Fatalf("baseline adoption on the real dialect = %+v", report)
 	}
 	freshDB := open(t)
 	if _, err := db.ApplySequence(ctx, freshDB, audit.MigrationSequence()); err != nil {

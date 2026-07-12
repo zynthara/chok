@@ -8,6 +8,10 @@ import (
 	"github.com/zynthara/chok/v2/db"
 )
 
+// Baseline fingerprints under migrations/baseline/ are generated from a
+// fresh AutoMigrate database; the regeneration recipe (CHOK_UPDATE_BASELINES
+// two-pass flow) is documented on account's migrationAssets.
+//
 //go:embed migrations/*/*.sql migrations/baseline/*.json
 var migrationAssets embed.FS
 
