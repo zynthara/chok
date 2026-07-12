@@ -180,6 +180,17 @@ func Providers() []Provider {
 	}
 }
 
+// MigrationSequences returns the built-in owner-managed database histories in
+// stable component order. The CLI consumes these exact descriptors; runtime
+// modules call the same package-level constructors.
+func MigrationSequences() []db.Sequence {
+	return []db.Sequence{
+		account.MigrationSequence(),
+		audit.MigrationSequence(),
+		authz.MigrationSequence(),
+	}
+}
+
 // BySection returns the inventory keyed by config section (note the
 // web module's section is "http", not "web").
 func BySection() map[string]Module {

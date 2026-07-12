@@ -126,6 +126,36 @@ func TestMigrateUpAndStatus_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestMigrateOwnedSequences_EndToEnd(t *testing.T) {
+	cfgPath, migDir := writeProject(t)
+	out, err := runMigrate(t, "up", "--component", "account", "--config", cfgPath, "--dir", migDir)
+	if err != nil {
+		t.Fatalf("account up: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[account] applied  0001_init.sql") || !strings.Contains(out, "[account] applied  0002_backfill_has_password.sql") {
+		t.Fatalf("account up output:\n%s", out)
+	}
+	out, err = runMigrate(t, "up", "--all-owned", "--config", cfgPath, "--dir", migDir)
+	if err != nil {
+		t.Fatalf("all-owned up: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[audit] applied  0001_init.sql") || !strings.Contains(out, "[authz] applied  0001_init.sql") {
+		t.Fatalf("all-owned output:\n%s", out)
+	}
+	out, err = runMigrate(t, "status", "--config", cfgPath, "--dir", migDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, section := range []string{"[account] ledger=schema_migrations_chok_account dialect=sqlite", "[audit] ledger=schema_migrations_chok_audit dialect=sqlite", "[authz] ledger=schema_migrations_chok_authz dialect=sqlite"} {
+		if !strings.Contains(out, section) {
+			t.Fatalf("status missing %q:\n%s", section, out)
+		}
+	}
+	if _, err := runMigrate(t, "up", "--component", "unknown", "--config", cfgPath, "--dir", migDir); err == nil {
+		t.Fatal("unknown owned component must fail")
+	}
+}
+
 func TestMigrateStatusCheckAndRepairAcceptDrift(t *testing.T) {
 	cfgPath, migDir := writeProject(t)
 	out, err := runRoot(t, "migrate", "status", "--check", "--config", cfgPath, "--dir", migDir)
@@ -156,9 +186,14 @@ func TestMigrateStatusCheckAndRepairAcceptDrift(t *testing.T) {
 	if out, err := runMigrate(t, "status", "--check", "--config", cfgPath, "--dir", migDir); err == nil || !strings.Contains(out, "drift") {
 		t.Fatalf("drifted status --check must fail: err=%v\n%s", err, out)
 	}
+	currentFiles, err := db.LoadMigrations(os.DirFS(migDir))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err = runMigrate(t,
 		"repair", "accept-drift", "1",
 		"--checksum", files[0].Checksum,
+		"--new-checksum", currentFiles[0].Checksum,
 		"--reason", "reviewed comment-only migration change",
 		"--config", cfgPath, "--dir", migDir,
 	)
