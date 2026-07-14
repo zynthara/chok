@@ -350,6 +350,19 @@ db:
   dialect。引入账本的过渡发布不改变表形状；未来不兼容 DDL 必须在迁移前
   排空旧副本或采用 expand/contract，并形成不可回滚边界——Missing 检查
   只会阻止迁移后再次启动的旧二进制，不能保护仍在运行的旧进程。
+- **第三方序列 manifest**：`OwnedSequence` 以完整组件包路径声明 owner，kind
+  派生唯一账本；`account`/`audit`/`authz` 绑定各自保留 owner，`manifest`
+  永久禁作 kind。每库的 `schema_migrations_chok_manifest` 持久化
+  kind→owner、engine floor 与信息性组件/chok 版本。写入防护分四层：构造期
+  保留映射 → 单 db.Component 进程内 descriptor/bytes 注册 → 数据库 claim →
+  既有 checksum/结构/fence。授权位于迁移锁内并覆盖 apply、repair、claim
+  transfer；存量账本只读预检通过后、任何后续账本元数据/schema 写之前持久化
+  owner。
+  PG advisory 与 MySQL GET_LOCK 当前使用固定全局键；SQLite 账本 lease 按 kind
+  分散，因此共享 manifest 的 additive DDL 另用短 `BEGIN IMMEDIATE` 事务串行。
+  status 将 manifest 与账本前缀扫描合并，第三方 SQL 不在通用 CLI 中时明确
+  标为 unverified。claim 强制力从全部写入方 manifest-aware 起完整成立；旧
+  二进制混跑期间仍只能依靠 checksum/结构/fence。
   `migrate: off` ⇒ 框架零 DDL（casbin 缺表则 LoadPolicy 启动失败）。
 - `SoftUnique` 在 PG 用 partial unique index（`WHERE deleted_at IS
   NULL`），mysql/sqlite 用 `(cols..., delete_token)` 复合唯一——

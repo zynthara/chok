@@ -439,6 +439,8 @@ chok migrate up                       # 跨进程锁下执行全部 pending
 chok migrate up --component account   # 只执行 account 内建序列
 chok migrate up --all-owned           # 执行全部内建电池序列
 chok migrate status --check           # 全景状态；非 clean 时退出 1
+# 只检查账本/fence/floor，不要求 CLI 持有第三方组件 SQL：
+chok migrate status --check --ledger-health-only
 ```
 
 每个文件按 CRLF→LF 归一化后计算 SHA-256。执行任何 SQL 前，框架先
@@ -493,6 +495,66 @@ db.Module(db.WithMigrations(migrations))
 电池 DDL 前，必须先排空旧副本或采用 expand/contract。账本 Missing 检查
 只能阻止迁移后重新启动的旧二进制，不能保护迁移发生时仍在运行的旧进程。
 一旦执行不兼容前向迁移，回滚到账本前版本属于明确禁止的操作。
+
+### 8.1 下游组件的独立迁移序列
+
+第三方组件可以使用与内建电池相同的三方言、独立账本协议。kind 决定
+`schema_migrations_chok_<kind>`，owner 是声明该序列的组件包完整 import
+path；同一个 module 下的不同组件因此仍有不同身份：
+
+```text
+migrations/
+├── sqlite/0001_init.sql
+├── mysql/0001_init.sql
+└── postgres/0001_init.sql
+```
+
+```go
+seq, err := db.OwnedSequence(
+    "billing",
+    migrations,
+    db.Baseline{},
+    db.SequenceOwner("github.com/acme/platform/billing"), // 必填
+    db.SequenceVersion("v1.4.0"),                         // 选填、仅信息性
+)
+if err != nil {
+    return err
+}
+_, err = databaseComponent.ApplyOwnedMigrations(ctx, seq)
+```
+
+组件在 `Descriptor.Schema.Tables` 中声明自己的业务表和派生账本表；全局
+`schema_migrations_chok_manifest` 由 db 组件拥有，不重复声明。`manifest`
+不能作为 kind；`account`、`audit`、`authz` 分别保留给对应 chok 包。
+
+首次执行在全局 manifest 中 claim kind。已有 beta.5 账本只有在方言、名称、
+checksum/结构与 baseline 指纹预检全部通过后才以 `adopted` 归属当前 owner；
+owner 在任何账本或 schema 写入前持久化，因此随后迁移失败也不会重新变成
+unclaimed。apply、账本 repair 与 claim transfer 都在同一迁移锁内校验 owner
+和 `engine_floor`。更高 floor 只允许只读 status，旧引擎不能写入。
+
+`chok migrate status` 合并 manifest 行与 `schema_migrations_chok_*` 实表扫描：
+存量无 claim 账本显示 `unclaimed`，CLI 没有第三方内嵌 SQL 时显示
+`content=unverified`。严格 `--check` 对两者 fail-closed；只有明确使用
+`--ledger-health-only` 才跳过这两类内容/归属核验，dirty、fence、缺账本、
+manifest 损坏与 floor 超限仍失败。通用 CLI 不能凭空应用第三方 SQL；运行时
+由组件在 Migrate phase 调用 `ApplyOwnedMigrations`。
+
+通过 `db.Component.ApplyOwnedMigrations` 注册的第三方序列会自动进入迁移
+监控，Prometheus 迁移指标的 `sequence` 标签为 `chok_<kind>`；直接调用包级
+`ApplySequence` 不经过组件注册表，适合 CLI/测试，不产生该组件级采样。
+
+组件包改名时用精确 owner CAS 转移已有 claim：
+
+```bash
+chok migrate repair claim \
+  --kind billing \
+  --expected-owner github.com/acme/platform/billing \
+  --new-owner github.com/acme/platform/payments
+```
+
+claim 的强制力以所有写入方都已升级到 manifest-aware 发布为前提。混跑期间，
+旧二进制仍不读取 manifest，只能由既有 checksum、结构检查与 dirty fence 兜底。
 
 account 的 versioned 回填只运行一次。data-only restore 或旧工具导入 legacy
 用户后，如需补救可显式调用既有 `account.BackfillHasPassword`；auto 模式仍
@@ -666,6 +728,9 @@ func TestPostFlow(t *testing.T) {
 | `versioned` 模式下写入报表不存在 | 忘了 `chok migrate up`,或 SQL 文件没 embed | 检查 `WithMigrations` 与 `migrate status` |
 | 启动报 `dirty migration attempt` | 上次迁移失败或进程在 clean 前退出 | `migrate status` 核对实际 schema，再按 §8 选择 repair retry 或 mark-applied |
 | `status --check` 报 `unverified` | 旧三列账本尚未建立 checksum 基线 | 使用当前可信发布执行一次 `migrate up` 完成 trust-on-first-use adoption |
+| 启动报 `migration sequence claim conflict` | 两个组件声明了同一 kind，或组件包路径已变更 | 确认真实归属；冲突组件改 kind，合法改名用 `migrate repair claim` 做 expected-owner CAS |
+| 启动报 `migration engine generation is too old` | manifest 的 `engine_floor` 高于当前二进制 | 升级 chok；不要用旧 CLI repair 或绕过 manifest。旧 pre-manifest 二进制不受此行保护，混跑边界见 §8.1 |
+| `status --check` 报 `content is unavailable` | 通用 CLI 看得到第三方账本但不持有组件内嵌 SQL | 由应用组件执行完整校验；只需检查 dirty/fence/floor 时显式加 `--ledger-health-only` |
 
 ---
 
@@ -682,6 +747,11 @@ func TestPostFlow(t *testing.T) {
   db.LoadMigrations(fs)  db.ApplyMigrations(ctx, h, fs)
   db.ApplyMigrationsWithReport(ctx, h, fs)  db.MigrationsStatus(ctx, h, fs)
   db.RepairMigration(ctx, h, fs, db.RepairOptions)
+  db.OwnedSequence(kind, fs, baseline, db.SequenceOwner(path), db.SequenceVersion(v))
+  db.ApplySequence(ctx, h, seq)  db.SequenceStatus(ctx, h, seq)
+  db.RepairSequence(ctx, h, seq, opts)  db.SequencePresent(ctx, h, seq)
+  db.ManifestEntries(ctx, h)  db.LedgerSnapshot(ctx, h, kind)
+  db.RepairSequenceClaim(ctx, h, kind, db.RepairClaimOptions)
 
 Store[T](读)
   Get(ctx, loc, ...QueryOption)         List(ctx, ...where.Option)

@@ -33,11 +33,13 @@ import (
 const ledgerTable = "schema_migrations"
 
 type migrationSequence struct {
-	kind     string
-	ledger   string
-	dialect  string
-	fsys     fs.FS
-	baseline *Baseline
+	kind             string
+	ledger           string
+	dialect          string
+	fsys             fs.FS
+	baseline         *Baseline
+	owner            string
+	componentVersion string
 }
 
 func applicationMigrationSequence(fsys fs.FS, dialect string) migrationSequence {
@@ -467,8 +469,24 @@ func (e migrationEngine) apply(ctx context.Context, h *DB) (*ApplyReport, error)
 		return report, err
 	}
 	gdb := h.gdb.WithContext(ctx)
+	owned := e.seq.owner != ""
+	ledgerExisted := owned && gdb.Migrator().HasTable(e.seq.ledger)
+	if owned && !ledgerExisted {
+		claimExists, err := manifestClaimExists(gdb, e.seq.kind)
+		if err != nil {
+			return report, err
+		}
+		if claimExists {
+			return report, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, e.seq.kind, e.seq.ledger)
+		}
+	}
 	if err := e.ensureLedgerBase(gdb); err != nil {
 		return report, fmt.Errorf("db: ensure %s base: %w", e.seq.ledger, err)
+	}
+	if owned {
+		if err := ensureManifestBase(gdb); err != nil {
+			return report, fmt.Errorf("db: ensure %s base: %w", sequenceManifestTable, err)
+		}
 	}
 
 	lock, err := e.acquireMigrationLock(ctx, gdb)
@@ -479,10 +497,33 @@ func (e migrationEngine) apply(ctx context.Context, h *DB) (*ApplyReport, error)
 	if err := e.ensureLedgerColumns(gdb); err != nil {
 		return report, err
 	}
+	if owned {
+		if err := ensureManifestColumns(gdb); err != nil {
+			return report, err
+		}
+	}
 
 	ledger, err := e.appliedMigrations(gdb, nil)
 	if err != nil {
 		return report, err
+	}
+	if owned {
+		needsAdoption, err := e.authorizeSequenceWrite(gdb, ledgerExisted)
+		if err != nil {
+			return report, err
+		}
+		if needsAdoption {
+			// The legacy ledger must prove that its existing history belongs to
+			// this sequence before trust-on-first-use persists an owner. Once
+			// proven, persist the claim before any dialect/checksum/baseline or
+			// schema write so a crash cannot return the ledger to unclaimed state.
+			if err := e.preflightSequenceAdoption(ctx, h, gdb, files, ledger); err != nil {
+				return report, err
+			}
+			if err := e.adoptSequenceManifest(gdb); err != nil {
+				return report, err
+			}
+		}
 	}
 	if err := e.adoptLegacyDialect(gdb, ledger, lock.owner); err != nil {
 		return report, err
@@ -536,7 +577,46 @@ func (e migrationEngine) apply(ctx context.Context, h *DB) (*ApplyReport, error)
 		}
 		report.Applied = append(report.Applied, m)
 	}
+	if owned {
+		if err := e.refreshSequenceManifest(gdb); err != nil {
+			return report, err
+		}
+	}
 	return report, nil
+}
+
+func (e migrationEngine) preflightSequenceAdoption(
+	ctx context.Context,
+	h *DB,
+	gdb *gorm.DB,
+	files []Migration,
+	ledger []AppliedMigration,
+) error {
+	if err := e.validateLedgerDialect(ledger); err != nil {
+		return err
+	}
+	st := e.diffMigrations(files, ledger)
+	if len(st.Dirty) > 0 {
+		return dirtyMigrationsError(st.Dirty)
+	}
+	if len(ledger) == 0 && e.seq.baseline != nil && e.seq.baseline.EquivalentVersion > 0 {
+		adopted, err := e.planBaselineAdoption(ctx, h, gdb, files)
+		if err != nil {
+			return err
+		}
+		if len(adopted) > 0 {
+			st = e.diffMigrations(files, adopted)
+		}
+	}
+	if err := structuralMigrationError(st); err != nil {
+		return err
+	}
+	if len(st.Drift) > 0 {
+		return fmt.Errorf(
+			"db: checksum drift at migration version(s) %s; inspect with chok migrate status and resolve explicitly with chok migrate repair accept-drift",
+			versionList(st.Drift, func(d ChecksumDrift) int64 { return d.Version }))
+	}
+	return nil
 }
 
 func structuralMigrationError(st *MigrationStatus) error {
@@ -622,6 +702,34 @@ func (e migrationEngine) adoptBaseline(
 	files []Migration,
 	owner string,
 ) ([]AppliedMigration, error) {
+	adopted, err := e.planBaselineAdoption(ctx, h, gdb, files)
+	if err != nil || len(adopted) == 0 {
+		return adopted, err
+	}
+	work := func(tx *gorm.DB) error {
+		for _, row := range adopted {
+			if err := tx.Exec(
+				"INSERT INTO "+e.seq.ledger+" (version, name, applied_at, checksum, finished_at, dirty, last_error, dialect, provenance) "+
+					"VALUES (?, ?, ?, ?, ?, FALSE, '', ?, 'baseline')",
+				row.Version, row.Name, row.AppliedAt, row.Checksum, row.FinishedAt, row.Dialect,
+			).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := e.withMigrationLeaseTransaction(gdb, owner, work); err != nil {
+		return nil, fmt.Errorf("db: sequence %s ledger %s adopt baseline: %w", e.seq.kind, e.seq.ledger, err)
+	}
+	return adopted, nil
+}
+
+func (e migrationEngine) planBaselineAdoption(
+	ctx context.Context,
+	h *DB,
+	gdb *gorm.DB,
+	files []Migration,
+) ([]AppliedMigration, error) {
 	baseline := e.seq.baseline
 	if baseline == nil || baseline.EquivalentVersion == 0 {
 		return nil, nil
@@ -671,21 +779,6 @@ func (e migrationEngine) adoptBaseline(
 			Checksum: file.Checksum, FinishedAt: now,
 			Dialect: e.seq.dialect, Provenance: "baseline",
 		})
-	}
-	work := func(tx *gorm.DB) error {
-		for _, row := range adopted {
-			if err := tx.Exec(
-				"INSERT INTO "+e.seq.ledger+" (version, name, applied_at, checksum, finished_at, dirty, last_error, dialect, provenance) "+
-					"VALUES (?, ?, ?, ?, ?, FALSE, '', ?, 'baseline')",
-				row.Version, row.Name, row.AppliedAt, row.Checksum, row.FinishedAt, row.Dialect,
-			).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := e.withMigrationLeaseTransaction(gdb, owner, work); err != nil {
-		return nil, fmt.Errorf("db: sequence %s ledger %s adopt baseline: %w", e.seq.kind, e.seq.ledger, err)
 	}
 	return adopted, nil
 }
@@ -992,8 +1085,25 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 		byVersion[f.Version] = f
 	}
 	gdb := h.gdb.WithContext(ctx)
+	owned := e.seq.owner != ""
+	ledgerExisted := owned && gdb.Migrator().HasTable(e.seq.ledger)
+	if owned && !ledgerExisted {
+		claimExists, err := manifestClaimExists(gdb, e.seq.kind)
+		if err != nil {
+			return nil, err
+		}
+		if claimExists {
+			return nil, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, e.seq.kind, e.seq.ledger)
+		}
+		return nil, fmt.Errorf("%w: migration kind %q has no existing ledger", ErrSequenceUnclaimed, e.seq.kind)
+	}
 	if err := e.ensureLedgerBase(gdb); err != nil {
 		return nil, fmt.Errorf("db: ensure %s base: %w", e.seq.ledger, err)
+	}
+	if owned {
+		if err := ensureManifestBase(gdb); err != nil {
+			return nil, fmt.Errorf("db: ensure %s base: %w", sequenceManifestTable, err)
+		}
 	}
 	lock, err := e.acquireMigrationLock(ctx, gdb)
 	if err != nil {
@@ -1002,6 +1112,14 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 	defer lock.release()
 	if err := e.ensureLedgerColumns(gdb); err != nil {
 		return nil, err
+	}
+	if owned {
+		if err := ensureManifestColumns(gdb); err != nil {
+			return nil, err
+		}
+		if err := e.authorizeSequenceRepair(gdb, ledgerExisted); err != nil {
+			return nil, err
+		}
 	}
 
 	ledger, err := e.appliedMigrations(gdb, nil)

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -94,12 +96,17 @@ func openFromConfig(f *migrateFlags) (*db.DB, error) {
 }
 
 func ownedMigrationSequence(kind string) (db.Sequence, error) {
-	for _, seq := range blessed.MigrationSequences() {
+	sequences := blessed.MigrationSequences()
+	known := make([]string, 0, len(sequences))
+	for _, seq := range sequences {
+		known = append(known, seq.Kind())
 		if seq.Kind() == kind {
 			return seq, nil
 		}
 	}
-	return db.Sequence{}, fmt.Errorf("unknown migration component %q (want account|audit|authz)", kind)
+	return db.Sequence{}, fmt.Errorf(
+		"unknown built-in migration component %q (want %s); third-party sequences are applied by the application component through db.ApplyOwnedMigrations",
+		kind, strings.Join(known, "|"))
 }
 
 func renderApplyReport(out io.Writer, report *db.ApplyReport) {
@@ -284,12 +291,15 @@ func migrateUpCmd() *cobra.Command {
 
 func migrateStatusCmd() *cobra.Command {
 	f := &migrateFlags{}
-	var check bool
+	var check, ledgerHealthOnly bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show the complete migration audit state",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if ledgerHealthOnly && !check {
+				return fmt.Errorf("--ledger-health-only requires --check")
+			}
 			h, err := openFromConfig(f)
 			if err != nil {
 				return err
@@ -320,6 +330,11 @@ func migrateStatusCmd() *cobra.Command {
 			for _, status := range statuses {
 				renderMigrationStatus(out, status)
 			}
+			catalog, err := ownedMigrationCatalog(cmd.Context(), h)
+			if err != nil {
+				return err
+			}
+			renderOwnedMigrationCatalog(out, catalog)
 			fmt.Fprintf(out,
 				"\nbuilt-in framework-owned table catalog (outside application migration history):\n  %s\n",
 				strings.Join(appStatus.FrameworkTables, ", "))
@@ -329,13 +344,138 @@ func migrateStatusCmd() *cobra.Command {
 						return fmt.Errorf("migration status is not clean (sequence %s)", status.Sequence)
 					}
 				}
+				if err := checkOwnedMigrationCatalog(catalog, ledgerHealthOnly); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
 	}
 	addMigrateFlags(cmd, f)
-	cmd.Flags().BoolVar(&check, "check", false, "exit 1 unless there are no pending, dirty, drifted, missing, unverified, out-of-order, renamed or fenced migrations")
+	cmd.Flags().BoolVar(&check, "check", false, "exit 1 unless application and owned migration state is fully verified and clean")
+	cmd.Flags().BoolVar(&ledgerHealthOnly, "ledger-health-only", false, "with --check, allow unclaimed or file-unverified third-party sequences while still rejecting unhealthy ledgers and incompatible engine floors")
 	return cmd
+}
+
+type ownedMigrationCatalogRow struct {
+	entry    *db.ManifestEntry
+	snapshot *db.SequenceLedgerSnapshot
+	content  string
+}
+
+func ownedMigrationCatalog(ctx context.Context, h *db.DB) ([]ownedMigrationCatalogRow, error) {
+	entries, err := db.ManifestEntries(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	byKind := make(map[string]*db.ManifestEntry, len(entries))
+	kinds := make(map[string]struct{}, len(entries))
+	for i := range entries {
+		byKind[entries[i].Kind] = &entries[i]
+		kinds[entries[i].Kind] = struct{}{}
+	}
+	tables, err := h.Unsafe(ctx).Migrator().GetTables()
+	if err != nil {
+		return nil, fmt.Errorf("inspect owned migration ledgers: %w", err)
+	}
+	const prefix = "schema_migrations_chok_"
+	for _, table := range tables {
+		if !strings.HasPrefix(table, prefix) || table == prefix+"manifest" {
+			continue
+		}
+		kind := strings.TrimPrefix(table, prefix)
+		// A table outside the documented grammar is not chok-managed merely
+		// because it has a similar prefix. Valid kinds are read again below,
+		// where ledger corruption must propagate rather than be mistaken for
+		// an invalid identifier and hidden from status.
+		if db.ValidateSequenceKind(kind) != nil {
+			continue
+		}
+		kinds[kind] = struct{}{}
+	}
+	ordered := make([]string, 0, len(kinds))
+	for kind := range kinds {
+		ordered = append(ordered, kind)
+	}
+	sort.Strings(ordered)
+	builtIn := make(map[string]struct{})
+	for _, seq := range blessed.MigrationSequences() {
+		builtIn[seq.Kind()] = struct{}{}
+	}
+	rows := make([]ownedMigrationCatalogRow, 0, len(ordered))
+	for _, kind := range ordered {
+		snapshot, err := db.LedgerSnapshot(ctx, h, kind)
+		if err != nil {
+			return nil, err
+		}
+		content := "unverified"
+		if _, ok := builtIn[kind]; ok {
+			content = "verified-by-binary"
+		}
+		rows = append(rows, ownedMigrationCatalogRow{entry: byKind[kind], snapshot: snapshot, content: content})
+	}
+	return rows, nil
+}
+
+func renderOwnedMigrationCatalog(out io.Writer, rows []ownedMigrationCatalogRow) {
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "\nowned sequence manifest and ledger panorama:")
+	for _, row := range rows {
+		claim, owner, provenance := "unclaimed", "unknown", "unclaimed"
+		floor, componentVersion, chokVersion := 0, "", ""
+		if row.entry != nil {
+			claim = "claimed"
+			owner = row.entry.Owner
+			provenance = row.entry.Provenance
+			floor = row.entry.EngineFloor
+			componentVersion = row.entry.ComponentVersion
+			chokVersion = row.entry.ChokVersion
+		}
+		ledgerState := "missing"
+		if row.snapshot.Exists {
+			ledgerState = "present"
+		}
+		fmt.Fprintf(out,
+			"[%s] ledger=%s ledger_state=%s claim=%s owner=%s provenance=%s engine_floor=%d component=%s chok=%s content=%s frontier=%d rows=%d dirty=%d unverified=%d fenced=%t\n",
+			row.snapshot.Kind, row.snapshot.Ledger, ledgerState, claim, owner, provenance, floor,
+			emptyMigrationMetadata(componentVersion), emptyMigrationMetadata(chokVersion), row.content,
+			row.snapshot.Frontier, row.snapshot.Rows, row.snapshot.Dirty, row.snapshot.Unverified, row.snapshot.Fence != nil,
+		)
+	}
+}
+
+func emptyMigrationMetadata(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func checkOwnedMigrationCatalog(rows []ownedMigrationCatalogRow, ledgerHealthOnly bool) error {
+	for _, row := range rows {
+		kind := row.snapshot.Kind
+		if !row.snapshot.Exists {
+			return fmt.Errorf("migration status is not clean (sequence %s ledger is missing)", kind)
+		}
+		if row.entry != nil && !row.entry.EngineCompatible() {
+			return fmt.Errorf("migration status is not clean (sequence %s requires engine generation %d; this build supports %d)", kind, row.entry.EngineFloor, db.MigrationEngineGeneration)
+		}
+		if row.snapshot.Dirty > 0 || row.snapshot.Fence != nil || row.snapshot.Unverified > 0 {
+			return fmt.Errorf("migration status is not clean (sequence %s ledger health: dirty=%d unverified=%d fenced=%t)", kind, row.snapshot.Dirty, row.snapshot.Unverified, row.snapshot.Fence != nil)
+		}
+		if ledgerHealthOnly {
+			continue
+		}
+		if row.entry == nil {
+			return fmt.Errorf("migration status is not clean (sequence %s is unclaimed)", kind)
+		}
+		if row.content == "unverified" {
+			return fmt.Errorf("migration status is not clean (sequence %s content is unavailable to this CLI binary)", kind)
+		}
+	}
+	return nil
 }
 
 func formatMigrationTime(t time.Time) string {
@@ -354,7 +494,44 @@ func migrateRepairCmd() *cobra.Command {
 		migrateRepairActionCmd(db.RepairRetry),
 		migrateRepairActionCmd(db.RepairMarkApplied),
 		migrateRepairActionCmd(db.RepairAcceptDrift),
+		migrateRepairClaimCmd(),
 	)
+	return cmd
+}
+
+func migrateRepairClaimCmd() *cobra.Command {
+	f := &migrateFlags{}
+	var kind, expectedOwner, newOwner string
+	cmd := &cobra.Command{
+		Use:   "claim",
+		Short: "Transfer one inspected owned-sequence manifest claim",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if kind == "" || expectedOwner == "" || newOwner == "" {
+				return fmt.Errorf("--kind, --expected-owner and --new-owner are required")
+			}
+			h, err := openFromConfig(f)
+			if err != nil {
+				return err
+			}
+			defer h.Close()
+			report, err := db.RepairSequenceClaim(cmd.Context(), h, kind, db.RepairClaimOptions{
+				ExpectedOwner: expectedOwner,
+				NewOwner:      newOwner,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"repaired sequence=%s ledger=%s dialect=%s previous_owner=%s new_owner=%s repaired_at=%s\n",
+				report.Kind, report.Ledger, report.Dialect, report.PreviousOwner, report.NewOwner, report.RepairedAt.Format(time.RFC3339))
+			return nil
+		},
+	}
+	addMigrateFlags(cmd, f)
+	cmd.Flags().StringVar(&kind, "kind", "", "owned migration kind whose existing claim is transferred")
+	cmd.Flags().StringVar(&expectedOwner, "expected-owner", "", "exact current owner observed in migrate status")
+	cmd.Flags().StringVar(&newOwner, "new-owner", "", "new full component import path")
 	return cmd
 }
 

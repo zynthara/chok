@@ -76,7 +76,7 @@ jobs:
       - name: test (store semantics, migration audit and battery schemas on MySQL)
         env:
           CHOK_TEST_MYSQL_DSN: root:root@tcp(localhost:3306)/?parseTime=true
-        run: go test -race -count=1 ./store ./db ./account ./audit ./authz -run 'TestBatchUpsert_MySQLIgnoresDeclaredConflictTarget|TestApplyMigrations_MySQLPartialDDL|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent'
+        run: go test -race -count=1 ./store ./db ./account ./audit ./authz -run 'TestBatchUpsert_MySQLIgnoresDeclaredConflictTarget|TestApplyMigrations_MySQLPartialDDL|TestSequenceManifest_MySQLClaimAndRepair|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent'
 
       - name: build
         run: go build ./...

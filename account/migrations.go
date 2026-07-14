@@ -49,7 +49,7 @@ func mustMigrationSequence() db.Sequence {
 		EquivalentVersion: 2,
 		Tables:            []string{"users", "identities"},
 		Fingerprints:      fingerprints,
-	})
+	}, db.SequenceOwner("github.com/zynthara/chok/v2/account"))
 	if err != nil {
 		panic(err)
 	}

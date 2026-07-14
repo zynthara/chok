@@ -10,7 +10,7 @@
 
 ---
 
-## Unreleased — 批量写语义补齐
+## Unreleased — 批量写语义补齐 + 第三方迁移序列 manifest
 
 > `BatchUpdate` 与 `BatchUpsert` 补齐了“每行不同 payload”和“批量
 > insert-or-update”两块操作面，同时不把 `Writer[T]` 扩成会打碎下游 mock
@@ -27,6 +27,19 @@
 > `BatchUpdate` 复用单行 Update 内核，scope、零值写入与乐观锁只有一份
 > 事实源；自管事务失败时恢复此前由框架递增的内存 Version，避免数据库
 > 已回滚而对象重试立即产生伪 stale conflict。
+>
+> 第三方组件现在与内建电池共享唯一的 owned-sequence 实现：组件包完整路径
+> 声明 owner，全局 manifest 用数据库 claim 把 kind/账本归属持久化，并以
+> engine floor 阻止较旧的 manifest-aware 引擎写入。claim 校验位于迁移锁内，
+> 覆盖 apply、repair 与 owner transfer；存量账本先完成只读 TOFU 预检，再在
+> 第一笔账本/schema 写之前持久化 owner，崩溃不会把已验证的归属重新暴露为
+> unclaimed。
+>
+> 通用 CLI 能通过 manifest + 前缀扫描展示第三方账本，但不能凭空取得组件
+> 内嵌 SQL，因此严格 `status --check` 将 content-unverified 视为非 clean；
+> 操作者必须显式选择 `--ledger-health-only` 才只检查 dirty/fence/floor 等
+> 文件无关健康状态。声明式组件身份保留 fork/vendor 可控性，没有采用脆弱的
+> runtime caller/build-info 推导。
 
 ## 2.0.0-beta.5 — 数据层加固：只读实例 + 电池独立迁移账本
 

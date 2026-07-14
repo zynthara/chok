@@ -7,6 +7,12 @@ import (
 	"testing/fstest"
 )
 
+const ownedTestSequenceOwner = "example.com/choktest/sequence"
+
+func ownedTestOptions() []SequenceOption {
+	return []SequenceOption{SequenceOwner(ownedTestSequenceOwner)}
+}
+
 func ownedTestFS(sql string) fstest.MapFS {
 	return fstest.MapFS{
 		"sqlite/0001_init.sql":   &fstest.MapFile{Data: []byte(sql)},
@@ -21,7 +27,7 @@ func TestSequence_ApplicationAndOwnedLedgersAreIndependent(t *testing.T) {
 	appFS := fstest.MapFS{
 		"0001_app.sql": &fstest.MapFile{Data: []byte("CREATE TABLE app_sequence_item (id INTEGER PRIMARY KEY);")},
 	}
-	owned, err := OwnedSequence("widget", ownedTestFS("CREATE TABLE owned_sequence_item (id INTEGER PRIMARY KEY);"), Baseline{})
+	owned, err := OwnedSequence("widget", ownedTestFS("CREATE TABLE owned_sequence_item (id INTEGER PRIMARY KEY);"), Baseline{}, ownedTestOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +63,7 @@ func TestSequence_ApplicationAndOwnedLedgersAreIndependent(t *testing.T) {
 func TestSequence_DirtyAndRepairStayInOwnedLedger(t *testing.T) {
 	ctx := context.Background()
 	h := openTestHandle(t)
-	seq, err := OwnedSequence("broken", ownedTestFS("CREATE TABLE broken_owned (id INTEGER PRIMARY KEY); INVALID SQL;"), Baseline{})
+	seq, err := OwnedSequence("broken", ownedTestFS("CREATE TABLE broken_owned (id INTEGER PRIMARY KEY); INVALID SQL;"), Baseline{}, ownedTestOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +100,7 @@ func TestOwnedSequence_RejectsDialectSetDrift(t *testing.T) {
 	fsys := ownedTestFS("SELECT 1;")
 	delete(fsys, "mysql/0001_init.sql")
 	fsys["mysql/0002_other.sql"] = &fstest.MapFile{Data: []byte("SELECT 1;")}
-	_, err := OwnedSequence("drift", fsys, Baseline{})
+	_, err := OwnedSequence("drift", fsys, Baseline{}, ownedTestOptions()...)
 	if err == nil || !strings.Contains(err.Error(), "dialect set mismatch") {
 		t.Fatalf("want dialect set mismatch, got %v", err)
 	}
@@ -123,7 +129,7 @@ func TestSameBaseline_RequiresEquivalentVersionAndFingerprints(t *testing.T) {
 
 func TestSequence_DialectMismatchFailsStatusAndRepair(t *testing.T) {
 	h := openTestHandle(t)
-	seq, err := OwnedSequence("dialect_guard", ownedTestFS("CREATE TABLE dialect_guard_item (id INTEGER PRIMARY KEY);"), Baseline{})
+	seq, err := OwnedSequence("dialect_guard", ownedTestFS("CREATE TABLE dialect_guard_item (id INTEGER PRIMARY KEY);"), Baseline{}, ownedTestOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,11 +166,11 @@ func TestSequence_LedgerAwareOlderBinaryRejectsNewerLedger(t *testing.T) {
 		olderFS[dialect+"/0001_init.sql"] = first
 		newerFS[dialect+"/0002_new_shape.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE ledger_aware_new_shape (id INTEGER PRIMARY KEY);")}
 	}
-	newer, err := OwnedSequence("ledger_aware", newerFS, Baseline{})
+	newer, err := OwnedSequence("ledger_aware", newerFS, Baseline{}, ownedTestOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	older, err := OwnedSequence("ledger_aware", olderFS, Baseline{})
+	older, err := OwnedSequence("ledger_aware", olderFS, Baseline{}, ownedTestOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,11 +10,28 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 )
 
 var ownedSequenceKindRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
+const (
+	sequenceManifestKind     = "manifest"
+	maxSequenceOwnerBytes    = 190
+	maxSequenceVersionBytes  = 64
+	chokAccountSequenceOwner = "github.com/zynthara/chok/v2/account"
+	chokAuditSequenceOwner   = "github.com/zynthara/chok/v2/audit"
+	chokAuthzSequenceOwner   = "github.com/zynthara/chok/v2/authz"
+)
+
+var reservedSequenceOwners = map[string]string{
+	"account": chokAccountSequenceOwner,
+	"audit":   chokAuditSequenceOwner,
+	"authz":   chokAuthzSequenceOwner,
+}
 
 // Baseline describes the AutoMigrate-equivalent frontier of an owned
 // component sequence. Fingerprints are canonical SchemaFingerprint results by
@@ -30,17 +47,89 @@ type Baseline struct {
 // Construct it with OwnedSequence; its internals are intentionally opaque so
 // callers cannot select arbitrary ledger identifiers.
 type Sequence struct {
-	kind     string
-	ledger   string
-	fsys     fs.FS
-	baseline Baseline
+	kind             string
+	ledger           string
+	owner            string
+	componentVersion string
+	fsys             fs.FS
+	baseline         Baseline
+}
+
+type sequenceOptions struct {
+	owner            string
+	componentVersion string
+	ownerSet         bool
+	versionSet       bool
+}
+
+// SequenceOption configures the stable identity and informational metadata of
+// an owned migration sequence. Construct options with SequenceOwner and
+// SequenceVersion.
+type SequenceOption interface {
+	applySequenceOption(*sequenceOptions) error
+}
+
+type sequenceOptionFunc func(*sequenceOptions) error
+
+func (f sequenceOptionFunc) applySequenceOption(opts *sequenceOptions) error { return f(opts) }
+
+// SequenceOwner declares the stable component identity that owns a migration
+// sequence. Use the full import path of the package declaring the sequence.
+// Every OwnedSequence must provide exactly one owner.
+func SequenceOwner(owner string) SequenceOption {
+	return sequenceOptionFunc(func(opts *sequenceOptions) error {
+		if opts.ownerSet {
+			return fmt.Errorf("db: migration sequence owner was declared more than once")
+		}
+		if err := validateSequenceOwner(owner); err != nil {
+			return err
+		}
+		opts.owner = owner
+		opts.ownerSet = true
+		return nil
+	})
+}
+
+// SequenceVersion declares an informational component version to record in
+// the manifest. It does not participate in compatibility decisions.
+func SequenceVersion(version string) SequenceOption {
+	return sequenceOptionFunc(func(opts *sequenceOptions) error {
+		if opts.versionSet {
+			return fmt.Errorf("db: migration sequence version was declared more than once")
+		}
+		if err := validateSequenceVersion(version); err != nil {
+			return err
+		}
+		opts.componentVersion = version
+		opts.versionSet = true
+		return nil
+	})
 }
 
 // OwnedSequence constructs a framework-owned migration sequence. fsys must
 // contain sqlite, mysql and postgres subdirectories with numbered SQL files.
-func OwnedSequence(kind string, fsys fs.FS, baseline Baseline) (Sequence, error) {
+// SequenceOwner is mandatory; SequenceVersion is optional and informational.
+func OwnedSequence(kind string, fsys fs.FS, baseline Baseline, options ...SequenceOption) (Sequence, error) {
 	if !ownedSequenceKindRE.MatchString(kind) {
 		return Sequence{}, fmt.Errorf("db: owned migration kind %q must match %s", kind, ownedSequenceKindRE)
+	}
+	if kind == sequenceManifestKind {
+		return Sequence{}, fmt.Errorf("db: owned migration kind %q is reserved for the global migration manifest", kind)
+	}
+	var opts sequenceOptions
+	for i, option := range options {
+		if option == nil {
+			return Sequence{}, fmt.Errorf("db: owned migration sequence %q option %d is nil", kind, i)
+		}
+		if err := option.applySequenceOption(&opts); err != nil {
+			return Sequence{}, fmt.Errorf("db: owned migration sequence %q: %w", kind, err)
+		}
+	}
+	if !opts.ownerSet {
+		return Sequence{}, fmt.Errorf("db: owned migration sequence %q requires db.SequenceOwner", kind)
+	}
+	if expected, reserved := reservedSequenceOwners[kind]; reserved && opts.owner != expected {
+		return Sequence{}, fmt.Errorf("db: owned migration kind %q is reserved for owner %q", kind, expected)
 	}
 	if fsys == nil {
 		return Sequence{}, fmt.Errorf("db: owned migration sequence %q requires a migration filesystem", kind)
@@ -87,10 +176,66 @@ func OwnedSequence(kind string, fsys fs.FS, baseline Baseline) (Sequence, error)
 		}
 	}
 	return Sequence{
-		kind: kind, ledger: "schema_migrations_chok_" + kind,
-		fsys: fsys, baseline: cloneBaseline(baseline),
+		kind: kind, ledger: ledgerForSequenceKind(kind), owner: opts.owner,
+		componentVersion: opts.componentVersion,
+		fsys:             fsys, baseline: cloneBaseline(baseline),
 	}, nil
 }
+
+func validateSequenceOwner(owner string) error {
+	if owner == "" {
+		return fmt.Errorf("migration sequence owner is empty")
+	}
+	if !utf8.ValidString(owner) {
+		return fmt.Errorf("migration sequence owner is not valid UTF-8")
+	}
+	if len(owner) > maxSequenceOwnerBytes {
+		return fmt.Errorf("migration sequence owner is %d bytes, maximum is %d", len(owner), maxSequenceOwnerBytes)
+	}
+	if strings.TrimSpace(owner) != owner {
+		return fmt.Errorf("migration sequence owner must not contain leading or trailing whitespace")
+	}
+	for _, r := range owner {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("migration sequence owner contains whitespace or a control character")
+		}
+	}
+	return nil
+}
+
+func validateSequenceVersion(version string) error {
+	if !utf8.ValidString(version) {
+		return fmt.Errorf("migration sequence version is not valid UTF-8")
+	}
+	if len(version) > maxSequenceVersionBytes {
+		return fmt.Errorf("migration sequence version is %d bytes, maximum is %d", len(version), maxSequenceVersionBytes)
+	}
+	if strings.TrimSpace(version) != version {
+		return fmt.Errorf("migration sequence version must not contain leading or trailing whitespace")
+	}
+	for _, r := range version {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("migration sequence version contains a control character")
+		}
+	}
+	return nil
+}
+
+// ValidateSequenceKind reports whether kind is a legal owned-sequence kind:
+// it must match the sequence-kind grammar and must not be the reserved
+// manifest name. It is the single gate tooling should use before deriving a
+// ledger identifier from an externally observed kind string.
+func ValidateSequenceKind(kind string) error {
+	if !ownedSequenceKindRE.MatchString(kind) {
+		return fmt.Errorf("db: owned migration kind %q must match %s", kind, ownedSequenceKindRE)
+	}
+	if kind == sequenceManifestKind {
+		return fmt.Errorf("db: owned migration kind %q is reserved for the global migration manifest", kind)
+	}
+	return nil
+}
+
+func ledgerForSequenceKind(kind string) string { return "schema_migrations_chok_" + kind }
 
 func compareMigrationIdentities(want, got []Migration) error {
 	if len(want) != len(got) {
@@ -122,6 +267,12 @@ func (s Sequence) Kind() string { return s.kind }
 // Ledger reports the derived framework-owned ledger table.
 func (s Sequence) Ledger() string { return s.ledger }
 
+// Owner reports the stable component import path that owns the sequence.
+func (s Sequence) Owner() string { return s.owner }
+
+// ComponentVersion reports the optional informational component version.
+func (s Sequence) ComponentVersion() string { return s.componentVersion }
+
 // OwnedTables returns a caller-safe copy of the sequence's baseline tables.
 func (s Sequence) OwnedTables() []string {
 	return append([]string(nil), s.baseline.Tables...)
@@ -131,7 +282,7 @@ func resolveOwnedSequence(h *DB, seq Sequence) (migrationEngine, error) {
 	if h == nil || h.gdb == nil {
 		return migrationEngine{}, fmt.Errorf("db: resolve migration sequence: nil database handle")
 	}
-	if seq.kind == "" || seq.ledger == "" || seq.fsys == nil {
+	if seq.kind == "" || seq.ledger == "" || seq.owner == "" || seq.fsys == nil {
 		return migrationEngine{}, fmt.Errorf("db: invalid zero migration sequence; construct it with db.OwnedSequence")
 	}
 	dialect := h.gdb.Dialector.Name()
@@ -147,7 +298,7 @@ func resolveOwnedSequence(h *DB, seq Sequence) (migrationEngine, error) {
 	}
 	return migrationEngine{seq: migrationSequence{
 		kind: seq.kind, ledger: seq.ledger, dialect: dialect, fsys: selected,
-		baseline: &seq.baseline,
+		baseline: &seq.baseline, owner: seq.owner, componentVersion: seq.componentVersion,
 	}}, nil
 }
 

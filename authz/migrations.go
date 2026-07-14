@@ -38,7 +38,7 @@ func mustMigrationSequence() db.Sequence {
 		EquivalentVersion: 1,
 		Tables:            []string{"casbin_rule"},
 		Fingerprints:      fingerprints,
-	})
+	}, db.SequenceOwner("github.com/zynthara/chok/v2/authz"))
 	if err != nil {
 		panic(err)
 	}

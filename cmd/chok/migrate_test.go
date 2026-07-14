@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/zynthara/chok/v2/db"
 )
@@ -150,9 +151,101 @@ func TestMigrateOwnedSequences_EndToEnd(t *testing.T) {
 		if !strings.Contains(out, section) {
 			t.Fatalf("status missing %q:\n%s", section, out)
 		}
+		for _, owner := range []string{"github.com/zynthara/chok/v2/account", "github.com/zynthara/chok/v2/audit", "github.com/zynthara/chok/v2/authz"} {
+			if !strings.Contains(out, "owner="+owner) || !strings.Contains(out, "content=verified-by-binary") {
+				t.Fatalf("status manifest panorama missing built-in owner %q:\n%s", owner, out)
+			}
+		}
 	}
 	if _, err := runMigrate(t, "up", "--component", "unknown", "--config", cfgPath, "--dir", migDir); err == nil {
 		t.Fatal("unknown owned component must fail")
+	}
+}
+
+func TestMigrateThirdPartyManifestStatusCheckAndClaimRepair(t *testing.T) {
+	cfgPath, migDir := writeProject(t)
+	if out, err := runMigrate(t, "up", "--config", cfgPath, "--dir", migDir); err != nil {
+		t.Fatalf("application up: %v\n%s", err, out)
+	}
+	h, err := openFromConfig(&migrateFlags{config: cfgPath, dir: migDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets := fstest.MapFS{}
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		assets[dialect+"/0001_init.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE cli_third_party_item (id BIGINT PRIMARY KEY);")}
+	}
+	const oldOwner = "example.com/acme/billing"
+	seq, err := db.OwnedSequence("billing", assets, db.Baseline{}, db.SequenceOwner(oldOwner), db.SequenceVersion("v1.2.3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ApplySequence(t.Context(), h, seq); err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close()
+
+	out, err := runMigrate(t, "status", "--config", cfgPath, "--dir", migDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []string{"[billing]", "owner=" + oldOwner, "component=v1.2.3", "content=unverified", "ledger_state=present"} {
+		if !strings.Contains(out, part) {
+			t.Fatalf("third-party panorama missing %q:\n%s", part, out)
+		}
+	}
+	if out, err := runMigrate(t, "status", "--check", "--config", cfgPath, "--dir", migDir); err == nil || !strings.Contains(err.Error(), "content is unavailable") {
+		t.Fatalf("default check must fail closed on third-party content: err=%v\n%s", err, out)
+	}
+	if out, err := runMigrate(t, "status", "--check", "--ledger-health-only", "--config", cfgPath, "--dir", migDir); err != nil {
+		t.Fatalf("healthy third-party ledger must pass explicit relaxed check: %v\n%s", err, out)
+	}
+
+	const newOwner = "example.com/acme/payments"
+	out, err = runMigrate(t,
+		"repair", "claim",
+		"--kind", "billing",
+		"--expected-owner", oldOwner,
+		"--new-owner", newOwner,
+		"--config", cfgPath,
+	)
+	if err != nil || !strings.Contains(out, "previous_owner="+oldOwner) || !strings.Contains(out, "new_owner="+newOwner) {
+		t.Fatalf("repair claim: err=%v\n%s", err, out)
+	}
+	out, err = runMigrate(t, "status", "--config", cfgPath, "--dir", migDir)
+	if err != nil || !strings.Contains(out, "owner="+newOwner) {
+		t.Fatalf("status after claim transfer: err=%v\n%s", err, out)
+	}
+}
+
+func TestCheckOwnedMigrationCatalogMatrix(t *testing.T) {
+	healthy := &db.SequenceLedgerSnapshot{Kind: "billing", Ledger: "schema_migrations_chok_billing", Exists: true}
+	unclaimed := []ownedMigrationCatalogRow{{snapshot: healthy, content: "unverified"}}
+	if err := checkOwnedMigrationCatalog(unclaimed, false); err == nil || !strings.Contains(err.Error(), "unclaimed") {
+		t.Fatalf("strict check must reject an unclaimed ledger, got %v", err)
+	}
+	if err := checkOwnedMigrationCatalog(unclaimed, true); err != nil {
+		t.Fatalf("ledger-health-only must allow a healthy unclaimed ledger: %v", err)
+	}
+
+	highFloor := db.ManifestEntry{Kind: "billing", Ledger: healthy.Ledger, Owner: "example.com/acme/billing", EngineFloor: db.MigrationEngineGeneration + 1}
+	incompatible := []ownedMigrationCatalogRow{{entry: &highFloor, snapshot: healthy, content: "unverified"}}
+	for _, relaxed := range []bool{false, true} {
+		if err := checkOwnedMigrationCatalog(incompatible, relaxed); err == nil || !strings.Contains(err.Error(), "requires engine generation") {
+			t.Fatalf("engine floor must fail with relaxed=%t, got %v", relaxed, err)
+		}
+	}
+
+	unverifiedLedger := *healthy
+	unverifiedLedger.Unverified = 1
+	if err := checkOwnedMigrationCatalog([]ownedMigrationCatalogRow{{snapshot: &unverifiedLedger, content: "unverified"}}, true); err == nil || !strings.Contains(err.Error(), "ledger health") {
+		t.Fatalf("ledger-health-only must still reject checksum-unverified ledger rows, got %v", err)
+	}
+
+	missingLedger := *healthy
+	missingLedger.Exists = false
+	if err := checkOwnedMigrationCatalog([]ownedMigrationCatalogRow{{snapshot: &missingLedger, content: "unverified"}}, true); err == nil || !strings.Contains(err.Error(), "ledger is missing") {
+		t.Fatalf("ledger-health-only must still reject a missing ledger, got %v", err)
 	}
 }
 

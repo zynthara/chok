@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -342,7 +343,8 @@ func TestRepairMigration_MarkAppliedAndAcceptDrift(t *testing.T) {
 	}
 }
 
-func TestApplyMigrations_MySQLPartialDDL(t *testing.T) {
+func openMySQLMigrationTestHandle(t *testing.T, prefix string) *DB {
+	t.Helper()
 	dsn := os.Getenv("CHOK_TEST_MYSQL_DSN")
 	if dsn == "" {
 		t.Skip("CHOK_TEST_MYSQL_DSN is unset")
@@ -351,7 +353,7 @@ func TestApplyMigrations_MySQLPartialDDL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dbName := fmt.Sprintf("chok_migration_%d_%d", os.Getpid(), time.Now().UnixNano())
+	dbName := fmt.Sprintf("chok_%s_%d_%d", prefix, os.Getpid(), time.Now().UnixNano())
 	adminCfg := *cfg
 	adminCfg.DBName = ""
 	admin, err := sql.Open("mysql", adminCfg.FormatDSN())
@@ -372,7 +374,12 @@ func TestApplyMigrations_MySQLPartialDDL(t *testing.T) {
 	if pool, err := gdb.DB(); err == nil {
 		t.Cleanup(func() { _ = pool.Close() })
 	}
-	h := wrapForTest(gdb)
+	return wrapForTest(gdb)
+}
+
+func TestApplyMigrations_MySQLPartialDDL(t *testing.T) {
+	h := openMySQLMigrationTestHandle(t, "migration")
+	gdb := h.gdb
 	ctx := context.Background()
 	bad := migFS(map[string]string{
 		"0001_partial.sql": "CREATE TABLE mysql_partial (id BIGINT PRIMARY KEY); THIS IS NOT SQL;",
@@ -404,6 +411,30 @@ func TestApplyMigrations_MySQLPartialDDL(t *testing.T) {
 	}
 	if _, err := ApplyMigrations(ctx, h, fixed); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSequenceManifest_MySQLClaimAndRepair(t *testing.T) {
+	h := openMySQLMigrationTestHandle(t, "manifest")
+	seq := manifestTestSequence(t, "mysql_claim", "example.com/mysql/old", map[string]string{
+		"0001_init.sql": "CREATE TABLE mysql_manifest_item (id BIGINT PRIMARY KEY);",
+	})
+	if _, err := ApplySequence(t.Context(), h, seq); err != nil {
+		t.Fatal(err)
+	}
+	other := manifestTestSequence(t, seq.Kind(), "example.com/mysql/other", map[string]string{
+		"0001_init.sql": "CREATE TABLE mysql_manifest_item (id BIGINT PRIMARY KEY);",
+	})
+	if _, err := ApplySequence(t.Context(), h, other); !errors.Is(err, ErrSequenceClaimConflict) {
+		t.Fatalf("MySQL manifest must reject another owner, got %v", err)
+	}
+	if _, err := RepairSequenceClaim(t.Context(), h, seq.Kind(), RepairClaimOptions{
+		ExpectedOwner: seq.Owner(), NewOwner: other.Owner(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplySequence(t.Context(), h, other); err != nil {
+		t.Fatalf("transferred MySQL claim must accept the new owner: %v", err)
 	}
 }
 

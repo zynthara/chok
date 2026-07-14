@@ -31,6 +31,7 @@ func TestFrameworkTablesSource_IsFormattedGo(t *testing.T) {
 		"schema_migrations_chok_account",
 		"schema_migrations_chok_audit",
 		"schema_migrations_chok_authz",
+		"schema_migrations_chok_manifest",
 		"users",
 	} {
 		if !strings.Contains(string(source), `"`+table+`"`) {

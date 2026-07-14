@@ -38,7 +38,7 @@ func mustMigrationSequence() db.Sequence {
 		EquivalentVersion: 1,
 		Tables:            []string{"audit_logs"},
 		Fingerprints:      fingerprints,
-	})
+	}, db.SequenceOwner("github.com/zynthara/chok/v2/audit"))
 	if err != nil {
 		panic(err)
 	}

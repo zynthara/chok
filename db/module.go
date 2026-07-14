@@ -136,7 +136,7 @@ func (c *Component) Describe() kernel.Descriptor {
 		Instance:  c.instance,
 		ConfigKey: "db",
 		Options:   Options{},
-		Schema:    kernel.SchemaOwner{Tables: []string{ledgerTable}},
+		Schema:    kernel.SchemaOwner{Tables: []string{ledgerTable, sequenceManifestTable}},
 		Needs: []kernel.Dep{
 			{Kind: "log", Optional: true},
 			{Kind: "tracing", Optional: true},
@@ -193,7 +193,8 @@ func (c *Component) registerOwnedSequence(h *DB, seq Sequence) error {
 		c.seqs = make(map[string]Sequence)
 	}
 	if existing, ok := c.seqs[seq.Kind()]; ok {
-		if existing.Ledger() != seq.Ledger() || !sameBaseline(existing.baseline, seq.baseline) {
+		if existing.Ledger() != seq.Ledger() || existing.Owner() != seq.Owner() ||
+			existing.ComponentVersion() != seq.ComponentVersion() || !sameBaseline(existing.baseline, seq.baseline) {
 			return fmt.Errorf("db: migration sequence %s registered with conflicting metadata", seq.Kind())
 		}
 		oldEngine, oldErr := resolveOwnedSequence(h, existing)
