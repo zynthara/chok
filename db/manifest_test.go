@@ -266,7 +266,7 @@ func TestSequenceManifest_RepairAndFloorShareAuthorization(t *testing.T) {
 		t.Fatalf("repair must reject higher engine floor, got %v", err)
 	}
 	if _, err := RepairSequenceClaim(t.Context(), h, owner.Kind(), RepairClaimOptions{
-		ExpectedOwner: owner.Owner(), NewOwner: "example.com/new/repair",
+		ExpectedOwner: owner.Owner(), NewOwner: "example.com/new/repair", Reason: "test transfer",
 	}); !errors.Is(err, ErrMigrationEngineTooOld) {
 		t.Fatalf("claim transfer must reject higher engine floor, got %v", err)
 	}
@@ -282,12 +282,12 @@ func TestRepairSequenceClaim_CASAndMissingLedgerFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := RepairSequenceClaim(t.Context(), h, seq.Kind(), RepairClaimOptions{
-		ExpectedOwner: "example.com/wrong/transfer", NewOwner: newOwner,
+		ExpectedOwner: "example.com/wrong/transfer", NewOwner: newOwner, Reason: "test transfer",
 	}); err == nil || !strings.Contains(err.Error(), "expected owner") {
 		t.Fatalf("claim transfer must enforce the expected-owner CAS, got %v", err)
 	}
 	report, err := RepairSequenceClaim(t.Context(), h, seq.Kind(), RepairClaimOptions{
-		ExpectedOwner: oldOwner, NewOwner: newOwner,
+		ExpectedOwner: oldOwner, NewOwner: newOwner, Reason: "test transfer",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func TestRepairSequenceClaim_CASAndMissingLedgerFailClosed(t *testing.T) {
 		t.Fatal("ledger repair must not recreate a missing owned ledger")
 	}
 	if _, err := RepairSequenceClaim(t.Context(), h, seq.Kind(), RepairClaimOptions{
-		ExpectedOwner: newOwner, NewOwner: oldOwner,
+		ExpectedOwner: newOwner, NewOwner: oldOwner, Reason: "test transfer",
 	}); !errors.Is(err, ErrSequenceManifestCorrupt) {
 		t.Fatalf("claim without ledger must fail closed, got %v", err)
 	}
@@ -354,7 +354,7 @@ func TestRepairSequenceClaim_CanRestoreReservedOwner(t *testing.T) {
 	}
 	report, err := RepairSequenceClaim(t.Context(), h, e.seq.kind, RepairClaimOptions{
 		ExpectedOwner: wrongOwner,
-		NewOwner:      chokAccountSequenceOwner,
+		NewOwner:      chokAccountSequenceOwner, Reason: "test transfer",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +387,7 @@ func TestRepairSequenceClaim_WaitsForTheMigrationLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
 	defer cancel()
 	_, repairErr := RepairSequenceClaim(ctx, h, seq.Kind(), RepairClaimOptions{
-		ExpectedOwner: seq.Owner(), NewOwner: "example.com/new/lock",
+		ExpectedOwner: seq.Owner(), NewOwner: "example.com/new/lock", Reason: "test transfer",
 	})
 	held.release()
 	if repairErr == nil || (!errors.Is(repairErr, context.DeadlineExceeded) && !strings.Contains(repairErr.Error(), "deadline") && !strings.Contains(repairErr.Error(), "lease")) {
@@ -402,7 +402,7 @@ func TestRepairSequenceClaim_WaitsForTheMigrationLock(t *testing.T) {
 func TestManifestTrustBoundaryAndAdditiveUpgrade(t *testing.T) {
 	h := openTestHandle(t)
 	if _, err := RepairSequenceClaim(t.Context(), h, "unclaimed_kind", RepairClaimOptions{
-		ExpectedOwner: "example.com/old/unclaimed", NewOwner: "example.com/new/unclaimed",
+		ExpectedOwner: "example.com/old/unclaimed", NewOwner: "example.com/new/unclaimed", Reason: "test transfer",
 	}); !errors.Is(err, ErrSequenceUnclaimed) {
 		t.Fatalf("claim repair must not create a first claim, got %v", err)
 	}
@@ -413,7 +413,7 @@ func TestManifestTrustBoundaryAndAdditiveUpgrade(t *testing.T) {
 		t.Fatal("manifest kind must be rejected")
 	}
 	if _, err := RepairSequenceClaim(t.Context(), h, sequenceManifestKind, RepairClaimOptions{
-		ExpectedOwner: "example.com/old/manifest", NewOwner: "example.com/new/manifest",
+		ExpectedOwner: "example.com/old/manifest", NewOwner: "example.com/new/manifest", Reason: "test transfer",
 	}); err == nil {
 		t.Fatal("claim repair must reject the manifest kind")
 	}

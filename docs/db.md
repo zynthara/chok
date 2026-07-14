@@ -466,9 +466,26 @@ chok migrate repair accept-drift 7 --checksum <old-ledger-sha256> \
 ```
 
 repair 使用 version + checksum 做 compare-and-swap，并返回包含 old/current
-checksum、reason、时间的结构化报告。v2 不额外创建 repair history 表；有
-合规留存要求时应把该报告写入部署平台或集中审计日志。MySQL 尤其不能在
-未核对已提交 DDL 的情况下直接选择 retry。
+checksum、reason、时间的结构化报告。同一份证据（动作、校验和或 owner、
+必填 reason、operator、chok 版本）会在 **repair 自己的事务里**追加写入
+每库一张的 `schema_migrations_chok_repairs`：历史行存在 ⇔ 该次 repair 的
+业务状态迁移已提交（PostgreSQL/MySQL 的 fence 清理也在同一事务；SQLite
+的 lease 释放在提交后 best-effort，失败时残留 fence 由后续 takeover 自
+愈）。写不进历史的 repair 会整体失败，而不是提交一次无据可查的改写。
+「事务已提交」不等于「调用方观察到成功」——提交后进程崩溃同样会留下
+一行调用方没收到成功响应的历史。历史行只由 history-aware 二进制写入，
+旧二进制的 repair 缺行属于既有混跑边界。查询用
+`db.RepairHistory` / `chok migrate repair history`（最近优先，按 kind 过
+滤；应用账本的 kind 恒为 `app`）。表由框架 append-only 维护、永不清理；
+防篡改是权限纪律而非密码学——建议对应用账号 REVOKE 该表的
+UPDATE/DELETE，有更强合规要求的部署继续把报告同步到外部审计管道，两者
+不互斥。`claim` 转移同样强制 `--reason` 并入史。MySQL 尤其不能在未核对
+已提交 DDL 的情况下直接选择 retry。
+
+repair 账号对历史表的权限按阶段累计：首次 repair 需要 CREATE + INSERT
+（建表即写入），跨引擎版本升级后的首次 repair 需要 ALTER + INSERT（列
+演进），稳定期写入只需 INSERT，读取历史只需 SELECT；账本与 manifest 本
+身所需权限按既有 repair 要求另计。
 
 应用侧把目录嵌进二进制:
 
@@ -524,8 +541,10 @@ _, err = databaseComponent.ApplyOwnedMigrations(ctx, seq)
 ```
 
 组件在 `Descriptor.Schema.Tables` 中声明自己的业务表和派生账本表；全局
-`schema_migrations_chok_manifest` 由 db 组件拥有，不重复声明。`manifest`
-不能作为 kind；`account`、`audit`、`authz` 分别保留给对应 chok 包。
+`schema_migrations_chok_manifest` 与 `schema_migrations_chok_repairs` 由
+db 组件拥有，不重复声明。`manifest`、`app`、`repairs` 永久不能作为 kind
+（分别保留给全局 manifest、应用账本的历史身份、repair 历史表）；
+`account`、`audit`、`authz` 分别保留给对应 chok 包。
 
 首次执行在全局 manifest 中 claim kind。已有 beta.5 账本只有在方言、名称、
 checksum/结构与 baseline 指纹预检全部通过后才以 `adopted` 归属当前 owner；
@@ -752,6 +771,7 @@ func TestPostFlow(t *testing.T) {
 | `status --check` 报 `unverified` | 旧三列账本尚未建立 checksum 基线 | 使用当前可信发布执行一次 `migrate up` 完成 trust-on-first-use adoption |
 | 启动报 `migration sequence claim conflict` | 两个组件声明了同一 kind，或组件包路径已变更 | 确认真实归属；冲突组件改 kind，合法改名用 `migrate repair claim` 做 expected-owner CAS |
 | 启动报 `migration engine generation is too old` | manifest 的 `engine_floor` 高于当前二进制 | 升级 chok；不要用旧 CLI repair 或绕过 manifest。旧 pre-manifest 二进制不受此行保护，混跑边界见 §8.1 |
+| `repair history` 报 `repair history is corrupt` | 历史表被改写（行内 kind/ledger/action/owner 不自洽）或表形状被手工重塑 | 历史是 append-only 证据表，任何 UPDATE/DELETE 都视为篡改；核对数据库审计与账号授权，必要时以外部审计管道的报告副本重建信任 |
 | `status --check` 报 `content is unavailable` | 通用 CLI 看得到第三方账本但不持有组件内嵌 SQL | 由应用组件执行完整校验；只需检查 dirty/fence/floor 时显式加 `--ledger-health-only` |
 
 ---
@@ -774,6 +794,7 @@ func TestPostFlow(t *testing.T) {
   db.RepairSequence(ctx, h, seq, opts)  db.SequencePresent(ctx, h, seq)
   db.ManifestEntries(ctx, h)  db.LedgerSnapshot(ctx, h, kind)
   db.RepairSequenceClaim(ctx, h, kind, db.RepairClaimOptions)
+  db.RepairHistory(ctx, h, db.RepairHistoryFilter)  db.ValidateSequenceKind(kind)
 
 Store[T](读)
   Get(ctx, loc, ...QueryOption)         List(ctx, ...where.Option)

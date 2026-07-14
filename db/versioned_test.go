@@ -429,7 +429,7 @@ func TestSequenceManifest_MySQLClaimAndRepair(t *testing.T) {
 		t.Fatalf("MySQL manifest must reject another owner, got %v", err)
 	}
 	if _, err := RepairSequenceClaim(t.Context(), h, seq.Kind(), RepairClaimOptions{
-		ExpectedOwner: seq.Owner(), NewOwner: other.Owner(),
+		ExpectedOwner: seq.Owner(), NewOwner: other.Owner(), Reason: "test transfer",
 	}); err != nil {
 		t.Fatal(err)
 	}

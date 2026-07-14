@@ -10,7 +10,7 @@
 
 ---
 
-## Unreleased — 批量写语义补齐 + 第三方迁移序列 manifest
+## Unreleased — 批量写语义补齐 + 第三方迁移序列 manifest + repair 留痕
 
 > `BatchUpdate` 与 `BatchUpsert` 补齐了“每行不同 payload”和“批量
 > insert-or-update”两块操作面，同时不把 `Writer[T]` 扩成会打碎下游 mock
@@ -46,6 +46,13 @@
 > versioned 前缀升级、旧 auto 基线采纳必须收敛到同一指纹和行为轨迹。迁移
 > 文件前缀只证明 versioned schema frontier，旧运行时回填由电池 fixture
 > 显式复现，避免把历史二进制能力错误归因给 checksum。
+>
+> repair 是迁移体系里唯一「人说了算」的写入，此前只回传一次性报告、旧状态
+> 被原地覆盖。现在每次 repair（含 claim 转移）在自己的事务里向 append-only
+> 的 `schema_migrations_chok_repairs` 落一行完整证据，写不进历史即整体失败；
+> fence 清理在 PG/MySQL 并入同一提交。历史行的语义刻意收窄为「业务状态 CAS
+> 已提交」而非「调用方观察到成功」，防篡改边界诚实声明为授权纪律而非密码学。
+> claim 转移补上了此前缺失的 reason；operator 显式输入不容静默丢弃。
 
 ## 2.0.0-beta.5 — 数据层加固：只读实例 + 电池独立迁移账本
 

@@ -13,5 +13,6 @@ var frameworkTables = []string{
 	"schema_migrations_chok_audit",
 	"schema_migrations_chok_authz",
 	"schema_migrations_chok_manifest",
+	"schema_migrations_chok_repairs",
 	"users",
 }

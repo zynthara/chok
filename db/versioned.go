@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 )
@@ -180,18 +182,24 @@ const (
 
 // RepairOptions scopes a repair to one version and uses ExpectedChecksum as
 // a compare-and-swap guard against resolving state other than what the
-// operator inspected. Reason is mandatory and should be persisted by the
-// caller's operational audit sink.
+// operator inspected. Reason is mandatory. Operator is the optional identity
+// persisted to repair history — an explicitly supplied value must pass
+// validation, while an empty value derives user@host best-effort.
 type RepairOptions struct {
 	Action           RepairAction
 	Version          int64
 	ExpectedChecksum string
 	Reason           string
+	Operator         string
 }
 
-// RepairReport is the structured evidence emitted for one repair action.
-// Chok deliberately does not add a second framework-owned history table in
-// v2; callers that require durable compliance history persist this report.
+// RepairReport is the structured evidence emitted for one repair action. The
+// same evidence is persisted to the append-only repair history table in the
+// repair's own transaction — a history row means the business-state CAS (and,
+// on PostgreSQL/MySQL, the fence cleanup) committed; SQLite's post-commit
+// lease release stays best-effort and a caller crash after commit can still
+// leave a row whose success response was never observed. Operator and
+// ChokVersion echo the values actually persisted.
 type RepairReport struct {
 	Sequence        string
 	Ledger          string
@@ -202,12 +210,31 @@ type RepairReport struct {
 	LedgerChecksum  string
 	CurrentChecksum string
 	Reason          string
+	Operator        string
+	ChokVersion     string
 	ResolvedAt      time.Time
 }
 
 // migFileRe: <version>_<name>.sql — version is a positive decimal
 // sequence number (padding optional), name is free-form.
 var migFileRe = regexp.MustCompile(`^(\d+)_(.+)\.sql$`)
+
+// validateMigrationFileNameChars keeps migration filenames renderable and
+// history-safe: valid UTF-8, no control characters, no path separators.
+// LoadMigrations enforces it at load time and the repair-history read path
+// re-checks persisted rows with the same rule, so a migration that can be
+// repaired can never persist history its own reader rejects.
+func validateMigrationFileNameChars(name string) error {
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("filename is not valid UTF-8")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || r == '/' || r == '\\' {
+			return fmt.Errorf("filename contains a control character or path separator")
+		}
+	}
+	return nil
+}
 
 // LoadMigrations parses the root of fsys. Every *.sql file must match
 // NNNN_name.sql (fail-fast on strays — a typo'd file silently skipped
@@ -228,6 +255,9 @@ func LoadMigrations(fsys fs.FS) ([]Migration, error) {
 		name := e.Name()
 		if len(name) < 4 || name[len(name)-4:] != ".sql" {
 			continue
+		}
+		if err := validateMigrationFileNameChars(name); err != nil {
+			return nil, fmt.Errorf("db: migration file %q: %v", name, err)
 		}
 		m := migFileRe.FindStringSubmatch(name)
 		if m == nil {
@@ -1076,6 +1106,10 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 	if err := validateRepairOptions(opts); err != nil {
 		return nil, err
 	}
+	operator, err := resolveRepairOperator(opts.Operator)
+	if err != nil {
+		return nil, err
+	}
 	files, err := LoadMigrations(e.seq.fsys)
 	if err != nil {
 		return nil, err
@@ -1105,6 +1139,9 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 			return nil, fmt.Errorf("db: ensure %s base: %w", sequenceManifestTable, err)
 		}
 	}
+	if err := ensureRepairHistoryBase(gdb); err != nil {
+		return nil, fmt.Errorf("db: ensure %s base: %w", sequenceRepairHistoryTable, err)
+	}
 	lock, err := e.acquireMigrationLock(ctx, gdb)
 	if err != nil {
 		return nil, err
@@ -1120,6 +1157,9 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 		if err := e.authorizeSequenceRepair(gdb, ledgerExisted); err != nil {
 			return nil, err
 		}
+	}
+	if err := ensureRepairHistoryColumns(gdb); err != nil {
+		return nil, err
 	}
 
 	ledger, err := e.appliedMigrations(gdb, nil)
@@ -1195,21 +1235,27 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 		if res.RowsAffected != 1 {
 			return fmt.Errorf("repair compare-and-swap lost (updated %d rows)", res.RowsAffected)
 		}
-		return nil
+		// PostgreSQL/MySQL hold the global lock without a ledger lease, so
+		// the fence transition joins the repair's own transaction: a history
+		// row then proves the CAS and the fence state committed together.
+		// SQLite (lock.owner != "") keeps its fence inside the lease-release
+		// path, best-effort after commit.
+		if lock.owner == "" {
+			if err := e.cleanupMigrationFenceIfClean(tx, ""); err != nil {
+				return err
+			}
+		}
+		return insertRepairHistory(tx, e.newLedgerRepairRecord(opts, file, row.Checksum, operator, now))
 	})
 	if err != nil {
 		return nil, fmt.Errorf("db: repair migration %d (%s): %w", opts.Version, opts.Action, err)
-	}
-	if lock.owner == "" {
-		if err := e.cleanupMigrationFenceIfClean(gdb, ""); err != nil {
-			return nil, err
-		}
 	}
 	return &RepairReport{
 		Sequence: e.seq.kind, Ledger: e.seq.ledger, Dialect: e.seq.dialect,
 		Action: opts.Action, Version: opts.Version, File: file.File,
 		LedgerChecksum: row.Checksum, CurrentChecksum: file.Checksum,
-		Reason: strings.TrimSpace(opts.Reason), ResolvedAt: now,
+		Reason: strings.TrimSpace(opts.Reason), Operator: operator,
+		ChokVersion: currentChokVersion(), ResolvedAt: now,
 	}, nil
 }
 
@@ -1227,12 +1273,8 @@ func validateRepairOptions(opts RepairOptions) error {
 	if !checksumHexRe.MatchString(opts.ExpectedChecksum) {
 		return fmt.Errorf("db: repair expected checksum must be 64 lowercase hex characters")
 	}
-	reason := strings.TrimSpace(opts.Reason)
-	if reason == "" {
-		return fmt.Errorf("db: repair reason must not be empty")
-	}
-	if len([]rune(reason)) > 1024 {
-		return fmt.Errorf("db: repair reason must be at most 1024 characters")
+	if err := validateRepairReason(opts.Reason); err != nil {
+		return fmt.Errorf("db: %w", err)
 	}
 	return nil
 }

@@ -113,6 +113,7 @@ func TestM3Fixture_EndToEnd(t *testing.T) {
 		"schema_migrations_chok_audit",
 		"schema_migrations_chok_authz",
 		"schema_migrations_chok_manifest",
+		"schema_migrations_chok_repairs",
 		"users",
 	}
 	if strings.Join(st.FrameworkTables, ",") != strings.Join(want, ",") {

@@ -370,6 +370,17 @@ db:
   标为 unverified。claim 强制力从全部写入方 manifest-aware 起完整成立；旧
   二进制混跑期间仍只能依靠 checksum/结构/fence。
   `migrate: off` ⇒ 框架零 DDL（casbin 缺表则 LoadPolicy 启动失败）。
+- **repair 留痕**：每次 repair（账本三动作 + claim 转移）在**自己的事务里**
+  向 `schema_migrations_chok_repairs` 追加完整证据行，写不进历史即整体
+  失败；PostgreSQL/MySQL 的 fence 清理并入同一事务，SQLite 的 lease 释放
+  维持提交后 best-effort。历史行语义 = 业务状态 CAS 已提交，不承诺调用方
+  观察到成功。reason 全路径必填；operator 显式传入必须过校验、自动推导
+  失败降级空串（写入端永不产出读取端拒绝的值）。列契约两级：core（建表
+  即有、缺失即 corrupt——`reason`/`repaired_at` 无默认值故只能生在
+  CREATE）与 additive（未来列必须可 DEFAULT/nullable，读取用 fallback）。
+  `app`/`repairs` 与 `manifest` 同列永久保留 kind；`OwnedSequence` 与所有
+  kind 派生路径统一经 `ValidateSequenceKind`。防篡改边界 = 授权纪律 +
+  外部审计管道，非密码学。
 - `SoftUnique` 在 PG 用 partial unique index（`WHERE deleted_at IS
   NULL`），mysql/sqlite 用 `(cols..., delete_token)` 复合唯一——
   可观测行为等价。

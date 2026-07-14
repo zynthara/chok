@@ -495,20 +495,65 @@ func migrateRepairCmd() *cobra.Command {
 		migrateRepairActionCmd(db.RepairMarkApplied),
 		migrateRepairActionCmd(db.RepairAcceptDrift),
 		migrateRepairClaimCmd(),
+		migrateRepairHistoryCmd(),
 	)
+	return cmd
+}
+
+func migrateRepairHistoryCmd() *cobra.Command {
+	f := &migrateFlags{}
+	var kind string
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "history",
+		Short: "Show persisted repair evidence, most recent first",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			h, err := openFromConfig(f)
+			if err != nil {
+				return err
+			}
+			defer h.Close()
+			records, err := db.RepairHistory(cmd.Context(), h, db.RepairHistoryFilter{Kind: kind, Limit: limit})
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if len(records) == 0 {
+				fmt.Fprintln(out, "no repair history")
+				return nil
+			}
+			for _, record := range records {
+				fmt.Fprintf(out, "[%s] %s  action=%s", record.Kind, record.RepairedAt.Format(time.RFC3339), record.Action)
+				if record.Version > 0 {
+					fmt.Fprintf(out, " version=%d file=%q ledger_checksum=%s current_checksum=%s",
+						record.Version, record.File, record.LedgerChecksum, record.CurrentChecksum)
+				}
+				if record.PreviousOwner != "" || record.NewOwner != "" {
+					fmt.Fprintf(out, " previous_owner=%s new_owner=%s", record.PreviousOwner, record.NewOwner)
+				}
+				fmt.Fprintf(out, " operator=%s chok=%s reason=%q\n",
+					emptyMigrationMetadata(record.Operator), emptyMigrationMetadata(record.ChokVersion), record.Reason)
+			}
+			return nil
+		},
+	}
+	addMigrateFlags(cmd, f)
+	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind (app = application ledger); empty = all")
+	cmd.Flags().IntVar(&limit, "limit", 20, "maximum rows, most recent first")
 	return cmd
 }
 
 func migrateRepairClaimCmd() *cobra.Command {
 	f := &migrateFlags{}
-	var kind, expectedOwner, newOwner string
+	var kind, expectedOwner, newOwner, reason, operator string
 	cmd := &cobra.Command{
 		Use:   "claim",
 		Short: "Transfer one inspected owned-sequence manifest claim",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if kind == "" || expectedOwner == "" || newOwner == "" {
-				return fmt.Errorf("--kind, --expected-owner and --new-owner are required")
+			if kind == "" || expectedOwner == "" || newOwner == "" || reason == "" {
+				return fmt.Errorf("--kind, --expected-owner, --new-owner and --reason are required")
 			}
 			h, err := openFromConfig(f)
 			if err != nil {
@@ -518,6 +563,8 @@ func migrateRepairClaimCmd() *cobra.Command {
 			report, err := db.RepairSequenceClaim(cmd.Context(), h, kind, db.RepairClaimOptions{
 				ExpectedOwner: expectedOwner,
 				NewOwner:      newOwner,
+				Reason:        reason,
+				Operator:      operator,
 			})
 			if err != nil {
 				return err
@@ -532,12 +579,14 @@ func migrateRepairClaimCmd() *cobra.Command {
 	cmd.Flags().StringVar(&kind, "kind", "", "owned migration kind whose existing claim is transferred")
 	cmd.Flags().StringVar(&expectedOwner, "expected-owner", "", "exact current owner observed in migrate status")
 	cmd.Flags().StringVar(&newOwner, "new-owner", "", "new full component import path")
+	cmd.Flags().StringVar(&reason, "reason", "", "why this claim is transferred (persisted to repair history)")
+	cmd.Flags().StringVar(&operator, "operator", "", "identity recorded in repair history (default: derived user@host)")
 	return cmd
 }
 
 func migrateRepairActionCmd(action db.RepairAction) *cobra.Command {
 	f := &migrateFlags{}
-	var reason, expectedChecksum, newChecksum, component string
+	var reason, expectedChecksum, newChecksum, component, operator string
 	short := map[db.RepairAction]string{
 		db.RepairRetry:       "Clear a dirty attempt after restoring the database to its pre-migration state",
 		db.RepairMarkApplied: "Mark a dirty attempt complete after verifying every intended effect exists",
@@ -559,7 +608,7 @@ func migrateRepairActionCmd(action db.RepairAction) *cobra.Command {
 			defer h.Close()
 			opts := db.RepairOptions{
 				Action: action, Version: version,
-				ExpectedChecksum: expectedChecksum, Reason: reason,
+				ExpectedChecksum: expectedChecksum, Reason: reason, Operator: operator,
 			}
 			var report *db.RepairReport
 			if component == "" {
@@ -610,6 +659,7 @@ func migrateRepairActionCmd(action db.RepairAction) *cobra.Command {
 	cmd.Flags().StringVar(&expectedChecksum, "checksum", "", "exact ledger checksum observed in status (compare-and-swap guard)")
 	cmd.Flags().StringVar(&newChecksum, "new-checksum", "", "current file checksum observed in status (required by accept-drift)")
 	cmd.Flags().StringVar(&reason, "reason", "", "mandatory operational reason recorded in the repair report")
+	cmd.Flags().StringVar(&operator, "operator", "", "identity recorded in repair history (default: derived user@host)")
 	cmd.Flags().StringVar(&component, "component", "", "repair one built-in owned sequence (account|audit|authz); empty = application")
 	return cmd
 }

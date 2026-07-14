@@ -41,7 +41,6 @@
 | **WebSocket 模块** | stdlib / gorilla 封装 + kernel 生命周期接入 | 中 |
 | **i18n error messages** | `apierr` RenderHook 机制已就位，缺 locale 资源与语言协商 | 中 |
 | **Admin dashboard** | 基于 `/componentz` + `/healthz` + `/metrics` 的内置 Web UI | 大 |
-| **迁移 repair history** | 将 v2 由部署平台持久化的结构化 repair report 升级为框架内 append-only 历史表 | 中 |
 
 ## 不会做
 

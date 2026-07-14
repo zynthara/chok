@@ -110,11 +110,8 @@ func SequenceVersion(version string) SequenceOption {
 // contain sqlite, mysql and postgres subdirectories with numbered SQL files.
 // SequenceOwner is mandatory; SequenceVersion is optional and informational.
 func OwnedSequence(kind string, fsys fs.FS, baseline Baseline, options ...SequenceOption) (Sequence, error) {
-	if !ownedSequenceKindRE.MatchString(kind) {
-		return Sequence{}, fmt.Errorf("db: owned migration kind %q must match %s", kind, ownedSequenceKindRE)
-	}
-	if kind == sequenceManifestKind {
-		return Sequence{}, fmt.Errorf("db: owned migration kind %q is reserved for the global migration manifest", kind)
+	if err := ValidateSequenceKind(kind); err != nil {
+		return Sequence{}, err
 	}
 	var opts sequenceOptions
 	for i, option := range options {
@@ -221,16 +218,28 @@ func validateSequenceVersion(version string) error {
 	return nil
 }
 
+// forbiddenSequenceKinds are names no sequence may ever use, mapped to the
+// framework identity each is reserved for: the shared manifest and repair
+// history tables live inside the derived-ledger namespace, and "app" is the
+// application ledger's identity in repair history rows.
+var forbiddenSequenceKinds = map[string]string{
+	sequenceManifestKind: "the global migration manifest",
+	"app":                "the application migration ledger",
+	"repairs":            "the migration repair history table",
+}
+
 // ValidateSequenceKind reports whether kind is a legal owned-sequence kind:
-// it must match the sequence-kind grammar and must not be the reserved
-// manifest name. It is the single gate tooling should use before deriving a
-// ledger identifier from an externally observed kind string.
+// it must match the sequence-kind grammar and must not collide with a
+// reserved framework identity (manifest, app, repairs). It is the single
+// gate — OwnedSequence, claim repair and every kind-derived identifier
+// resolve through it — so tooling must use it before deriving a ledger name
+// from an externally observed kind string.
 func ValidateSequenceKind(kind string) error {
 	if !ownedSequenceKindRE.MatchString(kind) {
 		return fmt.Errorf("db: owned migration kind %q must match %s", kind, ownedSequenceKindRE)
 	}
-	if kind == sequenceManifestKind {
-		return fmt.Errorf("db: owned migration kind %q is reserved for the global migration manifest", kind)
+	if identity, forbidden := forbiddenSequenceKinds[kind]; forbidden {
+		return fmt.Errorf("db: owned migration kind %q is reserved for %s", kind, identity)
 	}
 	return nil
 }

@@ -207,6 +207,7 @@ func TestMigrateThirdPartyManifestStatusCheckAndClaimRepair(t *testing.T) {
 		"--kind", "billing",
 		"--expected-owner", oldOwner,
 		"--new-owner", newOwner,
+		"--reason", "component package moved to payments",
 		"--config", cfgPath,
 	)
 	if err != nil || !strings.Contains(out, "previous_owner="+oldOwner) || !strings.Contains(out, "new_owner="+newOwner) {
@@ -215,6 +216,13 @@ func TestMigrateThirdPartyManifestStatusCheckAndClaimRepair(t *testing.T) {
 	out, err = runMigrate(t, "status", "--config", cfgPath, "--dir", migDir)
 	if err != nil || !strings.Contains(out, "owner="+newOwner) {
 		t.Fatalf("status after claim transfer: err=%v\n%s", err, out)
+	}
+
+	out, err = runMigrate(t, "repair", "history", "--kind", "billing", "--config", cfgPath)
+	if err != nil || !strings.Contains(out, "action=claim-transfer") ||
+		!strings.Contains(out, "previous_owner="+oldOwner) ||
+		!strings.Contains(out, `reason="component package moved to payments"`) {
+		t.Fatalf("repair history: err=%v\n%s", err, out)
 	}
 }
 

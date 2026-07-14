@@ -44,7 +44,8 @@ func AssertOwnershipForMode(t testing.TB, h *db.DB, component kernel.Component, 
 		if component.Describe().Kind != "db" && table == "schema_migrations" {
 			continue // owned by the required db component, not this battery
 		}
-		if component.Describe().Kind != "db" && table == "schema_migrations_chok_manifest" {
+		if component.Describe().Kind != "db" &&
+			(table == "schema_migrations_chok_manifest" || table == "schema_migrations_chok_repairs") {
 			continue // shared db infrastructure, not the sequence-owning component
 		}
 		actual = append(actual, table)
@@ -54,9 +55,11 @@ func AssertOwnershipForMode(t testing.TB, h *db.DB, component kernel.Component, 
 		if mode != db.MigrateVersioned && strings.HasPrefix(table, "schema_migrations_chok_") {
 			continue
 		}
-		// The db component owns the manifest, but application-only databases
-		// do not create it until their first owned sequence is applied.
-		if table == "schema_migrations_chok_manifest" && !slices.Contains(actual, table) {
+		// The db component owns the manifest and repair history, but they are
+		// created lazily: the manifest by the first owned-sequence apply, the
+		// repair history by the first repair.
+		if (table == "schema_migrations_chok_manifest" || table == "schema_migrations_chok_repairs") &&
+			!slices.Contains(actual, table) {
 			continue
 		}
 		expected = append(expected, table)

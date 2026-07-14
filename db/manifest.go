@@ -74,25 +74,34 @@ type SequenceLedgerSnapshot struct {
 
 // RepairClaimOptions transfers an existing manifest claim with an exact-owner
 // compare-and-swap guard. It cannot create the first claim for an unclaimed
-// ledger; ApplySequence owns trust-on-first-use adoption.
+// ledger; ApplySequence owns trust-on-first-use adoption. Reason is mandatory
+// — an ownership transfer is the audit action that most needs one. Operator
+// follows the same contract as RepairOptions.Operator.
 type RepairClaimOptions struct {
 	ExpectedOwner string
 	NewOwner      string
+	Reason        string
+	Operator      string
 }
 
-// RepairClaimReport records one successful sequence-claim transfer.
+// RepairClaimReport records one successful sequence-claim transfer. The same
+// evidence lands in the append-only repair history table in the transfer's
+// own transaction; Operator and ChokVersion echo the persisted values.
 type RepairClaimReport struct {
 	Kind          string
 	Ledger        string
 	Dialect       string
 	PreviousOwner string
 	NewOwner      string
+	Reason        string
+	Operator      string
+	ChokVersion   string
 	RepairedAt    time.Time
 }
 
-type manifestColumns map[string]bool
+type tableColumns map[string]bool
 
-func (columns manifestColumns) has(name string) bool {
+func (columns tableColumns) has(name string) bool {
 	return columns == nil || columns[strings.ToLower(name)]
 }
 
@@ -111,16 +120,22 @@ func ensureManifestBase(gdb *gorm.DB) error {
 	).Error
 }
 
-func inspectManifestColumns(gdb *gorm.DB) (manifestColumns, error) {
-	types, err := gdb.Migrator().ColumnTypes(sequenceManifestTable)
+// inspectColumns snapshots one table's lowercase column set. Shared by the
+// manifest and repair-history additive-upgrade and fallback-read paths.
+func inspectColumns(gdb *gorm.DB, table string) (tableColumns, error) {
+	types, err := gdb.Migrator().ColumnTypes(table)
 	if err != nil {
-		return nil, fmt.Errorf("db: inspect %s columns: %w", sequenceManifestTable, err)
+		return nil, fmt.Errorf("db: inspect %s columns: %w", table, err)
 	}
-	columns := make(manifestColumns, len(types))
+	columns := make(tableColumns, len(types))
 	for _, column := range types {
 		columns[strings.ToLower(column.Name())] = true
 	}
 	return columns, nil
+}
+
+func inspectManifestColumns(gdb *gorm.DB) (tableColumns, error) {
+	return inspectColumns(gdb, sequenceManifestTable)
 }
 
 // ensureManifestColumns is called while the sequence migration lock is held.
@@ -202,11 +217,11 @@ func ManifestEntries(ctx context.Context, h *DB) ([]ManifestEntry, error) {
 	return manifestEntries(gdb, columns)
 }
 
-func manifestEntries(gdb *gorm.DB, columns manifestColumns) ([]ManifestEntry, error) {
+func manifestEntries(gdb *gorm.DB, columns tableColumns) ([]ManifestEntry, error) {
 	return manifestEntriesWithPolicy(gdb, columns, "")
 }
 
-func manifestEntriesWithPolicy(gdb *gorm.DB, columns manifestColumns, allowedReservedOwnerMismatch string) ([]ManifestEntry, error) {
+func manifestEntriesWithPolicy(gdb *gorm.DB, columns tableColumns, allowedReservedOwnerMismatch string) ([]ManifestEntry, error) {
 	for _, core := range []string{"kind", "ledger", "owner"} {
 		if !columns.has(core) {
 			return nil, fmt.Errorf("%w: %s is missing identity column %s", ErrSequenceManifestCorrupt, sequenceManifestTable, core)
@@ -531,6 +546,13 @@ func RepairSequenceClaim(ctx context.Context, h *DB, kind string, opts RepairCla
 	if expected, reserved := reservedSequenceOwners[kind]; reserved && opts.NewOwner != expected {
 		return nil, fmt.Errorf("db: reserved migration kind %q can only be restored to owner %q", kind, expected)
 	}
+	if err := validateRepairReason(opts.Reason); err != nil {
+		return nil, fmt.Errorf("db: %w", err)
+	}
+	operator, err := resolveRepairOperator(opts.Operator)
+	if err != nil {
+		return nil, err
+	}
 
 	gdb := h.gdb.WithContext(ctx)
 	ledger := ledgerForSequenceKind(kind)
@@ -540,6 +562,9 @@ func RepairSequenceClaim(ctx context.Context, h *DB, kind string, opts RepairCla
 	if !gdb.Migrator().HasTable(ledger) {
 		return nil, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, kind, ledger)
 	}
+	if err := ensureRepairHistoryBase(gdb); err != nil {
+		return nil, fmt.Errorf("db: ensure %s base: %w", sequenceRepairHistoryTable, err)
+	}
 	e := migrationEngine{seq: migrationSequence{kind: kind, ledger: ledger, dialect: gdb.Dialector.Name()}}
 	lock, err := e.acquireMigrationLock(ctx, gdb)
 	if err != nil {
@@ -547,6 +572,9 @@ func RepairSequenceClaim(ctx context.Context, h *DB, kind string, opts RepairCla
 	}
 	defer lock.release()
 	if err := ensureManifestColumns(gdb); err != nil {
+		return nil, err
+	}
+	if err := ensureRepairHistoryColumns(gdb); err != nil {
 		return nil, err
 	}
 	if !gdb.Migrator().HasTable(ledger) {
@@ -568,19 +596,36 @@ func RepairSequenceClaim(ctx context.Context, h *DB, kind string, opts RepairCla
 		return nil, fmt.Errorf("db: repair migration kind %q claim: expected owner %q, manifest has %q", kind, opts.ExpectedOwner, entry.Owner)
 	}
 	now := time.Now().UTC()
-	res := gdb.Exec(
-		"UPDATE "+sequenceManifestTable+" SET owner = ?, component_version = '', chok_version = ?, updated_at = ? "+
-			"WHERE kind = ? AND owner = ? AND engine_floor <= ?",
-		opts.NewOwner, currentChokVersion(), now, kind, opts.ExpectedOwner, MigrationEngineGeneration,
-	)
-	if res.Error != nil {
-		return nil, fmt.Errorf("db: repair migration kind %q claim: %w", kind, res.Error)
-	}
-	if res.RowsAffected != 1 {
-		return nil, fmt.Errorf("db: repair migration kind %q claim changed concurrently", kind)
+	reason := strings.TrimSpace(opts.Reason)
+	// The owner CAS and its history row commit together: a transfer that
+	// cannot be recorded must not happen.
+	err = e.withMigrationLeaseTransaction(gdb, lock.owner, func(tx *gorm.DB) error {
+		res := tx.Exec(
+			"UPDATE "+sequenceManifestTable+" SET owner = ?, component_version = '', chok_version = ?, updated_at = ? "+
+				"WHERE kind = ? AND owner = ? AND engine_floor <= ?",
+			opts.NewOwner, currentChokVersion(), now, kind, opts.ExpectedOwner, MigrationEngineGeneration,
+		)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("claim changed concurrently")
+		}
+		return insertRepairHistory(tx, RepairRecord{
+			Kind: kind, Ledger: ledger, Dialect: e.seq.dialect,
+			Action: repairActionClaimTransfer, Version: 0,
+			PreviousOwner: opts.ExpectedOwner, NewOwner: opts.NewOwner,
+			Reason: reason, Operator: operator,
+			ChokVersion: currentChokVersion(), RepairedAt: now,
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("db: repair migration kind %q claim: %w", kind, err)
 	}
 	return &RepairClaimReport{
 		Kind: kind, Ledger: ledger, Dialect: e.seq.dialect,
-		PreviousOwner: opts.ExpectedOwner, NewOwner: opts.NewOwner, RepairedAt: now,
+		PreviousOwner: opts.ExpectedOwner, NewOwner: opts.NewOwner,
+		Reason: reason, Operator: operator, ChokVersion: currentChokVersion(),
+		RepairedAt: now,
 	}, nil
 }
