@@ -2,15 +2,19 @@ package store
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"maps"
 	"reflect"
+	"sort"
+	"strings"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
 	"github.com/zynthara/chok/v2/db"
+	"github.com/zynthara/chok/v2/internal/txctx"
 	"github.com/zynthara/chok/v2/rid"
 )
 
@@ -249,6 +253,16 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 		}
 	}
 
+	cfg := &updateConfig{}
+	for _, o := range opts {
+		o.applyUpdate(cfg)
+	}
+	return s.updateOne(ctx, by, changes, cfg)
+}
+
+// updateOne is Update's hook-free write kernel. Callers must run rejectWrite
+// and any before-update hooks before entering it.
+func (s *Store[T]) updateOne(ctx context.Context, by Locator, changes Changes, cfg *updateConfig) error {
 	cols, payload, implicitVer, err := changes.build(s.updateFieldMap)
 	if err != nil {
 		return err
@@ -256,10 +270,6 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 
 	// Resolve the effective lock version: explicit WithVersion wins over the
 	// implicit one extracted from Fields(&obj).
-	cfg := &updateConfig{}
-	for _, o := range opts {
-		o.applyUpdate(cfg)
-	}
 	lockVer := implicitVer
 	if cfg.versionSet {
 		lockVer = cfg.version
@@ -457,7 +467,12 @@ func (s *Store[T]) Exists(ctx context.Context, by Locator) (bool, error) {
 // conflict (resolved via the update field whitelist). When updateColumns
 // is empty, all update-whitelisted columns are updated.
 //
-// Before-create hooks fire before the SQL. Owner auto-fill applies.
+// Before-create hooks fire after static argument validation and before the
+// SQL. Owner auto-fill applies.
+//
+// The input object is not a persisted-row snapshot on the conflict path:
+// create hooks may generate a new RID while the database keeps the existing
+// row's RID. Re-read by a known business key when the persisted row is needed.
 //
 // Upsert is forbidden on scoped Stores AND on Stores whose model embeds
 // db.Owned (even when OwnerScope is disabled via WithoutOwnerScope). SQL
@@ -469,11 +484,18 @@ func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflictColumns []string,
 	if err := s.rejectWrite("Upsert"); err != nil {
 		return err
 	}
+	if obj == nil {
+		return fmt.Errorf("store: Upsert: obj is nil")
+	}
 	if len(s.scopes) > 0 {
 		return ErrUpsertScoped
 	}
 	if db.IsOwnedModel(new(T)) {
 		return ErrUpsertScoped
+	}
+	gormCols, doUpdateCols, err := s.resolveUpsertColumns(conflictColumns, updateColumns)
+	if err != nil {
+		return err
 	}
 	if err := fillOwner(ctx, obj, s.requirePrincipal); err != nil {
 		return err
@@ -484,25 +506,138 @@ func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflictColumns []string,
 		}
 	}
 
-	// Resolve conflict columns to DB column names via the query whitelist.
-	gormCols := make([]clause.Column, len(conflictColumns))
-	for i, name := range conflictColumns {
-		col, ok := s.queryFieldMap[name]
-		if !ok {
-			return fmt.Errorf("store: unknown conflict column %q: not in query whitelist", name)
-		}
-		gormCols[i] = clause.Column{Name: col}
+	if err := s.effectiveDB(ctx).Clauses(clause.OnConflict{
+		Columns:   gormCols,
+		DoUpdates: clause.AssignmentColumns(doUpdateCols),
+	}).Create(obj).Error; err != nil {
+		return mapError(err)
+	}
+	// The SQL doesn't report a portable insert-vs-update branch or a truthful
+	// persisted object on every supported dialect. Publish a payload-free
+	// OpUpsert so subscribers can invalidate type-wide without caching the
+	// synthetic create object.
+	s.publishChanged(ctx, upsertEvent[T]())
+	return nil
+}
+
+// BatchUpsert inserts or conflict-updates multiple objects. It uses the same
+// conflict and update whitelist semantics as Upsert and executes GORM's
+// chunked statements atomically in one transaction.
+//
+// Every object must be non-nil, and the declared conflict-key tuple must be
+// unique across the batch under the target database's equality rules. Exact
+// duplicate Go values are rejected before hooks or SQL with
+// ErrDuplicateBatchConflict; database collation and type rules remain the
+// final authority. Empty input is a no-op.
+//
+// BatchUpsert is forbidden for scoped Stores and db.Owned models. Before-create
+// hooks run for every item before this method opens its transaction. Input
+// objects are not persisted-row snapshots on conflict; re-read when the stored
+// RID, version, or database-generated values are needed. A bus-enabled Store
+// publishes one payload-free OpUpsert per successful non-empty BatchUpsert
+// call, not per input object, because the event represents type-wide
+// invalidation.
+func (s *Store[T]) BatchUpsert(ctx context.Context, objs []*T, conflictColumns []string, updateColumns ...string) error {
+	if err := s.rejectWrite("BatchUpsert"); err != nil {
+		return err
+	}
+	if len(objs) == 0 {
+		return nil
+	}
+	if len(s.scopes) > 0 || db.IsOwnedModel(new(T)) {
+		return ErrUpsertScoped
 	}
 
-	// Resolve update columns.
+	gormCols, doUpdateCols, err := s.resolveUpsertColumns(conflictColumns, updateColumns)
+	if err != nil {
+		return err
+	}
+	for i, obj := range objs {
+		if obj == nil {
+			return fmt.Errorf("store: BatchUpsert item %d: obj is nil", i)
+		}
+	}
+	if err := s.rejectDuplicateConflictTuples(ctx, objs, gormCols); err != nil {
+		return err
+	}
+
+	for i, obj := range objs {
+		if err := fillOwner(ctx, obj, s.requirePrincipal); err != nil {
+			return fmt.Errorf("store: BatchUpsert item %d: %w", i, err)
+		}
+	}
+	for i, obj := range objs {
+		for _, h := range s.hooks.beforeCreate {
+			if err := h(ctx, obj); err != nil {
+				return fmt.Errorf("store: BatchUpsert item %d: %w", i, err)
+			}
+		}
+	}
+	// Hooks are allowed to normalize conflict fields, so re-check before SQL.
+	if err := s.rejectDuplicateConflictTuples(ctx, objs, gormCols); err != nil {
+		return err
+	}
+
+	write := func(txCtx context.Context) error {
+		return s.effectiveDB(txCtx).Clauses(clause.OnConflict{
+			Columns:   gormCols,
+			DoUpdates: clause.AssignmentColumns(doUpdateCols),
+		}).CreateInBatches(objs, createBatchSize).Error
+	}
+	if txctx.DB(ctx, s.h) != nil || s.txDB != nil {
+		err = write(ctx)
+	} else {
+		err = s.h.RunInTx(ctx, write)
+	}
+	if err != nil {
+		return mapError(err)
+	}
+	// OpUpsert carries no row identity, so one event per call has the same
+	// information as one per input without amplifying type-wide invalidation.
+	s.publishChanged(ctx, upsertEvent[T]())
+	return nil
+}
+
+func (s *Store[T]) resolveUpsertColumns(conflictColumns, updateColumns []string) ([]clause.Column, []string, error) {
+	if len(conflictColumns) == 0 {
+		return nil, nil, ErrMissingConflictColumns
+	}
+
+	gormCols := make([]clause.Column, 0, len(conflictColumns))
+	seenConflict := make(map[string]struct{}, len(conflictColumns))
+	for _, name := range conflictColumns {
+		col, ok := s.queryFieldMap[name]
+		if !ok {
+			return nil, nil, fmt.Errorf("store: unknown conflict column %q: not in query whitelist", name)
+		}
+		// Repeating an arbiter column produces an invalid/ambiguous conflict
+		// target, so treat it as a caller error instead of emitting SQL.
+		if _, duplicate := seenConflict[col]; duplicate {
+			return nil, nil, fmt.Errorf("store: duplicate conflict column %q", name)
+		}
+		seenConflict[col] = struct{}{}
+		gormCols = append(gormCols, clause.Column{Name: col})
+	}
+
+	if s.updateFieldMap == nil {
+		return nil, nil, ErrUpdateFieldsNotConfigured
+	}
 	var doUpdateCols []string
 	if len(updateColumns) > 0 {
 		doUpdateCols = make([]string, 0, len(updateColumns))
+		seenUpdate := make(map[string]struct{}, len(updateColumns))
 		for _, name := range updateColumns {
 			col, ok := s.updateFieldMap[name]
 			if !ok {
-				return fmt.Errorf("%w: %q", ErrUnknownUpdateField, name)
+				return nil, nil, fmt.Errorf("%w: %q", ErrUnknownUpdateField, name)
 			}
+			// Repeating an assignment column is semantically redundant: every
+			// occurrence resolves to the same excluded column. Collapse it while
+			// preserving the caller's first-occurrence order.
+			if _, duplicate := seenUpdate[col]; duplicate {
+				continue
+			}
+			seenUpdate[col] = struct{}{}
 			doUpdateCols = append(doUpdateCols, col)
 		}
 	} else {
@@ -510,19 +645,84 @@ func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflictColumns []string,
 		for _, col := range s.updateFieldMap {
 			doUpdateCols = append(doUpdateCols, col)
 		}
+		sort.Strings(doUpdateCols)
+	}
+	if len(doUpdateCols) == 0 {
+		return nil, nil, ErrMissingColumns
+	}
+	return gormCols, doUpdateCols, nil
+}
+
+type batchConflictTuple struct {
+	index  int
+	values []any
+}
+
+// rejectDuplicateConflictTuples catches exact duplicate Go values before
+// GORM splits a batch into statements. Database equality remains authoritative
+// for collation/type-specific equivalence, so the public contract still
+// requires conflict tuples to be unique under the target database's rules.
+func (s *Store[T]) rejectDuplicateConflictTuples(ctx context.Context, objs []*T, cols []clause.Column) error {
+	stmt := &gorm.Statement{DB: s.effectiveDB(ctx)}
+	if err := stmt.Parse(new(T)); err != nil {
+		return fmt.Errorf("store: BatchUpsert parse model: %w", err)
 	}
 
-	if err := s.effectiveDB(ctx).Clauses(clause.OnConflict{
-		Columns:   gormCols,
-		DoUpdates: clause.AssignmentColumns(doUpdateCols),
-	}).Create(obj).Error; err != nil {
-		return mapError(err)
+	seen := make(map[string][]batchConflictTuple, len(objs))
+	for i, obj := range objs {
+		rv := reflect.ValueOf(obj)
+		values := make([]any, len(cols))
+		var fingerprint strings.Builder
+		for j, col := range cols {
+			field := stmt.Schema.LookUpField(col.Name)
+			if field == nil {
+				return fmt.Errorf("store: BatchUpsert conflict column %q not found in model", col.Name)
+			}
+			value, _ := field.ValueOf(ctx, rv)
+			value, err := normalizeConflictValue(value)
+			if err != nil {
+				return fmt.Errorf("store: BatchUpsert conflict column %q value: %w", col.Name, err)
+			}
+			values[j] = value
+			fmt.Fprintf(&fingerprint, "%T:%#v\x00", value, value)
+		}
+
+		key := fingerprint.String()
+		for _, prior := range seen[key] {
+			if reflect.DeepEqual(prior.values, values) {
+				return fmt.Errorf("%w: items %d and %d share the declared conflict key", ErrDuplicateBatchConflict, prior.index, i)
+			}
+		}
+		seen[key] = append(seen[key], batchConflictTuple{index: i, values: values})
 	}
-	// OpCreate regardless of which conflict path ran — v1 fired the
-	// after-create hooks for upserts, and the SQL doesn't report which
-	// branch was taken.
-	s.publishChanged(ctx, createdEvent(obj))
 	return nil
+}
+
+const maxConflictValueNormalizeDepth = 32
+
+func normalizeConflictValue(value any) (any, error) {
+	for depth := 0; value != nil; depth++ {
+		if depth >= maxConflictValueNormalizeDepth {
+			return nil, fmt.Errorf("exceeded maximum normalization depth %d", maxConflictValueNormalizeDepth)
+		}
+		if valuer, ok := value.(driver.Valuer); ok {
+			resolved, err := valuer.Value()
+			if err != nil {
+				return nil, err
+			}
+			value = resolved
+			continue
+		}
+		rv := reflect.ValueOf(value)
+		if rv.Kind() != reflect.Pointer && rv.Kind() != reflect.Interface {
+			break
+		}
+		if rv.IsNil() {
+			return nil, nil
+		}
+		value = rv.Elem().Interface()
+	}
+	return value, nil
 }
 
 // --- helpers ---------------------------------------------------------------

@@ -140,8 +140,14 @@ db.Module(db.WithTables(
 ))
 ```
 
-生成 `UNIQUE(email, delete_token)`:活跃行的 `delete_token` 恒为空串,
-软删时框架写入随机 token 释放槽位;`Restore` 归还空串重新入槽(§7.5)。
+不同方言用不同索引形状实现同一行为:
+
+- PostgreSQL:业务列上的 partial unique index,谓词为
+  `WHERE deleted_at IS NULL`;
+- MySQL / SQLite:`UNIQUE(email, delete_token)` 复合唯一索引。
+
+活跃行的 `delete_token` 恒为空串,软删时框架写入随机 token 释放槽位;
+`Restore` 归还空串重新入槽(§6.4)。
 
 ---
 
@@ -296,6 +302,35 @@ err := posts.Update(ctx, store.RID(rid), store.Set(m), store.WithVersion(v))
 规则:列名走 **update 白名单**;每次成功更新 `version` 自增;确实不要
 锁时用 `store.Fields(p, cols...).NoLock()` 把意图写在代码里。
 
+#### 每行不同值:`BatchUpdate`
+
+```go
+for _, p := range postsToReorder {
+    p.Position = nextPosition(p)
+}
+err := posts.BatchUpdate(ctx, postsToReorder, "position")
+```
+
+`BatchUpdate` 对每个对象执行一条等价于
+`Update(locator, Fields(obj, fields...))` 的 SQL,整批放在一个事务中。定位
+优先用对象的内部 `ID`,没有时用 `RID`;两者都没有会在任何 hook/SQL 前
+报出 item 序号。乐观锁、零值写入、scope 与单行 `Update` 完全相同;
+任一行失败会回滚整批,并恢复本方法已经递增的内存 `Version`。
+
+如果所有行要写**同一个值**,不要用它做 O(N) SQL,直接使用:
+
+```go
+err := posts.Update(ctx,
+    store.Where(where.WithFilterIn("id", ids)),
+    store.Set(map[string]any{"status": "archived"}))
+```
+
+当方法加入调用方已有事务且外层后来回滚时,与事务内单行 `Update` 一样,
+调用方应丢弃或重新读取这些对象。反过来,如果 `BatchUpdate` 在外层事务中
+返回错误,调用方必须回滚外层事务（或在继续前重读全部对象）;忽略错误并
+继续提交,在部分数据库上可能提交前面已执行的 SQL,而本方法已经恢复了
+对应对象的内存 `Version`。
+
 ### 6.3 `Delete`
 
 ```go
@@ -325,12 +360,38 @@ SoftUnique 槽位。`Restore` 持有这套不变量:
 - 幂等镜像 `Delete`:行本来就活着 ⇒ nil;行不存在 ⇒ `ErrNotFound`;
 - 硬删模型调用 ⇒ 错误(`not a soft-delete model`)。
 
-### 6.5 `Upsert` 与属主模型不兼容
+### 6.5 `Upsert` / `BatchUpsert`
 
-`Upsert` 在带 scope 的 Store、以及**内嵌 `db.Owned` 的模型**上直接报错:
-SQL 的 `ON CONFLICT UPDATE` 不会给更新路径套 `owner_id` 过滤,攻击者
-可以用一个冲突键改到别人的行。替代写法:`Create` → 捕获 `ErrDuplicate`
-→ 显式 `Update`。
+```go
+err := settings.Upsert(ctx, one, []string{"key"}, "value")
+err = settings.BatchUpsert(ctx, many, []string{"key"}, "value")
+```
+
+两种 Upsert 都先校验 conflict/update 白名单,再执行 create hooks。
+`conflictColumns` 不可为空;`BatchUpsert` 还要求批内的冲突键元组按目标
+数据库的相等规则互不重复,框架会在 hook/SQL 前拦截完全相同的 Go 值,
+避免 100 行分片边界改变结果。多个分片仍在同一事务中。
+
+边界必须显式理解:
+
+- 带 scope 的 Store、以及**内嵌 `db.Owned` 的模型**直接返回
+  `ErrUpsertScoped`:SQL 的 conflict-update 路径不会自动带
+  `owner_id` 条件。替代写法是 `Create` → 捕获 `ErrDuplicate` → 显式
+  `Update`。
+- PostgreSQL / SQLite 要求 conflict target 精确匹配可用唯一索引;
+  PostgreSQL 的 partial unique index 还需要匹配谓词。MySQL 会把语句
+  渲染为 `ON DUPLICATE KEY UPDATE`,忽略 `conflictColumns`,任意唯一键冲突
+  都可能进入更新分支。
+- 因此 `SoftUnique` 模型不要使用 Upsert 系列:PostgreSQL 的 partial
+  index 需要 `deleted_at IS NULL` target predicate,SQLite 的复合索引还
+  包含 `delete_token`,当前公共 API 均不暴露这两种方言细节。
+- conflict-update 不做乐观锁/version 自增。输入对象也不是数据库快照:
+  create hook 可能生成新 RID,而数据库保留旧行 RID;需要持久化身份或版本
+  时按业务键重新读取。
+- `WithBus` 对 Upsert 发布无 payload 的 `OpUpsert`,不发布可能指向不存在
+  RID 的伪 `OpCreate` 对象;订阅者应按实体类型失效缓存后重新读取。
+  `BatchUpsert` 每次成功的非空调用只发布一条,而不是按输入对象发布 N 条
+  相同的类型级失效事件。
 
 ---
 
@@ -531,7 +592,8 @@ gdb := h.Unsafe(ctx)               // 句柄级:无 scope,自己负责
   统计,Close 前再补一次;设 0 关闭。备份挂 litestream 边车即可,
   WAL 模式天然适配。
 - **纪律**:写事务保持短小;`Rows()` 流式读及时 Close(长快照会顶住
-  checkpoint);批量写走 `BatchCreate` 或一个 `RunInTx` 合并提交;
+  checkpoint);批量写走 `BatchCreate` / `BatchUpdate` / `BatchUpsert`
+  或一个 `RunInTx` 合并提交;
   事务内的所有操作必须传 `txCtx`(Store 已自动)——拿根 ctx 在事务内
   再发写,会在池上排队等那个被外层事务占着的唯一写连接。
 
@@ -556,6 +618,8 @@ chok.New(
 | `store.ErrNotFound` | 定位无命中(或无权看见) | 404 |
 | `store.ErrStaleVersion` | 乐观锁冲突 | 409 |
 | `store.ErrDuplicate` | 唯一约束冲突 | 409 |
+| `store.ErrMissingConflictColumns` | Upsert 未声明冲突目标 | 500(编程错误) |
+| `store.ErrDuplicateBatchConflict` | BatchUpsert 批内冲突键重复 | 500(编程错误) |
 | `store.ErrMissingConditions` | 无条件写操作被拦 | 500(编程错误) |
 | `db.ErrReadOnly` | 只读实例或只读 store 收到写操作 | 500(装配/编程错误) |
 | `where.ErrUnknownField` | 过滤字段未声明 | 400 |
@@ -627,9 +691,10 @@ Store[T](读)
 
 Store[T](写)
   Create(ctx, *T)      BatchCreate(ctx, []*T)
-  Update(ctx, loc, changes, ...UpdateOption)
+  Update(ctx, loc, changes, ...UpdateOption)      BatchUpdate(ctx, []*T, fields...)
   Delete(ctx, loc, ...DeleteOption)     Restore(ctx, loc)
-  Upsert(ctx, *T, conflictCols, updateCols...)   // 属主模型禁用
+  Upsert(ctx, *T, conflictCols, updateCols...)
+  BatchUpsert(ctx, []*T, conflictCols, updateCols...)     // 两者均禁属主模型
   Tx(ctx, fn)          Unsafe(ctx)
 
 定位 / 变更 / 选项
@@ -638,7 +703,7 @@ Store[T](写)
   store.WithPreload(rel)  store.WithTrashed()  store.WithOnlyTrashed()
 
 接口视图(依赖注入用)
-  store.Reader[T]  store.Writer[T]  store.ReadWriter[T]
+  store.Reader[T]  store.Writer[T]  store.BatchWriter[T]  store.ReadWriter[T]
 ```
 
 ---

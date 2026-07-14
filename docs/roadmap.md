@@ -23,8 +23,6 @@
 |---|---|---|
 | **CORS 配置段** | `middleware.CORS` 已存在但未进 web 默认栈；补 `http.cors` 子段接入 | 小 |
 | **Email verification flow** | `Sender` 接口已定义，缺注册后的邮箱验证流程（发验证码 → 确认 → 激活） | 中 |
-| **Store `Count`** | 只需要总数不需要数据时，避免 `List` 的全量查询开销 | 小 |
-| **Store `Restore`** | 软删除恢复方法。`WithTrashed` 已支持查询，缺写入侧 | 小 |
 
 ## Tier 2 — 规模变大后需要
 
@@ -42,7 +40,6 @@
 |---|---|---|
 | **WebSocket 模块** | stdlib / gorilla 封装 + kernel 生命周期接入 | 中 |
 | **i18n error messages** | `apierr` RenderHook 机制已就位，缺 locale 资源与语言协商 | 中 |
-| **Batch update / upsert** | `BatchCreate` 已有，`BatchUpdate` / `BatchUpsert` 缺位 | 中 |
 | **Admin dashboard** | 基于 `/componentz` + `/healthz` + `/metrics` 的内置 Web UI | 大 |
 | **第三方迁移序列 manifest** | 内建电池已有独立账本；为下游组件增加跨包/跨进程 kind 与 ledger 抢注防护、全局 manifest 和兼容性元数据 | 中 |
 | **电池迁移行为矩阵 + N-1 升级测试** | 深指纹只证 catalog/DDL 等价；首个改变形状的电池迁移合入前须补真实方言 DML 行为矩阵（SoftUnique 重占槽 / JSON round-trip / casbin 去重 / RID 自增）与 previous-version → N 升级脚手架（合入前置条件） | 中 |

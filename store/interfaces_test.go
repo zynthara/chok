@@ -11,7 +11,8 @@ type ifaceTestModel struct {
 func (ifaceTestModel) RIDPrefix() string { return "ift" }
 
 var (
-	_ Reader[ifaceTestModel]     = (*Store[ifaceTestModel])(nil)
-	_ Writer[ifaceTestModel]     = (*Store[ifaceTestModel])(nil)
-	_ ReadWriter[ifaceTestModel] = (*Store[ifaceTestModel])(nil)
+	_ Reader[ifaceTestModel]      = (*Store[ifaceTestModel])(nil)
+	_ Writer[ifaceTestModel]      = (*Store[ifaceTestModel])(nil)
+	_ BatchWriter[ifaceTestModel] = (*Store[ifaceTestModel])(nil)
+	_ ReadWriter[ifaceTestModel]  = (*Store[ifaceTestModel])(nil)
 )

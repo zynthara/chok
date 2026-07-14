@@ -37,6 +37,13 @@ var (
 	// rather than silently succeeding with zero rows affected.
 	ErrDegenerateConditions = errors.New("store: filter matches nothing")
 	ErrDuplicate            = errors.New("store: duplicate entry")
+	// ErrMissingConflictColumns indicates an Upsert/BatchUpsert call omitted
+	// the unique columns that identify the conflict target.
+	ErrMissingConflictColumns = errors.New("store: upsert called without conflict columns")
+	// ErrDuplicateBatchConflict indicates two BatchUpsert inputs carry the
+	// same declared conflict-key tuple. Such input is rejected before SQL so
+	// statement chunk boundaries cannot change the result.
+	ErrDuplicateBatchConflict = errors.New("store: duplicate conflict key in batch upsert")
 
 	// ErrUnknownUpdateField indicates the field name is not in the update whitelist.
 	// This is a programming error (code passes a wrong field constant), not client input.
@@ -46,14 +53,16 @@ var (
 	// This is a programming error (Store misconfigured), not client input.
 	ErrUpdateFieldsNotConfigured = errors.New("store: update fields not configured")
 
-	// ErrUpsertScoped indicates Upsert was called on a Store that has
+	// ErrUpsertScoped indicates Upsert or BatchUpsert was called on a Store that has
 	// scopes registered. SQL INSERT ... ON CONFLICT DO UPDATE does not
 	// honour WHERE-based scope conditions on the conflict update path,
 	// so a conflict on a globally unique column could silently bypass
 	// tenant isolation or other scope invariants. Use Create + Update,
-	// or s.DB() as an escape hatch if you understand the implications.
+	// or s.Unsafe(ctx) as an escape hatch if you understand the implications.
 	ErrUpsertScoped = errors.New("store: upsert is not safe with scoped stores (scopes are ignored on conflict update); use separate Create + Update")
 )
+
+const createBatchSize = 100
 
 // --- Structured error types --------------------------------------------------
 //
@@ -772,10 +781,10 @@ func (s *Store[T]) BatchCreate(ctx context.Context, objs []*T) error {
 	// whole batch back (v1 semantics).
 	var err error
 	if txctx.DB(ctx, s.h) != nil || s.txDB != nil {
-		err = s.effectiveDB(ctx).CreateInBatches(objs, 100).Error
+		err = s.effectiveDB(ctx).CreateInBatches(objs, createBatchSize).Error
 	} else {
 		err = s.h.RunInTx(ctx, func(txCtx context.Context) error {
-			return s.effectiveDB(txCtx).CreateInBatches(objs, 100).Error
+			return s.effectiveDB(txCtx).CreateInBatches(objs, createBatchSize).Error
 		})
 	}
 	if err != nil {
@@ -783,6 +792,101 @@ func (s *Store[T]) BatchCreate(ctx context.Context, objs []*T) error {
 	}
 	for _, obj := range objs {
 		s.publishChanged(ctx, createdEvent(obj))
+	}
+	return nil
+}
+
+// BatchUpdate applies per-object values to multiple rows. It is equivalent to
+// Update(ctx, locator, Fields(obj, fields...)) for each item, with all SQL
+// writes in one transaction. Use Update with Where + Set for a single value
+// applied to many rows in one SQL statement.
+//
+// ID is the preferred locator when present; RID is used otherwise. Every item
+// must carry one of them. Before-update hooks run for every item before this
+// method opens its transaction. A hook error prevents all BatchUpdate SQL.
+//
+// Optimistic locking and zero-value persistence match Fields. On an error from
+// the batch transaction, Version mutations made by successful earlier items
+// are restored. When BatchUpdate joins a caller-owned transaction that later
+// rolls back after BatchUpdate has returned success, callers must discard or
+// reload the objects, as with individual Update calls in that transaction. If
+// BatchUpdate returns an error inside a caller-owned transaction, the caller
+// must roll that transaction back (or reload every input before continuing);
+// ignoring the error may allow earlier SQL writes to commit on some databases
+// even though this method restored their in-memory Version values.
+func (s *Store[T]) BatchUpdate(ctx context.Context, objs []*T, fields ...string) error {
+	if err := s.rejectWrite("BatchUpdate"); err != nil {
+		return err
+	}
+	if len(objs) == 0 {
+		return nil
+	}
+
+	// Resolve the shared field list once before hooks or SQL. updateOne still
+	// builds each Changes value so it remains the single write path.
+	var probe T
+	if _, _, _, err := Fields(&probe, fields...).build(s.updateFieldMap); err != nil {
+		return err
+	}
+
+	locators := make([]Locator, len(objs))
+	changes := make([]Changes, len(objs))
+	models := make([]*db.Model, len(objs))
+	for i, obj := range objs {
+		if obj == nil {
+			return fmt.Errorf("store: BatchUpdate item %d: obj is nil", i)
+		}
+		model := extractModelSafe(obj)
+		if model == nil {
+			return fmt.Errorf("store: BatchUpdate item %d: model does not embed db.Model", i)
+		}
+		switch {
+		case model.ID > 0:
+			locators[i] = ID(model.ID)
+		case model.RID != "":
+			locators[i] = RID(model.RID)
+		default:
+			return fmt.Errorf("store: BatchUpdate item %d: missing ID and RID", i)
+		}
+		changes[i] = Fields(obj, fields...)
+		models[i] = model
+	}
+
+	for i := range objs {
+		for _, h := range s.hooks.beforeUpdate {
+			if err := h(ctx, locators[i], changes[i]); err != nil {
+				return fmt.Errorf("store: BatchUpdate item %d: %w", i, err)
+			}
+		}
+	}
+
+	originalVersions := make([]int, len(models))
+	for i, model := range models {
+		originalVersions[i] = model.Version
+	}
+	restoreVersions := func() {
+		for i, model := range models {
+			model.Version = originalVersions[i]
+		}
+	}
+	updateAll := func(txCtx context.Context) error {
+		for i := range objs {
+			if err := s.updateOne(txCtx, locators[i], changes[i], &updateConfig{}); err != nil {
+				return fmt.Errorf("store: BatchUpdate item %d: %w", i, err)
+			}
+		}
+		return nil
+	}
+
+	var err error
+	if txctx.DB(ctx, s.h) != nil || s.txDB != nil {
+		err = updateAll(ctx)
+	} else {
+		err = s.h.RunInTx(ctx, updateAll)
+	}
+	if err != nil {
+		restoreVersions()
+		return err
 	}
 	return nil
 }

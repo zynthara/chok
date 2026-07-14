@@ -301,7 +301,7 @@ func TestWithBus_SoftDeletePublishes(t *testing.T) {
 	}
 }
 
-func TestWithBus_UpsertPublishesOpCreate(t *testing.T) {
+func TestWithBus_UpsertPublishesTruthfulPayloadFreeEvent(t *testing.T) {
 	s, seen := setupBusItemStore(t)
 
 	obj := &Item{Code: "EVUP"}
@@ -318,9 +318,86 @@ func TestWithBus_UpsertPublishesOpCreate(t *testing.T) {
 		t.Fatalf("both upsert paths must publish, got %d", len(*seen))
 	}
 	for i, ev := range *seen {
-		if ev.Op != OpCreate {
-			t.Fatalf("upsert event #%d must be OpCreate (v1 after-create parity), got %s", i, ev.Op)
+		if ev.Op != OpUpsert || ev.Object != nil || ev.Locator != nil || ev.Changes != nil {
+			t.Fatalf("upsert event #%d must be payload-free OpUpsert, got %+v", i, ev)
 		}
+	}
+}
+
+func TestWithBus_BatchUpsertPublishesOncePerCallAfterCommit(t *testing.T) {
+	s, seen := setupBusItemStore(t)
+	ctx := context.Background()
+	items := []*Item{{Code: "BUPE1"}, {Code: "BUPE2"}}
+	if err := s.BatchUpsert(ctx, items, []string{"code"}, "code"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("got %d events, want one type-wide invalidation", len(*seen))
+	}
+	if ev := (*seen)[0]; ev.Op != OpUpsert || ev.Object != nil {
+		t.Fatalf("event is not a truthful OpUpsert: %+v", ev)
+	}
+
+	*seen = (*seen)[:0]
+	boom := errors.New("rollback")
+	err := s.h.RunInTx(ctx, func(txCtx context.Context) error {
+		if err := s.BatchUpsert(txCtx, []*Item{{Code: "BUPE3"}}, []string{"code"}, "code"); err != nil {
+			return err
+		}
+		if len(*seen) != 0 {
+			t.Fatalf("batch upsert event published before commit: %+v", *seen)
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("want rollback error, got %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("rollback leaked batch upsert events: %+v", *seen)
+	}
+}
+
+func TestWithBus_BatchUpdatePublishesPerRowAndDropsOnRollback(t *testing.T) {
+	s, seen := setupBusItemStore(t)
+	ctx := context.Background()
+	a := &Item{Code: "BUE1"}
+	b := &Item{Code: "BUE2"}
+	if err := s.BatchCreate(ctx, []*Item{a, b}); err != nil {
+		t.Fatal(err)
+	}
+	*seen = (*seen)[:0]
+	a.Code = "BUE1-updated"
+	b.Code = "BUE2-updated"
+	if err := s.BatchUpdate(ctx, []*Item{a, b}, "code"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("got %d events, want 2", len(*seen))
+	}
+	for i, ev := range *seen {
+		if ev.Op != OpUpdate || ev.Locator == nil || ev.Changes == nil {
+			t.Fatalf("event #%d is not OpUpdate: %+v", i, ev)
+		}
+	}
+
+	*seen = (*seen)[:0]
+	a.Code = "BUE1-rollback"
+	b.Code = "BUE2-rollback"
+	boom := errors.New("rollback")
+	err := s.h.RunInTx(ctx, func(txCtx context.Context) error {
+		if err := s.BatchUpdate(txCtx, []*Item{a, b}, "code"); err != nil {
+			return err
+		}
+		if len(*seen) != 0 {
+			t.Fatalf("batch update event published before commit: %+v", *seen)
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("want rollback error, got %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("rollback leaked batch update events: %+v", *seen)
 	}
 }
 

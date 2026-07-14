@@ -10,6 +10,24 @@
 
 ---
 
+## Unreleased — 批量写语义补齐
+
+> `BatchUpdate` 与 `BatchUpsert` 补齐了“每行不同 payload”和“批量
+> insert-or-update”两块操作面，同时不把 `Writer[T]` 扩成会打碎下游 mock
+> 的胖接口；需要批量能力的依赖显式使用 `BatchWriter[T]`。
+>
+> 这次没有照搬单行 Upsert 的历史事件行为。conflict-update 时 create hook
+> 生成的 RID 不一定属于数据库旧行，因此 Upsert 统一发布无 payload 的
+> `OpUpsert`，让订阅者做实体类型级失效，而不是缓存一个可能不存在的对象；
+> `BatchUpsert` 每次调用只发布一条，输入规模不会放大相同的失效工作。
+> BatchUpsert 还把静态白名单、空指针与完全相同的批内 conflict key 校验
+> 前置到 hooks/SQL 之前，并将“数据库相等规则下批内键必须唯一”写成公开
+> 前置条件，避免固定分片边界改变 PostgreSQL 结果。
+>
+> `BatchUpdate` 复用单行 Update 内核，scope、零值写入与乐观锁只有一份
+> 事实源；自管事务失败时恢复此前由框架递增的内存 Version，避免数据库
+> 已回滚而对象重试立即产生伪 stale conflict。
+
 ## 2.0.0-beta.5 — 数据层加固：只读实例 + 电池独立迁移账本
 
 > 本轮把 db-layer 架构 review 的收敛推进到类型、配置与生成物里。

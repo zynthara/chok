@@ -11,17 +11,19 @@ import (
 // Op names the write that produced an EntityChanged event.
 type Op string
 
-// Write operations carried by EntityChanged.Op. Upsert publishes
-// OpCreate — mirroring v1's after-create hook semantics for upserts —
-// regardless of whether the row was inserted or updated on conflict.
-// Restore publishes OpRestore with the locator: subscribers tracking
-// row liveness (caches, projections) treat it as the inverse of
-// OpDelete rather than a field update.
+// Write operations carried by EntityChanged.Op. Upsert and BatchUpsert publish
+// OpUpsert without Object: supported SQL dialects do not expose a portable way
+// to tell insert from conflict-update or return the truthful persisted row
+// identity. BatchUpsert publishes one such event per call, not per input.
+// Subscribers should treat it as type-wide invalidation. Restore publishes
+// OpRestore with the locator: subscribers tracking row liveness (caches,
+// projections) treat it as the inverse of OpDelete rather than a field update.
 const (
 	OpCreate  Op = "create"
 	OpUpdate  Op = "update"
 	OpDelete  Op = "delete"
 	OpRestore Op = "restore"
+	OpUpsert  Op = "upsert"
 )
 
 // EntityChanged is the typed event a WithBus store publishes after a
@@ -32,6 +34,9 @@ const (
 //	           mutates or reuses the original)
 //	OpUpdate — Locator + Changes
 //	OpDelete — Locator
+//	OpRestore — Locator
+//	OpUpsert — no payload; invalidate this entity type and re-read through a
+//	           domain key when needed
 //
 // Subscribe by concrete entity type:
 //
@@ -80,4 +85,8 @@ func (s *Store[T]) publishChanged(ctx context.Context, ev EntityChanged[T]) {
 func createdEvent[T any](obj *T) EntityChanged[T] {
 	cp := *obj
 	return EntityChanged[T]{Op: OpCreate, Object: &cp}
+}
+
+func upsertEvent[T any]() EntityChanged[T] {
+	return EntityChanged[T]{Op: OpUpsert}
 }

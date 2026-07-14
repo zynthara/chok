@@ -29,6 +29,15 @@ type Writer[T db.Modeler] interface {
 	Upsert(ctx context.Context, obj *T, conflictColumns []string, updateColumns ...string) error
 }
 
+// BatchWriter is the opt-in batch mutation surface. It is separate from
+// Writer so adding batch capabilities does not break downstream Writer mocks
+// and adapters by expanding their required method set.
+type BatchWriter[T db.Modeler] interface {
+	BatchCreate(ctx context.Context, objs []*T) error
+	BatchUpdate(ctx context.Context, objs []*T, fields ...string) error
+	BatchUpsert(ctx context.Context, objs []*T, conflictColumns []string, updateColumns ...string) error
+}
+
 // ReadWriter combines Reader and Writer into a single interface covering
 // standard CRUD operations without escape hatches (DB/ScopedDB/Tx).
 type ReadWriter[T db.Modeler] interface {

@@ -132,12 +132,14 @@ func TestReadOnly_RequiresExplicitBindingAndRejectsWrites(t *testing.T) {
 	}
 	obj := &User{Name: "blocked", Email: "blocked@example.com"}
 	writes := map[string]func() error{
-		"create":  func() error { return s.Create(ctx, obj) },
-		"batch":   func() error { return s.BatchCreate(ctx, []*User{obj}) },
-		"update":  func() error { return s.Update(ctx, RID(seed.RID), Set(map[string]any{"email": "new@example.com"})) },
-		"delete":  func() error { return s.Delete(ctx, RID(seed.RID)) },
-		"restore": func() error { return s.Restore(ctx, RID(seed.RID)) },
-		"upsert":  func() error { return s.Upsert(ctx, obj, []string{"email"}) },
+		"create":       func() error { return s.Create(ctx, obj) },
+		"batch-create": func() error { return s.BatchCreate(ctx, []*User{obj}) },
+		"update":       func() error { return s.Update(ctx, RID(seed.RID), Set(map[string]any{"email": "new@example.com"})) },
+		"batch-update": func() error { return s.BatchUpdate(ctx, []*User{seed}, "email") },
+		"delete":       func() error { return s.Delete(ctx, RID(seed.RID)) },
+		"restore":      func() error { return s.Restore(ctx, RID(seed.RID)) },
+		"upsert":       func() error { return s.Upsert(ctx, obj, []string{"email"}) },
+		"batch-upsert": func() error { return s.BatchUpsert(ctx, []*User{obj}, []string{"email"}) },
 	}
 	for name, write := range writes {
 		if err := write(); !errors.Is(err, db.ErrReadOnly) {
