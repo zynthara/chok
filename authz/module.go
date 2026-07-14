@@ -149,6 +149,19 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	return nil
 }
 
+// MigrateSchema runs AutoMigrate for the casbin_rule table. casbin_rule is
+// wire-compatible with gorm-adapter v3 — a foreign-shaped table with no chok
+// RID model, so it rides raw AutoMigrate through the sanctioned escape hatch
+// rather than the db.Table spec path (which enforces db.Model embedding).
+// The authz module uses this path in migrate: auto; migrate: versioned uses
+// MigrationSequence instead. Kernel-less embedders can call it directly.
+func MigrateSchema(ctx context.Context, h *db.DB) error {
+	if err := h.Unsafe(ctx).AutoMigrate(&casbin.CasbinRule{}); err != nil {
+		return fmt.Errorf("authz: migrate casbin_rule: %w", err)
+	}
+	return nil
+}
+
 // Migrate implements kernel.Migrator: ensure the casbin_rule schema
 // (honouring the framework migrate mode, SPEC §5.3), then bring the
 // policy engine fully up — eager LoadPolicy, watcher, audit hook,
@@ -163,14 +176,8 @@ func (c *Component) Migrate(ctx context.Context) error {
 		if _, err := c.dbc.ApplyOwnedMigrations(ctx, MigrationSequence()); err != nil {
 			return fmt.Errorf("authz: migrate owned sequence: %w", err)
 		}
-	} else {
-		// casbin_rule is wire-compatible with gorm-adapter v3 — a
-		// foreign-shaped table with no chok RID model, so it rides raw
-		// AutoMigrate through the sanctioned escape hatch rather than
-		// the db.Table spec path (which enforces db.Model embedding).
-		if err := c.h.Unsafe(ctx).AutoMigrate(&casbin.CasbinRule{}); err != nil {
-			return fmt.Errorf("authz: migrate casbin_rule: %w", err)
-		}
+	} else if err := MigrateSchema(ctx, c.h); err != nil {
+		return err
 	}
 
 	// The engine's adapter is a lifetime handle: bind it to a

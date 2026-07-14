@@ -350,6 +350,12 @@ db:
   dialect。引入账本的过渡发布不改变表形状；未来不兼容 DDL 必须在迁移前
   排空旧副本或采用 expand/contract，并形成不可回滚边界——Missing 检查
   只会阻止迁移后再次启动的旧二进制，不能保护仍在运行的旧进程。
+- **电池形状变更闸门**：迁移文件前缀只代表 versioned schema frontier，不
+  等同于历史二进制。每个改变电池表形状的 PR 必须通过 fresh、严格 N-1
+  前缀升级、旧 auto 基线采纳三路径；后两条的 catalog 指纹与 DML 行为轨迹
+  均须收敛到 fresh。auto 路径由电池自有 fixture 复现旧数据及旧运行时回填，
+  并在 apply 前证明没有序列账本或 manifest claim。`EquivalentVersion` 在
+  首个超出 AutoMigrate 等价面的形状迁移前永久冻结。
 - **第三方序列 manifest**：`OwnedSequence` 以完整组件包路径声明 owner，kind
   派生唯一账本；`account`/`audit`/`authz` 绑定各自保留 owner，`manifest`
   永久禁作 kind。每库的 `schema_migrations_chok_manifest` 持久化

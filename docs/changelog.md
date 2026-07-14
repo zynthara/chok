@@ -40,6 +40,12 @@
 > 操作者必须显式选择 `--ledger-health-only` 才只检查 dirty/fence/floor 等
 > 文件无关健康状态。声明式组件身份保留 fork/vendor 可控性，没有采用脆弱的
 > runtime caller/build-info 推导。
+>
+> 电池迁移的 catalog 指纹闸门新增了真实 DML 半边和 N-1 三路径：SoftUnique
+> 重占槽、自增续接、JSON 语义与 casbin 数据库层去重按方言对照；fresh、
+> versioned 前缀升级、旧 auto 基线采纳必须收敛到同一指纹和行为轨迹。迁移
+> 文件前缀只证明 versioned schema frontier，旧运行时回填由电池 fixture
+> 显式复现，避免把历史二进制能力错误归因给 checksum。
 
 ## 2.0.0-beta.5 — 数据层加固：只读实例 + 电池独立迁移账本
 

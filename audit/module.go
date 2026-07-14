@@ -140,6 +140,19 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 	return nil
 }
 
+// MigrateSchema runs AutoMigrate for the audit_logs table. audit_logs is
+// rid-keyed with its own shape (no db.Model embedding), so it rides raw
+// AutoMigrate through the sanctioned escape hatch rather than the db.Table
+// spec path. The audit module uses this path in migrate: auto; migrate:
+// versioned uses MigrationSequence instead. Kernel-less embedders can call
+// it directly.
+func MigrateSchema(ctx context.Context, h *db.DB) error {
+	if err := h.Unsafe(ctx).AutoMigrate(&Log{}); err != nil {
+		return fmt.Errorf("audit: migrate audit_logs: %w", err)
+	}
+	return nil
+}
+
 // Migrate implements kernel.Migrator: create audit_logs, honouring
 // the framework migrate mode (SPEC §5.3 — off touches no schema,
 // battery tables included; a missing table then surfaces on the
@@ -156,13 +169,7 @@ func (c *Component) Migrate(ctx context.Context) error {
 		}
 		return nil
 	}
-	// audit_logs is rid-keyed with its own shape (no db.Model
-	// embedding), so it rides raw AutoMigrate through the sanctioned
-	// escape hatch rather than the db.Table spec path.
-	if err := c.h.Unsafe(ctx).AutoMigrate(&Log{}); err != nil {
-		return fmt.Errorf("audit: migrate audit_logs: %w", err)
-	}
-	return nil
+	return MigrateSchema(ctx, c.h)
 }
 
 // Mount implements kernel.Mounter: the admin query API. Fail-closed:
