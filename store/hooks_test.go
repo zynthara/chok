@@ -672,6 +672,36 @@ func TestListWithCursor_FirstPage(t *testing.T) {
 	}
 }
 
+func TestListWithCursor_SizeEqualStoreCap_PreservesNextCursor(t *testing.T) {
+	gdb := setupHookDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New[Item](gdb, log.Empty(),
+		WithQueryFields("id", "code"),
+		WithMaxPageSize(3),
+	)
+
+	for i := range 5 {
+		code := "item" + string(rune('A'+i))
+		if err := s.Create(context.Background(), &Item{Code: code}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 3 {
+		t.Fatalf("expected 3 items at the Store cap, got %d", len(page.Items))
+	}
+	if page.NextCursor == "" {
+		t.Fatal("expected NextCursor when rows remain beyond a page equal to the Store cap")
+	}
+}
+
 func TestListWithCursor_LastPage_NoCursor(t *testing.T) {
 	gdb := setupHookDB(t)
 	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {

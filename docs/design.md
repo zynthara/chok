@@ -269,6 +269,8 @@ Query/Update 字段白名单（生产必须显式 `WithQueryFields` /
 fail-closed `1=0`）、owned 模型自动 OwnerScope（未认证 401、写侧
 owner 强制覆盖）、`Fields` 乐观锁 + 零值强制落库、scope 化 store
 禁 Upsert、RID 双 ID 模型（外部 `pst_xxx`，数字主键不出进程）。
+`Fields` 只接受 Store 的具体模型类型（`T` / `*T`），不把形状兼容 DTO
+交给 GORM 猜测字段与锁元数据。
 字段到列的映射以 GORM parser 的 `Field.DBName` 为唯一事实源，不另写
 snake_case；显式 update 列表与 alias 也不能重开 id/RID/version/时间戳/
 软删状态/owner 等框架托管列，执行内核再做第二道检查。`version` 是行修订号：

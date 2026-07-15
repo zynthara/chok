@@ -311,6 +311,8 @@ err := posts.Update(ctx, store.RID(rid), store.Set(m), store.WithVersion(v))
 规则:列名走 **update 白名单**;每次成功更新 `version` 都在同一条 SQL 中
 自增。`Set` 或 `NoLock` 只是不做旧 version 条件检查,不会停止修订号推进;
 这两种无锁写无法可靠回填调用方对象的最终 version,需要时重新读取。
+`Fields` 的对象必须是该 Store 的具体模型类型(`T` 或 `*T`),不会接受字段
+形状相同的 DTO;这样字段值和乐观锁元数据始终来自同一份 GORM schema。
 确实不要锁时用 `store.Fields(p, cols...).NoLock()` 把意图写在代码里。
 
 #### 每行不同值:`BatchUpdate`

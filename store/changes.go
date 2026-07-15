@@ -44,7 +44,10 @@ func Set(kv map[string]any) Changes {
 	return setChanges(kv)
 }
 
-// Fields returns a FieldChanges that updates selected fields of obj.
+// Fields returns a FieldChanges that updates selected fields of obj. obj must
+// have the Store's concrete model type (T or *T); shape-compatible DTOs are
+// rejected so field extraction and optimistic-lock metadata always come from
+// the Store's parsed GORM schema.
 //
 // When fields is empty, every column declared via WithUpdateFields is written
 // (whole-whitelist update). Zero values in obj ARE persisted — the Store

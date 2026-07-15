@@ -15,8 +15,10 @@
 > 架构复核暴露的八处数据层契约缺口在同一轮收口：显式 update 白名单和
 > alias 不能再把 RID/version/时间戳/软删/owner 等框架托管列重新打开，
 > 普通 Update、软删与 Restore 的成功 SQL 都推进 version；Upsert 不推进
-> version 仍作为单独、已公开的方言限制保留。事件 payload 改为包外可解释的
-> Locator/Object/Change snapshot，递归隔离调用方与多个异步订阅者的可变数据。
+> version 仍作为单独、已公开的方言限制保留。`Fields` 只接受 Store 的具体
+> 模型类型，不再把形状兼容 DTO 交给 GORM 推断字段与乐观锁元数据。事件
+> payload 改为包外可解释的 Locator/Object/Change snapshot，递归隔离调用方
+> 与多个异步订阅者的可变数据。
 >
 > `where.Option` 因已有公开扩展契约暂不封闭，而是明确提升到与 Unsafe 相同的
 > 可信代码边界，并以内建 NULL 谓词覆盖已知逃逸理由；分页 cap 只允许逐层

@@ -156,6 +156,28 @@ func TestFields_UnknownField_ErrUnknownUpdateField(t *testing.T) {
 	}
 }
 
+func TestFields_ShapeCompatibleDTORejected(t *testing.T) {
+	type userDTO struct {
+		Name string
+	}
+
+	s, _ := setupUserStore(t)
+	u := createUser(t, s, "alice", "a@test.com")
+
+	err := s.Update(context.Background(), RID(u.RID), Fields(&userDTO{Name: "not-a-model"}, "name"))
+	if err == nil {
+		t.Fatal("expected Fields to reject a shape-compatible DTO")
+	}
+
+	got, getErr := s.Get(context.Background(), RID(u.RID))
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if got.Name != u.Name {
+		t.Fatalf("rejected DTO must not mutate the row: got name %q want %q", got.Name, u.Name)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Update tests — optimistic locking
 // ---------------------------------------------------------------------------

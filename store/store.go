@@ -964,10 +964,18 @@ func (s *Store[T]) ListQ(ctx context.Context, qopts []QueryOption, opts ...where
 }
 
 func (s *Store[T]) listInternal(ctx context.Context, qopts []QueryOption, opts []where.Option) (*Page[T], error) {
+	return s.listInternalWithMaxPageSize(ctx, qopts, opts, s.maxPageSize)
+}
+
+// listInternalWithMaxPageSize is the shared list execution path. A zero
+// maxPageSize skips Store-cap injection; ListWithCursor uses that only after
+// validating its caller-visible size against the Store cap, so its private
+// size+1 lookahead row is not mistaken for caller-visible page capacity.
+func (s *Store[T]) listInternalWithMaxPageSize(ctx context.Context, qopts []QueryOption, opts []where.Option, maxPageSize int) (*Page[T], error) {
 	// Enforce max page size. where.WithMaxPageSize composes caps by taking
 	// the minimum, so caller options may tighten this policy but cannot raise it.
-	if s.maxPageSize > 0 {
-		opts = append([]where.Option{where.WithMaxPageSize(s.maxPageSize)}, opts...)
+	if maxPageSize > 0 {
+		opts = append([]where.Option{where.WithMaxPageSize(maxPageSize)}, opts...)
 	}
 
 	base, err := s.applyScopes(ctx, s.effectiveDB(ctx).Model(new(T)))
@@ -1111,13 +1119,9 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	if size < 1 {
 		return nil, fmt.Errorf("%w: cursor page size %d, must be >= 1", where.ErrInvalidParam, size)
 	}
-	// Enforce the Store's maxPageSize BEFORE deriving fetchSize, so a
-	// caller that requests size > store cap gets rejected up front instead
-	// of silently truncated. Reserve one slot below the ceiling for the
-	// size+1 peek used to detect has-next-page: the WithCursor option
-	// below rejects size > MaxPageSize, and we pass fetchSize = size+1
-	// there, so the effective user-visible cap is MaxPageSize-1 when no
-	// Store override is configured.
+	// Enforce the caller-visible size before deriving the private size+1
+	// lookahead. Reserve one slot below the package ceiling so the lookahead
+	// remains a valid where limit; it is never returned to the caller.
 	cap := s.maxPageSize
 	if cap <= 0 || cap > where.MaxPageSize-1 {
 		cap = where.MaxPageSize - 1
@@ -1129,12 +1133,11 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	fetchSize := size + 1
 	allOpts := make([]where.Option, 0, len(opts)+2)
 	allOpts = append(allOpts, opts...)
-	// Override the Store's maxPageSize with fetchSize so the sentinel
-	// size+1 fetch isn't clamped back to size (which would break
-	// has-next-page detection when maxPageSize == size). The bump is
-	// safe because the `size <= cap` check above already ensured that
-	// fetchSize stays within the package ceiling (cap+1 ≤ MaxPageSize+1,
-	// and WithCursor/WithLimit reject size > MaxPageSize independently).
+	// Cap the internal query at exactly the requested page plus its lookahead.
+	// The execution call below deliberately skips reinjecting s.maxPageSize:
+	// size was already checked against it, and applying it again would discard
+	// the lookahead when size equals the Store cap. Caller options can still
+	// tighten this internal limit because WithMaxPageSize composes by minimum.
 	allOpts = append(allOpts, where.WithMaxPageSize(fetchSize))
 	if cursorValue != nil && cursorValue != "" {
 		allOpts = append(allOpts, where.WithCursor(cursorField, direction, cursorValue, fetchSize))
@@ -1144,7 +1147,7 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 		allOpts = append(allOpts, where.WithOrder(cursorField, desc), where.WithLimit(fetchSize))
 	}
 
-	result, err := s.List(ctx, allOpts...)
+	result, err := s.listInternalWithMaxPageSize(ctx, nil, allOpts, 0)
 	if err != nil {
 		return nil, err
 	}
