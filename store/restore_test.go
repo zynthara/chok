@@ -37,6 +37,9 @@ func TestRestore_RoundTrip(t *testing.T) {
 	if got.Email != "alice@example.com" {
 		t.Fatalf("restored row lost data: %+v", got)
 	}
+	if got.Version != 3 {
+		t.Fatalf("soft delete and restore must each advance the row revision, got %d", got.Version)
+	}
 	// The SoftUnique slot only frees up when delete_token returns to
 	// the live sentinel — assert the column, not just visibility.
 	var token string

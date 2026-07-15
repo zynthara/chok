@@ -34,6 +34,13 @@ type Item struct {
 
 func (Item) RIDPrefix() string { return "itm" }
 
+type AcronymItem struct {
+	db.Model
+	HTTPStatus string `json:"http_status"`
+}
+
+func (AcronymItem) RIDPrefix() string { return "aci" }
+
 // --- helpers ---
 
 // setupDB rides the dbtest lane switch: SQLite by default, Postgres
@@ -531,9 +538,8 @@ func TestUpdateByID(t *testing.T) {
 	if found.Name != "alice2" {
 		t.Fatalf("expected alice2, got %s", found.Name)
 	}
-	// Version must NOT be incremented.
-	if found.Version != 1 {
-		t.Fatalf("UpdateByID should not bump version, got %d", found.Version)
+	if found.Version != 2 {
+		t.Fatalf("unlocked Update by ID must advance row revision, got %d", found.Version)
 	}
 }
 
@@ -601,8 +607,8 @@ func TestUpdateByRID(t *testing.T) {
 	if found.Name != "alice2" {
 		t.Fatalf("expected alice2, got %s", found.Name)
 	}
-	if found.Version != 1 {
-		t.Fatalf("UpdateByRID should not bump version, got %d", found.Version)
+	if found.Version != 2 {
+		t.Fatalf("unlocked Update by RID must advance row revision, got %d", found.Version)
 	}
 }
 
@@ -815,6 +821,29 @@ func TestWithQueryFields_MapsCorrectly(t *testing.T) {
 	}
 }
 
+func TestAutoDiscovery_UsesGORMDBNameForAcronyms(t *testing.T) {
+	h := setupDB(t)
+	if err := h.Migrate(context.Background(), db.Table(&AcronymItem{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[AcronymItem](h, log.Empty())
+	item := &AcronymItem{HTTPStatus: "created"}
+	if err := s.Create(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.List(context.Background(), where.WithFilter("http_status", "created"))
+	if err != nil {
+		t.Fatalf("query used a column name different from GORM: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("got %d rows, want 1", len(page.Items))
+	}
+	item.HTTPStatus = "accepted"
+	if err := s.Update(context.Background(), RID(item.RID), Fields(item, "http_status")); err != nil {
+		t.Fatalf("update used a column name different from GORM: %v", err)
+	}
+}
+
 func TestWithQueryFields_NotConfigured_Rejects(t *testing.T) {
 	gdb := setupDB(t)
 	gdb.Migrate(context.Background(), db.Table(&Item{}))
@@ -863,6 +892,44 @@ func TestWithColumnAlias_BeforeFields_WorksCorrectly(t *testing.T) {
 	}
 	if got.Code != "TST" {
 		t.Fatalf("expected code TST, got %s", got.Code)
+	}
+}
+
+func TestNew_UpdateAllowlistCannotReopenFrameworkManagedColumns(t *testing.T) {
+	gdb := setupDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&User{})); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		opts []StoreOption
+	}{
+		{"public id auto aliases to rid", []StoreOption{WithUpdateFields("id")}},
+		{"version explicit", []StoreOption{WithUpdateFields("version")}},
+		{"alias targets rid", []StoreOption{WithUpdateFields("name"), WithColumnAlias("name", "rid")}},
+		{"alias targets owner", []StoreOption{WithUpdateFields("name"), WithColumnAlias("name", "owner_id")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "framework-managed") {
+					t.Fatalf("expected framework-managed column panic, got %v", r)
+				}
+			}()
+			New[User](gdb, log.Empty(), append([]StoreOption{WithQueryFields("id", "name")}, tt.opts...)...)
+		})
+	}
+}
+
+func TestChangesBuild_DefendsFrameworkManagedColumns(t *testing.T) {
+	s, _ := setupUserStore(t)
+	u := createUser(t, s, "alice", "managed@test")
+	// Simulate an internal regression corrupting the construction-time map;
+	// Changes must retain an independent execution-time barrier.
+	s.updateFieldMap["name"] = "version"
+	err := s.Update(context.Background(), RID(u.RID), Set(map[string]any{"name": 99}))
+	if !errors.Is(err, ErrProtectedUpdateField) {
+		t.Fatalf("expected ErrProtectedUpdateField, got %v", err)
 	}
 }
 

@@ -84,6 +84,13 @@ func (c *Config) PageInfo() PageInfo {
 
 // Option modifies a GORM query and/or query config.
 // fieldMap is provided by Store at apply-time.
+//
+// Option is an advanced, trusted-code extension point: a custom function
+// receives the raw *gorm.DB and writable Config, so it can bypass the field
+// allowlist and the HasFilter bookkeeping used by store.Where's write guard.
+// Treat custom Options like Store.Unsafe and never build them from untrusted
+// input. Prefer the built-in helpers, including WithFilterNull and
+// WithFilterNotNull, whenever they can express the query.
 type Option func(db *gorm.DB, cfg *Config, fieldMap map[string]string) (*gorm.DB, error)
 
 // Op is a comparison operator.
@@ -151,7 +158,18 @@ func WithOffset(offset int) Option {
 // policy constraint, not a user input error.
 func WithMaxPageSize(max int) Option {
 	return func(db *gorm.DB, cfg *Config, _ map[string]string) (*gorm.DB, error) {
-		cfg.MaxPageSize = max
+		if max <= 0 {
+			return db, nil
+		}
+		if max > MaxPageSize {
+			max = MaxPageSize
+		}
+		// Multiple policy layers may contribute caps (package, handle,
+		// Store, call site). A later option may tighten an earlier cap but
+		// must never raise it.
+		if cfg.MaxPageSize == 0 || max < cfg.MaxPageSize {
+			cfg.MaxPageSize = max
+		}
 		return db, nil
 	}
 }
@@ -180,8 +198,7 @@ func WithLimit(limit int) Option {
 // A nil value is treated as degenerate (SQL's three-valued logic makes
 // `col = NULL` always false) and flagged via Config.DegenerateFilter so
 // locators can reject "filter present but matches nothing" on
-// Update/Delete. Use explicit IS NULL semantics via a custom option if
-// that is the intended query.
+// Update/Delete. Use WithFilterNull for explicit IS NULL semantics.
 func WithFilter(field string, value any) Option {
 	return func(db *gorm.DB, cfg *Config, fm map[string]string) (*gorm.DB, error) {
 		cfg.HasFilter = true
@@ -194,6 +211,32 @@ func WithFilter(field string, value any) Option {
 			return db.Where("1 = 0"), nil
 		}
 		return db.Where(col+" = ?", value), nil
+	}
+}
+
+// WithFilterNull adds WHERE field IS NULL. The field is resolved through the
+// same query allowlist as every other built-in filter.
+func WithFilterNull(field string) Option {
+	return func(db *gorm.DB, cfg *Config, fm map[string]string) (*gorm.DB, error) {
+		cfg.HasFilter = true
+		col, err := resolveField(fm, field)
+		if err != nil {
+			return nil, err
+		}
+		return db.Where(col + " IS NULL"), nil
+	}
+}
+
+// WithFilterNotNull adds WHERE field IS NOT NULL. The field is resolved
+// through the same query allowlist as every other built-in filter.
+func WithFilterNotNull(field string) Option {
+	return func(db *gorm.DB, cfg *Config, fm map[string]string) (*gorm.DB, error) {
+		cfg.HasFilter = true
+		col, err := resolveField(fm, field)
+		if err != nil {
+			return nil, err
+		}
+		return db.Where(col + " IS NOT NULL"), nil
 	}
 }
 

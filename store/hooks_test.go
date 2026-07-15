@@ -206,13 +206,48 @@ func TestWithBus_CreatePublishesImmediately_NonTx(t *testing.T) {
 		t.Fatalf("non-transactional create must publish immediately, got %d events", len(*seen))
 	}
 	ev := (*seen)[0]
-	if ev.Op != OpCreate || ev.Object == nil || ev.Object.Code != "EV1" {
+	object := ev.Object.Value()
+	if ev.Op != OpCreate || object == nil || object.Code != "EV1" {
 		t.Fatalf("unexpected event %+v", ev)
 	}
 	// The event carries a copy — asynchronous consumers must never race
 	// the caller's continued use of the original.
-	if ev.Object == item {
-		t.Fatal("event must carry a shallow copy, not the caller's pointer")
+	if object == item {
+		t.Fatal("event must carry a recursive copy, not the caller's pointer")
+	}
+}
+
+func TestEntityChanged_SnapshotsNestedMutablePayloads(t *testing.T) {
+	type payload struct {
+		Labels map[string][]string
+	}
+	original := &payload{Labels: map[string][]string{"role": []string{"reader"}}}
+	ev := createdEvent(original)
+	original.Labels["role"][0] = "admin"
+	original.Labels["new"] = []string{"caller-only"}
+	object := ev.Object.Value()
+	if got := object.Labels["role"][0]; got != "reader" {
+		t.Fatalf("create event shares nested caller state: %q", got)
+	}
+	if _, ok := object.Labels["new"]; ok {
+		t.Fatal("create event observed a caller map mutation")
+	}
+	object.Labels["role"][0] = "subscriber"
+	if got := ev.Object.Value().Labels["role"][0]; got != "reader" {
+		t.Fatalf("object snapshot accessor exposes internal state: %q", got)
+	}
+
+	input := map[string]any{"meta": map[string]any{"tags": []string{"a"}}}
+	changes := newChangeSnapshot(input)
+	input["meta"].(map[string]any)["tags"].([]string)[0] = "caller"
+	values := changes.Values()
+	if got := values["meta"].(map[string]any)["tags"].([]string)[0]; got != "a" {
+		t.Fatalf("change snapshot shares caller state: %q", got)
+	}
+	values["meta"].(map[string]any)["tags"].([]string)[0] = "subscriber"
+	again := changes.Values()
+	if got := again["meta"].(map[string]any)["tags"].([]string)[0]; got != "a" {
+		t.Fatalf("change snapshot accessor exposes internal state: %q", got)
 	}
 }
 
@@ -228,8 +263,15 @@ func TestWithBus_UpdatePublishes_GatedOnRowsAffected(t *testing.T) {
 	if err := s.Update(context.Background(), RID(item.RID), Set(map[string]any{"code": "EV2b"})); err != nil {
 		t.Fatal(err)
 	}
-	if len(*seen) != 1 || (*seen)[0].Op != OpUpdate || (*seen)[0].Locator == nil || (*seen)[0].Changes == nil {
+	if len(*seen) != 1 || (*seen)[0].Op != OpUpdate || (*seen)[0].Locator.Kind != LocatorRID || (*seen)[0].Changes.Empty() {
 		t.Fatalf("update must publish OpUpdate with locator+changes, got %+v", *seen)
+	}
+	ev := (*seen)[0]
+	if ev.Locator.RID != item.RID {
+		t.Fatalf("event locator RID = %q, want %q", ev.Locator.RID, item.RID)
+	}
+	if value, ok := ev.Changes.Value("code"); !ok || value != "EV2b" {
+		t.Fatalf("event changes are not inspectable: value=%v ok=%v", value, ok)
 	}
 
 	// Not-found update: no event (v1 after-hook gate carried over).
@@ -255,7 +297,7 @@ func TestWithBus_DeletePublishes_NotOnIdempotentNoop(t *testing.T) {
 	if err := s.Delete(context.Background(), RID(item.RID)); err != nil {
 		t.Fatal(err)
 	}
-	if len(*seen) != 1 || (*seen)[0].Op != OpDelete || (*seen)[0].Locator == nil {
+	if len(*seen) != 1 || (*seen)[0].Op != OpDelete || (*seen)[0].Locator.Kind != LocatorRID {
 		t.Fatalf("delete must publish OpDelete with locator, got %+v", *seen)
 	}
 
@@ -318,7 +360,7 @@ func TestWithBus_UpsertPublishesTruthfulPayloadFreeEvent(t *testing.T) {
 		t.Fatalf("both upsert paths must publish, got %d", len(*seen))
 	}
 	for i, ev := range *seen {
-		if ev.Op != OpUpsert || ev.Object != nil || ev.Locator != nil || ev.Changes != nil {
+		if ev.Op != OpUpsert || !ev.Object.Empty() || ev.Locator.Kind != "" || !ev.Changes.Empty() {
 			t.Fatalf("upsert event #%d must be payload-free OpUpsert, got %+v", i, ev)
 		}
 	}
@@ -334,7 +376,7 @@ func TestWithBus_BatchUpsertPublishesOncePerCallAfterCommit(t *testing.T) {
 	if len(*seen) != 1 {
 		t.Fatalf("got %d events, want one type-wide invalidation", len(*seen))
 	}
-	if ev := (*seen)[0]; ev.Op != OpUpsert || ev.Object != nil {
+	if ev := (*seen)[0]; ev.Op != OpUpsert || !ev.Object.Empty() {
 		t.Fatalf("event is not a truthful OpUpsert: %+v", ev)
 	}
 
@@ -375,7 +417,7 @@ func TestWithBus_BatchUpdatePublishesPerRowAndDropsOnRollback(t *testing.T) {
 		t.Fatalf("got %d events, want 2", len(*seen))
 	}
 	for i, ev := range *seen {
-		if ev.Op != OpUpdate || ev.Locator == nil || ev.Changes == nil {
+		if ev.Op != OpUpdate || ev.Locator.Kind == "" || ev.Changes.Empty() {
 			t.Fatalf("event #%d is not OpUpdate: %+v", i, ev)
 		}
 	}
@@ -413,8 +455,8 @@ func TestWithBus_BatchCreatePublishesPerObjectInOrder(t *testing.T) {
 		t.Fatalf("batch create must publish one event per object, got %d", len(*seen))
 	}
 	for i, want := range []string{"B1", "B2", "B3"} {
-		if (*seen)[i].Object.Code != want {
-			t.Fatalf("event #%d out of order: want %s got %s", i, want, (*seen)[i].Object.Code)
+		if got := (*seen)[i].Object.Value().Code; got != want {
+			t.Fatalf("event #%d out of order: want %s got %s", i, want, got)
 		}
 	}
 }
@@ -446,7 +488,7 @@ func TestWithBus_TxCommitFlushesInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(*seen) != 2 || (*seen)[0].Object.Code != "T1" || (*seen)[1].Object.Code != "T2" {
+	if len(*seen) != 2 || (*seen)[0].Object.Value().Code != "T1" || (*seen)[1].Object.Value().Code != "T2" {
 		t.Fatalf("commit must flush staged events in write order, got %+v", *seen)
 	}
 }
@@ -501,7 +543,7 @@ func TestWithBus_RunInTxContextPropagation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(*seen) != 1 || (*seen)[0].Object.Code != "CTX1" {
+	if len(*seen) != 1 || (*seen)[0].Object.Value().Code != "CTX1" {
 		t.Fatalf("commit must flush the staged event, got %+v", *seen)
 	}
 }
@@ -540,7 +582,7 @@ func TestWithBus_ForeignHandleTx_PublishesImmediately(t *testing.T) {
 	if n, err := sb.Count(ctx); err != nil || n != 1 {
 		t.Fatalf("write must have committed on B, n=%d err=%v", n, err)
 	}
-	if len(*seen) != 1 || (*seen)[0].Object.Code != "FOREIGN" {
+	if len(*seen) != 1 || (*seen)[0].Object.Value().Code != "FOREIGN" {
 		t.Fatalf("foreign rollback must not drop the committed write's event, got %+v", *seen)
 	}
 }

@@ -10,7 +10,19 @@
 
 ---
 
-## Unreleased — 批量写语义补齐 + 第三方迁移序列 manifest + repair 留痕
+## Unreleased — 数据契约收口 + 批量写 + 迁移 manifest/repair 留痕
+
+> 架构复核暴露的八处数据层契约缺口在同一轮收口：显式 update 白名单和
+> alias 不能再把 RID/version/时间戳/软删/owner 等框架托管列重新打开，
+> 普通 Update、软删与 Restore 的成功 SQL 都推进 version；Upsert 不推进
+> version 仍作为单独、已公开的方言限制保留。事件 payload 改为包外可解释的
+> Locator/Object/Change snapshot，递归隔离调用方与多个异步订阅者的可变数据。
+>
+> `where.Option` 因已有公开扩展契约暂不封闭，而是明确提升到与 Unsafe 相同的
+> 可信代码边界，并以内建 NULL 谓词覆盖已知逃逸理由；分页 cap 只允许逐层
+> 收紧。auto 迁移在首条 DDL 前预检全部声明，字段解析统一服从 GORM schema；
+> PG/MySQL unlock 有独立 deadline，失败即废弃 session；SQLite 依据扩展错误码
+> 区分 UNIQUE 与 NOT NULL/CHECK/FK，不再把所有 constraint failed 都报重复键。
 
 > `BatchUpdate` 与 `BatchUpsert` 补齐了“每行不同 payload”和“批量
 > insert-or-update”两块操作面，同时不把 `Writer[T]` 扩成会打碎下游 mock

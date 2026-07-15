@@ -43,9 +43,21 @@ type MissingNotNull struct {
 	Email string `gorm:"size:200"` // missing "not null"
 }
 
+type PreflightGood struct {
+	Model
+	Name string `gorm:"size:40"`
+}
+
+type AcronymColumn struct {
+	SoftDeleteModel
+	HTTPStatus string `json:"http_status" gorm:"not null;size:40"`
+}
+
 func (BadUniqueIndex) RIDPrefix() string { return "bad" }
 func (NullableColumn) RIDPrefix() string { return "nul" }
 func (MissingNotNull) RIDPrefix() string { return "mis" }
+func (PreflightGood) RIDPrefix() string  { return "pfg" }
+func (AcronymColumn) RIDPrefix() string  { return "acr" }
 
 // --- helpers ---
 
@@ -210,6 +222,39 @@ func TestMigrate_SoftUniqueMissingNotNull_Error(t *testing.T) {
 	err := Migrate(context.Background(), gdb, Table(&MissingNotNull{}, SoftUnique("uk_email", "email")))
 	if err == nil {
 		t.Fatal("expected error for missing 'not null' tag")
+	}
+}
+
+func TestMigrate_ValidatesAllSpecsBeforeDDL(t *testing.T) {
+	gdb := openTestDB(t)
+	if err := gdb.Migrator().DropTable(&PreflightGood{}); err != nil {
+		t.Fatal(err)
+	}
+	err := Migrate(context.Background(), gdb,
+		Table(&PreflightGood{}),
+		TableSpec{
+			model:   &TestItem{},
+			indexes: []SoftIndex{SoftUnique("uk_bad_code", "code")},
+			soft:    false,
+		},
+	)
+	if err == nil {
+		t.Fatal("expected later invalid spec to fail preflight")
+	}
+	if gdb.Migrator().HasTable(&PreflightGood{}) {
+		t.Fatal("an invalid later spec must fail before the first AutoMigrate")
+	}
+}
+
+func TestMigrate_SoftUniqueUsesGORMDBNameForAcronyms(t *testing.T) {
+	gdb := openTestDB(t)
+	if err := Migrate(context.Background(), gdb,
+		Table(&AcronymColumn{}, SoftUnique("uk_acronym_status", "http_status")),
+	); err != nil {
+		t.Fatalf("GORM maps HTTPStatus to http_status; migration validation drifted: %v", err)
+	}
+	if !gdb.Migrator().HasColumn(&AcronymColumn{}, "http_status") {
+		t.Fatal("AutoMigrate did not create GORM's http_status column")
 	}
 }
 

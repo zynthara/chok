@@ -47,37 +47,36 @@ func SoftUnique(name string, columns ...string) SoftIndex {
 // SoftDeleteModel supports both uniqueIndex (permanent, survives soft delete)
 // and SoftUnique (released on soft delete). Choose per field.
 //
-// Validation order (fail-fast):
+// Validation order (fail-fast across the complete specs slice):
 //  1. SoftUnique used on non-SoftDeleteModel → error
 //  2. SoftUnique columns must be NOT NULL → error for pointer/sql.Null* types or missing "not null" tag
-//  3. AutoMigrate
-//  4. Create SoftUnique indexes
+//  3. Only after every spec passes: AutoMigrate, then create its SoftUnique indexes
 //
 // ctx flows into every DDL statement (AutoMigrate, Raw, Exec) via
 // gdb.WithContext so that registry Init timeouts and shutdown cancellation
 // can abort long-running migrations instead of blocking startup.
 func Migrate(ctx context.Context, gdb *gorm.DB, specs ...TableSpec) error {
 	gdb = gdb.WithContext(ctx)
+	// Validate the complete declaration set before the first DDL statement.
+	// This keeps a typo in a later spec from leaving an avoidable prefix of
+	// AutoMigrate changes behind.
 	for _, spec := range specs {
-		// Step 1: SoftUnique only valid for SoftDeleteModel.
 		if len(spec.indexes) > 0 && !spec.soft {
 			return fmt.Errorf("db.Migrate: SoftUnique is only valid for SoftDeleteModel, "+
 				"model %T does not embed SoftDeleteModel", spec.model)
 		}
-
-		// Step 2: SoftUnique columns must be NOT NULL.
 		for _, idx := range spec.indexes {
-			if err := validateSoftUniqueColumns(spec.model, idx); err != nil {
+			if err := validateSoftUniqueColumns(gdb, spec.model, idx); err != nil {
 				return err
 			}
 		}
+	}
 
-		// Step 3: AutoMigrate.
+	for _, spec := range specs {
 		if err := gdb.AutoMigrate(spec.model); err != nil {
 			return fmt.Errorf("db.Migrate: AutoMigrate %T: %w", spec.model, err)
 		}
 
-		// Step 4: Create SoftUnique indexes.
 		for _, idx := range spec.indexes {
 			if err := createSoftUniqueIndex(gdb, spec.model, idx); err != nil {
 				return fmt.Errorf("db.Migrate: create index %s: %w", idx.Name, err)
@@ -88,85 +87,39 @@ func Migrate(ctx context.Context, gdb *gorm.DB, specs ...TableSpec) error {
 }
 
 // validateSoftUniqueColumns ensures all columns in a SoftUnique index are NOT NULL.
-func validateSoftUniqueColumns(model any, idx SoftIndex) error {
-	t := reflect.TypeOf(model)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
+func validateSoftUniqueColumns(gdb *gorm.DB, model any, idx SoftIndex) error {
+	stmt := &gorm.Statement{DB: gdb}
+	if err := stmt.Parse(model); err != nil {
+		return fmt.Errorf("db.Migrate: parse model %T: %w", model, err)
 	}
+	t := stmt.Schema.ModelType
 
 	for _, col := range idx.Columns {
-		field, found := findFieldByColumn(t, col)
-		if !found {
+		field := stmt.Schema.FieldsByDBName[col]
+		if field == nil {
 			return fmt.Errorf("db.Migrate: SoftUnique %q references column %q not found in %s",
 				idx.Name, col, t.Name())
 		}
 
 		// Pointer types are nullable.
-		if field.Type.Kind() == reflect.Ptr {
+		if field.FieldType.Kind() == reflect.Ptr {
 			return fmt.Errorf("db.Migrate: SoftUnique column %q in %s is a pointer type (nullable); "+
 				"SoftUnique columns must be NOT NULL", col, t.Name())
 		}
 
 		// sql.Null* types are nullable.
-		typeName := field.Type.Name()
-		if strings.HasPrefix(typeName, "Null") && field.Type.PkgPath() == "database/sql" {
+		typeName := field.FieldType.Name()
+		if strings.HasPrefix(typeName, "Null") && field.FieldType.PkgPath() == "database/sql" {
 			return fmt.Errorf("db.Migrate: SoftUnique column %q in %s uses sql.%s (nullable); "+
 				"SoftUnique columns must be NOT NULL", col, t.Name(), typeName)
 		}
 
-		// Must have "not null" in gorm tag.
-		gormTag := strings.ToLower(field.Tag.Get("gorm"))
-		if !strings.Contains(gormTag, "not null") {
+		if !field.NotNull {
 			return fmt.Errorf("db.Migrate: SoftUnique column %q in %s is missing 'not null' gorm tag; "+
 				"SoftUnique columns must be NOT NULL", col, t.Name())
 		}
 	}
 	return nil
-}
-
-// findFieldByColumn finds a struct field matching a gorm column name.
-func findFieldByColumn(t reflect.Type, column string) (reflect.StructField, bool) {
-	for i := range t.NumField() {
-		f := t.Field(i)
-		if f.Anonymous && f.Type.Kind() == reflect.Struct {
-			if sf, ok := findFieldByColumn(f.Type, column); ok {
-				return sf, true
-			}
-			continue
-		}
-		// Check gorm column tag.
-		gormTag := f.Tag.Get("gorm")
-		for _, part := range strings.Split(gormTag, ";") {
-			part = strings.TrimSpace(part)
-			if strings.HasPrefix(part, "column:") {
-				if strings.TrimPrefix(part, "column:") == column {
-					return f, true
-				}
-			}
-		}
-		// Fallback: snake_case field name.
-		if toSnakeCase(f.Name) == column {
-			return f, true
-		}
-	}
-	return reflect.StructField{}, false
-}
-
-// toSnakeCase converts CamelCase to snake_case.
-// Handles consecutive uppercase correctly: "UserID" → "user_id".
-func toSnakeCase(s string) string {
-	var result []byte
-	for i, c := range s {
-		if c >= 'A' && c <= 'Z' {
-			if i > 0 && s[i-1] >= 'a' && s[i-1] <= 'z' {
-				result = append(result, '_')
-			}
-			result = append(result, byte(c)+32)
-		} else {
-			result = append(result, byte(c))
-		}
-	}
-	return string(result)
 }
 
 // createSoftUniqueIndex creates the dialect-appropriate unique index

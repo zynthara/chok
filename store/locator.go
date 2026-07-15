@@ -26,6 +26,42 @@ type Locator interface {
 	apply(db *gorm.DB, queryFieldMap map[string]string) (*gorm.DB, error)
 }
 
+// LocatorKind identifies the stable built-in locator shape carried by an
+// EntityChanged event.
+type LocatorKind string
+
+const (
+	// LocatorRID identifies a public resource-ID locator.
+	LocatorRID LocatorKind = "rid"
+	// LocatorID identifies an internal numeric primary-key locator.
+	LocatorID LocatorKind = "id"
+	// LocatorWhere identifies an arbitrary predicate locator.
+	LocatorWhere LocatorKind = "where"
+)
+
+// LocatorSnapshot is an immutable, subscriber-friendly description of the
+// row target used by a write. Where locators can represent arbitrary or custom
+// predicates, so they intentionally expose only their kind; subscribers should
+// treat them as type-wide invalidations.
+type LocatorSnapshot struct {
+	Kind LocatorKind
+	RID  string
+	ID   uint
+}
+
+func snapshotLocator(by Locator) LocatorSnapshot {
+	switch v := by.(type) {
+	case ridLocator:
+		return LocatorSnapshot{Kind: LocatorRID, RID: string(v)}
+	case idLocator:
+		return LocatorSnapshot{Kind: LocatorID, ID: uint(v)}
+	case whereLocator:
+		return LocatorSnapshot{Kind: LocatorWhere}
+	default:
+		return LocatorSnapshot{Kind: LocatorWhere}
+	}
+}
+
 // RID returns a Locator matching records by their public resource ID (rid column).
 // This is the default locator for HTTP-facing operations.
 func RID(id string) Locator {

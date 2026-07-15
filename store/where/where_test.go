@@ -71,6 +71,45 @@ func TestApply_OffsetPaginationPageInfo(t *testing.T) {
 	}
 }
 
+func TestApply_MaxPageSizeCannotBeRaisedOrExceedPackageCeiling(t *testing.T) {
+	db := testDB(t)
+	_, cfg, err := Apply(db, nil, []Option{
+		WithMaxPageSize(25),
+		WithMaxPageSize(50_000),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.PageInfo().Size; got != 25 {
+		t.Fatalf("later max-page option raised the effective cap: got %d want 25", got)
+	}
+
+	_, cfg, err = Apply(db, nil, []Option{WithMaxPageSize(50_000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.PageInfo().Size; got != MaxPageSize {
+		t.Fatalf("configured cap escaped package ceiling: got %d want %d", got, MaxPageSize)
+	}
+}
+
+func TestWithFilterNull_BuiltinsUseAllowlistAndMarkFilter(t *testing.T) {
+	db := testDB(t)
+	fm := map[string]string{"deleted_at": "deleted_at"}
+	for _, opt := range []Option{WithFilterNull("deleted_at"), WithFilterNotNull("deleted_at")} {
+		_, cfg, err := Apply(db, fm, []Option{opt})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.HasFilter || cfg.DegenerateFilter {
+			t.Fatalf("null predicate metadata = %+v", cfg)
+		}
+	}
+	if _, _, err := Apply(db, fm, []Option{WithFilterNull("secret")}); !errors.Is(err, ErrUnknownField) {
+		t.Fatalf("null predicate bypassed field allowlist: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // WithCursor tests
 // ---------------------------------------------------------------------------

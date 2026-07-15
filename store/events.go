@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"reflect"
+	"sort"
 
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/internal/txctx"
@@ -30,8 +32,7 @@ const (
 // successful write. Which fields are set depends on the operation,
 // mirroring the information v1's after-hooks received:
 //
-//	OpCreate — Object (a shallow copy; safe to read after the caller
-//	           mutates or reuses the original)
+//	OpCreate — Object.Value() (a recursive snapshot; each read returns a copy)
 //	OpUpdate — Locator + Changes
 //	OpDelete — Locator
 //	OpRestore — Locator
@@ -48,9 +49,67 @@ const (
 // from rolled-back writes never fire.
 type EntityChanged[T any] struct {
 	Op      Op
-	Object  *T
-	Locator Locator
-	Changes Changes
+	Object  ObjectSnapshot[T]
+	Locator LocatorSnapshot
+	Changes ChangeSnapshot
+}
+
+// ObjectSnapshot is the immutable create payload carried by EntityChanged.
+// Value returns a fresh recursive copy for each caller, so asynchronous
+// subscribers cannot mutate shared event state.
+type ObjectSnapshot[T any] struct {
+	value *T
+}
+
+// Empty reports whether the event carries no object payload.
+func (o ObjectSnapshot[T]) Empty() bool { return o.value == nil }
+
+// Value returns a recursive copy of the created object, or nil when absent.
+func (o ObjectSnapshot[T]) Value() *T {
+	if o.value == nil {
+		return nil
+	}
+	return cloneAny(o.value).(*T)
+}
+
+// ChangeSnapshot is the immutable update payload carried by EntityChanged.
+// Keys are the public update-field names used by the caller, not database
+// columns. Its accessors return recursive copies so one subscriber cannot race
+// or corrupt another subscriber's view.
+type ChangeSnapshot struct {
+	values map[string]any
+}
+
+func newChangeSnapshot(values map[string]any) ChangeSnapshot {
+	if len(values) == 0 {
+		return ChangeSnapshot{}
+	}
+	return ChangeSnapshot{values: cloneMap(values)}
+}
+
+// Empty reports whether the update carried no field payload.
+func (c ChangeSnapshot) Empty() bool { return len(c.values) == 0 }
+
+// Fields returns the sorted public field names changed by the update.
+func (c ChangeSnapshot) Fields() []string {
+	fields := make([]string, 0, len(c.values))
+	for field := range c.values {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+// Values returns a recursive copy of all public field values.
+func (c ChangeSnapshot) Values() map[string]any { return cloneMap(c.values) }
+
+// Value returns a recursive copy of one public field value.
+func (c ChangeSnapshot) Value(field string) (any, bool) {
+	value, ok := c.values[field]
+	if !ok {
+		return nil, false
+	}
+	return cloneAny(value), true
 }
 
 // publishChanged emits ev on the Store's bus, if any. Inside a
@@ -79,14 +138,114 @@ func (s *Store[T]) publishChanged(ctx context.Context, ev EntityChanged[T]) {
 	publish(ctx)
 }
 
-// createdEvent builds the OpCreate event with a shallow copy of obj so
-// asynchronous subscribers never race the caller's ongoing use of the
-// original (the same copy discipline v1's WithAsyncAfterCreate had).
+// createdEvent builds the OpCreate event with a recursive snapshot so
+// asynchronous subscribers never share caller-owned mutable descendants.
 func createdEvent[T any](obj *T) EntityChanged[T] {
-	cp := *obj
-	return EntityChanged[T]{Op: OpCreate, Object: &cp}
+	cp := cloneAny(obj).(*T)
+	return EntityChanged[T]{Op: OpCreate, Object: ObjectSnapshot[T]{value: cp}}
 }
 
 func upsertEvent[T any]() EntityChanged[T] {
 	return EntityChanged[T]{Op: OpUpsert}
+}
+
+type cloneVisit struct {
+	typ reflect.Type
+	ptr uintptr
+	len int
+	cap int
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	cloned := cloneAny(src)
+	if cloned == nil {
+		return nil
+	}
+	return cloned.(map[string]any)
+}
+
+func cloneAny(value any) any {
+	if value == nil {
+		return nil
+	}
+	return cloneReflect(reflect.ValueOf(value), make(map[cloneVisit]reflect.Value), 0).Interface()
+}
+
+func cloneReflect(value reflect.Value, seen map[cloneVisit]reflect.Value, depth int) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := cloneReflect(value.Elem(), seen, depth+1)
+		out := reflect.New(value.Type()).Elem()
+		out.Set(cloned)
+		return out
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		visit := cloneVisit{typ: value.Type(), ptr: value.Pointer()}
+		if prior, ok := seen[visit]; ok {
+			return prior
+		}
+		out := reflect.New(value.Type().Elem())
+		seen[visit] = out
+		out.Elem().Set(cloneReflect(value.Elem(), seen, depth+1))
+		return out
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		visit := cloneVisit{typ: value.Type(), ptr: value.Pointer()}
+		if prior, ok := seen[visit]; ok {
+			return prior
+		}
+		out := reflect.MakeMapWithSize(value.Type(), value.Len())
+		seen[visit] = out
+		iter := value.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), cloneReflect(iter.Value(), seen, depth+1))
+		}
+		return out
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		visit := cloneVisit{typ: value.Type(), ptr: value.Pointer(), len: value.Len(), cap: value.Cap()}
+		if prior, ok := seen[visit]; ok {
+			return prior
+		}
+		out := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		seen[visit] = out
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(cloneReflect(value.Index(i), seen, depth+1))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(cloneReflect(value.Index(i), seen, depth+1))
+		}
+		return out
+	case reflect.Struct:
+		// Copy the whole value first so immutable structs with unexported
+		// internals (time.Time, decimal types) retain their representation.
+		out := reflect.New(value.Type()).Elem()
+		out.Set(value)
+		for i := 0; i < value.NumField(); i++ {
+			if out.Field(i).CanSet() && value.Type().Field(i).PkgPath == "" {
+				out.Field(i).Set(cloneReflect(value.Field(i), seen, depth+1))
+			}
+		}
+		return out
+	default:
+		return value
+	}
 }

@@ -269,6 +269,21 @@ Query/Update 字段白名单（生产必须显式 `WithQueryFields` /
 fail-closed `1=0`）、owned 模型自动 OwnerScope（未认证 401、写侧
 owner 强制覆盖）、`Fields` 乐观锁 + 零值强制落库、scope 化 store
 禁 Upsert、RID 双 ID 模型（外部 `pst_xxx`，数字主键不出进程）。
+字段到列的映射以 GORM parser 的 `Field.DBName` 为唯一事实源，不另写
+snake_case；显式 update 列表与 alias 也不能重开 id/RID/version/时间戳/
+软删状态/owner 等框架托管列，执行内核再做第二道检查。`version` 是行修订号：
+普通 Update（含 `Set`/`NoLock`）、软删与 Restore 的成功 SQL 都推进它；
+是否带旧 version 条件只决定冲突检测，不决定修订号是否增长。Upsert 的
+conflict-update 不增 version 仍是单独、已文档化的方言能力限制。
+
+`where.Option` 保留为已公开的可信代码扩展点，但它直接获得 `*gorm.DB` 与
+可写 Config，信任级等同 `Store.Unsafe`，不得由请求动态构造；常用空值谓词
+由 `WithFilterNull` / `WithFilterNotNull` 内建覆盖。分页 cap 按所有策略层的
+最小值合成，调用点只能收紧 Store/handle 上限，且不超过包级 10k ceiling。
+`EntityChanged` 不再携带包外不可解释的 Locator/Changes 接口引用：事件暴露
+`LocatorSnapshot`（RID/ID/Where 类型）与 `ChangeSnapshot`（public field →
+值），Create 对象和 Update 值递归拷贝，访问器再返回拷贝；Where 事件按类型级
+失效。事务提交锚定语义不变。
 
 批量写分成三种明确语义:`BatchCreate` 是分片 insert;`BatchUpdate` 是
 事务内逐行 `Fields` 更新（每行 payload 不同，失败恢复框架递增的内存
@@ -324,6 +339,12 @@ db:
   `schema_migrations` 审计账本、跨进程迁移锁三分支：PG advisory /
   MySQL GET_LOCK / SQLite ledger lease）；`chok migrate
   create|up|status|repair`。
+- auto：在第一条 DDL 前解析 GORM schema 并完成全部 `TableSpec` 的静态
+  校验，再按声明顺序 AutoMigrate；后置声明错误不会留下可避免的前缀迁移。
+- PG/MySQL session lock 的释放使用保留父 context value 的独立 5 秒 deadline；
+  unlock 报错、返回未持锁或超时时将物理连接标为 bad connection 后关闭，
+  不依赖 `sql.Conn.Close`（它只归还连接池）释放 session lock。SQLite ledger
+  lease 使用同一 cleanup timeout 模式。
 - **迁移审计状态机**：文件按 CRLF→LF 归一化后记录 SHA-256；任何 SQL
   执行前先提交 `dirty=true` 行与临时 version-zero fence，旧二进制在
   dirty 期间也会 fail-closed。PG/SQLite 把 SQL 与 clean 转换放在同一

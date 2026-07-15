@@ -133,6 +133,13 @@ func TestStorePolicy_PageSizes_InheritAndOverride(t *testing.T) {
 	if len(page.Items) != 2 {
 		t.Fatalf("policy max_page_size=2 must clamp the query: got %d items", len(page.Items))
 	}
+	page, err = s.List(alice, where.WithMaxPageSize(50_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("call-site max page size must not raise Store policy: got %d items", len(page.Items))
+	}
 	// An explicit zero is an override (unlimited / package default),
 	// not "unset": the call site must be able to escape the policy.
 	o := New[Product](h, log.Empty(),

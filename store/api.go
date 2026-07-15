@@ -5,7 +5,6 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"maps"
 	"reflect"
 	"sort"
 	"strings"
@@ -263,14 +262,14 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 // updateOne is Update's hook-free write kernel. Callers must run rejectWrite
 // and any before-update hooks before entering it.
 func (s *Store[T]) updateOne(ctx context.Context, by Locator, changes Changes, cfg *updateConfig) error {
-	cols, payload, implicitVer, err := changes.build(s.updateFieldMap)
+	built, err := changes.build(ctx, s.updateFieldMap, s.modelSchema)
 	if err != nil {
 		return err
 	}
 
 	// Resolve the effective lock version: explicit WithVersion wins over the
 	// implicit one extracted from Fields(&obj).
-	lockVer := implicitVer
+	lockVer := built.implicitVersion
 	if cfg.versionSet {
 		lockVer = cfg.version
 	}
@@ -286,54 +285,23 @@ func (s *Store[T]) updateOne(ctx context.Context, by Locator, changes Changes, c
 	}
 	if lockVer > 0 {
 		q = q.Where("version = ?", lockVer)
-		cols = append(cols, "version")
 	}
 
-	// Branch on payload shape.
-	rv := reflect.ValueOf(payload)
-	if rv.Kind() == reflect.Map {
-		m := payload.(map[string]any)
-		if lockVer > 0 {
-			// Clone before injecting "version" so we don't mutate the
-			// caller's map. Re-using the same map across retries would
-			// double-apply version + 1 and break optimistic locking.
-			cloned := make(map[string]any, len(m)+1)
-			maps.Copy(cloned, m)
-			cloned["version"] = gorm.Expr("version + 1")
-			m = cloned
-		}
-		result := q.Model(new(T)).Select(cols).Updates(m)
-		recordAffected(cfg.affected, result)
-		return s.finalizeUpdate(ctx, by, result, lockVer, changes)
-	}
-
-	// Struct payload path (Fields).
-	//
-	// GORM Updates(struct) reads the Version field off the passed struct
-	// to write the new value, which means we have to bump modelPtr.Version
-	// BEFORE executing the UPDATE. If the UPDATE fails (conflict or DB
-	// error) we restore the old value. Callers that share `obj` across
-	// goroutines would briefly observe the bumped value during the
-	// UPDATE; Update is single-caller-per-object by contract and tests
-	// assume that invariant — this note exists to make the contract
-	// explicit rather than implicit.
-	modelPtr := extractModelSafe(payload)
-	if lockVer > 0 {
-		if modelPtr == nil {
-			return fmt.Errorf("store: optimistic lock requested but payload does not embed db.Model")
-		}
-		modelPtr.Version = lockVer + 1
-	}
-	result := q.Model(new(T)).Select(cols).Updates(payload)
+	// Version is a row revision, independent of whether this call asks for an
+	// optimistic-lock guard. Always advance it in the same UPDATE statement.
+	built.columns = append(built.columns, "version")
+	built.payload["version"] = gorm.Expr("version + 1")
+	result := q.Model(new(T)).Select(built.columns).Updates(built.payload)
 	recordAffected(cfg.affected, result)
-	if lockVer > 0 && (result.Error != nil || result.RowsAffected == 0) {
-		modelPtr.Version = lockVer
+	if result.Error == nil && result.RowsAffected > 0 && lockVer > 0 && built.model != nil {
+		built.model.Version = lockVer + 1
 	}
-	return s.finalizeUpdate(ctx, by, result, lockVer, changes)
+	return s.finalizeUpdate(ctx, by, result, lockVer, built.event)
 }
 
 // Delete removes the record(s) matched by the locator. Soft-delete models get
-// deleted_at + a fresh delete_token; regular models are physically deleted.
+// deleted_at + a fresh delete_token and advance the row revision in the same
+// statement; regular models are physically deleted.
 //
 // Without WithVersion, Delete is idempotent — zero matches returns nil.
 // With WithVersion, a zero-match row that exists returns ErrStaleVersion;
@@ -370,6 +338,7 @@ func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption)
 		result = q.Model(new(T)).Updates(map[string]any{
 			"deleted_at":   gorm.Expr("CURRENT_TIMESTAMP"),
 			"delete_token": rid.NewRaw(),
+			"version":      gorm.Expr("version + 1"),
 		})
 	} else {
 		result = q.Delete(new(T))
@@ -396,15 +365,16 @@ func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption)
 	// audit/cache subscribers would record a deletion that never
 	// happened (v1's after-hook gate, carried over).
 	if result.RowsAffected > 0 {
-		s.publishChanged(ctx, EntityChanged[T]{Op: OpDelete, Locator: by})
+		s.publishChanged(ctx, EntityChanged[T]{Op: OpDelete, Locator: snapshotLocator(by)})
 	}
 	return nil
 }
 
 // Restore un-deletes the soft-deleted record(s) matched by the locator:
-// deleted_at is cleared and delete_token returns to the empty-string live
-// sentinel, so the row re-enters every SoftUnique slot — when a new live
-// row has taken the slot in the meantime, the write maps to
+// deleted_at is cleared, delete_token returns to the empty-string live
+// sentinel, and the row revision advances, so the row re-enters every
+// SoftUnique slot — when a new live row has taken the slot in the meantime,
+// the write maps to
 // ErrDuplicate and the record stays deleted. Only soft-delete models
 // (db.SoftDeleteModel embedders) can restore; calling Restore on a
 // hard-delete model is a programming error and returns an error.
@@ -434,6 +404,7 @@ func (s *Store[T]) Restore(ctx context.Context, by Locator) error {
 	result := q.Where("deleted_at IS NOT NULL").Model(new(T)).Updates(map[string]any{
 		"deleted_at":   nil,
 		"delete_token": "",
+		"version":      gorm.Expr("version + 1"),
 	})
 	if result.Error != nil {
 		return mapError(result.Error)
@@ -451,7 +422,7 @@ func (s *Store[T]) Restore(ctx context.Context, by Locator) error {
 		}
 		return nil
 	}
-	s.publishChanged(ctx, EntityChanged[T]{Op: OpRestore, Locator: by})
+	s.publishChanged(ctx, EntityChanged[T]{Op: OpRestore, Locator: snapshotLocator(by)})
 	return nil
 }
 
@@ -727,7 +698,7 @@ func normalizeConflictValue(value any) (any, error) {
 
 // --- helpers ---------------------------------------------------------------
 
-func (s *Store[T]) finalizeUpdate(ctx context.Context, by Locator, result *gorm.DB, lockVer int, changes Changes) error {
+func (s *Store[T]) finalizeUpdate(ctx context.Context, by Locator, result *gorm.DB, lockVer int, changes ChangeSnapshot) error {
 	if result.Error != nil {
 		return mapError(result.Error)
 	}
@@ -748,7 +719,7 @@ func (s *Store[T]) finalizeUpdate(ctx context.Context, by Locator, result *gorm.
 		}
 		return newNotFoundError(by)
 	}
-	s.publishChanged(ctx, EntityChanged[T]{Op: OpUpdate, Locator: by, Changes: changes})
+	s.publishChanged(ctx, EntityChanged[T]{Op: OpUpdate, Locator: snapshotLocator(by), Changes: changes})
 	return nil
 }
 

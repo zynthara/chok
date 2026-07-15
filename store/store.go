@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/db"
@@ -30,6 +31,9 @@ var (
 	ErrStaleVersion      = errors.New("store: version conflict, row was modified by another request")
 	ErrMissingColumns    = errors.New("store: update called without columns")
 	ErrMissingConditions = errors.New("store: operation called without conditions")
+	// ErrProtectedUpdateField indicates an update list or alias resolved to a
+	// lifecycle/ownership column managed exclusively by Store.
+	ErrProtectedUpdateField = errors.New("store: framework-managed field cannot be updated")
 	// ErrDegenerateConditions means the locator's filter is present but
 	// collapses to match-nothing (e.g. WithFilterIn over an empty slice,
 	// WithFilter with a nil value). Distinguishing this from "no filter"
@@ -164,6 +168,7 @@ type Store[T db.Modeler] struct {
 	bus              *event.Bus        // nil unless WithBus was given
 	queryFieldMap    map[string]string // filter + order
 	updateFieldMap   map[string]string // update SET columns
+	modelSchema      *schema.Schema    // GORM's authoritative field/column mapping
 	soft             bool              // true if T embeds SoftDeleteModel
 	scopes           []ScopeFunc
 	defaultPageSize  int  // default page size for ListFromQuery (0 = where.DefaultPageSize)
@@ -301,8 +306,10 @@ func WithoutRequirePrincipal() StoreOption {
 }
 
 // WithMaxPageSize sets a hard cap on page size for List / ListFromQuery.
-// Requests exceeding this limit are silently clamped. Zero disables the
-// cap — including one inherited from the handle's db.store policy.
+// Requests exceeding this limit are silently clamped. A query-level cap may
+// tighten but never raise this Store cap. Zero disables the Store cap —
+// including one inherited from the handle's db.store policy — while the
+// package-level where.MaxPageSize ceiling still applies.
 func WithMaxPageSize(n int) StoreOption {
 	return func(c *storeConfig) { c.maxPageSize = n; c.maxPageSizeSet = true }
 }
@@ -315,16 +322,20 @@ func WithQueryFields(fields ...string) StoreOption {
 	}
 }
 
-// WithUpdateFields declares which fields are updatable. Column name defaults to the field name.
-// Fields not declared here are rejected by Update.
+// WithUpdateFields declares which fields are updatable. Column name defaults to
+// the field name. Fields not declared here are rejected by Update. Framework-
+// managed lifecycle and ownership columns are rejected even when explicitly
+// listed or targeted through WithColumnAlias.
 func WithUpdateFields(fields ...string) StoreOption {
 	return func(c *storeConfig) {
 		c.updateFields = append(c.updateFields, fields...)
 	}
 }
 
-// WithColumnAlias maps a public field name to a different database column (e.g. "id" → "rid").
-// The field must be declared via WithQueryFields or WithUpdateFields; otherwise panics at Store construction.
+// WithColumnAlias maps a public field name to a different database column (e.g.
+// "id" → "rid" on the query side). The field must be declared via
+// WithQueryFields or WithUpdateFields; otherwise Store construction panics.
+// An update alias may not target a framework-managed column.
 func WithColumnAlias(field, column string) StoreOption {
 	return func(c *storeConfig) {
 		if c.aliases == nil {
@@ -481,6 +492,11 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	if err := db.ValidateModel(model); err != nil {
 		panic(fmt.Sprintf("store.New: %v", err))
 	}
+	stmt := &gorm.Statement{DB: h.Unsafe(context.Background())}
+	if err := stmt.Parse(model); err != nil {
+		panic(fmt.Sprintf("store.New: parse GORM schema for %s: %v", t.Name(), err))
+	}
+	modelSchema := stmt.Schema
 
 	cfg := &storeConfig{}
 	for _, o := range opts {
@@ -514,7 +530,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	// The model's own `store` tag declaration, if any. Resolved before
 	// the per-side switches so both sides agree on whether the model is
 	// tag-declared; panics on malformed tags.
-	tagQuery, tagUpdate, tagged := tagDeclaredFields(t)
+	tagQuery, tagUpdate, tagged := tagDeclaredFields(t, modelSchema)
 
 	// Build queryFieldMap.
 	// Priority: WithQueryFields (explicit) > WithAllQueryFields
@@ -532,7 +548,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		queryFieldMap = tagQuery
 	default:
 		var queryCollisions []string
-		queryFieldMap, queryCollisions = discoverFields(t, cfg.queryFieldsExclude)
+		queryFieldMap, queryCollisions = discoverFields(modelSchema, cfg.queryFieldsExclude)
 		if len(queryCollisions) > 0 && logger != nil {
 			logger.Warn("store: duplicate json tag names in query fields — last one wins, consider WithQueryFields to disambiguate",
 				"model", t.Name(),
@@ -557,7 +573,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		updateFieldMap = tagUpdate
 	default:
 		var updateCollisions []string
-		updateFieldMap, updateCollisions = discoverUpdateFields(t, cfg.updateFieldsExclude)
+		updateFieldMap, updateCollisions = discoverUpdateFields(modelSchema, cfg.updateFieldsExclude)
 		if len(updateCollisions) > 0 && logger != nil {
 			logger.Warn("store: duplicate json tag names in update fields — last one wins, consider WithUpdateFields to disambiguate",
 				"model", t.Name(),
@@ -620,13 +636,32 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	}
 
 	// Auto-register "id" → "rid" alias: db.Model exposes RID as JSON "id",
-	// so this mapping is always correct. Users can override via explicit WithColumnAlias.
+	// so this mapping is always correct on the query side. The update side is
+	// validated below and rejects RID with every other framework-managed column.
 	if _, explicit := cfg.aliases["id"]; !explicit {
 		if queryFieldMap != nil && queryFieldMap["id"] == "id" {
 			queryFieldMap["id"] = "rid"
 		}
 		if updateFieldMap != nil && updateFieldMap["id"] == "id" {
 			updateFieldMap["id"] = "rid"
+		}
+	}
+
+	// Aliases and explicit update lists must not reopen lifecycle or ownership
+	// columns excluded by automatic discovery. Keep this after alias expansion
+	// so innocuous-looking public names such as "id" cannot silently become a
+	// writable RID. The same invariant is checked again when Changes builds.
+	for field, col := range updateFieldMap {
+		if isProtectedUpdateColumn(modelSchema, col) {
+			panic(fmt.Sprintf("store.New: update field %q resolves to framework-managed column %q", field, col))
+		}
+		if _, err := where.ResolveField(updateFieldMap, field); err != nil {
+			panic(fmt.Sprintf("store.New: update field %q has invalid column %q: %v", field, col, err))
+		}
+	}
+	for field, col := range queryFieldMap {
+		if _, err := where.ResolveField(queryFieldMap, field); err != nil {
+			panic(fmt.Sprintf("store.New: query field %q has invalid column %q: %v", field, col, err))
 		}
 	}
 
@@ -674,6 +709,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		bus:              cfg.bus,
 		queryFieldMap:    queryFieldMap,
 		updateFieldMap:   updateFieldMap,
+		modelSchema:      modelSchema,
 		soft:             db.IsSoftDeleteModel(model),
 		scopes:           scopes,
 		defaultPageSize:  cfg.defaultPageSize,
@@ -825,7 +861,7 @@ func (s *Store[T]) BatchUpdate(ctx context.Context, objs []*T, fields ...string)
 	// Resolve the shared field list once before hooks or SQL. updateOne still
 	// builds each Changes value so it remains the single write path.
 	var probe T
-	if _, _, _, err := Fields(&probe, fields...).build(s.updateFieldMap); err != nil {
+	if _, err := Fields(&probe, fields...).build(ctx, s.updateFieldMap, s.modelSchema); err != nil {
 		return err
 	}
 
@@ -928,8 +964,8 @@ func (s *Store[T]) ListQ(ctx context.Context, qopts []QueryOption, opts ...where
 }
 
 func (s *Store[T]) listInternal(ctx context.Context, qopts []QueryOption, opts []where.Option) (*Page[T], error) {
-	// Enforce max page size: prepend so caller-provided WithMaxPageSize
-	// options (e.g. from ListWithCursor) can override it by appearing later.
+	// Enforce max page size. where.WithMaxPageSize composes caps by taking
+	// the minimum, so caller options may tighten this policy but cannot raise it.
 	if s.maxPageSize > 0 {
 		opts = append([]where.Option{where.WithMaxPageSize(s.maxPageSize)}, opts...)
 	}
@@ -1116,7 +1152,7 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	page := &CursorPage[T]{Items: result.Items}
 	if len(result.Items) > size {
 		page.Items = result.Items[:size]
-		page.NextCursor = extractCursorValue(result.Items[size-1], cursorField, s.queryFieldMap)
+		page.NextCursor = extractCursorValue(result.Items[size-1], cursorField, s.queryFieldMap, s.modelSchema)
 	}
 	return page, nil
 }
@@ -1240,6 +1276,38 @@ var baseModelExclude = map[string]bool{
 	"id": true, "version": true, "created_at": true, "updated_at": true,
 }
 
+// protectedUpdateColumns are owned by Store write invariants rather than
+// application payloads. Ownership changes and lifecycle repair remain possible
+// through the explicitly unsafe GORM door, where they are auditable as such.
+var protectedUpdateColumns = map[string]struct{}{
+	"id":           {},
+	"rid":          {},
+	"version":      {},
+	"created_at":   {},
+	"updated_at":   {},
+	"deleted_at":   {},
+	"delete_token": {},
+	"owner_id":     {},
+}
+
+func isProtectedUpdateColumn(modelSchema *schema.Schema, column string) bool {
+	if _, protected := protectedUpdateColumns[column]; protected {
+		return true
+	}
+	if modelSchema == nil {
+		return false
+	}
+	for _, name := range []string{
+		"ID", "RID", "Version", "CreatedAt", "UpdatedAt",
+		"DeletedAt", "DeleteToken", "OwnerID",
+	} {
+		if field := modelSchema.LookUpField(name); field != nil && field.DBName == column {
+			return true
+		}
+	}
+	return false
+}
+
 // baseQueryExclude is the default exclusion set for the query whitelist.
 // version is hidden because the optimistic-lock counter is an internal
 // concurrency primitive — exposing it through `?version=X` or
@@ -1254,39 +1322,29 @@ var baseQueryExclude = map[string]bool{
 // Excludes json:"-", text/blob columns, version, and user-specified names.
 // Returns the collisions encountered (duplicate JSON tag names routing
 // to different DB columns) so the caller can warn at construction time.
-func discoverFields(t reflect.Type, exclude []string) (map[string]string, []string) {
+func discoverFields(modelSchema *schema.Schema, exclude []string) (map[string]string, []string) {
 	ex := toSet(exclude)
 	for k := range baseQueryExclude {
 		ex[k] = true
 	}
-	result := make(map[string]string)
-	var collisions []string
-	scanJSONFieldsWithCollisions(t, ex, true, result, &collisions)
-	return result, collisions
+	return discoverSchemaFields(modelSchema, ex, true)
 }
 
 // discoverUpdateFields builds an updateFieldMap from JSON tags.
 // Excludes json:"-", base model fields (id/version/timestamps), and user-specified names.
 // Does NOT exclude text/blob (updating content is normal).
 // Returns collisions — see discoverFields.
-func discoverUpdateFields(t reflect.Type, exclude []string) (map[string]string, []string) {
+func discoverUpdateFields(modelSchema *schema.Schema, exclude []string) (map[string]string, []string) {
 	ex := toSet(exclude)
 	for k := range baseModelExclude {
 		ex[k] = true
 	}
-	result := make(map[string]string)
-	var collisions []string
-	scanJSONFieldsWithCollisions(t, ex, false, result, &collisions)
-	return result, collisions
+	return discoverSchemaFields(modelSchema, ex, false)
 }
 
 // storeTagName is the struct tag store.New reads for model-declared
 // field allowlists: `store:"query"`, `store:"update"` or both.
 const storeTagName = "store"
-
-// chokDBPkgPath identifies embedded chok base models (db.Model and
-// friends) during tag scanning without hard-coding the import path.
-var chokDBPkgPath = reflect.TypeFor[db.Model]().PkgPath()
 
 // tagDeclaredFields collects the model's own `store` tag declaration.
 // Returned maps are filter-name → column. tagged reports whether any
@@ -1294,68 +1352,55 @@ var chokDBPkgPath = reflect.TypeFor[db.Model]().PkgPath()
 // caller falls back to discovery.
 //
 // The filter name is the field's JSON name; fields hidden from JSON
-// (no tag or json:"-") fall back to snake_case of the Go name, so an
+// (no tag or json:"-") fall back to GORM's parsed DBName, so an
 // internal column can still be declared queryable. Embedded chok base
 // models contribute their standard queryable fields (the JSON-visible
 // set discovery would expose, minus version) to the query side only —
 // update lists never gain base-model fields. Malformed tag values and
 // duplicate names mapping to different columns panic: a declaration
 // typo must fail construction, not silently narrow the surface.
-func tagDeclaredFields(t reflect.Type) (query, update map[string]string, tagged bool) {
+func tagDeclaredFields(t reflect.Type, modelSchema *schema.Schema) (query, update map[string]string, tagged bool) {
 	query = make(map[string]string)
 	update = make(map[string]string)
-	base := make(map[string]string)
-	scanStoreTags(t, query, update, base, &tagged)
-	if !tagged {
-		return nil, nil, false
-	}
-	// Base-model fields join the query side unless the declaration
-	// already claimed the name.
-	for name, col := range base {
-		if _, ok := query[name]; !ok {
-			query[name] = col
-		}
-	}
-	return query, update, true
-}
-
-func scanStoreTags(t reflect.Type, query, update, base map[string]string, tagged *bool) {
-	for i := range t.NumField() {
-		f := t.Field(i)
-		if f.Anonymous {
-			ft := f.Type
-			if ft.Kind() == reflect.Ptr {
-				ft = ft.Elem()
-			}
-			if ft.Kind() != reflect.Struct {
-				continue
-			}
-			if ft.PkgPath() == chokDBPkgPath {
-				scanJSONFieldsWithCollisions(ft, baseQueryExclude, true, base, nil)
-			} else {
-				scanStoreTags(ft, query, update, base, tagged)
-			}
+	for _, field := range modelSchema.Fields {
+		if field.DBName == "" {
 			continue
 		}
-		tag, ok := f.Tag.Lookup(storeTagName)
+		tag, ok := field.StructField.Tag.Lookup(storeTagName)
 		if !ok {
 			continue
 		}
-		*tagged = true
-		name := storeTagFieldName(f)
-		col := gormColumnName(f)
+		tagged = true
+		name := storeTagFieldName(field)
 		for _, raw := range strings.Split(tag, ",") {
 			switch strings.TrimSpace(raw) {
 			case "query":
-				addDeclaredField(query, name, col, t, f)
+				addDeclaredField(query, name, field.DBName, t, field.StructField)
 			case "update":
-				addDeclaredField(update, name, col, t, f)
+				addDeclaredField(update, name, field.DBName, t, field.StructField)
 			default:
 				panic(fmt.Sprintf("store: %s.%s: bad `store:%q` tag value %q — use \"query\", \"update\" or both (remove the tag to keep the field private)",
-					t.Name(), f.Name, tag, strings.TrimSpace(raw)))
+					t.Name(), field.StructField.Name, tag, strings.TrimSpace(raw)))
 			}
 		}
 	}
+	if !tagged {
+		return nil, nil, false
+	}
+	// Every Store model embeds db.Model. Its lifecycle fields contribute
+	// the standard query surface, resolved through the same parsed schema
+	// GORM will use for SQL.
+	for name, goName := range map[string]string{
+		"id": "RID", "created_at": "CreatedAt", "updated_at": "UpdatedAt",
+	} {
+		if _, exists := query[name]; exists {
+			continue
+		}
+		if field := modelSchema.LookUpField(goName); field != nil && field.DBName != "" {
+			query[name] = field.DBName
+		}
+	}
+	return query, update, true
 }
 
 func addDeclaredField(m map[string]string, name, col string, t reflect.Type, f reflect.StructField) {
@@ -1368,10 +1413,10 @@ func addDeclaredField(m map[string]string, name, col string, t reflect.Type, f r
 
 // storeTagFieldName resolves the filter name for a tag-declared field:
 // the JSON name when visible, snake_case of the Go name otherwise.
-func storeTagFieldName(f reflect.StructField) string {
-	name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+func storeTagFieldName(field *schema.Field) string {
+	name, _, _ := strings.Cut(field.StructField.Tag.Get("json"), ",")
 	if name == "" || name == "-" {
-		return toSnakeCase(f.Name)
+		return field.DBName
 	}
 	return name
 }
@@ -1393,27 +1438,17 @@ func toSet(ss []string) map[string]bool {
 	return m
 }
 
-// scanJSONFieldsWithCollisions is the field-discovery workhorse. If
-// collisions is non-nil, any duplicate JSON tag name encountered is
-// appended — so callers that care (e.g. Store construction) can warn
-// instead of silently accepting the "last write wins" behaviour.
-func scanJSONFieldsWithCollisions(t reflect.Type, exclude map[string]bool, skipLarge bool, out map[string]string, collisions *[]string) {
-	for i := range t.NumField() {
-		f := t.Field(i)
-
-		// Recurse into embedded structs.
-		if f.Anonymous {
-			ft := f.Type
-			if ft.Kind() == reflect.Ptr {
-				ft = ft.Elem()
-			}
-			if ft.Kind() == reflect.Struct {
-				scanJSONFieldsWithCollisions(ft, exclude, skipLarge, out, collisions)
-			}
+// discoverSchemaFields is the field-discovery workhorse. GORM's parsed
+// Schema is authoritative for DBName, including acronym splitting, explicit
+// column tags, embedded prefixes, and custom naming strategies.
+func discoverSchemaFields(modelSchema *schema.Schema, exclude map[string]bool, skipLarge bool) (map[string]string, []string) {
+	out := make(map[string]string)
+	var collisions []string
+	for _, field := range modelSchema.Fields {
+		if field.DBName == "" {
 			continue
 		}
-
-		// Parse json tag.
+		f := field.StructField
 		jsonTag := f.Tag.Get("json")
 		if jsonTag == "" || jsonTag == "-" {
 			continue
@@ -1429,14 +1464,13 @@ func scanJSONFieldsWithCollisions(t reflect.Type, exclude map[string]bool, skipL
 			continue
 		}
 
-		col := gormColumnName(f)
-		if collisions != nil {
-			if existing, ok := out[name]; ok && existing != col {
-				*collisions = append(*collisions, fmt.Sprintf("%q (columns %q vs %q)", name, existing, col))
-			}
+		col := field.DBName
+		if existing, ok := out[name]; ok && existing != col {
+			collisions = append(collisions, fmt.Sprintf("%q (columns %q vs %q)", name, existing, col))
 		}
 		out[name] = col
 	}
+	return out, collisions
 }
 
 // isLargeColumnType returns true for fields that are text/blob types,
@@ -1462,94 +1496,32 @@ func isLargeColumnType(f reflect.StructField) bool {
 	return false
 }
 
-// gormColumnName returns the DB column for a struct field:
-// gorm:"column:xxx" tag if present, otherwise snake_case of the field name.
-func gormColumnName(f reflect.StructField) string {
-	for _, part := range strings.Split(f.Tag.Get("gorm"), ";") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "column:") {
-			return strings.TrimPrefix(part, "column:")
-		}
-	}
-	return toSnakeCase(f.Name)
-}
-
-func toSnakeCase(s string) string {
-	var buf []byte
-	for i, c := range s {
-		if c >= 'A' && c <= 'Z' {
-			// Insert underscore before uppercase when preceded by a lowercase
-			// letter, handling acronyms correctly: "UserID" → "user_id",
-			// "HTTPStatus" → "http_status".
-			if i > 0 && s[i-1] >= 'a' && s[i-1] <= 'z' {
-				buf = append(buf, '_')
-			}
-			buf = append(buf, byte(c)+32)
-		} else {
-			buf = append(buf, byte(c))
-		}
-	}
-	return string(buf)
-}
-
 // extractCursorValue gets the value of the cursor field from the last
 // item in a page result using the JSON-to-column mapping. It converts
 // the value to a string suitable for passing as the next cursor.
-func extractCursorValue(item any, field string, fieldMap map[string]string) string {
+func extractCursorValue(item any, field string, fieldMap map[string]string, modelSchema *schema.Schema) string {
 	col := field
 	if c, ok := fieldMap[field]; ok {
 		col = c
 	}
-
-	rv := reflect.ValueOf(item)
-	if rv.Kind() == reflect.Ptr {
-		rv = rv.Elem()
-	}
-	if rv.Kind() != reflect.Struct {
+	if modelSchema == nil {
 		return ""
 	}
-
-	return extractCursorFromStruct(rv, col)
-}
-
-func extractCursorFromStruct(rv reflect.Value, col string) string {
-	rt := rv.Type()
-	for i := range rt.NumField() {
-		f := rt.Field(i)
-		if f.Anonymous {
-			fv := rv.Field(i)
-			if fv.Kind() == reflect.Ptr {
-				if fv.IsNil() {
-					continue
-				}
-				fv = fv.Elem()
-			}
-			if fv.Kind() == reflect.Struct {
-				if v := extractCursorFromStruct(fv, col); v != "" {
-					return v
-				}
-			}
-			continue
-		}
-		if gormColumnName(f) == col {
-			val := rv.Field(i).Interface()
-			// Only formats with round-trippable string representations
-			// are supported. Binary / JSON / user-defined column types
-			// would produce cursors that don't round-trip through the
-			// next query, so they're explicitly rejected at this layer.
-			switch v := val.(type) {
-			case time.Time:
-				// RFC3339Nano for reliable SQL driver round-trip.
-				return v.UTC().Format(time.RFC3339Nano)
-			case string:
-				return v
-			case int, int8, int16, int32, int64,
-				uint, uint8, uint16, uint32, uint64,
-				float32, float64, bool:
-				return fmt.Sprint(v)
-			}
-			return ""
-		}
+	fieldSchema := modelSchema.LookUpField(col)
+	if fieldSchema == nil {
+		return ""
+	}
+	val, _ := fieldSchema.ValueOf(context.Background(), reflect.ValueOf(item))
+	// Only formats with round-trippable string representations are supported.
+	switch v := val.(type) {
+	case time.Time:
+		return v.UTC().Format(time.RFC3339Nano)
+	case string:
+		return v
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, bool:
+		return fmt.Sprint(v)
 	}
 	return ""
 }
@@ -1562,16 +1534,28 @@ type DuplicateError interface {
 	IsDuplicate() bool
 }
 
+type sqliteErrorCoder interface {
+	Code() int
+}
+
+const (
+	sqliteConstraintPrimaryKey = 1555
+	sqliteConstraintUnique     = 2067
+	sqliteConstraintRowID      = 2579
+)
+
 // isDuplicateError detects duplicate key errors using a tiered strategy:
 //
 //  1. DuplicateError interface — most reliable, no string dependency.
 //  2. Typed pgx error — SQLSTATE 23505 (unique_violation) is Postgres's
 //     authoritative signal; any other PG code is authoritatively NOT a
 //     duplicate (M3, SPEC §5.3 error-mapping acceptance).
-//  3. GORM's ErrDuplicatedKey (v1.25.0+) — covers drivers that translate
+//  3. SQLite extended result code — UNIQUE/PRIMARYKEY/ROWID only; other
+//     constraint families are authoritatively not duplicates.
+//  4. GORM's ErrDuplicatedKey (v1.25.0+) — covers drivers that translate
 //     into GORM's sentinel via translate plugin.
-//  4. String matching fallback — catches MySQL and SQLite error
-//     messages without importing driver packages.
+//  5. Narrow string matching fallback — catches MySQL and unknown-driver
+//     duplicate/unique messages without matching generic constraint failures.
 func isDuplicateError(err error) bool {
 	if err == nil {
 		return false
@@ -1586,16 +1570,27 @@ func isDuplicateError(err error) bool {
 	if errors.As(err, &pgErr) {
 		return pgErr.Code == pgUniqueViolation
 	}
-	// Tier 3: GORM sentinel.
+	// glebarez/modernc SQLite exposes extended result codes. Treat those as
+	// authoritative: generic CONSTRAINT (NOT NULL, CHECK, FK) is not a
+	// duplicate, while PRIMARYKEY/UNIQUE/ROWID is.
+	var sqliteErr sqliteErrorCoder
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() {
+		case sqliteConstraintPrimaryKey, sqliteConstraintUnique, sqliteConstraintRowID:
+			return true
+		default:
+			return false
+		}
+	}
+	// Tier 4: GORM sentinel.
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return true
 	}
-	// Tier 4: string heuristic (backward compatibility).
+	// Tier 5: string heuristic (backward compatibility).
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "duplicate") ||
 		strings.Contains(msg, "unique constraint") ||
-		strings.Contains(msg, "unique_violation") ||
-		strings.Contains(msg, "constraint failed")
+		strings.Contains(msg, "unique_violation")
 }
 
 // pgUniqueViolation is SQLSTATE class 23, unique_violation.

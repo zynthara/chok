@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -26,6 +27,8 @@ import (
 type fakeMySQLDriver struct {
 	mu      sync.Mutex
 	queries []string
+	opens   int
+	closes  int
 	// getLockResult is what SELECT GET_LOCK returns: 1 granted, 0 timed out.
 	getLockResult int64
 }
@@ -42,13 +45,29 @@ func (d *fakeMySQLDriver) recorded() []string {
 	return append([]string(nil), d.queries...)
 }
 
-func (d *fakeMySQLDriver) Open(string) (driver.Conn, error) { return &fakeConn{d: d}, nil }
+func (d *fakeMySQLDriver) Open(string) (driver.Conn, error) {
+	d.mu.Lock()
+	d.opens++
+	d.mu.Unlock()
+	return &fakeConn{d: d}, nil
+}
+
+func (d *fakeMySQLDriver) closeCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closes
+}
 
 type fakeConn struct{ d *fakeMySQLDriver }
 
 func (c *fakeConn) Prepare(query string) (driver.Stmt, error) { return &fakeStmt{c: c, q: query}, nil }
-func (c *fakeConn) Close() error                              { return nil }
-func (c *fakeConn) Begin() (driver.Tx, error)                 { return fakeTx{}, nil }
+func (c *fakeConn) Close() error {
+	c.d.mu.Lock()
+	c.d.closes++
+	c.d.mu.Unlock()
+	return nil
+}
+func (c *fakeConn) Begin() (driver.Tx, error) { return fakeTx{}, nil }
 
 type fakeTx struct{}
 
@@ -163,4 +182,29 @@ func TestMigrationLock_MySQLTimeoutFromDeadline(t *testing.T) {
 	// The driver saw the interpolated GET_LOCK query; the numeric
 	// timeout itself rides as a bind arg, so just pin that the deadline
 	// path executed without falling back to the 60s default failing.
+}
+
+func TestAcquireConnLock_UnlockUsesCleanupDeadlineAndDiscardsOnFailure(t *testing.T) {
+	fake := &fakeMySQLDriver{getLockResult: 1}
+	gdb := newFakeMySQLGorm(t, fake)
+	beforeClose := fake.closeCount()
+	var sawDeadline bool
+	release, err := acquireConnLock(context.Background(), gdb,
+		func(context.Context, *sql.Conn) error { return nil },
+		func(ctx context.Context, _ *sql.Conn) error {
+			deadline, ok := ctx.Deadline()
+			sawDeadline = ok && time.Until(deadline) <= migrationCleanupTimeout
+			return errors.New("unlock failed")
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if !sawDeadline {
+		t.Fatal("unlock did not receive a bounded cleanup context")
+	}
+	if got := fake.closeCount(); got <= beforeClose {
+		t.Fatalf("failed unlock returned the physical session to the pool: closes=%d before=%d", got, beforeClose)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1351,11 +1352,16 @@ func (e migrationEngine) acquireMigrationLock(ctx context.Context, gdb *gorm.DB)
 				_, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", pgAdvisoryLockKey)
 				return err
 			},
-			func(conn *sql.Conn) {
-				// Unlock on the same session; ignore errors — the
-				// conn.Close below drops the session and with it the lock.
-				_, _ = conn.ExecContext(context.WithoutCancel(ctx),
-					"SELECT pg_advisory_unlock($1)", pgAdvisoryLockKey)
+			func(ctx context.Context, conn *sql.Conn) error {
+				var unlocked bool
+				if err := conn.QueryRowContext(ctx,
+					"SELECT pg_advisory_unlock($1)", pgAdvisoryLockKey).Scan(&unlocked); err != nil {
+					return err
+				}
+				if !unlocked {
+					return fmt.Errorf("db: PostgreSQL advisory lock was not held by the pinned session")
+				}
+				return nil
 			})
 		return migrationLock{release: release}, err
 	case "mysql":
@@ -1379,9 +1385,15 @@ func (e migrationEngine) acquireMigrationLock(ctx context.Context, gdb *gorm.DB)
 				}
 				return nil
 			},
-			func(conn *sql.Conn) {
-				_, _ = conn.ExecContext(context.WithoutCancel(ctx),
-					"SELECT RELEASE_LOCK(?)", mysqlLockName)
+			func(ctx context.Context, conn *sql.Conn) error {
+				var released sql.NullInt64
+				if err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", mysqlLockName).Scan(&released); err != nil {
+					return err
+				}
+				if !released.Valid || released.Int64 != 1 {
+					return fmt.Errorf("db: MySQL migration lock %q was not held by the pinned session", mysqlLockName)
+				}
+				return nil
 			})
 		return migrationLock{release: release}, err
 	case "sqlite":
@@ -1494,7 +1506,7 @@ func acquireConnLock(
 	ctx context.Context,
 	gdb *gorm.DB,
 	lock func(context.Context, *sql.Conn) error,
-	unlock func(*sql.Conn),
+	unlock func(context.Context, *sql.Conn) error,
 ) (func(), error) {
 	sqlDB, err := gdb.DB()
 	if err != nil {
@@ -1515,7 +1527,14 @@ func acquireConnLock(
 		return nil, fmt.Errorf("db: acquire migration lock: %w", err)
 	}
 	return func() {
-		unlock(conn)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), migrationCleanupTimeout)
+		defer cancel()
+		if err := unlock(cleanupCtx, conn); err != nil {
+			// sql.Conn.Close returns a healthy physical connection to the
+			// pool; it does not end the server session. Force database/sql to
+			// discard this connection when unlock cannot be confirmed.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 		_ = conn.Close()
 	}, nil
 }

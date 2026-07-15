@@ -1,10 +1,13 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"reflect"
+	"sort"
 
 	"github.com/zynthara/chok/v2/db"
+	"gorm.io/gorm/schema"
 )
 
 // Changes describes what to update on matched rows. It is the "what" axis of
@@ -18,14 +21,15 @@ import (
 //     the optimistic-lock version from obj.Version unless .NoLock() is called.
 //     Omitting fields updates every field in the Store's update whitelist.
 type Changes interface {
-	// build resolves public field names to DB columns and returns:
-	//   cols        — columns the SQL UPDATE will touch (excluding any
-	//                 version-bump column the Store adds later)
-	//   payload     — the second argument to GORM's Updates(); either a
-	//                 map[string]any or a pointer to the caller's struct
-	//   implicitVer — the optimistic-lock version to enforce (>0 enables
-	//                 the lock; 0 leaves the decision to UpdateOption)
-	build(updateFieldMap map[string]string) (cols []string, payload any, implicitVer int, err error)
+	build(ctx context.Context, updateFieldMap map[string]string, modelSchema *schema.Schema) (builtChanges, error)
+}
+
+type builtChanges struct {
+	columns         []string
+	payload         map[string]any
+	implicitVersion int
+	model           *db.Model
+	event           ChangeSnapshot
 }
 
 // Set returns a Changes that applies literal map values to the matched row.
@@ -33,7 +37,7 @@ type Changes interface {
 // unknown keys return ErrUnknownUpdateField. Empty map returns ErrMissingColumns.
 //
 // Set does NOT enable optimistic locking on its own — pairing with WithVersion
-// is explicit:
+// is explicit. A successful unlocked update still increments the row revision:
 //
 //	store.Update(ctx, store.RID(x), store.Set(cols), store.WithVersion(v))
 func Set(kv map[string]any) Changes {
@@ -44,7 +48,7 @@ func Set(kv map[string]any) Changes {
 //
 // When fields is empty, every column declared via WithUpdateFields is written
 // (whole-whitelist update). Zero values in obj ARE persisted — the Store
-// internally uses Select(cols...).Updates(obj) to bypass GORM's default
+// internally extracts the selected schema fields into an update map to bypass GORM's default
 // "skip zero values" behaviour, which would otherwise silently drop clears
 // (e.g. setting a bio back to "").
 //
@@ -64,9 +68,11 @@ type FieldChanges struct {
 	noLock bool
 }
 
-// NoLock disables the automatic optimistic-lock behaviour of Fields.
-// Use this for admin-level overrides ("force save, ignore version") or when
-// the caller already decided a first-write-wins policy is acceptable.
+// NoLock disables the automatic optimistic-lock condition of Fields. The
+// successful write still advances the database row revision; because the
+// previous database version is unknown, the caller's object is not updated and
+// should be re-read when its final Version matters. Use this for admin-level
+// overrides ("force save, ignore version") or when last-write-wins is intended.
 func (f *FieldChanges) NoLock() *FieldChanges {
 	f.noLock = true
 	return f
@@ -74,65 +80,108 @@ func (f *FieldChanges) NoLock() *FieldChanges {
 
 type setChanges map[string]any
 
-func (s setChanges) build(fm map[string]string) ([]string, any, int, error) {
+func (s setChanges) build(_ context.Context, fm map[string]string, modelSchema *schema.Schema) (builtChanges, error) {
 	if len(s) == 0 {
-		return nil, nil, 0, ErrMissingColumns
+		return builtChanges{}, ErrMissingColumns
 	}
 	if fm == nil {
-		return nil, nil, 0, ErrUpdateFieldsNotConfigured
+		return builtChanges{}, ErrUpdateFieldsNotConfigured
 	}
 	payload := make(map[string]any, len(s))
+	eventValues := make(map[string]any, len(s))
 	cols := make([]string, 0, len(s))
 	for field, val := range s {
 		col, ok := fm[field]
 		if !ok {
-			return nil, nil, 0, fmt.Errorf("%w: %q", ErrUnknownUpdateField, field)
+			return builtChanges{}, fmt.Errorf("%w: %q", ErrUnknownUpdateField, field)
+		}
+		if isProtectedUpdateColumn(modelSchema, col) {
+			return builtChanges{}, fmt.Errorf("%w: %q resolves to %q", ErrProtectedUpdateField, field, col)
 		}
 		payload[col] = val
+		eventValues[field] = val
 		cols = append(cols, col)
 	}
-	return cols, payload, 0, nil
+	sort.Strings(cols)
+	return builtChanges{
+		columns: cols,
+		payload: payload,
+		event:   newChangeSnapshot(eventValues),
+	}, nil
 }
 
-func (f *FieldChanges) build(fm map[string]string) ([]string, any, int, error) {
+func (f *FieldChanges) build(ctx context.Context, fm map[string]string, modelSchema *schema.Schema) (builtChanges, error) {
 	if f.obj == nil {
-		return nil, nil, 0, fmt.Errorf("%w: Fields obj is nil", ErrMissingColumns)
+		return builtChanges{}, fmt.Errorf("%w: Fields obj is nil", ErrMissingColumns)
 	}
 	if fm == nil {
-		return nil, nil, 0, ErrUpdateFieldsNotConfigured
+		return builtChanges{}, ErrUpdateFieldsNotConfigured
+	}
+	if modelSchema == nil {
+		return builtChanges{}, fmt.Errorf("store: Fields: model schema is unavailable")
+	}
+	rv := reflect.ValueOf(f.obj)
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return builtChanges{}, fmt.Errorf("%w: Fields obj is nil", ErrMissingColumns)
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct || rv.Type() != modelSchema.ModelType {
+		return builtChanges{}, fmt.Errorf("store: Fields object type %T does not match Store model %s", f.obj, modelSchema.ModelType)
 	}
 
 	// Determine the field set: explicit list or full whitelist.
 	fields := f.fields
 	if len(fields) == 0 {
 		if len(fm) == 0 {
-			return nil, nil, 0, ErrMissingColumns
+			return builtChanges{}, ErrMissingColumns
 		}
 		fields = make([]string, 0, len(fm))
 		for k := range fm {
 			fields = append(fields, k)
 		}
+		sort.Strings(fields)
 	}
 
 	cols := make([]string, 0, len(fields))
+	payload := make(map[string]any, len(fields))
+	eventValues := make(map[string]any, len(fields))
 	for _, name := range fields {
 		col, ok := fm[name]
 		if !ok {
-			return nil, nil, 0, fmt.Errorf("%w: %q", ErrUnknownUpdateField, name)
+			return builtChanges{}, fmt.Errorf("%w: %q", ErrUnknownUpdateField, name)
 		}
+		if isProtectedUpdateColumn(modelSchema, col) {
+			return builtChanges{}, fmt.Errorf("%w: %q resolves to %q", ErrProtectedUpdateField, name, col)
+		}
+		field := modelSchema.LookUpField(col)
+		if field == nil {
+			return builtChanges{}, fmt.Errorf("store: update field %q resolves to unknown model column %q", name, col)
+		}
+		value, _ := field.ValueOf(ctx, reflect.ValueOf(f.obj))
 		cols = append(cols, col)
+		payload[col] = value
+		eventValues[name] = value
 	}
 
 	// Auto-extract the current version for optimistic locking when the
 	// object carries a db.Model (directly or via SoftDeleteModel).
+	model := extractModelSafe(f.obj)
 	var implicitVer int
 	if !f.noLock {
-		if m := extractModelSafe(f.obj); m != nil {
-			implicitVer = m.Version
+		if model != nil {
+			implicitVer = model.Version
 		}
 	}
 
-	return cols, f.obj, implicitVer, nil
+	return builtChanges{
+		columns:         cols,
+		payload:         payload,
+		implicitVersion: implicitVer,
+		model:           model,
+		event:           newChangeSnapshot(eventValues),
+	}, nil
 }
 
 // extractModelSafe is the non-panicking sibling of extractModel. Returns nil

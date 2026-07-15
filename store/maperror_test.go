@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -23,6 +24,50 @@ func TestIsDuplicateError_PgconnTyped(t *testing.T) {
 	fk := &pgconn.PgError{Code: "23503", Message: `insert or update on table "posts" violates foreign key constraint "fk_author"`}
 	if isDuplicateError(fk) {
 		t.Fatal("a typed non-23505 PG error must NOT classify as duplicate — the code is authoritative")
+	}
+}
+
+func TestIsDuplicateError_SQLiteConstraintCodesAreAuthoritative(t *testing.T) {
+	h := setupDB(t)
+	gdb := h.Unsafe(context.Background())
+	if gdb.Dialector.Name() != "sqlite" {
+		t.Skip("SQLite extended-code regression")
+	}
+	if err := gdb.Exec(`CREATE TABLE duplicate_probe (
+		id INTEGER PRIMARY KEY,
+		email TEXT NOT NULL UNIQUE,
+		score INTEGER NOT NULL CHECK (score >= 0)
+	)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec("INSERT INTO duplicate_probe (id, email, score) VALUES (1, 'a@test', 1)").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	uniqueErr := gdb.Exec("INSERT INTO duplicate_probe (id, email, score) VALUES (2, 'a@test', 1)").Error
+	if !isDuplicateError(uniqueErr) {
+		t.Fatalf("SQLite UNIQUE violation must classify as duplicate: %v", uniqueErr)
+	}
+	for name, err := range map[string]error{
+		"not null": gdb.Exec("INSERT INTO duplicate_probe (id, email, score) VALUES (3, NULL, 1)").Error,
+		"check":    gdb.Exec("INSERT INTO duplicate_probe (id, email, score) VALUES (4, 'b@test', -1)").Error,
+	} {
+		if err == nil {
+			t.Fatalf("%s probe unexpectedly succeeded", name)
+		}
+		if isDuplicateError(err) {
+			t.Fatalf("SQLite %s violation misclassified as duplicate: %v", name, err)
+		}
+	}
+	if err := gdb.Exec("CREATE TABLE duplicate_parent (id INTEGER PRIMARY KEY)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec("CREATE TABLE duplicate_child (parent_id INTEGER REFERENCES duplicate_parent(id))").Error; err != nil {
+		t.Fatal(err)
+	}
+	fkErr := gdb.Exec("INSERT INTO duplicate_child (parent_id) VALUES (999)").Error
+	if fkErr == nil || isDuplicateError(fkErr) {
+		t.Fatalf("SQLite foreign-key violation must remain a non-duplicate error: %v", fkErr)
 	}
 }
 

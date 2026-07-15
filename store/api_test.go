@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/zynthara/chok/v2/store/where"
 )
@@ -209,6 +210,13 @@ func TestUpdate_Fields_NoLock_SkipsVersionCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NoLock should bypass stale version, got %v", err)
 	}
+	got, err := s.Get(context.Background(), RID(u.RID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != clone.Version+1 {
+		t.Fatalf("NoLock must still advance the database revision: got %d want %d", got.Version, clone.Version+1)
+	}
 }
 
 func TestUpdate_Set_ExplicitVersion(t *testing.T) {
@@ -259,6 +267,30 @@ func TestUpdate_Set_NoLock_Idempotent(t *testing.T) {
 	}
 	if err := s.Update(context.Background(), RID(u.RID), Set(map[string]any{"name": "v2"})); err != nil {
 		t.Fatal(err)
+	}
+	got, err := s.Get(context.Background(), RID(u.RID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 3 {
+		t.Fatalf("two unlocked Sets must advance the row revision twice, got %d", got.Version)
+	}
+}
+
+func TestUpdate_MapKernelStillAdvancesUpdatedAt(t *testing.T) {
+	s, _ := setupUserStore(t)
+	u := createUser(t, s, "alice", "updated-at@test.com")
+	before := u.UpdatedAt
+	time.Sleep(2 * time.Millisecond)
+	if err := s.Update(context.Background(), RID(u.RID), Fields(u, "name")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(context.Background(), RID(u.RID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.UpdatedAt.After(before) {
+		t.Fatalf("updated_at did not advance: before=%v after=%v", before, got.UpdatedAt)
 	}
 }
 
