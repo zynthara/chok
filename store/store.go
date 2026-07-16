@@ -192,7 +192,7 @@ type Store[T db.Modeler] struct {
 // before-hooks or explicit code around the call.
 type hooks[T any] struct {
 	beforeCreate []func(ctx context.Context, obj *T) error
-	beforeUpdate []func(ctx context.Context, loc Locator, changes Changes) error
+	beforeUpdate []func(ctx context.Context, loc Locator, changes ChangeSnapshot) error
 	beforeDelete []func(ctx context.Context, loc Locator) error
 }
 
@@ -217,7 +217,7 @@ type storeConfig struct {
 	requirePrincipal    bool     // when true: Create/Upsert on Owned models reject no-principal contexts
 	readOnly            bool     // explicit declaration required for read-only db handles
 	beforeCreate        []any    // []func(ctx, *T) error — stored as any to avoid generic storeConfig
-	beforeUpdate        []any    // []func(ctx, Locator, Changes) error
+	beforeUpdate        []any    // []func(ctx, Locator, ChangeSnapshot) error
 	beforeDelete        []any    // []func(ctx, Locator) error
 
 	// *Set flags distinguish "the construction site chose" from "left
@@ -434,9 +434,21 @@ func WithBeforeCreate[T db.Modeler](fn func(ctx context.Context, obj *T) error) 
 	}
 }
 
-// WithBeforeUpdate registers a callback that runs before an Update writes
-// to the database. Returning an error aborts the Update.
-func WithBeforeUpdate(fn func(ctx context.Context, loc Locator, changes Changes) error) StoreOption {
+// WithBeforeUpdate registers a callback that runs before an Update or
+// BatchUpdate writes to the database. Returning an error aborts the write —
+// no row is touched and the caller sees the hook's error.
+//
+// The callback receives the resolved ChangeSnapshot: public update-field
+// names mapped to the values about to be written, with a whole-whitelist
+// Fields(&obj) update arriving fully expanded. Accessors return recursive
+// copies, so hooks can inspect but never mutate the payload — cross-field
+// validation and permission checks read it; value normalisation belongs in
+// the caller or a before-create hook, which receives the mutable object.
+//
+// Static validation (update whitelist, protected columns) runs when the
+// Changes are built, before any hook — a callback only ever observes a
+// structurally valid change set.
+func WithBeforeUpdate(fn func(ctx context.Context, loc Locator, changes ChangeSnapshot) error) StoreOption {
 	return func(c *storeConfig) {
 		c.beforeUpdate = append(c.beforeUpdate, any(fn))
 	}
@@ -788,7 +800,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		s.hooks.beforeCreate = append(s.hooks.beforeCreate, h)
 	}
 	for i, fn := range cfg.beforeUpdate {
-		h, ok := fn.(func(context.Context, Locator, Changes) error)
+		h, ok := fn.(func(context.Context, Locator, ChangeSnapshot) error)
 		if !ok {
 			panic(fmt.Sprintf("store: beforeUpdate hook #%d has wrong type %T", i, fn))
 		}
@@ -916,8 +928,10 @@ func (s *Store[T]) BatchUpdate(ctx context.Context, objs []*T, fields ...string)
 		return nil
 	}
 
-	// Resolve the shared field list once before hooks or SQL. updateOne still
-	// builds each Changes value so it remains the single write path.
+	// Resolve the shared field list once before any per-item processing so a
+	// bad field name fails ahead of nil-object and locator checks. Each item
+	// is then built individually below — those builds produce the snapshots
+	// the hooks inspect and the payloads updateBuilt consumes.
 	var probe T
 	if _, err := Fields(&probe, fields...).build(ctx, s.updateFieldMap, s.modelSchema); err != nil {
 		return err
@@ -946,9 +960,24 @@ func (s *Store[T]) BatchUpdate(ctx context.Context, objs []*T, fields ...string)
 		models[i] = model
 	}
 
+	// Build every item before hooks or SQL: static whitelist and
+	// protected-column validation precede user logic (the batch doctrine),
+	// hooks receive the resolved per-item snapshots, and a validation
+	// failure aborts before any statement — even inside a caller-owned
+	// transaction, where earlier items' SQL previously ran ahead of a later
+	// item's build error.
+	builts := make([]builtChanges, len(objs))
+	for i := range objs {
+		b, err := changes[i].build(ctx, s.updateFieldMap, s.modelSchema)
+		if err != nil {
+			return fmt.Errorf("store: BatchUpdate item %d: %w", i, err)
+		}
+		builts[i] = b
+	}
+
 	for i := range objs {
 		for _, h := range s.hooks.beforeUpdate {
-			if err := h(ctx, locators[i], changes[i]); err != nil {
+			if err := h(ctx, locators[i], builts[i].event); err != nil {
 				return fmt.Errorf("store: BatchUpdate item %d: %w", i, err)
 			}
 		}
@@ -965,7 +994,7 @@ func (s *Store[T]) BatchUpdate(ctx context.Context, objs []*T, fields ...string)
 	}
 	updateAll := func(txCtx context.Context) error {
 		for i := range objs {
-			if err := s.updateOne(txCtx, locators[i], changes[i], &updateConfig{}); err != nil {
+			if err := s.updateBuilt(txCtx, locators[i], builts[i], &updateConfig{}); err != nil {
 				return fmt.Errorf("store: BatchUpdate item %d: %w", i, err)
 			}
 		}
@@ -1181,8 +1210,14 @@ type CursorPage[T any] struct {
 //
 //	page, err := s.ListWithCursor(ctx, "id", where.CursorAfter, lastID, 20)
 func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direction where.CursorDirection, cursorValue any, size int, opts ...where.Option) (*CursorPage[T], error) {
+	// Direct-parameter validation goes through mapQueryError like every
+	// option-borne error: size and direction are routinely fed from client
+	// pagination input, and the raw where sentinel is not something
+	// store.MapError recognises — an unmapped return would surface as a 500
+	// from the handler layer instead of the invalid-argument 400 the
+	// guard-rejected options already produce.
 	if size < 1 {
-		return nil, fmt.Errorf("%w: cursor page size %d, must be >= 1", where.ErrInvalidParam, size)
+		return nil, mapQueryError(fmt.Errorf("%w: cursor page size %d, must be >= 1", where.ErrInvalidParam, size))
 	}
 	// Enforce the caller-visible size before deriving the private size+1
 	// lookahead. Reserve one slot below the package ceiling so the lookahead
@@ -1192,13 +1227,13 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 		cap = where.MaxPageSize - 1
 	}
 	if size > cap {
-		return nil, fmt.Errorf("%w: cursor page size %d exceeds maximum %d", where.ErrInvalidParam, size, cap)
+		return nil, mapQueryError(fmt.Errorf("%w: cursor page size %d exceeds maximum %d", where.ErrInvalidParam, size, cap))
 	}
 	// Validate direction on every path: the first-page branch below has no
 	// WithCursor to reject a malformed value and would otherwise silently
 	// scan ascending.
 	if direction != where.CursorAfter && direction != where.CursorBefore {
-		return nil, fmt.Errorf("%w: cursor direction must be 'after' or 'before'", where.ErrInvalidParam)
+		return nil, mapQueryError(fmt.Errorf("%w: cursor direction must be 'after' or 'before'", where.ErrInvalidParam))
 	}
 	// Fetch size+1 to detect whether there's a next page.
 	fetchSize := size + 1

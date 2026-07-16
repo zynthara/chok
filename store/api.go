@@ -230,6 +230,12 @@ func (s *Store[T]) Get(ctx context.Context, by Locator, opts ...QueryOption) (*T
 // obj embeds db.Model; use WithVersion for explicit locking with Set(map),
 // or .NoLock() on Fields to skip the lock.
 //
+// The Changes are built — update whitelist and protected-column validation
+// included — before any before-update hook runs, so static validation
+// precedes user logic exactly as it does on the batch paths, and hooks
+// receive the resolved ChangeSnapshot (public field names → the values
+// about to be written) rather than an opaque payload.
+//
 // Returns:
 //   - ErrNotFound        when no row matches the locator
 //   - ErrStaleVersion    when the lock version is stale (row exists but
@@ -245,9 +251,13 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 	if changes == nil {
 		return ErrMissingColumns
 	}
+	built, err := changes.build(ctx, s.updateFieldMap, s.modelSchema)
+	if err != nil {
+		return err
+	}
 
 	for _, h := range s.hooks.beforeUpdate {
-		if err := h(ctx, by, changes); err != nil {
+		if err := h(ctx, by, built.event); err != nil {
 			return err
 		}
 	}
@@ -256,17 +266,14 @@ func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts
 	for _, o := range opts {
 		o.applyUpdate(cfg)
 	}
-	return s.updateOne(ctx, by, changes, cfg)
+	return s.updateBuilt(ctx, by, built, cfg)
 }
 
-// updateOne is Update's hook-free write kernel. Callers must run rejectWrite
-// and any before-update hooks before entering it.
-func (s *Store[T]) updateOne(ctx context.Context, by Locator, changes Changes, cfg *updateConfig) error {
-	built, err := changes.build(ctx, s.updateFieldMap, s.modelSchema)
-	if err != nil {
-		return err
-	}
-
+// updateBuilt is Update's hook-free write kernel over pre-built Changes.
+// Callers run rejectWrite, changes.build and any before-update hooks first.
+// The built payload is consumed exactly once: the version column is
+// appended in place below.
+func (s *Store[T]) updateBuilt(ctx context.Context, by Locator, built builtChanges, cfg *updateConfig) error {
 	// Resolve the effective lock version: explicit WithVersion wins over the
 	// implicit one extracted from Fields(&obj).
 	lockVer := built.implicitVersion

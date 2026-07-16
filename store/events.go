@@ -72,10 +72,11 @@ func (o ObjectSnapshot[T]) Value() *T {
 	return cloneAny(o.value).(*T)
 }
 
-// ChangeSnapshot is the immutable update payload carried by EntityChanged.
-// Keys are the public update-field names used by the caller, not database
-// columns. Its accessors return recursive copies so one subscriber cannot race
-// or corrupt another subscriber's view.
+// ChangeSnapshot is the immutable update payload carried by EntityChanged
+// and handed to before-update hooks (WithBeforeUpdate). Keys are the public
+// update-field names used by the caller, not database columns. Its accessors
+// return recursive copies so one subscriber or hook cannot race or corrupt
+// another's view.
 type ChangeSnapshot struct {
 	values map[string]any
 }

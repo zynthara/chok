@@ -96,7 +96,7 @@ func TestBeforeUpdate_AbortsUpdate(t *testing.T) {
 	s := New[Item](gdb, log.Empty(),
 		WithQueryFields("id", "code"),
 		WithUpdateFields("code"),
-		WithBeforeUpdate(func(ctx context.Context, loc Locator, changes Changes) error {
+		WithBeforeUpdate(func(ctx context.Context, loc Locator, changes ChangeSnapshot) error {
 			return hookErr
 		}),
 	)
@@ -118,6 +118,91 @@ func TestBeforeUpdate_AbortsUpdate(t *testing.T) {
 	}
 	if got.Code != "BU1" {
 		t.Fatalf("before-hook abort should prevent update, got code=%s", got.Code)
+	}
+}
+
+func TestBeforeUpdate_ReceivesResolvedSnapshot(t *testing.T) {
+	// Arch-review #6: hooks used to receive the opaque Changes interface —
+	// no way to inspect what was changing. They now get the resolved
+	// ChangeSnapshot: public field names → values about to be written,
+	// with a whole-whitelist Fields update fully expanded.
+	gdb := setupHookDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+
+	var seen []ChangeSnapshot
+	s := New[Item](gdb, log.Empty(),
+		WithQueryFields("id", "code"),
+		WithUpdateFields("code"),
+		WithBeforeUpdate(func(_ context.Context, _ Locator, changes ChangeSnapshot) error {
+			seen = append(seen, changes)
+			return nil
+		}),
+	)
+
+	item := &Item{Code: "SNAP1"}
+	if err := s.Create(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set path: map keys and values are visible.
+	if err := s.Update(context.Background(), RID(item.RID), Set(map[string]any{"code": "SNAP2"})); err != nil {
+		t.Fatal(err)
+	}
+	// Whole-whitelist Fields path: the empty field list arrives expanded.
+	item.Code = "SNAP3"
+	if err := s.Update(context.Background(), RID(item.RID), Fields(item).NoLock()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("expected 2 hook invocations, got %d", len(seen))
+	}
+	if fields := seen[0].Fields(); len(fields) != 1 || fields[0] != "code" {
+		t.Fatalf("Set snapshot fields mismatch: %v", fields)
+	}
+	if v, ok := seen[0].Value("code"); !ok || v != "SNAP2" {
+		t.Fatalf("Set snapshot value mismatch: %v (%v)", v, ok)
+	}
+	if fields := seen[1].Fields(); len(fields) != 1 || fields[0] != "code" {
+		t.Fatalf("whole-whitelist Fields snapshot must arrive expanded: %v", fields)
+	}
+	if v, ok := seen[1].Value("code"); !ok || v != "SNAP3" {
+		t.Fatalf("Fields snapshot value mismatch: %v (%v)", v, ok)
+	}
+}
+
+func TestBeforeUpdate_StaticValidationPrecedesHooks(t *testing.T) {
+	// Single-row alignment with the batch doctrine: the Changes are built —
+	// whitelist and protected-column checks included — before any hook runs,
+	// so a structurally invalid update never reaches user logic.
+	gdb := setupHookDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+
+	var hooks int
+	s := New[Item](gdb, log.Empty(),
+		WithQueryFields("id", "code"),
+		WithUpdateFields("code"),
+		WithBeforeUpdate(func(context.Context, Locator, ChangeSnapshot) error {
+			hooks++
+			return nil
+		}),
+	)
+
+	item := &Item{Code: "SV1"}
+	if err := s.Create(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.Update(context.Background(), RID(item.RID), Set(map[string]any{"missing": 1}))
+	if !errors.Is(err, ErrUnknownUpdateField) {
+		t.Fatalf("want ErrUnknownUpdateField, got %v", err)
+	}
+	if hooks != 0 {
+		t.Fatalf("invalid static input ran %d hooks", hooks)
 	}
 }
 
@@ -830,7 +915,27 @@ func TestFix_ListWithCursor_InvalidDirection_FirstPage(t *testing.T) {
 	}
 
 	_, err := s.ListWithCursor(context.Background(), "id", where.CursorDirection("sideways"), nil, 2)
-	if !errors.Is(err, where.ErrInvalidParam) {
-		t.Fatalf("invalid direction on the first page must be rejected, got %v", err)
+	if !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("invalid direction on the first page must map to ErrInvalidArgument, got %v", err)
+	}
+}
+
+func TestFix_ListWithCursor_DirectParamsMapToInvalidArgument(t *testing.T) {
+	// Meta-review round-5: the direct-parameter validations returned the
+	// raw where.ErrInvalidParam, which store.MapError does not recognise —
+	// a handler would report 500 for a client-supplied bad size while the
+	// guard-rejected options already mapped to 400. All three early returns
+	// now go through mapQueryError.
+	gdb := setupHookDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[Item](gdb, log.Empty(), WithQueryFields("id", "code"))
+
+	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 0); !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("size < 1 must map to ErrInvalidArgument, got %v", err)
+	}
+	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, where.MaxPageSize); !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("oversized page must map to ErrInvalidArgument, got %v", err)
 	}
 }

@@ -118,7 +118,7 @@ func TestBatchUpdate_HookFailureRunsBeforeAnySQL(t *testing.T) {
 	s := New[batchItem](h, log.Empty(),
 		WithQueryFields("id", "code", "alt", "value"),
 		WithUpdateFields("code", "alt", "value"),
-		WithBeforeUpdate(func(context.Context, Locator, Changes) error {
+		WithBeforeUpdate(func(context.Context, Locator, ChangeSnapshot) error {
 			hooks++
 			if hooks == 2 {
 				return hookErr
@@ -146,9 +146,33 @@ func TestBatchUpdate_HookFailureRunsBeforeAnySQL(t *testing.T) {
 	}
 }
 
+func TestBatchUpdate_HooksReceivePerItemSnapshots(t *testing.T) {
+	// Arch-review #6: batch hooks get each item's resolved snapshot, built
+	// before any hook or SQL runs.
+	var values []any
+	s, _ := setupBatchItemStore(t, WithBeforeUpdate(func(_ context.Context, _ Locator, changes ChangeSnapshot) error {
+		v, _ := changes.Value("value")
+		values = append(values, v)
+		return nil
+	}))
+	a := &batchItem{Code: "A", Alt: "A", Value: "old-a"}
+	b := &batchItem{Code: "B", Alt: "B", Value: "old-b"}
+	if err := s.BatchCreate(context.Background(), []*batchItem{a, b}); err != nil {
+		t.Fatal(err)
+	}
+	a.Value = "new-a"
+	b.Value = "new-b"
+	if err := s.BatchUpdate(context.Background(), []*batchItem{a, b}, "value"); err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || values[0] != "new-a" || values[1] != "new-b" {
+		t.Fatalf("hooks must observe per-item snapshot values, got %v", values)
+	}
+}
+
 func TestBatchUpdate_StaticValidationPrecedesHooks(t *testing.T) {
 	var hooks int
-	s, _ := setupBatchItemStore(t, WithBeforeUpdate(func(context.Context, Locator, Changes) error {
+	s, _ := setupBatchItemStore(t, WithBeforeUpdate(func(context.Context, Locator, ChangeSnapshot) error {
 		hooks++
 		return nil
 	}))

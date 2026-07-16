@@ -405,6 +405,12 @@ page, err := posts.ListQ(ctx,
 | `Delete` | `WithBeforeDelete` |
 | `Restore` | ⚠️ **无**——靠钩子做审计 / 校验 / 副作用时，恢复操作会被漏掉 |
 
+`WithBeforeUpdate` 的回调收到**已解析的 `ChangeSnapshot`**（公开字段名 →
+即将写入的值；`Fields(&obj)` 全白名单更新会展开成完整字段集），访问器返回
+递归拷贝——钩子能内省、不能改写（要改值，在调用方或 `WithBeforeCreate`
+里做，后者拿到的是可变对象）。Changes 的静态校验（更新白名单 / 托管列）在
+钩子**之前**执行：钩子只会看到结构合法的变更集。
+
 ### 6.1 `Create` / `BatchCreate`
 
 ```go
