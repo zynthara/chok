@@ -99,6 +99,19 @@ type StorePolicy struct {
 	DefaultPageSize int `mapstructure:"default_page_size"`
 }
 
+// clone returns a copy whose AdminRoles no longer shares backing storage
+// with the source. StorePolicy is restart-only immutable data: the handle
+// stores a clone at Open and hands out clones from StorePolicy(), so a
+// caller mutating its Options after Open — or a returned policy value —
+// can neither skew the admin list of stores built later nor race
+// store.New.
+func (p StorePolicy) clone() StorePolicy {
+	if p.AdminRoles != nil {
+		p.AdminRoles = append([]string(nil), p.AdminRoles...)
+	}
+	return p
+}
+
 func (p *StorePolicy) validate() error {
 	for i, r := range p.AdminRoles {
 		if strings.TrimSpace(r) == "" {

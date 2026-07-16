@@ -106,6 +106,7 @@ Named instances: sections marked *multi-instance* accept an
 | `migration_status_interval` | duration | `30s` | restart | — |
 | `store.strict` | bool | — | restart | — |
 | `store.require_principal` | bool | — | restart | — |
+| `store.admin_roles` | list(string) | — | restart | — |
 | `store.max_page_size` | int | — | restart | — |
 | `store.default_page_size` | int | — | restart | — |
 | `sqlite.path` | string | `app.db` | restart | — |

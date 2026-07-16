@@ -6,6 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"gorm.io/gorm"
+
+	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/dbtest"
 	"github.com/zynthara/chok/v2/kernel/event"
@@ -733,13 +736,17 @@ func TestListWithCursor_LastPage_NoCursor(t *testing.T) {
 	}
 }
 
-// Arch-review fix: ListWithCursor owns ORDER BY and LIMIT. Caller options
-// that would fight the keyset invariant (order, page, limit, offset, nested
-// cursors) must be rejected instead of silently corrupting the page, and a
-// malformed direction must fail on the first page too (it used to be
-// validated only on the WithCursor branch and silently scanned ascending).
+// Arch-review fix: ListWithCursor owns ORDER BY, LIMIT and the size+1
+// lookahead. Caller options that would fight the keyset invariant (order,
+// page, limit, offset, nested cursors) or clip the lookahead (max-page-size
+// caps — a tighter cap makes the page report "no more rows" while rows
+// remain) or waste work (count) must be rejected instead of silently
+// corrupting the page, and a malformed direction must fail on the first
+// page too (it used to be validated only on the WithCursor branch and
+// silently scanned ascending). The guard runs inside the one real, scoped
+// where.Apply, so custom options execute exactly once.
 
-func TestFix_ListWithCursor_RejectsOrderAndPaginationOptions(t *testing.T) {
+func TestFix_ListWithCursor_RejectsNonFilterOptions(t *testing.T) {
 	gdb := setupHookDB(t)
 	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
 		t.Fatal(err)
@@ -760,12 +767,17 @@ func TestFix_ListWithCursor_RejectsOrderAndPaginationOptions(t *testing.T) {
 		{"WithLimit", where.WithLimit(5)},
 		{"WithOffset", where.WithOffset(2)},
 		{"WithCursor", where.WithCursor("id", where.CursorAfter, "x", 2)},
+		// Meta-review round-3 #1: a caller cap tighter than size+1 clips
+		// the lookahead — 3 rows, size=2, cap=1 returned one row and an
+		// empty NextCursor, silently ending pagination with rows left.
+		{"WithMaxPageSize", where.WithMaxPageSize(1)},
+		{"WithCount", where.WithCount()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 2, tc.opt)
-			if !errors.Is(err, where.ErrInvalidParam) {
-				t.Fatalf("%s must be rejected with ErrInvalidParam, got %v", tc.name, err)
+			if !errors.Is(err, apierr.ErrInvalidArgument) {
+				t.Fatalf("%s must be rejected as ErrInvalidArgument, got %v", tc.name, err)
 			}
 		})
 	}
@@ -778,6 +790,32 @@ func TestFix_ListWithCursor_RejectsOrderAndPaginationOptions(t *testing.T) {
 	}
 	if len(page.Items) != 1 || page.Items[0].Code != "itemB" {
 		t.Fatalf("filtered cursor page mismatch: %+v", page.Items)
+	}
+}
+
+func TestFix_ListWithCursor_CustomOptionRunsOnce(t *testing.T) {
+	// Meta-review round-3 #2: the previous guard pre-probed caller options
+	// on an unscoped throwaway query, so a custom where.Option executed
+	// twice (once unscoped). The guard now rides the one real Apply.
+	gdb := setupHookDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[Item](gdb, log.Empty(), WithQueryFields("id", "code"))
+	if err := s.Create(context.Background(), &Item{Code: "itemA"}); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	counting := where.Option(func(q *gorm.DB, _ *where.Config, _ map[string]string) (*gorm.DB, error) {
+		calls++
+		return q, nil
+	})
+	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 2, counting); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("custom option must execute exactly once, ran %d times", calls)
 	}
 }
 

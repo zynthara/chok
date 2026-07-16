@@ -166,6 +166,119 @@ func TestFix_AdminRoles_CapturedAtConstruction(t *testing.T) {
 	}
 }
 
+func TestFix_AdminRoles_BlankRolePanics(t *testing.T) {
+	// Meta-review round-3 #5: the YAML policy rejects blank roles, the Go
+	// entry point must too — an empty-string role would match a principal
+	// whose resolver produced an empty role.
+	defer func() {
+		if recover() == nil {
+			t.Fatal("WithAdminRoles with a blank role must panic")
+		}
+	}()
+	WithAdminRoles("admin", "  ")
+}
+
+func TestFix_SetDefaultAdminRoles_BlankRolePanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("SetDefaultAdminRoles with a blank role must panic")
+		}
+	}()
+	SetDefaultAdminRoles("")
+}
+
+func TestFix_AdminRoles_OptionSnapshotsInputAtCreation(t *testing.T) {
+	// Meta-review round-4 #1: WithAdminRoles validated the caller's slice
+	// but the closure captured it and copied only when the option ran
+	// inside New — mutating the slice between option creation and New
+	// rewrote the authorization config (and could sneak a blank role past
+	// validation). The option now snapshots its input up front.
+	gdb := setupDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&Product{})); err != nil {
+		t.Fatal(err)
+	}
+
+	roles := []string{"ops"}
+	opt := WithAdminRoles(roles...)
+	roles[0] = "attacker" // after validation, before New
+
+	s := New[Product](gdb, log.Empty(),
+		WithQueryFields("id", "name"), WithUpdateFields("name"), opt)
+	if err := s.Create(userCtx("alice"), &Product{Name: "widget"}); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := s.List(userCtx("op-1", "ops"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("snapshotted role must bypass OwnerScope, got %d items", len(page.Items))
+	}
+	page, err = s.List(userCtx("mallory", "attacker"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("post-creation mutation must not grant bypass, got %d items", len(page.Items))
+	}
+}
+
+func TestFix_SetDefaultAdminRoles_CopiesInput(t *testing.T) {
+	// Meta-review round-3 #3: the global setter used to alias the caller's
+	// slice — mutating it afterwards silently rewrote the installed list.
+	roles := []string{"admin"}
+	SetDefaultAdminRoles(roles...)
+	t.Cleanup(func() { SetDefaultAdminRoles("admin") })
+
+	roles[0] = "attacker"
+	if got := getDefaultAdminRoles(); got[0] != "admin" {
+		t.Fatalf("mutating the caller slice must not reach the installed list, got %q", got[0])
+	}
+}
+
+func TestFix_AdminRoles_PolicyImmutableAfterOpen(t *testing.T) {
+	// Meta-review round-3 #3: the handle froze the policy struct but shared
+	// the AdminRoles backing array with the caller's Options and with every
+	// StorePolicy() return value — both were silent write-through channels
+	// into the admin list of stores built later.
+	roles := []string{"ops"}
+	h := openPolicyDB(t, db.StorePolicy{AdminRoles: roles})
+	if err := h.Migrate(context.Background(), db.Table(&Product{})); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mutate the caller's slice after Open...
+	roles[0] = "attacker"
+	// ...and write through a StorePolicy() hand-out.
+	leaked := h.StorePolicy()
+	if len(leaked.AdminRoles) != 1 {
+		t.Fatalf("policy must carry the admin list, got %v", leaked.AdminRoles)
+	}
+	leaked.AdminRoles[0] = "attacker"
+
+	s := New[Product](h, log.Empty(),
+		WithQueryFields("id", "name"), WithUpdateFields("name"))
+	if err := s.Create(userCtx("alice"), &Product{Name: "widget"}); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := s.List(userCtx("op-1", "ops"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("frozen policy role must still bypass OwnerScope, got %d items", len(page.Items))
+	}
+	page, err = s.List(userCtx("mallory", "attacker"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("mutated slices must not grant bypass, got %d items", len(page.Items))
+	}
+}
+
 func TestFix_AdminRoles_EmptyListFailsClosed(t *testing.T) {
 	// WithAdminRoles() with no arguments removes every bypass on this store:
 	// nobody escapes the owner filter, nobody may preset OwnerID.

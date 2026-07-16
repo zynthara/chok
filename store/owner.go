@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 
 	"gorm.io/gorm"
@@ -31,9 +33,19 @@ var (
 // try to override roles by passing a second OwnerScope through WithScope:
 // scopes compose by AND, so that intersects the bypass sets instead of
 // replacing them. This function will be removed in a future release.
+//
+// The input is copied, so mutating the caller's slice afterwards cannot
+// skew the installed list; blank role names panic, matching WithAdminRoles
+// and the db.store.admin_roles validation.
 func SetDefaultAdminRoles(roles ...string) {
+	for i, r := range roles {
+		if strings.TrimSpace(r) == "" {
+			panic(fmt.Sprintf("store: SetDefaultAdminRoles: role %d must not be empty", i))
+		}
+	}
+	cp := append([]string(nil), roles...)
 	defaultAdminMu.Lock()
-	defaultAdminRoles = roles
+	defaultAdminRoles = cp
 	defaultAdminMu.Unlock()
 }
 

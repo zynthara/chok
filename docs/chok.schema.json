@@ -571,6 +571,12 @@
               "store": {
                 "additionalProperties": false,
                 "properties": {
+                  "admin_roles": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
                   "default_page_size": {
                     "type": "integer"
                   },
@@ -767,6 +773,12 @@
         "store": {
           "additionalProperties": false,
           "properties": {
+            "admin_roles": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "default_page_size": {
               "type": "integer"
             },

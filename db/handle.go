@@ -37,7 +37,10 @@ type DB struct {
 // opened with (the "db.store" config block). store.New consults it
 // for every knob the construction site leaves unset; the zero value
 // leaves store behaviour exactly as documented on store.New.
-func (h *DB) StorePolicy() StorePolicy { return h.storePolicy }
+//
+// The returned value is a defensive clone: mutating it (AdminRoles
+// included) never writes through to the handle's frozen policy.
+func (h *DB) StorePolicy() StorePolicy { return h.storePolicy.clone() }
 
 // ReadOnly reports whether this handle was opened with read_only: true.
 func (h *DB) ReadOnly() bool { return h.readOnly }
@@ -74,7 +77,10 @@ func Open(opts Options) (*DB, error) {
 		}
 		return nil, fmt.Errorf("db: install read-only guards: %w", err)
 	}
-	return &DB{gdb: gdb, readOnly: o.ReadOnly, readPool: readPool, storePolicy: o.Store}, nil
+	// Clone the policy so the handle's copy is frozen at Open — a caller
+	// mutating its Options (or the AdminRoles slice) afterwards cannot
+	// skew stores built later.
+	return &DB{gdb: gdb, readOnly: o.ReadOnly, readPool: readPool, storePolicy: o.Store.clone()}, nil
 }
 
 // Unsafe returns the effective raw gorm handle: the context's

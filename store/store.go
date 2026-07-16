@@ -272,10 +272,24 @@ func WithoutOwnerScope() StoreOption {
 // both lists escapes the owner filter.
 //
 // The roles are captured at construction; later SetDefaultAdminRoles calls
-// never affect a Store built with this option.
+// never affect a Store built with this option. A blank role name panics —
+// the same configuration error the db.store.admin_roles policy rejects at
+// validation, caught here at construction (an empty string could otherwise
+// match a principal whose resolver produced an empty role).
 func WithAdminRoles(roles ...string) StoreOption {
+	// Snapshot before validating: the variadic slice is the caller's own
+	// when invoked as WithAdminRoles(roles...), so validating (or copying
+	// later, when the option runs inside New) would leave a window where
+	// mutating the original slice rewrites the authorization config — and
+	// sneaks a blank role past this check.
+	cp := append([]string(nil), roles...)
+	for i, r := range cp {
+		if strings.TrimSpace(r) == "" {
+			panic(fmt.Sprintf("store: WithAdminRoles: role %d must not be empty", i))
+		}
+	}
 	return func(c *storeConfig) {
-		c.adminRoles = append([]string(nil), roles...)
+		c.adminRoles = cp
 		c.adminRolesSet = true
 	}
 }
@@ -1154,11 +1168,14 @@ type CursorPage[T any] struct {
 // cursorField is validated against the query whitelist. cursorValue is the
 // last-seen value from the previous page (empty string or nil for the
 // first page). size is the max items per page. Additional opts may add
-// FILTERS ONLY: the cursor owns ORDER BY and LIMIT, so order and pagination
-// options (WithOrder / WithPage / WithLimit / WithOffset / nested cursors)
-// are rejected with where.ErrInvalidParam — they would silently break the
-// keyset invariant (the ORDER BY must match the cursor predicate; an OFFSET
-// reintroduces the drift keyset pagination exists to avoid).
+// FILTERS ONLY: the cursor owns ORDER BY, LIMIT and the size+1 lookahead,
+// so ordering, pagination, count and page-size-cap options (WithOrder /
+// WithPage / WithLimit / WithOffset / WithCount / WithMaxPageSize / nested
+// cursors) are rejected as apierr.ErrInvalidArgument — a stray order breaks
+// the keyset invariant, an OFFSET reintroduces the drift keyset pagination
+// exists to avoid, and a tighter cap silently clips the lookahead so the
+// page reports "no more rows" while rows remain. The guard runs inside the
+// scoped query build, so custom options execute exactly once.
 //
 // Example:
 //
@@ -1183,27 +1200,23 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	if direction != where.CursorAfter && direction != where.CursorBefore {
 		return nil, fmt.Errorf("%w: cursor direction must be 'after' or 'before'", where.ErrInvalidParam)
 	}
-	// Caller opts may add filters only. Probe them against a throwaway
-	// query so an order or pagination option fails fast instead of
-	// returning silently mis-ordered or offset-shifted pages.
-	if len(opts) > 0 {
-		_, probeCfg, err := where.Apply(s.effectiveDB(ctx).Model(new(T)), s.queryFieldMap, opts)
-		if err != nil {
-			return nil, mapQueryError(err)
-		}
-		if probeCfg.HasPage || probeCfg.HasCursor || probeCfg.HasOrder {
-			return nil, fmt.Errorf("%w: ListWithCursor accepts filter options only; ordering and pagination come from the cursor arguments", where.ErrInvalidParam)
-		}
-	}
 	// Fetch size+1 to detect whether there's a next page.
 	fetchSize := size + 1
-	allOpts := make([]where.Option, 0, len(opts)+2)
+	allOpts := make([]where.Option, 0, len(opts)+3)
 	allOpts = append(allOpts, opts...)
+	// The FILTERS-ONLY guard sits between the caller options and the
+	// cursor's own: by the time it runs, Config reflects the caller
+	// options alone, and it executes inside the one real, scoped
+	// where.Apply — no pre-flight probe that would run stateful custom
+	// options twice or hand them an unscoped query.
+	allOpts = append(allOpts, cursorFilterOnlyGuard())
 	// Cap the internal query at exactly the requested page plus its lookahead.
 	// The execution call below deliberately skips reinjecting s.maxPageSize:
 	// size was already checked against it, and applying it again would discard
-	// the lookahead when size equals the Store cap. Caller options can still
-	// tighten this internal limit because WithMaxPageSize composes by minimum.
+	// the lookahead when size equals the Store cap. Caller options cannot
+	// tighten this internal limit — the FILTERS-ONLY guard above rejects any
+	// caller WithMaxPageSize, precisely because a tighter cap would clip the
+	// lookahead and end pagination with rows remaining.
 	allOpts = append(allOpts, where.WithMaxPageSize(fetchSize))
 	if cursorValue != nil && cursorValue != "" {
 		allOpts = append(allOpts, where.WithCursor(cursorField, direction, cursorValue, fetchSize))
@@ -1224,6 +1237,24 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 		page.NextCursor = extractCursorValue(result.Items[size-1], cursorField, s.queryFieldMap, s.modelSchema)
 	}
 	return page, nil
+}
+
+// cursorFilterOnlyGuard enforces ListWithCursor's FILTERS-ONLY contract for
+// caller options. Any pagination, ordering, count or page-size-cap signal
+// means the caller tried to steer what the cursor arguments own: a stray
+// ORDER BY takes precedence over the keyset ordering, an OFFSET
+// reintroduces drift, a COUNT is wasted work CursorPage cannot carry, and a
+// tighter MaxPageSize clips the size+1 lookahead — the page would report
+// "no more rows" (empty NextCursor) while rows remain. The error surfaces
+// through mapQueryError as apierr.ErrInvalidArgument, like every other
+// invalid query option.
+func cursorFilterOnlyGuard() where.Option {
+	return func(db *gorm.DB, cfg *where.Config, _ map[string]string) (*gorm.DB, error) {
+		if cfg.HasPage || cfg.HasCursor || cfg.HasOrder || cfg.Count || cfg.MaxPageSize > 0 {
+			return nil, fmt.Errorf("%w: ListWithCursor accepts filter options only; ordering, pagination, count and page-size caps come from the cursor arguments", where.ErrInvalidParam)
+		}
+		return db, nil
+	}
 }
 
 // Tx runs fn inside a transaction scoped to this Store. fn receives a
