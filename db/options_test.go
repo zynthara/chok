@@ -72,6 +72,12 @@ func TestOptions_Validate(t *testing.T) {
 		{"store policy valid", func(o *Options) {
 			o.Store = StorePolicy{Strict: true, RequirePrincipal: true, MaxPageSize: 100, DefaultPageSize: 20}
 		}, ""},
+		{"store admin roles valid", func(o *Options) {
+			o.Store = StorePolicy{AdminRoles: []string{"admin", "ops"}}
+		}, ""},
+		{"store admin roles blank entry", func(o *Options) {
+			o.Store = StorePolicy{AdminRoles: []string{"admin", "  "}}
+		}, "admin_roles[1] must not be empty"},
 		{"store negative max page size", func(o *Options) {
 			o.Store = StorePolicy{MaxPageSize: -1}
 		}, "max_page_size must be >= 0"},

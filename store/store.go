@@ -171,11 +171,12 @@ type Store[T db.Modeler] struct {
 	modelSchema      *schema.Schema    // GORM's authoritative field/column mapping
 	soft             bool              // true if T embeds SoftDeleteModel
 	scopes           []ScopeFunc
-	defaultPageSize  int  // default page size for ListFromQuery (0 = where.DefaultPageSize)
-	maxPageSize      int  // max page size (0 = unlimited)
-	strict           bool // strict mode: reject auto-discovered fields, unknown params
-	requirePrincipal bool // fail-closed: Create/Upsert on Owned models reject no-principal contexts
-	readOnly         bool // blessed write methods fail before hooks or model mutation
+	defaultPageSize  int      // default page size for ListFromQuery (0 = where.DefaultPageSize)
+	maxPageSize      int      // max page size (0 = unlimited)
+	strict           bool     // strict mode: reject auto-discovered fields, unknown params
+	requirePrincipal bool     // fail-closed: Create/Upsert on Owned models reject no-principal contexts
+	adminRoles       []string // construction-resolved: drives auto-OwnerScope bypass AND owner fill
+	readOnly         bool     // blessed write methods fail before hooks or model mutation
 	hooks            hooks[T]
 }
 
@@ -211,18 +212,20 @@ type storeConfig struct {
 	queryFieldsExclude  []string
 	updateFieldsExclude []string
 	noOwnerScope        bool
-	strict              bool  // when true: reject unknown query params, require explicit whitelist
-	requirePrincipal    bool  // when true: Create/Upsert on Owned models reject no-principal contexts
-	readOnly            bool  // explicit declaration required for read-only db handles
-	beforeCreate        []any // []func(ctx, *T) error — stored as any to avoid generic storeConfig
-	beforeUpdate        []any // []func(ctx, Locator, Changes) error
-	beforeDelete        []any // []func(ctx, Locator) error
+	adminRoles          []string // WithAdminRoles: roles bypassing OwnerScope + owner fill
+	strict              bool     // when true: reject unknown query params, require explicit whitelist
+	requirePrincipal    bool     // when true: Create/Upsert on Owned models reject no-principal contexts
+	readOnly            bool     // explicit declaration required for read-only db handles
+	beforeCreate        []any    // []func(ctx, *T) error — stored as any to avoid generic storeConfig
+	beforeUpdate        []any    // []func(ctx, Locator, Changes) error
+	beforeDelete        []any    // []func(ctx, Locator) error
 
 	// *Set flags distinguish "the construction site chose" from "left
 	// unset": unset knobs inherit the handle's db.store policy, set
 	// ones — including the Without* opt-outs — always win.
 	strictSet           bool
 	requirePrincipalSet bool
+	adminRolesSet       bool
 	defaultPageSizeSet  bool
 	maxPageSizeSet      bool
 }
@@ -252,6 +255,29 @@ func WithScope(scope ScopeFunc) StoreOption {
 // Use this when an owned model should be visible to all users.
 func WithoutOwnerScope() StoreOption {
 	return func(c *storeConfig) { c.noOwnerScope = true }
+}
+
+// WithAdminRoles sets, for this Store, the principal roles that bypass the
+// automatic OwnerScope and may set OwnerID explicitly on create (imports,
+// backfills, cross-user writes). One list drives BOTH sides of the owner
+// contract — the query-side scope bypass and the write-side owner fill — so
+// the two can never disagree.
+//
+// The list REPLACES the inherited one (db.store.admin_roles policy, else the
+// deprecated package default) rather than adding to it; calling it with no
+// arguments removes every admin bypass on this Store (fail-closed). This is
+// the supported way to widen or narrow admin semantics per store. Passing an
+// extra OwnerScope through WithScope does NOT override roles: scopes compose
+// by AND, so a second OwnerScope intersects the bypass sets — nobody outside
+// both lists escapes the owner filter.
+//
+// The roles are captured at construction; later SetDefaultAdminRoles calls
+// never affect a Store built with this option.
+func WithAdminRoles(roles ...string) StoreOption {
+	return func(c *storeConfig) {
+		c.adminRoles = append([]string(nil), roles...)
+		c.adminRolesSet = true
+	}
 }
 
 // WithStrict enables strict mode for production safety:
@@ -527,6 +553,21 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		cfg.defaultPageSize = pol.DefaultPageSize
 	}
 
+	// Admin-role resolution mirrors the other policy knobs: explicit
+	// WithAdminRoles wins, then the handle's db.store.admin_roles, then
+	// the (deprecated) package-level default. The resolved list drives
+	// BOTH the auto-detected OwnerScope and the write-side owner fill,
+	// so query bypass and OwnerID assignment can never disagree — and it
+	// is captured here, at construction, so a later SetDefaultAdminRoles
+	// call cannot skew one side of an existing store.
+	adminRoles := getDefaultAdminRoles()
+	if len(pol.AdminRoles) > 0 {
+		adminRoles = append([]string(nil), pol.AdminRoles...)
+	}
+	if cfg.adminRolesSet {
+		adminRoles = cfg.adminRoles
+	}
+
 	// The model's own `store` tag declaration, if any. Resolved before
 	// the per-side switches so both sides agree on whether the model is
 	// tag-declared; panics on malformed tags.
@@ -665,12 +706,14 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		}
 	}
 
-	// Auto-detect OwnerScope for models embedding db.Owned.
+	// Auto-detect OwnerScope for models embedding db.Owned. The bypass
+	// roles are the construction-resolved adminRoles — the same list
+	// fillOwner consults on the write side.
 	scopes := cfg.scopes
 	hasOwnerScope := false
 	if !cfg.noOwnerScope {
 		if _, ok := model.(db.OwnerAccessor); ok {
-			scopes = append([]ScopeFunc{OwnerScope(getDefaultAdminRoles()...)}, scopes...)
+			scopes = append([]ScopeFunc{OwnerScope(adminRoles...)}, scopes...)
 			hasOwnerScope = true
 		}
 	}
@@ -716,6 +759,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		maxPageSize:      cfg.maxPageSize,
 		strict:           cfg.strict,
 		requirePrincipal: cfg.requirePrincipal,
+		adminRoles:       adminRoles,
 		readOnly:         cfg.readOnly,
 	}
 
@@ -754,7 +798,7 @@ func (s *Store[T]) Create(ctx context.Context, obj *T) error {
 	if err := s.rejectWrite("Create"); err != nil {
 		return err
 	}
-	if err := fillOwner(ctx, obj, s.requirePrincipal); err != nil {
+	if err := fillOwner(ctx, obj, s.requirePrincipal, s.adminRoles); err != nil {
 		return err
 	}
 	for _, h := range s.hooks.beforeCreate {
@@ -792,12 +836,12 @@ func (s *Store[T]) BatchCreate(ctx context.Context, objs []*T) error {
 	// possible failure.
 	if s.requirePrincipal && db.IsOwnedModel(new(T)) {
 		var probe T
-		if err := fillOwner(ctx, &probe, s.requirePrincipal); err != nil {
+		if err := fillOwner(ctx, &probe, s.requirePrincipal, s.adminRoles); err != nil {
 			return err
 		}
 	}
 	for _, obj := range objs {
-		if err := fillOwner(ctx, obj, s.requirePrincipal); err != nil {
+		if err := fillOwner(ctx, obj, s.requirePrincipal, s.adminRoles); err != nil {
 			// Unreachable given the preflight above, but kept as a
 			// defence-in-depth so any future per-object policy still
 			// surfaces the error instead of silently succeeding.
@@ -1109,8 +1153,12 @@ type CursorPage[T any] struct {
 //
 // cursorField is validated against the query whitelist. cursorValue is the
 // last-seen value from the previous page (empty string or nil for the
-// first page). size is the max items per page. Additional opts can add
-// filters.
+// first page). size is the max items per page. Additional opts may add
+// FILTERS ONLY: the cursor owns ORDER BY and LIMIT, so order and pagination
+// options (WithOrder / WithPage / WithLimit / WithOffset / nested cursors)
+// are rejected with where.ErrInvalidParam — they would silently break the
+// keyset invariant (the ORDER BY must match the cursor predicate; an OFFSET
+// reintroduces the drift keyset pagination exists to avoid).
 //
 // Example:
 //
@@ -1128,6 +1176,24 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	}
 	if size > cap {
 		return nil, fmt.Errorf("%w: cursor page size %d exceeds maximum %d", where.ErrInvalidParam, size, cap)
+	}
+	// Validate direction on every path: the first-page branch below has no
+	// WithCursor to reject a malformed value and would otherwise silently
+	// scan ascending.
+	if direction != where.CursorAfter && direction != where.CursorBefore {
+		return nil, fmt.Errorf("%w: cursor direction must be 'after' or 'before'", where.ErrInvalidParam)
+	}
+	// Caller opts may add filters only. Probe them against a throwaway
+	// query so an order or pagination option fails fast instead of
+	// returning silently mis-ordered or offset-shifted pages.
+	if len(opts) > 0 {
+		_, probeCfg, err := where.Apply(s.effectiveDB(ctx).Model(new(T)), s.queryFieldMap, opts)
+		if err != nil {
+			return nil, mapQueryError(err)
+		}
+		if probeCfg.HasPage || probeCfg.HasCursor || probeCfg.HasOrder {
+			return nil, fmt.Errorf("%w: ListWithCursor accepts filter options only; ordering and pagination come from the cursor arguments", where.ErrInvalidParam)
+		}
 	}
 	// Fetch size+1 to detect whether there's a next page.
 	fetchSize := size + 1

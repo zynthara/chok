@@ -41,6 +41,11 @@ type Config struct {
 	HasFilter bool // true if any WHERE condition was applied
 	HasPage   bool // true if pagination (WithPage/WithOffset/WithLimit) was applied
 	HasCursor bool // true if cursor-based pagination (WithCursor) was applied
+	// HasOrder is set when an explicit order option (WithOrder) was
+	// supplied — even under countOnly, where its SQL is suppressed.
+	// Store.ListWithCursor probes it to reject caller options that would
+	// fight the cursor's own ORDER BY.
+	HasOrder bool
 	// DegenerateFilter is set when a filter option collapsed to a
 	// guaranteed-empty result (currently only WithFilterIn over an empty
 	// slice, which renders WHERE 1=0). HasFilter is still set so callers
@@ -418,6 +423,7 @@ func WithFilterEndsWith(field string, value string) Option {
 // WithOrder adds ORDER BY field [DESC]. desc defaults to false (ASC).
 func WithOrder(field string, desc ...bool) Option {
 	return func(db *gorm.DB, cfg *Config, fm map[string]string) (*gorm.DB, error) {
+		cfg.HasOrder = true
 		if cfg.countOnly {
 			return db, nil
 		}

@@ -221,7 +221,7 @@ func TestEntityChanged_SnapshotsNestedMutablePayloads(t *testing.T) {
 	type payload struct {
 		Labels map[string][]string
 	}
-	original := &payload{Labels: map[string][]string{"role": []string{"reader"}}}
+	original := &payload{Labels: map[string][]string{"role": {"reader"}}}
 	ev := createdEvent(original)
 	original.Labels["role"][0] = "admin"
 	original.Labels["new"] = []string{"caller-only"}
@@ -730,5 +730,69 @@ func TestListWithCursor_LastPage_NoCursor(t *testing.T) {
 	}
 	if page.NextCursor != "" {
 		t.Fatalf("expected empty NextCursor for last page, got %q", page.NextCursor)
+	}
+}
+
+// Arch-review fix: ListWithCursor owns ORDER BY and LIMIT. Caller options
+// that would fight the keyset invariant (order, page, limit, offset, nested
+// cursors) must be rejected instead of silently corrupting the page, and a
+// malformed direction must fail on the first page too (it used to be
+// validated only on the WithCursor branch and silently scanned ascending).
+
+func TestFix_ListWithCursor_RejectsOrderAndPaginationOptions(t *testing.T) {
+	gdb := setupHookDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[Item](gdb, log.Empty(), WithQueryFields("id", "code"))
+	for i := range 3 {
+		if err := s.Create(context.Background(), &Item{Code: "item" + string(rune('A'+i))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := []struct {
+		name string
+		opt  where.Option
+	}{
+		{"WithOrder", where.WithOrder("code")},
+		{"WithPage", where.WithPage(1, 2)},
+		{"WithLimit", where.WithLimit(5)},
+		{"WithOffset", where.WithOffset(2)},
+		{"WithCursor", where.WithCursor("id", where.CursorAfter, "x", 2)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 2, tc.opt)
+			if !errors.Is(err, where.ErrInvalidParam) {
+				t.Fatalf("%s must be rejected with ErrInvalidParam, got %v", tc.name, err)
+			}
+		})
+	}
+
+	// Filters remain the supported extra-option surface.
+	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 2,
+		where.WithFilter("code", "itemB"))
+	if err != nil {
+		t.Fatalf("filter options must still be accepted: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].Code != "itemB" {
+		t.Fatalf("filtered cursor page mismatch: %+v", page.Items)
+	}
+}
+
+func TestFix_ListWithCursor_InvalidDirection_FirstPage(t *testing.T) {
+	gdb := setupHookDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&Item{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[Item](gdb, log.Empty(), WithQueryFields("id", "code"))
+	if err := s.Create(context.Background(), &Item{Code: "itemA"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.ListWithCursor(context.Background(), "id", where.CursorDirection("sideways"), nil, 2)
+	if !errors.Is(err, where.ErrInvalidParam) {
+		t.Fatalf("invalid direction on the first page must be rejected, got %v", err)
 	}
 }

@@ -18,13 +18,19 @@ var (
 	defaultAdminMu    sync.RWMutex
 )
 
-// SetDefaultAdminRoles sets the global admin role names used by auto-detected
-// OwnerScope. Call once at startup before creating any Store.
+// SetDefaultAdminRoles sets the global fallback admin role names used when
+// neither store.WithAdminRoles nor the handle's db.store.admin_roles policy
+// supplies a list. Call once at startup before creating any Store: the list
+// is captured at Store construction for BOTH the query-side OwnerScope
+// bypass and the write-side owner fill, so later calls only affect stores
+// built afterwards.
 //
 // Deprecated: Global admin roles are shared across all Store instances.
-// Prefer per-Store admin roles via OwnerScope("admin", "superadmin") passed
-// to WithScope at Store construction. This function will be removed in a
-// future release.
+// Prefer db.store.admin_roles (app-wide policy) or store.WithAdminRoles
+// (per store) — both drive scope bypass and owner fill together. Do NOT
+// try to override roles by passing a second OwnerScope through WithScope:
+// scopes compose by AND, so that intersects the bypass sets instead of
+// replacing them. This function will be removed in a future release.
 func SetDefaultAdminRoles(roles ...string) {
 	defaultAdminMu.Lock()
 	defaultAdminRoles = roles
@@ -81,8 +87,11 @@ func OwnerScope(adminRoles ...string) ScopeFunc {
 
 // fillOwner enforces OwnerID on Owned models using the authenticated
 // principal's Subject. A caller-provided OwnerID is IGNORED unless the
-// principal holds one of the admin roles configured via SetDefaultAdminRoles
-// (the escape hatch for administrative imports / cross-user writes).
+// principal holds one of adminRoles — the Store's construction-resolved
+// admin list (WithAdminRoles > db.store.admin_roles > deprecated global
+// default), the same list its auto OwnerScope bypasses on, so read and
+// write admin semantics can never disagree. The escape hatch exists for
+// administrative imports / cross-user writes.
 //
 // Without this enforcement, an authenticated user could spoof OwnerID in
 // the request body and create rows attributed to another user.
@@ -94,7 +103,7 @@ func OwnerScope(adminRoles ...string) ScopeFunc {
 //     tests can Create rows with a preset OwnerID without a principal.
 //
 // Non-Owned models bypass the check entirely and always return nil.
-func fillOwner[T db.Modeler](ctx context.Context, obj *T, strict bool) error {
+func fillOwner[T db.Modeler](ctx context.Context, obj *T, strict bool, adminRoles []string) error {
 	owned, ok := any(obj).(db.OwnerAccessor)
 	if !ok {
 		return nil
@@ -106,7 +115,7 @@ func fillOwner[T db.Modeler](ctx context.Context, obj *T, strict bool) error {
 		}
 		return nil
 	}
-	if isAdminPrincipal(p) {
+	if isAdminPrincipal(p, adminRoles) {
 		// Admin may set OwnerID explicitly; only auto-fill when empty.
 		if owned.GetOwnerID() == "" {
 			owned.SetOwnerID(p.Subject)
@@ -118,15 +127,14 @@ func fillOwner[T db.Modeler](ctx context.Context, obj *T, strict bool) error {
 	return nil
 }
 
-// isAdminPrincipal reports whether the principal holds any of the global
-// default admin roles. Returns false when no admin roles are configured.
-func isAdminPrincipal(p auth.Principal) bool {
-	admins := getDefaultAdminRoles()
-	if len(admins) == 0 {
+// isAdminPrincipal reports whether the principal holds any of adminRoles.
+// Returns false when the list is empty — no roles, no bypass (fail-closed).
+func isAdminPrincipal(p auth.Principal, adminRoles []string) bool {
+	if len(adminRoles) == 0 {
 		return false
 	}
-	set := make(map[string]struct{}, len(admins))
-	for _, r := range admins {
+	set := make(map[string]struct{}, len(adminRoles))
+	for _, r := range adminRoles {
 		set[r] = struct{}{}
 	}
 	for _, r := range p.Roles {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/zynthara/chok/v2/conf"
@@ -79,6 +80,16 @@ type StorePolicy struct {
 	// system principal or opt out per store.
 	RequirePrincipal bool `mapstructure:"require_principal"`
 
+	// AdminRoles names the principal roles that bypass the automatic
+	// OwnerScope on db.Owned models and may set OwnerID explicitly on
+	// create (imports, backfills). One list drives BOTH the query-side
+	// scope bypass and the write-side owner fill, so the two can never
+	// disagree; it is captured at store construction. Empty inherits
+	// the store package default ("admin", or whatever the deprecated
+	// store.SetDefaultAdminRoles installed). Per-store override:
+	// store.WithAdminRoles (replaces, never stacks).
+	AdminRoles []string `mapstructure:"admin_roles"`
+
 	// MaxPageSize caps List / ListFromQuery page sizes; requests above
 	// it are clamped. 0 = unlimited.
 	MaxPageSize int `mapstructure:"max_page_size"`
@@ -89,6 +100,11 @@ type StorePolicy struct {
 }
 
 func (p *StorePolicy) validate() error {
+	for i, r := range p.AdminRoles {
+		if strings.TrimSpace(r) == "" {
+			return fmt.Errorf("db: store: admin_roles[%d] must not be empty", i)
+		}
+	}
 	if p.MaxPageSize < 0 {
 		return fmt.Errorf("db: store: max_page_size must be >= 0 (0 = unlimited), got %d", p.MaxPageSize)
 	}

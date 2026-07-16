@@ -82,6 +82,7 @@ db:
   migrate: auto           # auto | versioned | off（见 §8）
   store:
     require_principal: true   # Owned 模型：无登录用户时连 Create 也拒绝（见 §6.1）
+    # admin_roles: [admin]    # 属主隔离的管理员角色（读侧旁路 + 写侧可指定 OwnerID，见 §11.1）
 ```
 
 **② 模型 + Store + 路由** —— 一个实体的完整闭环：
@@ -424,9 +425,12 @@ err := posts.BatchCreate(ctx, []*Post{p1, p2, p3})   // 整批一个事务，中
 > ——chok.yaml 的 `db.store.require_principal: true`（§2 已开）或构造时
 > `store.WithRequirePrincipal()`。HTTP 面建议开启。
 >
-> ⚠️ **管理员例外**：principal 持有管理员角色（默认 `["admin"]`，见 §11.1）时，
-> 请求体显式的 `OwnerID` 会被**尊重**（仅为空时才自动补填）——这是管理导入 /
-> 跨用户写入的既定逃生门；只有非管理员的 `OwnerID` 才被无条件覆盖。
+> ⚠️ **管理员例外**：principal 持有管理员角色时，请求体显式的 `OwnerID` 会被
+> **尊重**（仅为空时才自动补填）——这是管理导入 / 跨用户写入的既定逃生门；只有
+> 非管理员的 `OwnerID` 才被无条件覆盖。角色名单按
+> `store.WithAdminRoles`（每 Store）→ `db.store.admin_roles`（应用级）→
+> 包默认 `["admin"]` 解析，**构造期定格、读写两侧共用同一份**：跳过属主过滤
+> 的角色和可显式指定 `OwnerID` 的角色永远一致（见 §11.1）。
 
 ### 6.2 `Update`：`Fields` 与 `Set` 怎么选
 
@@ -868,7 +872,7 @@ gdb := h.Unsafe(ctx)           // 句柄级：无 scope，自己负责
 | 栏 | 行为 | 关闭方式（显式） |
 |---|---|---|
 | 属主隔离 | `Owned` 模型自动 `owner_id` 过滤；🚫 **读 / 改 / 删缺登录用户 ⇒ 拒绝（401）**。Create 缺 principal 默认 no-op，须开 `require_principal` 才拒绝（§6.1） | `WithoutOwnerScope()`（构造期 warn） |
-| 管理员越权 | principal 带管理员角色时跳过属主过滤 | 每 Store 用 `store.WithScope(store.OwnerScope("admin", ...))` 声明角色；全局 `store.SetDefaultAdminRoles(...)` 已 **Deprecated** |
+| 管理员越权 | principal 带管理员角色时跳过属主过滤，创建时可显式指定 `OwnerID`；名单**读写两侧共用**、构造期定格 | 应用级 `db.store.admin_roles`；每 Store 用 `store.WithAdminRoles("ops", ...)` 覆盖（**替换**继承名单，零参数 = 关闭全部旁路）。⚠️ 别再用 `WithScope(store.OwnerScope(...))` 调角色——scope 按 AND 组合，第二个 OwnerScope 是旁路**交集**不是覆盖；全局 `store.SetDefaultAdminRoles(...)` 已 **Deprecated**（仅作兜底默认） |
 | 防清表 | 写操作的 `Where()` 必须至少一个条件，否则 `ErrMissingConditions` | 无（走逃生门） |
 | 字段白名单 | 过滤 / 更新只认声明过的字段；托管列不能被显式列表 / alias 重开 | 无（修复走 `Unsafe`） |
 | 大文本防护 | 自动发现不把 text/blob 列放进过滤面 | tag / 显式声明可放行 |

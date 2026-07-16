@@ -468,7 +468,7 @@ func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflictColumns []string,
 	if err != nil {
 		return err
 	}
-	if err := fillOwner(ctx, obj, s.requirePrincipal); err != nil {
+	if err := fillOwner(ctx, obj, s.requirePrincipal, s.adminRoles); err != nil {
 		return err
 	}
 	for _, h := range s.hooks.beforeCreate {
@@ -533,7 +533,7 @@ func (s *Store[T]) BatchUpsert(ctx context.Context, objs []*T, conflictColumns [
 	}
 
 	for i, obj := range objs {
-		if err := fillOwner(ctx, obj, s.requirePrincipal); err != nil {
+		if err := fillOwner(ctx, obj, s.requirePrincipal, s.adminRoles); err != nil {
 			return fmt.Errorf("store: BatchUpsert item %d: %w", i, err)
 		}
 	}
