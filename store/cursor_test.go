@@ -2,10 +2,16 @@ package store
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/db"
@@ -18,13 +24,87 @@ import (
 // longer skip boundary ties, the token binds version/field/direction, and
 // the tie-breaker is the public RID — never the internal numeric key.
 
-// CursorTie deliberately has a NON-unique, possibly-empty Grp column: the
-// worst case for single-column cursors (silent row skips on ties) and for
-// the old WithCursorBy first-page heuristic (empty string treated as "no
-// cursor" → infinite loop).
+// tieStatus is a defined string type — the round-6 P1 case: GORM's
+// Field.ValueOf preserves defined types, which an exact-type switch in the
+// cursor encoder silently failed to match, truncating pagination.
+type tieStatus string
+
+// tieClock is the round-7 P1 case, modelled on gorm.io/datatypes.Time: the
+// Go underlying type is an integer (time.Duration) while the wire type is
+// a string. Deriving the token expectation from the Go type alone would
+// expect "int" and reject every legitimately issued "str" token on the
+// second page.
+type tieClock time.Duration
+
+func (c tieClock) Value() (driver.Value, error) { return time.Duration(c).String(), nil }
+
+func (c *tieClock) Scan(v any) error {
+	var s string
+	switch x := v.(type) {
+	case string:
+		s = x
+	case []byte:
+		s = string(x)
+	default:
+		return fmt.Errorf("tieClock: unsupported scan type %T", v)
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*c = tieClock(d)
+	return nil
+}
+
+// tieDynamic is a legal driver.Valuer whose concrete wire type varies by
+// value. The interface permits this: zero probes as string, while real rows
+// encode as int64. It proves a zero sample cannot by itself guarantee that
+// every boundary will match the schema-pinned cursor kind.
+type tieDynamic int64
+
+func (v tieDynamic) Value() (driver.Value, error) {
+	if v == 0 {
+		return "0", nil
+	}
+	return int64(v), nil
+}
+
+func (v *tieDynamic) Scan(src any) error {
+	var (
+		n   int64
+		err error
+	)
+	switch x := src.(type) {
+	case int64:
+		n = x
+	case string:
+		n, err = strconv.ParseInt(x, 10, 64)
+	case []byte:
+		n, err = strconv.ParseInt(string(x), 10, 64)
+	default:
+		return fmt.Errorf("tieDynamic: unsupported scan type %T", src)
+	}
+	if err != nil {
+		return err
+	}
+	*v = tieDynamic(n)
+	return nil
+}
+
+// CursorTie deliberately has a NON-unique, possibly-empty Grp column (the
+// worst case for single-column cursors and for the old WithCursorBy
+// first-page heuristic), a defined-type Status, a NARROW int8 Pri (range
+// validation), a Valuer Clock whose wire type differs from its Go type,
+// and a []byte Blob (statically underivable → rejected as a cursor field).
 type CursorTie struct {
 	db.Model
-	Grp string `json:"grp" gorm:"size:20;not null;default:''"`
+	Grp     string     `json:"grp" gorm:"size:20;not null;default:''"`
+	Status  tieStatus  `json:"status" gorm:"size:20;not null;default:''"`
+	Pri     int8       `json:"pri" gorm:"not null;default:0"`
+	Clock   tieClock   `json:"clock" gorm:"type:text;not null"`
+	Ts      int64      `json:"ts" gorm:"serializer:unixtime;type:timestamp;not null"`
+	Dynamic tieDynamic `json:"dynamic" gorm:"type:text;not null"`
+	Blob    []byte     `json:"blob"`
 }
 
 func (CursorTie) RIDPrefix() string { return "cti" }
@@ -35,7 +115,8 @@ func setupCursorTieStore(t *testing.T) *Store[CursorTie] {
 	if err := gdb.Migrate(context.Background(), db.Table(&CursorTie{})); err != nil {
 		t.Fatal(err)
 	}
-	return New[CursorTie](gdb, log.Empty(), WithQueryFields("id", "grp", "created_at"))
+	return New[CursorTie](gdb, log.Empty(),
+		WithQueryFields("id", "grp", "created_at", "status", "pri", "clock", "ts", "dynamic", "blob"))
 }
 
 // walkCursor pages through the whole store and returns every RID seen, in
@@ -195,6 +276,315 @@ func TestListWithCursor_TimeCursorTypeFidelity(t *testing.T) {
 	rids := walkCursor(t, s, "created_at", where.CursorAfter, 1)
 	if len(rids) != 3 {
 		t.Fatalf("time-keyed cursor must traverse all 3 rows, got %d", len(rids))
+	}
+}
+
+func TestListWithCursor_DefinedTypeCursorField(t *testing.T) {
+	// Round-6 P1: `type Status string` and friends fell through the exact
+	// type switch — the encoder returned "no cursor" while the lookahead
+	// had proven more rows exist, silently truncating pagination.
+	s := setupCursorTieStore(t)
+	for _, st := range []tieStatus{"a", "a", "b"} {
+		if err := s.Create(context.Background(), &CursorTie{Status: st}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var rids []string
+	cursor := ""
+	for range 10 {
+		page, err := s.ListWithCursor(context.Background(), "status", where.CursorAfter, cursor, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, it := range page.Items {
+			rids = append(rids, it.RID)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if len(rids) != 3 {
+		t.Fatalf("defined-type cursor field must traverse all 3 rows, got %d", len(rids))
+	}
+}
+
+func TestListWithCursor_UnencodableBoundaryIsError(t *testing.T) {
+	// Round-6 P1 (honesty half), tightened by round-7: a field whose token
+	// kind is not statically derivable is rejected UP FRONT — before any
+	// token is issued — as a server-side configuration error, never as an
+	// empty NextCursor that tells the client "done" while rows remain.
+	s := setupCursorTieStore(t)
+	for _, b := range [][]byte{[]byte("x"), []byte("y")} {
+		if err := s.Create(context.Background(), &CursorTie{Blob: b}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := s.ListWithCursor(context.Background(), "blob", where.CursorAfter, "", 1)
+	if err == nil {
+		t.Fatal("underivable cursor field must error, not truncate silently")
+	}
+	if errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("the rejection is a server-side condition, not client input: %v", err)
+	}
+}
+
+func TestListWithCursor_ValuerWireTypeDiffersFromGoType(t *testing.T) {
+	// Round-7 P1: tieClock's Go underlying type is int64 (time.Duration)
+	// but its wire type is string. The expectation derivation must be
+	// Valuer-aware like the encoder — the old Go-type derivation expected
+	// "int", so the framework 400-rejected the very token it issued on the
+	// previous page.
+	s := setupCursorTieStore(t)
+	for _, d := range []time.Duration{time.Hour, 2 * time.Hour, 3 * time.Hour} {
+		if err := s.Create(context.Background(), &CursorTie{Clock: tieClock(d)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var rids []string
+	cursor := ""
+	for range 10 {
+		page, err := s.ListWithCursor(context.Background(), "clock", where.CursorAfter, cursor, 1)
+		if err != nil {
+			t.Fatalf("self-issued token must be accepted: %v", err)
+		}
+		for _, it := range page.Items {
+			rids = append(rids, it.RID)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if len(rids) != 3 {
+		t.Fatalf("Valuer-typed cursor field must traverse all 3 rows, got %d", len(rids))
+	}
+
+	// The schema pin follows the WIRE kind: forging an "int" token on the
+	// clock field is rejected even though the Go underlying type is int64.
+	raw, err := json.Marshal(cursorToken{V: cursorTokenVersion, Field: "clock", Dir: string(where.CursorAfter), Kind: cursorKindInt, Value: "42", RID: "cti_x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ListWithCursor(context.Background(), "clock", where.CursorAfter,
+		base64.RawURLEncoding.EncodeToString(raw), 1)
+	if !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("forged kind on a Valuer field must be rejected, got %v", err)
+	}
+}
+
+func TestListWithCursor_NarrowIntOverflowRejected(t *testing.T) {
+	// Round-7 P2: Pri is int8. A token whose value parses as int64 but
+	// overflows the field's declared width must be a clean 400, not a
+	// driver/database conversion failure downstream.
+	s := setupCursorTieStore(t)
+	if err := s.Create(context.Background(), &CursorTie{Pri: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := json.Marshal(cursorToken{V: cursorTokenVersion, Field: "pri", Dir: string(where.CursorAfter), Kind: cursorKindInt, Value: "300", RID: "cti_x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ListWithCursor(context.Background(), "pri", where.CursorAfter,
+		base64.RawURLEncoding.EncodeToString(raw), 1)
+	if !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("int8 overflow must be rejected as ErrInvalidArgument, got %v", err)
+	}
+
+	// In-range values still work end to end.
+	if _, err := s.ListWithCursor(context.Background(), "pri", where.CursorAfter, "", 1); err != nil {
+		t.Fatalf("narrow int cursor field must still paginate: %v", err)
+	}
+}
+
+func TestListWithCursor_SerializerFieldRoundTrip(t *testing.T) {
+	// Round-8 P1: Ts is int64 with `serializer:unixtime` — GORM's
+	// Field.ValueOf wraps serializer fields into driver.Valuers, so the
+	// encoder sees time.Time while the Go type says int. The expectation
+	// probe now runs the exact encoder pipeline on a zero row, so both
+	// sides agree on "time" and self-issued tokens stay consumable.
+	s := setupCursorTieStore(t)
+	for _, ts := range []int64{1000, 2000, 3000} {
+		if err := s.Create(context.Background(), &CursorTie{Ts: ts}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var rids []string
+	cursor := ""
+	for range 10 {
+		page, err := s.ListWithCursor(context.Background(), "ts", where.CursorAfter, cursor, 1)
+		if err != nil {
+			t.Fatalf("self-issued token must be accepted: %v", err)
+		}
+		for _, it := range page.Items {
+			rids = append(rids, it.RID)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if len(rids) != 3 {
+		t.Fatalf("serializer cursor field must traverse all 3 rows, got %d", len(rids))
+	}
+
+	// The pin follows the serialized wire kind: forging "int" — the Go
+	// type's kind — is rejected.
+	raw, err := json.Marshal(cursorToken{V: cursorTokenVersion, Field: "ts", Dir: string(where.CursorAfter), Kind: cursorKindInt, Value: "2000", RID: "cti_x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ListWithCursor(context.Background(), "ts", where.CursorAfter,
+		base64.RawURLEncoding.EncodeToString(raw), 1)
+	if !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("forged Go-type kind on a serializer field must be rejected, got %v", err)
+	}
+}
+
+func TestEncodeCursorValue_NeverSignsUndecodableToken(t *testing.T) {
+	// Round-8 P2: the decoder rejects NaN, so the encoder must refuse to
+	// sign it — otherwise a NaN boundary row with a next page issues a
+	// token the client can never consume. ±Inf stays symmetric: signable
+	// and decodable.
+	if _, _, err := encodeCursorValue(math.NaN()); err == nil {
+		t.Fatal("encoder must refuse to sign NaN")
+	}
+	kind, repr, err := encodeCursorValue(math.Inf(1))
+	if err != nil {
+		t.Fatalf("+Inf must be signable: %v", err)
+	}
+	if _, err := decodeCursorValue(kind, repr, 0); err != nil {
+		t.Fatalf("everything the encoder signs must decode: %v", err)
+	}
+}
+
+func TestEncodeCursorValue_Round9RejectsNonRFC3339Time(t *testing.T) {
+	// time.Format happily emits a five-digit year, but time.Parse with the
+	// same RFC3339Nano layout rejects it. PostgreSQL can store such years,
+	// so the cursor encoder must use strict RFC3339 validation rather than
+	// sign an unusable NextCursor.
+	outsideRFC3339 := time.Date(10000, time.January, 2, 3, 4, 5, 0, time.UTC)
+	if _, _, err := encodeCursorValue(outsideRFC3339); err == nil {
+		t.Fatal("encoder must reject a time value its decoder cannot parse")
+	}
+
+	valid := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	kind, repr, err := encodeCursorValue(valid)
+	if err != nil {
+		t.Fatalf("valid RFC3339 time must encode: %v", err)
+	}
+	if _, err := decodeCursorValue(kind, repr, 0); err != nil {
+		t.Fatalf("encoded time must decode: %v", err)
+	}
+}
+
+func TestListWithCursor_Round9DynamicValuerDriftRejectedBeforeSigning(t *testing.T) {
+	// The zero row pins tieDynamic to string, while non-zero boundaries
+	// return int64. The mismatch is a server-side field-contract error: it
+	// must be caught on the issuing page, never returned as a token that the
+	// next request rejects as forged client input.
+	s := setupCursorTieStore(t)
+	for _, v := range []tieDynamic{1, 2, 3} {
+		if err := s.Create(context.Background(), &CursorTie{Dynamic: v}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := s.ListWithCursor(context.Background(), "dynamic", where.CursorAfter, "", 1)
+	if err == nil {
+		t.Fatalf("wire-kind drift must fail before signing, got cursor %q", page.NextCursor)
+	}
+	if errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("wire-kind drift is a server-side field contract, not client input: %v", err)
+	}
+	if !strings.Contains(err.Error(), "wire kind changed") {
+		t.Fatalf("expected explicit wire-kind drift error, got %v", err)
+	}
+}
+
+func TestDecodeCursorValue_FloatEdgeCases(t *testing.T) {
+	// NaN never orders — reject; ±Inf is comparable and a float8 column can
+	// genuinely hold it, so the encoder's own output must stay decodable.
+	if _, err := decodeCursorValue(cursorKindFloat, "NaN", 0); err == nil {
+		t.Fatal("NaN must be rejected")
+	}
+	if _, err := decodeCursorValue(cursorKindFloat, "+Inf", 0); err != nil {
+		t.Fatalf("+Inf must round-trip: %v", err)
+	}
+	if _, err := decodeCursorValue(cursorKindFloat, "1e400", 32); err == nil {
+		t.Fatal("float32 overflow must be rejected")
+	}
+}
+
+func TestListWithCursor_WorksWithoutIDInAllowlist(t *testing.T) {
+	// Round-6 P2: the tie-breaker binds to the model's RID column directly.
+	// A store whose allowlist never exposes "id" must still paginate.
+	gdb := setupDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&CursorTie{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[CursorTie](gdb, log.Empty(), WithQueryFields("grp"))
+
+	for _, grp := range []string{"a", "b", "c"} {
+		if err := s.Create(context.Background(), &CursorTie{Grp: grp}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := s.ListWithCursor(context.Background(), "grp", where.CursorAfter, "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || page.NextCursor == "" {
+		t.Fatalf("first page mismatch: %d items, next=%q", len(page.Items), page.NextCursor)
+	}
+	next, err := s.ListWithCursor(context.Background(), "grp", where.CursorAfter, page.NextCursor, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Items) != 1 || next.NextCursor != "" {
+		t.Fatalf("second page mismatch: %d items, next=%q", len(next.Items), next.NextCursor)
+	}
+}
+
+func TestListWithCursor_ForgedKindAndValueRejected(t *testing.T) {
+	// Round-6 P3: the token is client-forgeable, so its kind tag is never
+	// the type source of truth — the expected kind derives from the field's
+	// schema. A forged "str" on an int column previously rode into the
+	// row-value comparison as a mistyped parameter.
+	s := setupCursorTieStore(t)
+	for i, grp := range []string{"a", "b", "c"} {
+		if err := s.Create(context.Background(), &CursorTie{Grp: grp, Pri: int8(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	forge := func(t *testing.T, tok cursorToken) string {
+		t.Helper()
+		raw, err := json.Marshal(tok)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.RawURLEncoding.EncodeToString(raw)
+	}
+
+	// Kind forged to string on an int field → schema pin rejects.
+	forged := forge(t, cursorToken{V: cursorTokenVersion, Field: "pri", Dir: string(where.CursorAfter), Kind: cursorKindString, Value: "abc", RID: "cti_x"})
+	_, err := s.ListWithCursor(context.Background(), "pri", where.CursorAfter, forged, 1)
+	if !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("forged kind must be rejected as ErrInvalidArgument, got %v", err)
+	}
+
+	// Kind honest but value garbage → value parse rejects.
+	forged = forge(t, cursorToken{V: cursorTokenVersion, Field: "pri", Dir: string(where.CursorAfter), Kind: cursorKindInt, Value: "abc", RID: "cti_x"})
+	_, err = s.ListWithCursor(context.Background(), "pri", where.CursorAfter, forged, 1)
+	if !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("forged value must be rejected as ErrInvalidArgument, got %v", err)
 	}
 }
 

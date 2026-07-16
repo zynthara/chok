@@ -2,12 +2,16 @@ package store
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"time"
+
+	"gorm.io/gorm/schema"
 
 	"github.com/zynthara/chok/v2/store/where"
 )
@@ -60,35 +64,160 @@ const (
 	cursorKindBool   = "bool"
 )
 
-// encodeCursorValue splits a boundary value into (kind, repr). ok is false
-// for unsupported types — notably NULLable boundary values — in which case
-// the page simply carries no NextCursor.
-func encodeCursorValue(val any) (kind, repr string, ok bool) {
-	switch v := val.(type) {
-	case time.Time:
+var (
+	cursorTimeType   = reflect.TypeOf(time.Time{})
+	cursorValuerType = reflect.TypeOf((*driver.Valuer)(nil)).Elem()
+)
+
+// encodeCursorValue splits a boundary value into (kind, repr). The value is
+// normalised first — pointers dereferenced, driver.Valuer resolved (the
+// normalizeConflictValue helper BatchUpsert already uses) — and then matched
+// by reflect.Kind, so defined scalar types (status enums, time.Duration),
+// non-nil pointer fields and Valuer types (UUID, decimal) all encode. An
+// error means the value genuinely cannot ride a cursor: a NULL boundary or
+// an unsupported shape. Callers must surface it — a page that provably has
+// a successor (the size+1 lookahead saw it) must never swallow the failure
+// into an empty NextCursor, silently ending the client's pagination.
+func encodeCursorValue(val any) (kind, repr string, err error) {
+	resolved, err := normalizeConflictValue(val)
+	if err != nil {
+		return "", "", fmt.Errorf("normalize cursor value: %w", err)
+	}
+	if resolved == nil {
+		return "", "", fmt.Errorf("cursor boundary value is NULL; cursor fields must be NOT NULL")
+	}
+	rv := reflect.ValueOf(resolved)
+	if rv.Type() == cursorTimeType || (rv.Kind() == reflect.Struct && rv.Type().ConvertibleTo(cursorTimeType)) {
 		// Preserve the zone (RFC3339 carries the offset): SQLite stores
 		// timestamps as text in the writer's zone and compares them
 		// lexicographically, so a UTC-normalised boundary value would
 		// render differently from the stored rows and mis-compare.
 		// Postgres compares the instant, for which the offset is neutral.
-		return cursorKindTime, v.Format(time.RFC3339Nano), true
-	case string:
-		return cursorKindString, v, true
-	case bool:
-		return cursorKindBool, strconv.FormatBool(v), true
-	case int, int8, int16, int32, int64:
-		return cursorKindInt, strconv.FormatInt(reflect.ValueOf(v).Int(), 10), true
-	case uint, uint8, uint16, uint32, uint64:
-		return cursorKindUint, strconv.FormatUint(reflect.ValueOf(v).Uint(), 10), true
-	case float32, float64:
-		return cursorKindFloat, strconv.FormatFloat(reflect.ValueOf(v).Float(), 'g', -1, 64), true
+		t := rv.Convert(cursorTimeType).Interface().(time.Time)
+		encoded, err := t.MarshalText()
+		if err != nil {
+			// Format would silently emit timestamps that Parse cannot consume
+			// (for example a five-digit year or a sub-minute zone offset).
+			// MarshalText applies RFC3339's strict representability checks, so
+			// the encoder never signs a time token its decoder rejects.
+			return "", "", fmt.Errorf("cursor boundary time is not RFC3339-representable: %w", err)
+		}
+		return cursorKindTime, string(encoded), nil
 	}
-	return "", "", false
+	switch rv.Kind() {
+	case reflect.String:
+		return cursorKindString, rv.String(), nil
+	case reflect.Bool:
+		return cursorKindBool, strconv.FormatBool(rv.Bool()), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return cursorKindInt, strconv.FormatInt(rv.Int(), 10), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return cursorKindUint, strconv.FormatUint(rv.Uint(), 10), nil
+	case reflect.Float32, reflect.Float64:
+		f := rv.Float()
+		// The decoder rejects NaN as unorderable, so signing one would
+		// issue a token the next page cannot consume. Refuse at the source.
+		if math.IsNaN(f) {
+			return "", "", fmt.Errorf("cursor boundary value is NaN, which is not orderable")
+		}
+		return cursorKindFloat, strconv.FormatFloat(f, 'g', -1, 64), nil
+	}
+	return "", "", fmt.Errorf("cursor boundary value of type %T is not a supported scalar", val)
+}
+
+// cursorFieldSpec pins what a cursor field's token must carry: the value
+// kind plus the integer/float bit width used for range validation. bits 0
+// means no numeric width applies; decode defaults it to 64 defensively.
+type cursorFieldSpec struct {
+	kind string
+	bits int
+}
+
+// cursorSpecForSchemaField derives the token expectation for a schema
+// field by running the SAME pipeline the encoder runs on real rows: a
+// zero-value row through GORM's Field.ValueOf — which wraps serializer
+// fields into driver.Valuers — and the encoder's normalization. Anything
+// less lets the framework issue tokens its own decoder rejects; two
+// in-tree traps prove it: gorm.io/datatypes.Time (Go int64, wire string)
+// and `serializer:unixtime` (Go int64, wire time.Time).
+//
+// When the zero probe is inconclusive — a nil sample (sql.Null* zero
+// values are NULL, pointer fields are nil), an error or a panic — falling
+// back to the raw Go type is safe only when nothing rewrites values on
+// the way out: with a serializer or Valuer in play the encoder WILL
+// transform real values, so such fields are rejected outright rather
+// than pinned to a kind the issued tokens would contradict. ListWithCursor
+// surfaces the rejection up front — signing a token the next page cannot
+// consume, or skipping forged-kind validation, are both worse than a loud
+// configuration error.
+func cursorSpecForSchemaField(modelType reflect.Type, field *schema.Field) (cursorFieldSpec, bool) {
+	if sample, ok := cursorZeroProbe(modelType, field); ok {
+		// The sample IS the wire shape; a non-scalar sample (e.g. a JSON
+		// serializer's []byte) rejects the field rather than falling back.
+		return cursorScalarSpec(reflect.TypeOf(sample))
+	}
+	if field.Serializer != nil {
+		return cursorFieldSpec{}, false
+	}
+	t := field.FieldType
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Implements(cursorValuerType) || reflect.PointerTo(t).Implements(cursorValuerType) {
+		return cursorFieldSpec{}, false
+	}
+	return cursorScalarSpec(t)
+}
+
+// cursorZeroProbe runs a zero-value row through Field.ValueOf and the
+// encoder's normalization, returning the wire sample. Defensive: exotic
+// Valuer or serializer implementations may error — or panic — on zero
+// receivers, all of which mean "not statically derivable".
+func cursorZeroProbe(modelType reflect.Type, field *schema.Field) (sample any, ok bool) {
+	defer func() {
+		if recover() != nil {
+			sample, ok = nil, false
+		}
+	}()
+	zeroRow := reflect.New(modelType).Elem()
+	val, _ := field.ValueOf(context.Background(), zeroRow)
+	resolved, err := normalizeConflictValue(val)
+	if err != nil || resolved == nil {
+		return nil, false
+	}
+	return resolved, true
+}
+
+// cursorScalarSpec classifies a plain scalar type into its token kind and
+// declared bit width.
+func cursorScalarSpec(t reflect.Type) (cursorFieldSpec, bool) {
+	if t == cursorTimeType || (t.Kind() == reflect.Struct && t.ConvertibleTo(cursorTimeType)) {
+		return cursorFieldSpec{kind: cursorKindTime}, true
+	}
+	switch t.Kind() {
+	case reflect.String:
+		return cursorFieldSpec{kind: cursorKindString}, true
+	case reflect.Bool:
+		return cursorFieldSpec{kind: cursorKindBool}, true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return cursorFieldSpec{kind: cursorKindInt, bits: t.Bits()}, true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return cursorFieldSpec{kind: cursorKindUint, bits: t.Bits()}, true
+	case reflect.Float32, reflect.Float64:
+		return cursorFieldSpec{kind: cursorKindFloat, bits: t.Bits()}, true
+	}
+	return cursorFieldSpec{}, false
 }
 
 // decodeCursorValue is encodeCursorValue's inverse: it rebuilds the typed
-// boundary value the SQL comparison needs.
-func decodeCursorValue(kind, repr string) (any, error) {
+// boundary value the SQL comparison needs. bits is the field's declared
+// integer/float width (0 = unknown, validate at 64) — a forged value that
+// parses as int64 but overflows an int8 column would otherwise surface as
+// a driver/database conversion failure (a 500) instead of a clean 400.
+func decodeCursorValue(kind, repr string, bits int) (any, error) {
+	if bits == 0 {
+		bits = 64
+	}
 	switch kind {
 	case cursorKindTime:
 		v, err := time.Parse(time.RFC3339Nano, repr)
@@ -105,21 +234,27 @@ func decodeCursorValue(kind, repr string) (any, error) {
 		}
 		return v, nil
 	case cursorKindInt:
-		v, err := strconv.ParseInt(repr, 10, 64)
+		v, err := strconv.ParseInt(repr, 10, bits)
 		if err != nil {
 			return nil, fmt.Errorf("bad int value: %w", err)
 		}
 		return v, nil
 	case cursorKindUint:
-		v, err := strconv.ParseUint(repr, 10, 64)
+		v, err := strconv.ParseUint(repr, 10, bits)
 		if err != nil {
 			return nil, fmt.Errorf("bad uint value: %w", err)
 		}
 		return v, nil
 	case cursorKindFloat:
-		v, err := strconv.ParseFloat(repr, 64)
+		v, err := strconv.ParseFloat(repr, bits)
 		if err != nil {
 			return nil, fmt.Errorf("bad float value: %w", err)
+		}
+		// NaN never orders — a keyset predicate against it is undefined
+		// everywhere. ±Inf stays: it is comparable, and a float8 column can
+		// genuinely hold it (the encoder round-trips it).
+		if math.IsNaN(v) {
+			return nil, fmt.Errorf("bad float value: NaN is not orderable")
 		}
 		return v, nil
 	}
@@ -145,10 +280,17 @@ func encodeCursor(field string, direction where.CursorDirection, kind, value, ri
 }
 
 // decodeCursor parses and validates an opaque token against the request's
-// field and direction. Every failure wraps where.ErrInvalidParam — cursors
-// come from clients, and mapQueryError turns this into the invalid-argument
-// 400 the rest of the query surface produces.
-func decodeCursor(token, field string, direction where.CursorDirection) (fieldValue any, rid string, err error) {
+// field and direction. spec is the field's schema-derived token
+// expectation (ListWithCursor rejects fields without one up front): the
+// token is client-forgeable, so its own kind tag is never the source of
+// type truth — a forged "str" on an integer column would otherwise ride
+// into the row-value comparison as a mistyped parameter (an error on
+// Postgres, silently wrong ordering elsewhere) — and the value is
+// range-validated at the field's declared width. Every failure wraps
+// where.ErrInvalidParam — cursors come from clients, and mapQueryError
+// turns this into the invalid-argument 400 the rest of the query surface
+// produces.
+func decodeCursor(token, field string, direction where.CursorDirection, spec cursorFieldSpec) (fieldValue any, rid string, err error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: invalid cursor: not base64url", where.ErrInvalidParam)
@@ -169,7 +311,10 @@ func decodeCursor(token, field string, direction where.CursorDirection) (fieldVa
 	if tok.RID == "" {
 		return nil, "", fmt.Errorf("%w: invalid cursor: missing tie-breaker", where.ErrInvalidParam)
 	}
-	value, err := decodeCursorValue(tok.Kind, tok.Value)
+	if tok.Kind != spec.kind {
+		return nil, "", fmt.Errorf("%w: invalid cursor: value kind %q does not match field %q (%s expected)", where.ErrInvalidParam, tok.Kind, field, spec.kind)
+	}
+	value, err := decodeCursorValue(tok.Kind, tok.Value, spec.bits)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: invalid cursor: %v", where.ErrInvalidParam, err)
 	}
@@ -178,29 +323,47 @@ func decodeCursor(token, field string, direction where.CursorDirection) (fieldVa
 
 // encodeItemCursor builds the NextCursor token from the last item included
 // in a page: the sort field's boundary value plus the row's public RID.
-// Returns the empty string — "no more pages" from the client's view — when
-// the boundary value's type cannot round-trip (e.g. a NULLable column);
-// cursor fields should be NOT NULL.
-func (s *Store[T]) encodeItemCursor(item T, field string, direction where.CursorDirection) string {
+// It is only called when the size+1 lookahead has PROVEN a next page
+// exists, so every failure is returned as an error — an empty NextCursor
+// here would tell the client "done" while rows remain. The failures are
+// server-side conditions (a NULL boundary value, a field type the token
+// cannot carry, a model without RID), not client input, so they surface
+// as plain 500-class errors.
+func (s *Store[T]) encodeItemCursor(item T, field string, direction where.CursorDirection, spec cursorFieldSpec) (string, error) {
 	col, err := where.ResolveField(s.queryFieldMap, field)
-	if err != nil || s.modelSchema == nil {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("store: ListWithCursor: resolve cursor field %q: %w", field, err)
+	}
+	if s.modelSchema == nil {
+		return "", fmt.Errorf("store: ListWithCursor: model schema unavailable")
 	}
 	fieldSchema := s.modelSchema.LookUpField(col)
 	ridSchema := s.modelSchema.LookUpField("RID")
 	if fieldSchema == nil || ridSchema == nil {
-		return ""
+		return "", fmt.Errorf("store: ListWithCursor: cursor field %q or RID missing from model schema", field)
 	}
 	rv := reflect.ValueOf(item)
 	val, _ := fieldSchema.ValueOf(context.Background(), rv)
 	ridVal, _ := ridSchema.ValueOf(context.Background(), rv)
 	rid, _ := ridVal.(string)
 	if rid == "" {
-		return ""
+		return "", fmt.Errorf("store: ListWithCursor: boundary row carries no RID")
 	}
-	kind, repr, ok := encodeCursorValue(val)
-	if !ok {
-		return ""
+	kind, repr, err := encodeCursorValue(val)
+	if err != nil {
+		return "", fmt.Errorf("store: ListWithCursor: cursor field %q: %w", field, err)
 	}
-	return encodeCursor(field, direction, kind, repr, rid)
+	// A zero-value probe can observe a Valuer/serializer's usual wire
+	// shape, but driver.Valuer does not promise that the concrete Value type
+	// stays constant for every row. Refuse an actual value that drifts from
+	// the schema pin before signing it; otherwise the next request would
+	// reject the framework's own token. Re-decoding also catches same-kind
+	// drift outside the sampled width/domain (for example int8 → int64(300)).
+	if kind != spec.kind {
+		return "", fmt.Errorf("store: ListWithCursor: cursor field %q wire kind changed from zero-probe %q to boundary value %q; serializer/driver.Valuer cursor fields must keep a stable wire kind", field, spec.kind, kind)
+	}
+	if _, err := decodeCursorValue(kind, repr, spec.bits); err != nil {
+		return "", fmt.Errorf("store: ListWithCursor: cursor field %q encoded a boundary outside its schema-derived cursor domain: %w", field, err)
+	}
+	return encodeCursor(field, direction, kind, repr, rid), nil
 }

@@ -564,20 +564,23 @@ func WithCursorBy(field string, direction CursorDirection, fieldCursor any, idCu
 	}
 }
 
-// WithCursorByField is the allowlist-resolved composite-cursor variant of
-// WithCursorBy: both the sort field and the tie-breaker field resolve
-// through the query allowlist, so the pair can ride public field names —
-// Store.ListWithCursor pairs the caller's sort field with "id", which the
-// standing id→rid alias resolves to the public RID column, keeping the
-// internal numeric key out of client-visible cursors.
+// WithCursorByField is the composite-cursor variant whose tie-breaker is a
+// caller-chosen COLUMN: the sort field resolves through the query
+// allowlist (it is client-facing input), while tieColumn is taken as a
+// database column name — identifier-validated but deliberately NOT
+// allowlist-resolved. The tie-breaker is infrastructure the trusted caller
+// picks, not client input: Store.ListWithCursor binds it to the model's
+// RID column directly, so cursor pagination works on stores that never
+// exposed "id" as a queryable field and cannot be repointed by a public
+// column alias.
 //
-// tieField MUST resolve to a strictly unique NOT NULL column; it is what
-// makes rows sharing the same sort value deterministically ordered and
-// never skipped at page boundaries. A nil fieldCursor fetches the first
-// page (ordered by both columns, so page one and page two agree on tie
-// order); any non-nil value — the empty string included — is a real
-// cursor position.
-func WithCursorByField(field string, direction CursorDirection, fieldCursor any, tieField string, tieCursor any, size int) Option {
+// tieColumn MUST be a strictly unique NOT NULL column; it is what makes
+// rows sharing the same sort value deterministically ordered and never
+// skipped at page boundaries. A nil fieldCursor fetches the first page
+// (ordered by both columns, so page one and page two agree on tie order);
+// any non-nil value — the empty string included — is a real cursor
+// position.
+func WithCursorByField(field string, direction CursorDirection, fieldCursor any, tieColumn string, tieCursor any, size int) Option {
 	return func(db *gorm.DB, cfg *Config, fm map[string]string) (*gorm.DB, error) {
 		cfg.HasPage = true
 		cfg.HasCursor = true
@@ -588,9 +591,9 @@ func WithCursorByField(field string, direction CursorDirection, fieldCursor any,
 		if err != nil {
 			return nil, err
 		}
-		tieCol, err := resolveField(fm, tieField)
-		if err != nil {
-			return nil, err
+		tieCol := tieColumn
+		if !isSafeColumnIdent(tieCol) {
+			return nil, fmt.Errorf("%w: tie column %q is not a safe SQL identifier", ErrUnknownField, tieCol)
 		}
 		if size < 1 {
 			return nil, fmt.Errorf("%w: cursor size %d, must be >= 1", ErrInvalidParam, size)

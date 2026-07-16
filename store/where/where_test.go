@@ -344,24 +344,26 @@ func TestWithCursorBy_NilCursorIsFirstPage(t *testing.T) {
 	}
 }
 
-// WithCursorByField resolves BOTH columns through the allowlist — the tie
-// field included, so "id" rides the standing id→rid alias when the store
-// maps it.
-func TestWithCursorByField_ResolvesTieFieldThroughAllowlist(t *testing.T) {
+// WithCursorByField takes the tie-breaker as a raw column: the sort field
+// is client-facing and resolves through the allowlist, while the tie column
+// is trusted-caller infrastructure (Store binds the model's RID column) —
+// deliberately NOT allowlist-resolved, so stores that never exposed "id"
+// still paginate. It is identifier-validated instead.
+func TestWithCursorByField_TieColumnIsDirectAndValidated(t *testing.T) {
 	db := testDB(t)
-	fm := map[string]string{"grp": "grp", "id": "rid"}
+	fm := map[string]string{"grp": "grp"} // note: no "id" in the allowlist
 
-	got, err := WithCursorByField("grp", CursorAfter, "a", "id", "cti_x", 2)(db.Table("ties"), &Config{}, fm)
+	got, err := WithCursorByField("grp", CursorAfter, "a", "rid", "cti_x", 2)(db.Table("ties"), &Config{}, fm)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stmt := got.Session(&gorm.Session{DryRun: true}).Find(&[]map[string]any{}).Statement
 	if !contains(stmt.SQL.String(), "(grp, rid) > (?, ?)") {
-		t.Fatalf("tie field must resolve through the allowlist (id→rid), got: %s", stmt.SQL.String())
+		t.Fatalf("tie column must bind directly without allowlist resolution, got: %s", stmt.SQL.String())
 	}
 
-	if _, err := WithCursorByField("grp", CursorAfter, "a", "nope", "x", 2)(db, &Config{}, fm); !errors.Is(err, ErrUnknownField) {
-		t.Fatalf("undeclared tie field must be rejected, got %v", err)
+	if _, err := WithCursorByField("grp", CursorAfter, "a", "rid; DROP TABLE ties", "x", 2)(db, &Config{}, fm); !errors.Is(err, ErrUnknownField) {
+		t.Fatalf("unsafe tie identifier must be rejected, got %v", err)
 	}
 }
 

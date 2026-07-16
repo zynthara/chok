@@ -357,8 +357,18 @@ cp, err := posts.ListWithCursor(ctx, "created_at", where.CursorAfter, cursor, 20
 > 绑定格式版本 / 字段 / 方向——换任何一样，旧令牌返回 400 而不是从错误位置
 > 静默继续；过滤条件**不**绑定（复用旧令牌换 filter 得不到 filter 本身给不了
 > 的东西，scope 照常生效），跨页保持 filter 稳定是调用方的契约。客户端**不得
-> 解析或构造**令牌；游标列应为 NOT NULL（NULL 边界值会提前结束分页）。服务端
-> 内部自组 keyset 时用 `where.WithCursorBy` / `WithCursorByField`。
+> 解析或构造**令牌——Kind 期望由**零值行跑编码器完整管线**推导（serializer /
+> `driver.Valuer` 全都按 **wire 类型**定 Kind：`datatypes.Time` 是 str、
+> `serializer:unixtime` 的 int64 是 time），伪造类型标签、窄整数越界（如
+> int8 列塞 int64）、NaN 一律 400。游标列必须 NOT NULL 且 Kind **静态可推
+> 导**：普通/defined 标量、其指针、零值探针能给出标量 wire 样本的
+> serializer/`driver.Valuer` 字段；后两者还必须让所有值保持稳定的 wire Kind。
+> `sql.Null*`（零值即 NULL）与 `[]byte` 这类推不出的字段**入口即拒**；实际边界
+> 在签发前会按推导出的 Kind / 位宽 / 值域再次自校验，动态 Valuer 的类型漂移、
+> NaN、RFC3339 无法表示的时间都作为服务端字段契约错误拒签，绝不返回下一页
+> 无法消费的令牌。确认还有下一页时遇到 NULL 边界值同样会**报错**而非静默截断。
+> tie-breaker 直接绑定模型的 RID 列，**不要求**把 `id` 暴露进查询白名单。
+> 服务端内部自组 keyset 时用 `where.WithCursorBy` / `WithCursorByField`。
 
 把列表页直接挂成路由只要一行（blog 在用）：
 

@@ -335,11 +335,19 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
 - `store.WithRowsAffected(&n)` 同时实现 UpdateOption/DeleteOption，
   观测 Where locator 批量写的命中行数；纯观测，不改变语义。
 - **游标分页钦定形态**：`ListWithCursor` = 复合 keyset `(field, rid)` +
-  不透明令牌（base64url(JSON)，绑定格式版本/字段/方向、值带类型标签保真；
-  tie-breaker 用公开 RID——数字主键不进任何客户端可见令牌；filter 不绑定，
-  跨页稳定是调用方契约）。DSL 级 `WithCursor`（单列，等值边界会跳行）/
-  `WithCursorBy`（内部 id tie）/`WithCursorByField`（tie 列过白名单）保留
-  为可信服务端底层。
+  不透明令牌（base64url(JSON)，绑定格式版本/字段/方向；值带类型标签保真，
+  Kind 期望由**零值行跑编码器完整管线**推导（`Field.ValueOf` 含 serializer
+	  包装 + Valuer 解析——`datatypes.Time`、`serializer:unixtime` 这类 wire ≠
+	  Go 底层类型的字段按 wire 定 Kind），令牌可伪造，类型事实源永远是 schema，
+	  解码按字段位宽做值域校验并拒绝 NaN（编码端对 NaN 同样拒签——编码器绝不
+	  签发解码器不认的令牌）；Kind 静态推不出的字段入口即拒，serializer/Valuer
+	  还须保证所有值的 wire Kind 稳定；每个实际边界在签发前按 schema pin 复验
+	  Kind / 位宽 / 值域，动态类型漂移、NaN、RFC3339 不可表示时间均拒签；
+	  tie-breaker 直接绑定模型 RID 列，不依赖 `id` 是否进白名单，数字主键不进任何
+	  客户端可见令牌；filter 不绑定，跨页稳定是调用方契约；lookahead 确认有下一
+	  页时 NULL 边界值报错，绝不静默截断）。DSL 级 `WithCursor`（单列，等值边界会跳行）/
+  `WithCursorBy`（内部 id tie）/`WithCursorByField`（tie 列直连 +
+  identifier 校验）保留为可信服务端底层。
 - **分页信封同源**：`where.Config` 产出 `PageInfo`（生效
   page/size/offset，钳制时 offset 按生效 size 重算，保持三者自洽）；
   `Page[T].Meta` 与 `ListFromQuery` 第三返回值携带它，

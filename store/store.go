@@ -168,6 +168,7 @@ type Store[T db.Modeler] struct {
 	queryFieldMap    map[string]string // filter + order
 	updateFieldMap   map[string]string // update SET columns
 	modelSchema      *schema.Schema    // GORM's authoritative field/column mapping
+	ridColumn        string            // RID's DB column — cursor tie-breaker, independent of the query allowlist
 	soft             bool              // true if T embeds SoftDeleteModel
 	scopes           []ScopeFunc
 	defaultPageSize  int      // default page size for ListFromQuery (0 = where.DefaultPageSize)
@@ -559,6 +560,16 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 	}
 	modelSchema := stmt.Schema
 
+	// Resolve the RID column once: ListWithCursor's tie-breaker binds to it
+	// directly — a store that doesn't expose "id" in its query allowlist
+	// (or aliases it elsewhere) must still paginate. ValidateModel above
+	// guarantees the db.Model embed, so the field always parses.
+	ridField := modelSchema.LookUpField("RID")
+	if ridField == nil || ridField.DBName == "" {
+		panic(fmt.Sprintf("store.New: %s has no RID column in its parsed schema", t.Name()))
+	}
+	ridColumn := ridField.DBName
+
 	cfg := &storeConfig{}
 	for _, o := range opts {
 		o(cfg)
@@ -788,6 +799,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		queryFieldMap:    queryFieldMap,
 		updateFieldMap:   updateFieldMap,
 		modelSchema:      modelSchema,
+		ridColumn:        ridColumn,
 		soft:             db.IsSoftDeleteModel(model),
 		scopes:           scopes,
 		defaultPageSize:  cfg.defaultPageSize,
@@ -1215,9 +1227,22 @@ type CursorPage[T any] struct {
 //
 // The keyset is composite — (cursorField, rid) — so non-unique sort
 // columns (created_at and friends) never skip rows that share a boundary
-// value: the public RID breaks ties. cursorField is validated against the
-// query whitelist and should be a NOT NULL column; a NULL boundary value
-// ends pagination early (empty NextCursor).
+// value: the public RID breaks ties. The tie-breaker binds to the model's
+// RID column directly, independent of the query allowlist — stores that
+// don't expose "id" (or alias it elsewhere) paginate all the same.
+// cursorField is validated against the query whitelist and MUST be a
+// NOT NULL column whose token kind is statically derivable: plain or
+// defined scalars (strings, ints, uints, floats, bools, time.Time),
+// pointers to those, and serializer or driver.Valuer fields whose
+// zero-value probe yields a scalar wire sample — the probe runs the
+// encoder's exact pipeline, so gorm.io/datatypes.Time (wire string) and
+// `serializer:unixtime` fields (wire time.Time) work, while sql.Null*
+// wrappers (zero value is NULL) and []byte are rejected up front. Custom
+// serializer/driver.Valuer fields must keep that wire kind stable for all
+// values; a runtime drift from the zero probe is rejected before signing.
+// When the lookahead has proven a next page exists, a NULL, NaN or
+// non-RFC3339-representable time boundary returns an error rather than
+// silently ending — or poisoning — the client's pagination.
 //
 // size is the max items per page. Additional opts may add FILTERS ONLY:
 // the cursor owns ORDER BY, LIMIT and the size+1 lookahead, so ordering,
@@ -1260,6 +1285,25 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	if direction != where.CursorAfter && direction != where.CursorBefore {
 		return nil, mapQueryError(fmt.Errorf("%w: cursor direction must be 'after' or 'before'", where.ErrInvalidParam))
 	}
+	// Resolve the cursor field's token expectation up front, with the same
+	// Valuer-aware classification the encoder uses. An unknown field keeps
+	// the invalid-argument mapping the option path produces; a field whose
+	// token kind cannot be derived statically is rejected before any token
+	// is issued or accepted — signing a token the next page cannot consume,
+	// or skipping forged-kind validation, are both worse than a loud
+	// configuration error.
+	col, err := where.ResolveField(s.queryFieldMap, cursorField)
+	if err != nil {
+		return nil, mapQueryError(err)
+	}
+	fieldSchema := s.modelSchema.LookUpField(col)
+	if fieldSchema == nil {
+		return nil, fmt.Errorf("store: ListWithCursor: cursor field %q missing from model schema", cursorField)
+	}
+	spec, ok := cursorSpecForSchemaField(s.modelSchema.ModelType, fieldSchema)
+	if !ok {
+		return nil, fmt.Errorf("store: ListWithCursor: field %q (type %s) cannot key a cursor: its token kind is not statically derivable (unsupported scalar shape, or a serializer/driver.Valuer whose zero-value probe yields no scalar wire sample); pick a NOT NULL scalar cursor field", cursorField, fieldSchema.FieldType)
+	}
 	// Fetch size+1 to detect whether there's a next page.
 	fetchSize := size + 1
 	allOpts := make([]where.Option, 0, len(opts)+3)
@@ -1278,19 +1322,22 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	// caller WithMaxPageSize, precisely because a tighter cap would clip the
 	// lookahead and end pagination with rows remaining.
 	allOpts = append(allOpts, where.WithMaxPageSize(fetchSize))
-	// Decode the opaque token (empty = first page) and ride the composite
-	// keyset: the "id" tie field resolves through the standing id→rid
-	// alias, so the tie-breaker in SQL — and in the token — is the public
-	// RID, never the internal numeric key.
+	// Decode the opaque token (empty = first page). The token's kind tag is
+	// client-forgeable — the schema-derived spec from the gate above is the
+	// type source of truth, and the value is range-validated at the field's
+	// declared width.
 	var fieldCursor, tieCursor any
 	if cursor != "" {
-		value, rid, err := decodeCursor(cursor, cursorField, direction)
+		value, rid, err := decodeCursor(cursor, cursorField, direction, spec)
 		if err != nil {
 			return nil, mapQueryError(err)
 		}
 		fieldCursor, tieCursor = value, rid
 	}
-	allOpts = append(allOpts, where.WithCursorByField(cursorField, direction, fieldCursor, "id", tieCursor, fetchSize))
+	// The tie-breaker is the store's RID column, bound directly — never
+	// through the public allowlist, which may not expose "id" at all or
+	// may alias it to another column.
+	allOpts = append(allOpts, where.WithCursorByField(cursorField, direction, fieldCursor, s.ridColumn, tieCursor, fetchSize))
 
 	result, err := s.listInternalWithMaxPageSize(ctx, nil, allOpts, 0)
 	if err != nil {
@@ -1300,7 +1347,13 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	page := &CursorPage[T]{Items: result.Items}
 	if len(result.Items) > size {
 		page.Items = result.Items[:size]
-		page.NextCursor = s.encodeItemCursor(result.Items[size-1], cursorField, direction)
+		// The lookahead proved a next page exists — an encode failure must
+		// surface, not degrade into "no more pages".
+		next, err := s.encodeItemCursor(result.Items[size-1], cursorField, direction, spec)
+		if err != nil {
+			return nil, err
+		}
+		page.NextCursor = next
 	}
 	return page, nil
 }
