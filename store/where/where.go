@@ -507,14 +507,19 @@ func WithCursor(field string, direction CursorDirection, cursor any, size int) O
 // still deterministically ordered and never skipped at page boundaries.
 // Use this for non-unique sort columns like `created_at`.
 //
-// cursor encodes the last row's (field, id) pair. When both are nil,
-// the first page is fetched (no cursor WHERE). The SQL is:
+// cursor encodes the last row's (field, id) pair. A nil fieldCursor
+// fetches the first page (no cursor WHERE, ordered by both columns);
+// any non-nil value — the empty string included, which is a legitimate
+// value for string columns — is a real cursor position. The SQL is:
 //
 //	WHERE (field, id) > (?, ?) ORDER BY field ASC, id ASC LIMIT size   // CursorAfter
 //	WHERE (field, id) < (?, ?) ORDER BY field DESC, id DESC LIMIT size // CursorBefore
 //
 // This relies on row-value comparison support, which all major SQL
-// engines (MySQL 8+, PostgreSQL, SQLite 3.15+) implement.
+// engines (MySQL 8+, PostgreSQL, SQLite 3.15+) implement. The id
+// tie-breaker is the internal numeric key, making this a server-side
+// tool; cursors exposed to clients ride Store.ListWithCursor, whose
+// tie-breaker is the public RID (see WithCursorByField).
 func WithCursorBy(field string, direction CursorDirection, fieldCursor any, idCursor uint, size int) Option {
 	return func(db *gorm.DB, cfg *Config, fm map[string]string) (*gorm.DB, error) {
 		cfg.HasPage = true
@@ -533,7 +538,10 @@ func WithCursorBy(field string, direction CursorDirection, fieldCursor any, idCu
 			return nil, fmt.Errorf("%w: cursor size %d exceeds MaxPageSize %d", ErrInvalidParam, size, MaxPageSize)
 		}
 		cfg.limit = size
-		firstPage := fieldCursor == nil || fieldCursor == "" || idCursor == 0
+		// Only nil means "first page". Treating the empty string or id 0 as
+		// first-page markers (the old heuristic) turned a legitimate
+		// empty-string boundary value into an infinite pagination loop.
+		firstPage := fieldCursor == nil
 		switch direction {
 		case CursorAfter:
 			if firstPage {
@@ -548,6 +556,64 @@ func WithCursorBy(field string, direction CursorDirection, fieldCursor any, idCu
 			} else {
 				db = db.Where("("+col+", id) < (?, ?)", fieldCursor, idCursor).
 					Order(col + " DESC").Order("id DESC").Limit(size)
+			}
+		default:
+			return nil, fmt.Errorf("%w: cursor direction must be 'after' or 'before'", ErrInvalidParam)
+		}
+		return db, nil
+	}
+}
+
+// WithCursorByField is the allowlist-resolved composite-cursor variant of
+// WithCursorBy: both the sort field and the tie-breaker field resolve
+// through the query allowlist, so the pair can ride public field names —
+// Store.ListWithCursor pairs the caller's sort field with "id", which the
+// standing id→rid alias resolves to the public RID column, keeping the
+// internal numeric key out of client-visible cursors.
+//
+// tieField MUST resolve to a strictly unique NOT NULL column; it is what
+// makes rows sharing the same sort value deterministically ordered and
+// never skipped at page boundaries. A nil fieldCursor fetches the first
+// page (ordered by both columns, so page one and page two agree on tie
+// order); any non-nil value — the empty string included — is a real
+// cursor position.
+func WithCursorByField(field string, direction CursorDirection, fieldCursor any, tieField string, tieCursor any, size int) Option {
+	return func(db *gorm.DB, cfg *Config, fm map[string]string) (*gorm.DB, error) {
+		cfg.HasPage = true
+		cfg.HasCursor = true
+		if cfg.countOnly {
+			return db, nil
+		}
+		col, err := resolveField(fm, field)
+		if err != nil {
+			return nil, err
+		}
+		tieCol, err := resolveField(fm, tieField)
+		if err != nil {
+			return nil, err
+		}
+		if size < 1 {
+			return nil, fmt.Errorf("%w: cursor size %d, must be >= 1", ErrInvalidParam, size)
+		}
+		if size > MaxPageSize {
+			return nil, fmt.Errorf("%w: cursor size %d exceeds MaxPageSize %d", ErrInvalidParam, size, MaxPageSize)
+		}
+		cfg.limit = size
+		firstPage := fieldCursor == nil
+		switch direction {
+		case CursorAfter:
+			if firstPage {
+				db = db.Order(col + " ASC").Order(tieCol + " ASC").Limit(size)
+			} else {
+				db = db.Where("("+col+", "+tieCol+") > (?, ?)", fieldCursor, tieCursor).
+					Order(col + " ASC").Order(tieCol + " ASC").Limit(size)
+			}
+		case CursorBefore:
+			if firstPage {
+				db = db.Order(col + " DESC").Order(tieCol + " DESC").Limit(size)
+			} else {
+				db = db.Where("("+col+", "+tieCol+") < (?, ?)", fieldCursor, tieCursor).
+					Order(col + " DESC").Order(tieCol + " DESC").Limit(size)
 			}
 		default:
 			return nil, fmt.Errorf("%w: cursor direction must be 'after' or 'before'", ErrInvalidParam)

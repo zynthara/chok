@@ -334,6 +334,12 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   两侧白名单都在场，超过 `where.MaxInList`（500）由调用方分块。
 - `store.WithRowsAffected(&n)` 同时实现 UpdateOption/DeleteOption，
   观测 Where locator 批量写的命中行数；纯观测，不改变语义。
+- **游标分页钦定形态**：`ListWithCursor` = 复合 keyset `(field, rid)` +
+  不透明令牌（base64url(JSON)，绑定格式版本/字段/方向、值带类型标签保真；
+  tie-breaker 用公开 RID——数字主键不进任何客户端可见令牌；filter 不绑定，
+  跨页稳定是调用方契约）。DSL 级 `WithCursor`（单列，等值边界会跳行）/
+  `WithCursorBy`（内部 id tie）/`WithCursorByField`（tie 列过白名单）保留
+  为可信服务端底层。
 - **分页信封同源**：`where.Config` 产出 `PageInfo`（生效
   page/size/offset，钳制时 offset 按生效 size 重算，保持三者自洽）；
   `Page[T].Meta` 与 `ListFromQuery` 第三返回值携带它，

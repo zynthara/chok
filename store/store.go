@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
@@ -1193,8 +1192,9 @@ type Page[T any] struct {
 }
 
 // CursorPage is the result of a cursor-based paginated query. NextCursor
-// is the value to pass as the cursor argument for the next page; empty
-// string means no more pages. Items are guaranteed non-nil.
+// is the OPAQUE token to pass back verbatim as the cursor argument for the
+// next page; empty string means no more pages. Clients must not parse or
+// construct it — see ListWithCursor. Items are guaranteed non-nil.
 type CursorPage[T any] struct {
 	Items      []T    `json:"items"`
 	NextCursor string `json:"next_cursor,omitempty"`
@@ -1204,22 +1204,37 @@ type CursorPage[T any] struct {
 // pagination, cursor pagination is O(1) regardless of page depth, making
 // it suitable for mobile infinite-scroll and public APIs.
 //
-// cursorField is validated against the query whitelist. cursorValue is the
-// last-seen value from the previous page (empty string or nil for the
-// first page). size is the max items per page. Additional opts may add
-// FILTERS ONLY: the cursor owns ORDER BY, LIMIT and the size+1 lookahead,
-// so ordering, pagination, count and page-size-cap options (WithOrder /
-// WithPage / WithLimit / WithOffset / WithCount / WithMaxPageSize / nested
-// cursors) are rejected as apierr.ErrInvalidArgument — a stray order breaks
-// the keyset invariant, an OFFSET reintroduces the drift keyset pagination
+// cursor is OPAQUE: pass the empty string for the first page, then feed
+// CursorPage.NextCursor back verbatim for each following page. Clients
+// must not parse, build or store meaning into the token — it binds the
+// pagination contract (format version, field, direction) and is rejected
+// as apierr.ErrInvalidArgument when replayed against a different one.
+// Filters are deliberately not bound into the token (reusing a cursor
+// under different filters grants nothing the filters don't already);
+// keeping them stable across pages is the caller's side of the contract.
+//
+// The keyset is composite — (cursorField, rid) — so non-unique sort
+// columns (created_at and friends) never skip rows that share a boundary
+// value: the public RID breaks ties. cursorField is validated against the
+// query whitelist and should be a NOT NULL column; a NULL boundary value
+// ends pagination early (empty NextCursor).
+//
+// size is the max items per page. Additional opts may add FILTERS ONLY:
+// the cursor owns ORDER BY, LIMIT and the size+1 lookahead, so ordering,
+// pagination, count and page-size-cap options (WithOrder / WithPage /
+// WithLimit / WithOffset / WithCount / WithMaxPageSize / nested cursors)
+// are rejected as apierr.ErrInvalidArgument — a stray order breaks the
+// keyset invariant, an OFFSET reintroduces the drift keyset pagination
 // exists to avoid, and a tighter cap silently clips the lookahead so the
 // page reports "no more rows" while rows remain. The guard runs inside the
 // scoped query build, so custom options execute exactly once.
 //
 // Example:
 //
-//	page, err := s.ListWithCursor(ctx, "id", where.CursorAfter, lastID, 20)
-func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direction where.CursorDirection, cursorValue any, size int, opts ...where.Option) (*CursorPage[T], error) {
+//	page, err := s.ListWithCursor(ctx, "created_at", where.CursorAfter, "", 20)
+//	// render page.Items; hand page.NextCursor to the client
+//	page, err = s.ListWithCursor(ctx, "created_at", where.CursorAfter, page.NextCursor, 20)
+func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direction where.CursorDirection, cursor string, size int, opts ...where.Option) (*CursorPage[T], error) {
 	// Direct-parameter validation goes through mapQueryError like every
 	// option-borne error: size and direction are routinely fed from client
 	// pagination input, and the raw where sentinel is not something
@@ -1239,9 +1254,9 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	if size > cap {
 		return nil, mapQueryError(fmt.Errorf("%w: cursor page size %d exceeds maximum %d", where.ErrInvalidParam, size, cap))
 	}
-	// Validate direction on every path: the first-page branch below has no
-	// WithCursor to reject a malformed value and would otherwise silently
-	// scan ascending.
+	// Validate direction before decoding the token: a malformed direction
+	// must fail as its own error rather than masquerade as a token
+	// direction mismatch.
 	if direction != where.CursorAfter && direction != where.CursorBefore {
 		return nil, mapQueryError(fmt.Errorf("%w: cursor direction must be 'after' or 'before'", where.ErrInvalidParam))
 	}
@@ -1263,13 +1278,19 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	// caller WithMaxPageSize, precisely because a tighter cap would clip the
 	// lookahead and end pagination with rows remaining.
 	allOpts = append(allOpts, where.WithMaxPageSize(fetchSize))
-	if cursorValue != nil && cursorValue != "" {
-		allOpts = append(allOpts, where.WithCursor(cursorField, direction, cursorValue, fetchSize))
-	} else {
-		// First page: just order + limit, no cursor WHERE.
-		desc := direction == where.CursorBefore
-		allOpts = append(allOpts, where.WithOrder(cursorField, desc), where.WithLimit(fetchSize))
+	// Decode the opaque token (empty = first page) and ride the composite
+	// keyset: the "id" tie field resolves through the standing id→rid
+	// alias, so the tie-breaker in SQL — and in the token — is the public
+	// RID, never the internal numeric key.
+	var fieldCursor, tieCursor any
+	if cursor != "" {
+		value, rid, err := decodeCursor(cursor, cursorField, direction)
+		if err != nil {
+			return nil, mapQueryError(err)
+		}
+		fieldCursor, tieCursor = value, rid
 	}
+	allOpts = append(allOpts, where.WithCursorByField(cursorField, direction, fieldCursor, "id", tieCursor, fetchSize))
 
 	result, err := s.listInternalWithMaxPageSize(ctx, nil, allOpts, 0)
 	if err != nil {
@@ -1279,7 +1300,7 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 	page := &CursorPage[T]{Items: result.Items}
 	if len(result.Items) > size {
 		page.Items = result.Items[:size]
-		page.NextCursor = extractCursorValue(result.Items[size-1], cursorField, s.queryFieldMap, s.modelSchema)
+		page.NextCursor = s.encodeItemCursor(result.Items[size-1], cursorField, direction)
 	}
 	return page, nil
 }
@@ -1639,36 +1660,6 @@ func isLargeColumnType(f reflect.StructField) bool {
 		}
 	}
 	return false
-}
-
-// extractCursorValue gets the value of the cursor field from the last
-// item in a page result using the JSON-to-column mapping. It converts
-// the value to a string suitable for passing as the next cursor.
-func extractCursorValue(item any, field string, fieldMap map[string]string, modelSchema *schema.Schema) string {
-	col := field
-	if c, ok := fieldMap[field]; ok {
-		col = c
-	}
-	if modelSchema == nil {
-		return ""
-	}
-	fieldSchema := modelSchema.LookUpField(col)
-	if fieldSchema == nil {
-		return ""
-	}
-	val, _ := fieldSchema.ValueOf(context.Background(), reflect.ValueOf(item))
-	// Only formats with round-trippable string representations are supported.
-	switch v := val.(type) {
-	case time.Time:
-		return v.UTC().Format(time.RFC3339Nano)
-	case string:
-		return v
-	case int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64,
-		float32, float64, bool:
-		return fmt.Sprint(v)
-	}
-	return ""
 }
 
 // DuplicateError is an optional interface that database drivers or error

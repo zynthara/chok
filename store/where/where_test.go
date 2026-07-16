@@ -308,6 +308,63 @@ func TestWithFilterLikeRaw_PassesThrough(t *testing.T) {
 	}
 }
 
+// Arch-backlog #2: only a nil fieldCursor means "first page". The old
+// heuristic also treated the empty string and id 0 as first-page markers,
+// so a legitimate empty-string boundary value restarted pagination — an
+// infinite loop for the caller.
+func TestWithCursorBy_EmptyStringCursorIsNotFirstPage(t *testing.T) {
+	db := testDB(t)
+	fm := map[string]string{"grp": "grp"}
+
+	got, err := WithCursorBy("grp", CursorAfter, "", 7, 2)(db.Table("ties"), &Config{}, fm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt := got.Session(&gorm.Session{DryRun: true}).Find(&[]map[string]any{}).Statement
+	if !contains(stmt.SQL.String(), "(grp, id) > (?, ?)") {
+		t.Fatalf("empty-string cursor must render the keyset predicate, got: %s", stmt.SQL.String())
+	}
+}
+
+func TestWithCursorBy_NilCursorIsFirstPage(t *testing.T) {
+	db := testDB(t)
+	fm := map[string]string{"grp": "grp"}
+
+	got, err := WithCursorBy("grp", CursorAfter, nil, 0, 2)(db.Table("ties"), &Config{}, fm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt := got.Session(&gorm.Session{DryRun: true}).Find(&[]map[string]any{}).Statement
+	sql := stmt.SQL.String()
+	if contains(sql, "(grp, id) >") {
+		t.Fatalf("nil cursor must not render a keyset predicate, got: %s", sql)
+	}
+	if !contains(sql, "ORDER BY grp ASC,id ASC") && !contains(sql, "ORDER BY grp ASC, id ASC") {
+		t.Fatalf("first page must order by both keyset columns, got: %s", sql)
+	}
+}
+
+// WithCursorByField resolves BOTH columns through the allowlist — the tie
+// field included, so "id" rides the standing id→rid alias when the store
+// maps it.
+func TestWithCursorByField_ResolvesTieFieldThroughAllowlist(t *testing.T) {
+	db := testDB(t)
+	fm := map[string]string{"grp": "grp", "id": "rid"}
+
+	got, err := WithCursorByField("grp", CursorAfter, "a", "id", "cti_x", 2)(db.Table("ties"), &Config{}, fm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt := got.Session(&gorm.Session{DryRun: true}).Find(&[]map[string]any{}).Statement
+	if !contains(stmt.SQL.String(), "(grp, rid) > (?, ?)") {
+		t.Fatalf("tie field must resolve through the allowlist (id→rid), got: %s", stmt.SQL.String())
+	}
+
+	if _, err := WithCursorByField("grp", CursorAfter, "a", "nope", "x", 2)(db, &Config{}, fm); !errors.Is(err, ErrUnknownField) {
+		t.Fatalf("undeclared tie field must be rejected, got %v", err)
+	}
+}
+
 func contains(s, substr string) bool {
 	for i := 0; i+len(substr) <= len(s); i++ {
 		if s[i:i+len(substr)] == substr {

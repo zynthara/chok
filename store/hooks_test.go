@@ -745,7 +745,7 @@ func TestListWithCursor_FirstPage(t *testing.T) {
 	}
 
 	// First page (no cursor value).
-	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 3)
+	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, "", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,7 +778,7 @@ func TestListWithCursor_SizeEqualStoreCap_PreservesNextCursor(t *testing.T) {
 		}
 	}
 
-	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 3)
+	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, "", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +809,7 @@ func TestListWithCursor_LastPage_NoCursor(t *testing.T) {
 	}
 
 	// Request more than available.
-	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 10)
+	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,7 +860,7 @@ func TestFix_ListWithCursor_RejectsNonFilterOptions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 2, tc.opt)
+			_, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, "", 2, tc.opt)
 			if !errors.Is(err, apierr.ErrInvalidArgument) {
 				t.Fatalf("%s must be rejected as ErrInvalidArgument, got %v", tc.name, err)
 			}
@@ -868,7 +868,7 @@ func TestFix_ListWithCursor_RejectsNonFilterOptions(t *testing.T) {
 	}
 
 	// Filters remain the supported extra-option surface.
-	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 2,
+	page, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, "", 2,
 		where.WithFilter("code", "itemB"))
 	if err != nil {
 		t.Fatalf("filter options must still be accepted: %v", err)
@@ -896,7 +896,7 @@ func TestFix_ListWithCursor_CustomOptionRunsOnce(t *testing.T) {
 		calls++
 		return q, nil
 	})
-	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 2, counting); err != nil {
+	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, "", 2, counting); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -914,7 +914,7 @@ func TestFix_ListWithCursor_InvalidDirection_FirstPage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := s.ListWithCursor(context.Background(), "id", where.CursorDirection("sideways"), nil, 2)
+	_, err := s.ListWithCursor(context.Background(), "id", where.CursorDirection("sideways"), "", 2)
 	if !errors.Is(err, apierr.ErrInvalidArgument) {
 		t.Fatalf("invalid direction on the first page must map to ErrInvalidArgument, got %v", err)
 	}
@@ -932,10 +932,10 @@ func TestFix_ListWithCursor_DirectParamsMapToInvalidArgument(t *testing.T) {
 	}
 	s := New[Item](gdb, log.Empty(), WithQueryFields("id", "code"))
 
-	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, 0); !errors.Is(err, apierr.ErrInvalidArgument) {
+	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, "", 0); !errors.Is(err, apierr.ErrInvalidArgument) {
 		t.Fatalf("size < 1 must map to ErrInvalidArgument, got %v", err)
 	}
-	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, nil, where.MaxPageSize); !errors.Is(err, apierr.ErrInvalidArgument) {
+	if _, err := s.ListWithCursor(context.Background(), "id", where.CursorAfter, "", where.MaxPageSize); !errors.Is(err, apierr.ErrInvalidArgument) {
 		t.Fatalf("oversized page must map to ErrInvalidArgument, got %v", err)
 	}
 }
