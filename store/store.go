@@ -472,6 +472,16 @@ func WithBeforeDelete(fn func(ctx context.Context, loc Locator) error) StoreOpti
 // logic that must run synchronously inside the write path belongs in
 // before-hooks.
 //
+// Delivery guarantee: AT-MOST-ONCE, in-process. Events exist only in
+// this process's memory — a crash between COMMIT and the buffer flush
+// loses them, the bus's default overflow policy (drop-oldest) discards
+// events when a subscriber's queue fills (counted, rate-limited warn),
+// and there is no persistence or replay. That is the right trade for
+// cache invalidation and other consumers that recover via TTL or
+// re-read; do NOT build audit trails, projections, or anything that
+// must observe every committed write on this — reliable delivery needs
+// a transactional outbox, which chok does not ship (yet).
+//
 // The bus is injected explicitly — never discovered from ctx or the DB
 // handle — keeping this the store package's single kernel touch point:
 //
