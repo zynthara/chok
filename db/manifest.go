@@ -348,6 +348,39 @@ func manifestClaimExists(gdb *gorm.DB, kind string) (bool, error) {
 	return i < len(entries) && entries[i].Kind == kind, nil
 }
 
+// preflightSequenceClaim reads the pre-ensure claim evidence for an owned
+// sequence — whether its ledger already existed — and refuses the corrupt
+// state where a manifest claim outlived its ledger, so apply can never
+// recreate and silently replay a deleted ledger. It must stay before the
+// migration lock: the SQLite lock creates the ledger as a lease side
+// effect, which would destroy the missing-table evidence. Running unlocked
+// means the catalog reads can interleave with a concurrent first claim, so
+// the read order is what makes the verdict sound — claims are only ever
+// inserted after their ledger exists, hence observe the claim first and
+// re-read the ledger second. A ledger still missing after its claim was
+// seen was dropped after claiming (the exact corruption guarded against),
+// while one that appears on the re-read is a first claim that converged
+// mid-probe and reads as existing.
+func (e migrationEngine) preflightSequenceClaim(gdb *gorm.DB) (bool, error) {
+	if e.seq.owner == "" {
+		return false, nil
+	}
+	if gdb.Migrator().HasTable(e.seq.ledger) {
+		return true, nil
+	}
+	claimExists, err := manifestClaimExists(gdb, e.seq.kind)
+	if err != nil {
+		return false, err
+	}
+	if !claimExists {
+		return false, nil
+	}
+	if gdb.Migrator().HasTable(e.seq.ledger) {
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, e.seq.kind, e.seq.ledger)
+}
+
 func currentChokVersion() string {
 	return sanitizeSequenceVersion(version.Get().Version)
 }

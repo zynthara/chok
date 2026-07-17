@@ -144,6 +144,42 @@ func TestSequenceManifest_ConcurrentFirstClaimConverges(t *testing.T) {
 	}
 }
 
+// TestPreflightSequenceClaim_StateMatrix pins the pre-lock probe behind
+// apply and repair on every reachable static state. The converged state
+// (claim and ledger both present) is the footprint a concurrent first
+// claim leaves mid-probe; the probe's claim-first-ledger-second read order
+// must report it as existing, never as the claim-without-ledger corruption.
+func TestPreflightSequenceClaim_StateMatrix(t *testing.T) {
+	h := openTestHandle(t)
+	files := map[string]string{"0001_init.sql": "CREATE TABLE preflight_claim_item (id BIGINT PRIMARY KEY);"}
+	seq := manifestTestSequence(t, "preflight_claim", "example.com/preflight/claim", files)
+	e, err := resolveOwnedSequence(h, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gdb := h.gdb.WithContext(t.Context())
+
+	existed, err := e.preflightSequenceClaim(gdb)
+	if err != nil || existed {
+		t.Fatalf("fresh database preflight = (%v, %v), want (false, nil)", existed, err)
+	}
+
+	if _, err := ApplySequence(t.Context(), h, seq); err != nil {
+		t.Fatal(err)
+	}
+	existed, err = e.preflightSequenceClaim(gdb)
+	if err != nil || !existed {
+		t.Fatalf("converged claim preflight = (%v, %v), want (true, nil)", existed, err)
+	}
+
+	if err := h.gdb.Migrator().DropTable(seq.Ledger()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.preflightSequenceClaim(gdb); !errors.Is(err, ErrSequenceManifestCorrupt) {
+		t.Fatalf("claim without ledger preflight = %v, want ErrSequenceManifestCorrupt", err)
+	}
+}
+
 func TestSequenceManifest_IsScopedPerDatabase(t *testing.T) {
 	firstDB := openTestHandle(t)
 	secondDB := openTestHandle(t)

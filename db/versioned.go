@@ -506,15 +506,9 @@ func (e migrationEngine) apply(ctx context.Context, h *DB) (*ApplyReport, error)
 	}
 	gdb := h.gdb.WithContext(ctx)
 	owned := e.seq.owner != ""
-	ledgerExisted := owned && gdb.Migrator().HasTable(e.seq.ledger)
-	if owned && !ledgerExisted {
-		claimExists, err := manifestClaimExists(gdb, e.seq.kind)
-		if err != nil {
-			return report, err
-		}
-		if claimExists {
-			return report, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, e.seq.kind, e.seq.ledger)
-		}
+	ledgerExisted, err := e.preflightSequenceClaim(gdb)
+	if err != nil {
+		return report, err
 	}
 	lock, err := e.acquireMigrationLock(ctx, gdb)
 	if err != nil {
@@ -1125,15 +1119,11 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 	}
 	gdb := h.gdb.WithContext(ctx)
 	owned := e.seq.owner != ""
-	ledgerExisted := owned && gdb.Migrator().HasTable(e.seq.ledger)
+	ledgerExisted, err := e.preflightSequenceClaim(gdb)
+	if err != nil {
+		return nil, err
+	}
 	if owned && !ledgerExisted {
-		claimExists, err := manifestClaimExists(gdb, e.seq.kind)
-		if err != nil {
-			return nil, err
-		}
-		if claimExists {
-			return nil, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, e.seq.kind, e.seq.ledger)
-		}
 		return nil, fmt.Errorf("%w: migration kind %q has no existing ledger", ErrSequenceUnclaimed, e.seq.kind)
 	}
 	lock, err := e.acquireMigrationLock(ctx, gdb)
