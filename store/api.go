@@ -205,11 +205,64 @@ func (s *Store[T]) applyQueryOpts(ctx context.Context, q *gorm.DB, opts []QueryO
 //	store.Get(ctx, store.RID("usr_abc"))
 //	store.Get(ctx, store.ID(42), store.WithPreload("Author"))
 func (s *Store[T]) Get(ctx context.Context, by Locator, opts ...QueryOption) (*T, error) {
+	return s.getInternal(ctx, by, opts, false)
+}
+
+// GetForUpdate retrieves a single record like Get and locks it against
+// concurrent lockers and writers until the enclosing transaction ends
+// (SELECT ... FOR UPDATE). It is the pessimistic counterpart to Update's
+// automatic optimistic locking: reach for it when a read-modify-write
+// sequence must win against concurrency instead of retrying on
+// ErrStaleVersion.
+//
+// It must run inside a transaction on the store's own handle — the tx
+// Store handed to Store.Tx's callback, or a context from db.RunInTx on
+// the same *db.DB. Outside one it returns ErrLockRequiresTx: a row lock
+// under autocommit is released before the caller can act on the row, so
+// the entry point enforces what the guarantee needs. Read-only stores
+// return db.ErrReadOnly — a lock is write intent.
+//
+// Dialects: PostgreSQL and MySQL render FOR UPDATE and block concurrent
+// lockers/writers of the row until commit. SQLite has no row locks and
+// its driver drops the clause — but chok's SQLite shape routes every
+// transaction onto the single write connection opened with
+// _txlock=immediate, so the enclosing transaction already holds the
+// database write lock: strictly stronger than a row lock. The observable
+// guarantee — no concurrent writer between the locked read and commit —
+// holds on all three dialects.
+//
+// WithPreload is rejected with ErrLockPreload: association rows load
+// through separate queries the lock does not cover. Lock the row first,
+// then load associations with a plain Get if needed.
+func (s *Store[T]) GetForUpdate(ctx context.Context, by Locator, opts ...QueryOption) (*T, error) {
+	if err := s.rejectWrite("GetForUpdate"); err != nil {
+		return nil, err
+	}
+	if txctx.DB(ctx, s.h) == nil && s.txDB == nil {
+		return nil, ErrLockRequiresTx
+	}
+	qc := &queryConfig{}
+	for _, o := range opts {
+		o(qc)
+	}
+	if len(qc.preloads) > 0 {
+		return nil, ErrLockPreload
+	}
+	return s.getInternal(ctx, by, opts, true)
+}
+
+// getInternal is the single-row read shared by Get and GetForUpdate;
+// lock appends FOR UPDATE (GetForUpdate has already verified the
+// transactional context it needs).
+func (s *Store[T]) getInternal(ctx context.Context, by Locator, opts []QueryOption, lock bool) (*T, error) {
 	q, err := s.applyScopes(ctx, s.effectiveDB(ctx))
 	if err != nil {
 		return nil, err
 	}
 	q = s.applyQueryOpts(ctx, q, opts)
+	if lock {
+		q = q.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate})
+	}
 	q, err = by.apply(q, s.queryFieldMap)
 	if err != nil {
 		return nil, mapQueryError(err)

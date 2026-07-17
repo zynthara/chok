@@ -489,6 +489,8 @@ err := posts.Update(ctx, store.RID(rid), store.Fields(p, "status").NoLock())
 - 🚫 `Fields` 的对象必须是该 Store 的**具体模型类型**（`T` 或 `*T`），不接受
   字段形状相同的 DTO——保证字段值与乐观锁元数据始终来自同一份 GORM schema。
 - 需要知道命中几行（尤其 `Where` 批量更新）时挂 `store.WithRowsAffected(&n)`。
+- 版本冲突时**不能**重读重试（必须赢）的序列 → 事务内悲观锁
+  `GetForUpdate`，见 [§7.1](#71-一个事务串起多次写)。
 
 ### 6.3 每行不同值：`BatchUpdate`
 
@@ -609,6 +611,31 @@ err := h.RunInTx(ctx, func(txCtx context.Context) error {
 > ⚠️ 事务内**所有**操作都要传 `txCtx`。SQLite 尤其：拿根 ctx 在事务内再发写
 > 会在池上排队等那个被外层事务占着的唯一写连接，直到超时（见
 > [§11.1 SQLite 单机生产形态](#sqlite-单机生产形态默认生效)）。
+
+**读-改-写必须赢 —— 悲观锁 `GetForUpdate`**：
+
+```go
+err := wallets.Tx(ctx, func(tx *store.Store[Wallet]) error {
+    w, err := tx.GetForUpdate(ctx, store.RID(rid))   // SELECT ... FOR UPDATE
+    if err != nil {
+        return err
+    }
+    w.Balance -= amount                              // 到提交为止无并发写者
+    return tx.Update(ctx, store.RID(rid), store.Fields(w, "balance"))
+})
+```
+
+- 它是 `Update` 自动乐观锁的悲观对应物：靠 `ErrStaleVersion` 重读重试不可
+  接受（扣款、库存、状态机推进）的读-改-写序列用它；能重试的场景优先乐观锁。
+- **必须在本句柄事务内**（`Store.Tx` 给的克隆，或 `RunInTx` 的 `txCtx`），
+  否则返回 `ErrLockRequiresTx`——autocommit 下行锁在方法返回前就释放了，
+  守卫把误用挡在入口。只读 store 返回 `db.ErrReadOnly`（锁是写意图）。
+- `WithPreload` 被拒（`ErrLockPreload`）：关联行走独立查询，锁盖不住；先锁
+  行，需要时再用普通 `Get` 取关联。
+- **方言语义一致**：PG / MySQL 渲染 `FOR UPDATE`，并发锁者/写者阻塞到提交；
+  SQLite 没有行锁、驱动会丢弃该子句——但 chok 的 SQLite 形态把所有事务路由
+  到 `_txlock=immediate` 的唯一写连接，事务本身持有**整库写锁**（强于行锁）。
+  三方言的可观测保证相同：锁定读到提交之间无并发写者。
 
 ### 7.2 数据变更事件：`EntityChanged`
 
@@ -957,6 +984,8 @@ chok.New("app",
 | `store.ErrDegenerateConditions` | 退化过滤（`WithFilter(x,nil)` / 空 `WithFilterIn`）用作 `Where` Locator | 400 |
 | `store.ErrUpsertScoped` | 对 scoped / Owned 模型调 Upsert | 500（编程错误） |
 | `store.ErrProtectedUpdateField` | 运行期试图更新框架托管列（显式列表 / alias 重开是**构造期 panic**，不走这里） | 500（编程错误） |
+| `store.ErrLockRequiresTx` | `GetForUpdate` 不在本句柄事务内 | 500（编程错误） |
+| `store.ErrLockPreload` | `GetForUpdate` 带 `WithPreload`（锁盖不住关联查询） | 500（编程错误） |
 | `db.ErrReadOnly` | 只读实例 / 只读 store 收到写 | 500（装配 / 编程错误） |
 | `where.ErrUnknownField` | 过滤字段未声明（Store 读方法已预映射为 400，见上方例外①） | 400 |
 | `db.ErrSequenceClaimConflict` | 两组件声明同 kind，或包路径变更 | 启动失败 |
@@ -993,6 +1022,7 @@ Store[T]（读）
   ListQ(ctx, []QueryOption, ...)        ListFromQuery(ctx, url.Values)
   ListByIDs(ctx, ids)                   ListWithCursor(ctx, field, dir, cur, n)
   Count(ctx, ...where.Option)           Exists(ctx, loc)
+  GetForUpdate(ctx, loc, ...QueryOption)   // 悲观锁，仅限本句柄事务内（§7.1）
 
 投影（自由函数，保留白名单 + scope）
   store.Pluck[F](ctx, s, field, ...opts)     store.PluckDistinct[F](ctx, s, field, ...opts)

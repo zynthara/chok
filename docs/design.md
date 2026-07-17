@@ -358,6 +358,13 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   LIMIT/OFFSET 出自同一份 Config，结构上无法漂移。`ListFromQuery`
   是 `*Store` 上的 HTTP 糖，刻意不进 `Reader` 契约——解析传输层
   输入属于边缘（handler），数据接口保持 transport-free。
+- **悲观锁最小面**：`GetForUpdate` 是唯一入口，按可验证性设计——
+  强制本句柄事务（`Store.Tx` 的克隆或 `RunInTx` 的 `txCtx`，
+  autocommit 直接 `ErrLockRequiresTx`）、只读 store 拒绝、
+  `WithPreload` 拒绝（关联查询在锁外）。SQLite 语义不依赖驱动渲染
+  （glebarez 会静默丢弃 `FOR UPDATE`）而依赖既有形态：事务一律路由
+  到 `_txlock=immediate` 的单写连接，整库写锁 ⊇ 行锁，三方言可观测
+  保证一致。`SKIP LOCKED` / `NOWAIT` 未提供，按需求再议。
 - **刻意不做**：JOIN DSL（单表 store 的边界；跨表读走两步 IN）、
   表达式 ORDER BY（无法白名单化）——这两类是 `Unsafe` 舱口的正当
   用途，逃逸应当稀少而非为零。

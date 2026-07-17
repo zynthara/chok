@@ -63,6 +63,19 @@ var (
 	// tenant isolation or other scope invariants. Use Create + Update,
 	// or s.Unsafe(ctx) as an escape hatch if you understand the implications.
 	ErrUpsertScoped = errors.New("store: upsert is not safe with scoped stores (scopes are ignored on conflict update); use separate Create + Update")
+
+	// ErrLockRequiresTx indicates GetForUpdate was called outside a
+	// transaction on the store's handle. A row lock under autocommit is
+	// released before the caller can act on the row, so the entry point
+	// enforces what the guarantee needs: wrap the call in Store.Tx or
+	// db.RunInTx on the same *db.DB.
+	ErrLockRequiresTx = errors.New("store: GetForUpdate requires a transaction on the store's handle (Store.Tx or db.RunInTx)")
+
+	// ErrLockPreload indicates GetForUpdate was called with WithPreload.
+	// Association rows load through separate queries the row lock does
+	// not cover; a locked read with preloads would look atomic without
+	// being it. Lock the row, then load associations separately.
+	ErrLockPreload = errors.New("store: GetForUpdate does not support WithPreload (association queries run outside the lock)")
 )
 
 const createBatchSize = 100

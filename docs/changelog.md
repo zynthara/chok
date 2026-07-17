@@ -10,7 +10,7 @@
 
 ---
 
-## Unreleased — 数据契约收口 + 批量写 + 接口划线 + 迁移 manifest/repair 留痕
+## Unreleased — 数据契约收口 + 批量写 + 接口划线 + 悲观锁 + 迁移 manifest/repair 留痕
 
 > 架构复核暴露的八处数据层契约缺口在同一轮收口：显式 update 白名单和
 > alias 不能再把 RID/version/时间戳/软删/owner 等框架托管列重新打开，
@@ -60,6 +60,17 @@
 > `store.Page` 及以其为返回值的 `List` / `ListQ` / `Reader.List`
 > 都记为类型变化；以类型身份做注册表键或缓存键的下游需要知道
 > 这一点。HTTP 响应面零变化。
+>
+> 悲观锁补上了与乐观锁的不对称：`GetForUpdate` 在事务内做
+> `SELECT ... FOR UPDATE`，是「必须赢」的读-改-写序列的正门（此前只能
+> `Unsafe`）。入口按可验证性设计：不在本句柄事务内直接返回
+> `ErrLockRequiresTx`——autocommit 下行锁在方法返回前就释放，而裸透传
+> clause 只会制造静默降级（glebarez 恰好就是静默丢弃 Locking 的驱动）；
+> 只读 store 拒绝（锁是写意图）；`WithPreload` 拒绝（关联查询在锁外，
+> 拼在一起是「看起来原子」的陷阱）。SQLite 的语义不依赖驱动渲染而依赖
+> 既有形态：事务一律路由到 `_txlock=immediate` 的唯一写连接，整库写锁
+> ⊇ 行锁，三方言可观测保证一致（锁定读到提交之间无并发写者）。
+> `SKIP LOCKED` / `NOWAIT` 刻意未做，等真实需求出现再议。
 > 声明 owner，全局 manifest 用数据库 claim 把 kind/账本归属持久化，并以
 > engine floor 阻止较旧的 manifest-aware 引擎写入。claim 校验位于迁移锁内，
 > 覆盖 apply、repair 与 owner transfer；存量账本先完成只读 TOFU 预检，再在
