@@ -361,13 +361,14 @@ func (m *Service) linkIdentityTx(ctx context.Context, userID string, pi *Provide
 			"provider", pi.Provider, "error", marshalErr)
 		raw = nil
 	}
+	now := time.Now()
 	ident := &Identity{
 		UserID:            userID,
 		Provider:          pi.Provider,
 		ProviderAccountID: pi.ProviderAccountID,
 		Email:             pi.Email,
 		Profile:           datatypes.JSON(raw),
-		LastUsedAt:        time.Now(),
+		LastUsedAt:        &now,
 	}
 	if err := m.idStore.Create(ctx, ident); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {

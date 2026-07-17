@@ -22,7 +22,12 @@ type Identity struct {
 	ProviderAccountID string         `json:"provider_account_id" gorm:"size:200;not null"`
 	Email             string         `json:"email,omitempty"     gorm:"size:200;default:'';not null"`
 	Profile           datatypes.JSON `json:"-"                   gorm:"type:json"`
-	LastUsedAt        time.Time      `json:"last_used_at,omitempty"`
+	// LastUsedAt records the latest successful OAuth login through this
+	// identity; nil means never used. It must stay a pointer: the column is
+	// NULL-able on every dialect, and a non-pointer zero value would be
+	// serialized by go-sql-driver as '0000-00-00', which MySQL's default
+	// strict NO_ZERO_DATE mode rejects on insert.
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
 // RIDPrefix returns the prefix for Identity resource IDs (e.g. "idn_abc123").
