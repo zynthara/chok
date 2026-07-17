@@ -27,7 +27,11 @@ var (
 	ErrInvalidParam = errors.New("where: invalid parameter")
 
 	// ErrUnknownField indicates a field name not present in the query whitelist.
-	// Typically caused by client input (sort/filter on a non-queryable field).
+	// Provenance decides its HTTP mapping: the store's programmatic entry
+	// points (List, Count, Pluck, locators, ...) return it raw — a field
+	// name written by server code is a programming bug (500) — while the
+	// ListFromQuery chain maps it to an invalid-argument 400, because there
+	// the name arrived in the URL.
 	ErrUnknownField = errors.New("where: unknown field")
 
 	// ErrFieldNotConfigured indicates WithQueryFields was not called on the Store.

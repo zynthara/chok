@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store/where"
@@ -62,17 +61,20 @@ func TestPluck_EmptyResultIsNonNil(t *testing.T) {
 }
 
 func TestPluck_UndeclaredFieldRejected(t *testing.T) {
+	// Arch-backlog #3: Pluck field names are server code — an undeclared
+	// one is a programming bug and keeps the raw where.ErrUnknownField
+	// (→ 500), not a client-shaped 400.
 	s := setupItemStore(t)
 	ctx := context.Background()
 
 	// A field that simply doesn't exist.
-	if _, err := Pluck[string](ctx, s, "nope"); !errors.Is(err, apierr.ErrInvalidArgument) {
-		t.Fatalf("unknown field must map to ErrInvalidArgument, got %v", err)
+	if _, err := Pluck[string](ctx, s, "nope"); !errors.Is(err, where.ErrUnknownField) {
+		t.Fatalf("unknown field must surface as raw ErrUnknownField, got %v", err)
 	}
 	// A real column outside the query allowlist must be rejected too —
 	// Pluck cannot become a side door around WithQueryFields.
-	if _, err := Pluck[string](ctx, s, "rid"); !errors.Is(err, apierr.ErrInvalidArgument) {
-		t.Fatalf("undeclared column must map to ErrInvalidArgument, got %v", err)
+	if _, err := Pluck[string](ctx, s, "rid"); !errors.Is(err, where.ErrUnknownField) {
+		t.Fatalf("undeclared column must surface as raw ErrUnknownField, got %v", err)
 	}
 }
 

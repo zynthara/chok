@@ -1296,23 +1296,24 @@ func TestResolveUpdateColumn_UnknownField_ErrUnknownUpdateField(t *testing.T) {
 }
 
 func TestWhereErrUnknownField(t *testing.T) {
+	// Arch-backlog #3: on the programmatic entry points a field name is
+	// server code, so an unknown one is a programming bug — the raw
+	// where.ErrUnknownField passes through (→ 500) with its chain intact,
+	// instead of masquerading as a client 400.
 	s, _ := setupUserStore(t)
 	_, err := s.List(context.Background(), where.WithFilter("bogus", "val"))
-	// mapQueryError wraps ErrUnknownField into apierr.ErrInvalidArgument (400).
-	// Verify the error is surfaced as a client error.
 	if err == nil {
 		t.Fatal("expected error for unknown field")
 	}
 	if !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("expected error to mention field name, got %v", err)
 	}
-	// Verify it's mapped to a 400-class error (not a raw where error).
-	var ae *apierr.Error
-	if !errors.As(err, &ae) {
-		t.Fatalf("expected *apierr.Error, got %T: %v", err, err)
+	if !errors.Is(err, where.ErrUnknownField) {
+		t.Fatalf("programmatic unknown field must keep its chain, got %v", err)
 	}
-	if ae.Code != 400 {
-		t.Fatalf("expected 400, got %d", ae.Code)
+	var ae *apierr.Error
+	if errors.As(err, &ae) {
+		t.Fatalf("programmatic unknown field must NOT be pre-mapped to apierr, got %v", ae)
 	}
 }
 

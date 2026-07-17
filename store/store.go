@@ -1253,9 +1253,21 @@ func (s *Store[T]) ListFromQuery(ctx context.Context, query url.Values) (*Page[T
 		opts, err = where.FromQuery(query, s.queryFieldMap, s.defaultPageSize)
 	}
 	if err != nil {
-		return nil, mapQueryError(err)
+		// The whole chain is client-facing: unlike the programmatic entry
+		// points, an unknown FIELD here (an order/filter name from the
+		// URL) is client input and maps to 400 with the value errors.
+		return nil, mapClientQueryError(err)
 	}
-	return s.List(ctx, opts...)
+	page, err := s.List(ctx, opts...)
+	if err != nil {
+		// FromQuery pre-validates every field name it accepts, so today
+		// this leg cannot produce where.ErrUnknownField; the client
+		// mapping stays as a seam guard so a future FromQuery change
+		// cannot silently break the whole-chain 400 contract. Already
+		// mapped *apierr.Error values pass through unchanged.
+		return nil, mapClientQueryError(err)
+	}
+	return page, nil
 }
 
 // Page is the result of a paginated list query — an alias of where.Page,
@@ -1293,7 +1305,9 @@ type CursorPage[T any] struct {
 // value: the public RID breaks ties. The tie-breaker binds to the model's
 // RID column directly, independent of the query allowlist — stores that
 // don't expose "id" (or alias it elsewhere) paginate all the same.
-// cursorField is validated against the query whitelist and MUST be a
+// cursorField is code-chosen, validated against the query whitelist (an
+// undeclared name is a server-side bug — the raw where.ErrUnknownField
+// surfaces as a 500, not client input) and MUST be a
 // NOT NULL column whose token kind is statically derivable: plain or
 // defined scalars (strings, ints, uints, floats, bools, time.Time),
 // pointers to those, and serializer or driver.Valuer fields whose
@@ -1351,12 +1365,14 @@ func (s *Store[T]) ListWithCursor(ctx context.Context, cursorField string, direc
 		return nil, mapQueryError(fmt.Errorf("%w: cursor direction must be 'after' or 'before'", where.ErrInvalidParam))
 	}
 	// Resolve the cursor field's token expectation up front, with the same
-	// Valuer-aware classification the encoder uses. An unknown field keeps
-	// the invalid-argument mapping the option path produces; a field whose
-	// token kind cannot be derived statically is rejected before any token
-	// is issued or accepted — signing a token the next page cannot consume,
-	// or skipping forged-kind validation, are both worse than a loud
-	// configuration error.
+	// Valuer-aware classification the encoder uses. An unknown field is a
+	// server-side bug like on every programmatic entry point (the raw
+	// where.ErrUnknownField passes through — cursorField is code-chosen,
+	// not client input); a field whose token kind cannot be derived
+	// statically is rejected before any token is issued or accepted —
+	// signing a token the next page cannot consume, or skipping
+	// forged-kind validation, are both worse than a loud configuration
+	// error.
 	col, err := where.ResolveField(s.queryFieldMap, cursorField)
 	if err != nil {
 		return nil, mapQueryError(err)
@@ -1527,17 +1543,47 @@ func (s *Store[T]) applyScopes(ctx context.Context, db *gorm.DB) (*gorm.DB, erro
 	return db, nil
 }
 
-// mapQueryError classifies query-building errors:
-// - Client errors (bad params, unknown fields) → apierr.ErrInvalidArgument (400)
-// - Server errors (unconfigured field set) → pass through (500)
+// mapQueryError classifies query-building errors on the PROGRAMMATIC
+// entry points (List / ListQ / Count / Pluck* / ListIn / ListWithCursor
+// and the locator-based Get / GetForUpdate / Update / Delete / Restore /
+// Exists), splitting them by provenance:
+//
+//   - Value errors (where.ErrInvalidParam) → apierr.ErrInvalidArgument
+//     (400). Pages, sizes, cursor tokens and filter VALUES routinely
+//     flow from clients through handler code into these entry points.
+//   - Field-NAME errors (where.ErrUnknownField) pass through raw → 500.
+//     On these entry points field names are written by server code, so
+//     an unknown field is a programming bug that must alarm monitoring,
+//     not masquerade as a client mistake. The chain is preserved —
+//     errors.Is(err, where.ErrUnknownField) works on the return.
+//     Client-supplied field names belong behind ListFromQuery (which
+//     validates them as input), never spliced into WithFilter/WithOrder.
+//   - Configuration errors (where.ErrFieldNotConfigured) pass through
+//     as server bugs (500), as always.
 func mapQueryError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, where.ErrInvalidParam) {
+		return apierr.ErrInvalidArgument.WithMessage(err.Error())
+	}
+	return err
+}
+
+// mapClientQueryError classifies the same errors on the CLIENT entry
+// point — the ListFromQuery chain, where field names come from the URL:
+// both value errors and field-name errors are client input there and map
+// to apierr.ErrInvalidArgument (400). where.ErrFieldNotConfigured still
+// passes through — an unconfigured store is a server bug no matter who
+// asked. Idempotent over already-mapped *apierr.Error values, which no
+// longer match the where sentinels.
+func mapClientQueryError(err error) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, where.ErrInvalidParam) || errors.Is(err, where.ErrUnknownField) {
 		return apierr.ErrInvalidArgument.WithMessage(err.Error())
 	}
-	// ErrFieldNotConfigured is a server-side bug — pass through as 500.
 	return err
 }
 

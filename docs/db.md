@@ -312,15 +312,24 @@ type Page[T any] struct {
 > 时非零且从 1 起，`Size==0` 表示无 limit，`HasMore` 只有走了 count 的 List
 > 才有意义（否则恒 `false`）。
 
-过滤字段一律经查询白名单解析，未声明的字段会被拒绝（不是静默忽略）——底层
-哨兵是 `where.ErrUnknownField`，但 Store 的公开读方法已把它映射成 400 的
-`apierr.ErrInvalidArgument`，因此**不要在返回值上
-`errors.Is(err, where.ErrUnknownField)`**（它已是 400，无需再经 `MapError`）。
+过滤字段一律经查询白名单解析，未声明的字段会被拒绝（不是静默忽略）——哨兵
+是 `where.ErrUnknownField`，**按错误来源划界**：`List` / `Count` / `Pluck*` /
+`ListIn` / 游标字段 / locator 这些**程序化入口**的字段名由服务端代码书写，
+未声明即编程 bug，错误**原样返回**（可 `errors.Is`；`MapError` 不认识它 →
+500，惊动监控而不是伪装成客户端传参错误沉底）。只有 `ListFromQuery` 链的
+字段名来自 URL，仍映射 400。
 `WithFilterNull` / `WithFilterNotNull` 的目标须是**已声明**的列（否则
 `ErrUnknownField`）——框架不校验可空性，用在 NOT NULL 列上不报错、只是恒真 /
 恒空；
 `WithFilterContains` / `StartsWith` / `EndsWith` 对用户输入的 `%`、`_` 做了
 转义，不会穿透（要原样通配用 `WithFilterLikeRaw`，自己负责）。
+
+> 📌 **约定：客户端输入进 where DSL 之前先过界。** 划界的代价是——handler
+> 若把客户端给的**字段名**直接拼进 `WithFilter` / `WithOrder`，typo 会以
+> 500 而非 400 浮出。客户端字段名走 `ListFromQuery`（它按输入校验并映射
+> 400），或先在 handler 层校验成白名单内的值再进 DSL。**值**（page/size/
+> 游标 token/过滤值）不受影响：`where.ErrInvalidParam` 在所有入口都映射
+> 400，`WithPage(page, size)` 直接吃客户端分页值仍然安全。
 
 > 🧪 `where.Option` 是已公开的高级扩展点，但自定义函数会直接拿到 `*gorm.DB`
 > 与可写查询元数据，能绕过字段白名单和 `Where` 写保护的条件记账。它与
@@ -978,9 +987,12 @@ gdb := h.Unsafe(ctx)           // 句柄级：无 scope，自己负责
 ### 11.2 错误处理
 
 下表哨兵可 `errors.Is` 匹配；挂上 `store.MapError` 后 HTTP 状态码自动正确。
-⚠️ 两点例外：① `where.ErrUnknownField` 已在 Store 读方法内部被映射成 400 的
-apierr（**不要**再对返回值 `errors.Is` 它）；而 `ErrDegenerateConditions` 等其余
-哨兵是原样返回的，可正常 `errors.Is`、由 `MapError` 给出状态码。② 并非每个返回
+⚠️ 两点例外：① `where.ErrUnknownField` **按入口划界**——程序化读入口
+（`List` / `Count` / `Pluck*` / `ListIn` / 游标字段 / locator）原样返回，可正常
+`errors.Is`，`MapError` 不映射它 → 500（字段名是服务端代码写的，typo 是编程
+bug）；`ListFromQuery` 链（字段名来自 URL）内部预映射 400 的 apierr，对**那条
+链**的返回值不要再 `errors.Is` 它。值错误 `where.ErrInvalidParam` 则在所有入口
+都预映射 400。② 并非每个返回
 错误都有稳定哨兵（如 `Fields` 传 DTO、对硬删模型 `Restore`，都是普通包装错误）。
 
 ```go
@@ -1003,7 +1015,7 @@ chok.New("app",
 | `store.ErrLockRequiresTx` | `GetForUpdate` 不在本句柄事务内 | 500（编程错误） |
 | `store.ErrLockPreload` | `GetForUpdate` 带 `WithPreload`（锁盖不住关联查询） | 500（编程错误） |
 | `db.ErrReadOnly` | 只读实例 / 只读 store 收到写 | 500（装配 / 编程错误） |
-| `where.ErrUnknownField` | 过滤字段未声明（Store 读方法已预映射为 400，见上方例外①） | 400 |
+| `where.ErrUnknownField` | 过滤/排序字段未声明。程序化入口原样返回（编程错误）；仅 `ListFromQuery` 链预映射 400（见上方例外①） | 500 / 400（按入口） |
 | `db.ErrSequenceClaimConflict` | 两组件声明同 kind，或包路径变更 | 启动失败 |
 | `db.ErrMigrationEngineTooOld` | manifest 的 `engine_floor` 高于当前二进制 | 启动失败 |
 | `db.ErrRepairHistoryCorrupt` | repair 历史表被改写 / 结构被重塑 | —— |

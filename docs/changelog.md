@@ -10,7 +10,7 @@
 
 ---
 
-## Unreleased — 数据契约收口 + 批量写 + 接口划线 + 悲观锁 + 游标尺寸契约 + 两步 IN 工具补全 + 约束字段映射 + 迁移 manifest/repair 留痕
+## Unreleased — 数据契约收口 + 批量写 + 接口划线 + 悲观锁 + 游标尺寸契约 + 两步 IN 工具补全 + 约束字段映射 + 错误 provenance 划界 + 迁移 manifest/repair 留痕
 
 > 架构复核暴露的八处数据层契约缺口在同一轮收口：显式 update 白名单和
 > alias 不能再把 RID/version/时间戳/软删/owner 等框架托管列重新打开，
@@ -83,6 +83,20 @@
 > 令牌长度，「绝不签出自己拒收的令牌」由此机械成立而非靠推理。截断
 > 从一开始不在选项里——被截断的边界会让下一页从错误位置继续，是静默
 > 错页的另一种拼法。
+>
+> 查询错误的 HTTP 语义此前只看错误种类不看来源：`where.ErrUnknownField`
+> 一律预映射 400，于是 `List(ctx, where.WithFilter("typo", v))` 这种服务端
+> 编程 bug 伪装成「客户端传参错误」沉底，监控永远看不见（不兼容变更）。
+> 现在按**入口**划界——字段名在程序化入口（List/Count/Pluck/ListIn/游标
+> 字段/locator）由服务端代码书写，未声明原样返回 → 500 且保留错误链；
+> 只有 `ListFromQuery` 链的字段名来自 URL，维持整链 400（parse 腿映射，
+> List 腿留幂等兜底防未来漂移）。**值**错误（`ErrInvalidParam`）不分入口
+> 维持 400——page/size/游标 token/过滤值本来就合法地从客户端流进这些入口。
+> 划界的代价写成公开约定：handler 不得把客户端**字段名**直接拼进
+> `WithFilter`/`WithOrder`（typo 会以 500 浮出），要么走 `ListFromQuery`
+> 要么先校验；update 侧 `ErrUnknownUpdateField` 本来就是 500，不动。
+> 这与 `ErrFieldNotConfigured`（一直 500）终于同一逻辑：**谁写的错，谁的
+> 状态码。**
 >
 > 重复键错误此前只会把驱动消息里提取的约束/索引名放进响应 metadata——
 > 那是 schema 命名，对客户端既是布局泄露、又随迁移改名而漂移。现在
