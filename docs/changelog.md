@@ -10,7 +10,7 @@
 
 ---
 
-## Unreleased — 数据契约收口 + 批量写 + 迁移 manifest/repair 留痕
+## Unreleased — 数据契约收口 + 批量写 + 接口划线 + 迁移 manifest/repair 留痕
 
 > 架构复核暴露的八处数据层契约缺口在同一轮收口：显式 update 白名单和
 > alias 不能再把 RID/version/时间戳/软删/owner 等框架托管列重新打开，
@@ -42,7 +42,24 @@
 > 事实源；自管事务失败时恢复此前由框架递增的内存 Version，避免数据库
 > 已回滚而对象重试立即产生伪 stale conflict。
 >
-> 第三方组件现在与内建电池共享唯一的 owned-sequence 实现：组件包完整路径
+> GA 前把接口视图的划线一次理顺（不兼容）。`Writer[T]` 的历史形状
+> （含 BatchCreate + Upsert）违反了上文「不扩张 Writer 以保 mock」的
+> 拆分理由，划线原则改为**单行 vs 批量**：Upsert 是单行写、留在
+> Writer；BatchCreate 移出 Writer（连带 ReadWriter）、归 BatchWriter；
+> `*Store` 方法集不变，经 `Writer[T]` 依赖批建的调用方改声明
+> `BatchWriter[T]`。同一轮把 `ListFromQuery` 移出 `Reader[T]`——
+> repository 读契约不该 import `net/url`，解析传输层输入属于边缘
+> （`handler.HandleList`，或 `*Store` 上保留的 HTTP 糖）；其返回值
+> 与 `List` 统一为 `*Page[T]`，消灭四返回值的形状分裂。
+>
+> 信封类型本体随之下沉：`Page[T]` 移入 `where`（store 与 handler
+> 共同的 query 层），`store.Page` 变为泛型别名——handler 由此与
+> store 说同一个信封而维持「handler 不 import store」的既有边界。
+> 别名保住拼写与 JSON 形状（字段零变化），但**类型身份**变了：
+> 反射（`PkgPath`/`Name`）、type registry 与 apidiff 眼中
+> `store.Page` 及以其为返回值的 `List` / `ListQ` / `Reader.List`
+> 都记为类型变化；以类型身份做注册表键或缓存键的下游需要知道
+> 这一点。HTTP 响应面零变化。
 > 声明 owner，全局 manifest 用数据库 claim 把 kind/账本归属持久化，并以
 > engine floor 阻止较旧的 manifest-aware 引擎写入。claim 校验位于迁移锁内，
 > 覆盖 apply、repair 与 owner transfer；存量账本先完成只读 TOFU 预检，再在
