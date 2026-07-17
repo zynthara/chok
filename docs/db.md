@@ -401,6 +401,13 @@ statuses, err := store.PluckDistinct[string](ctx, posts, "status")   // 去重
 // 强过手写一条穿透白名单的 JOIN + Unsafe）
 ids, err := store.PluckIDs(ctx, posts, where.WithFilter("status", "published"))
 comments, err := commentStore.ListByIDs(ctx, ids)
+
+// 值集超过 where.MaxInList（500）时用 ListIn：自动去重 + 分块，每块都走
+// List 的白名单 / scope / 软删路径，语义等价一条大 IN。只收过滤 option
+// （排序 / 分页 / count 跨块不可组合，直接拒绝），结果不保证顺序、不受
+// Store 页大小 cap 限制——这是按值集定大小的服务端管道，对准键形字段用
+items, err := store.ListIn(ctx, bookStore, "source_id", ids,
+    where.WithFilter("status", "active"))
 ```
 
 ### 5.6 看见软删行（管理 / 回收站视图）
@@ -1032,9 +1039,10 @@ Store[T]（读）
   Count(ctx, ...where.Option)           Exists(ctx, loc)
   GetForUpdate(ctx, loc, ...QueryOption)   // 悲观锁，仅限本句柄事务内（§7.1）
 
-投影（自由函数，保留白名单 + scope）
+自由函数读（保留白名单 + scope）
   store.Pluck[F](ctx, s, field, ...opts)     store.PluckDistinct[F](ctx, s, field, ...opts)
   store.PluckIDs(ctx, s, ...opts)            // 内部主键；两步 IN 的前半段
+  store.ListIn(ctx, s, field, values, ...opts)   // 两步 IN 后半段；>MaxInList 自动分块
 
 Store[T]（写）
   Create(ctx, *T)      BatchCreate(ctx, []*T)

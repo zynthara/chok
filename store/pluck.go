@@ -41,7 +41,8 @@ func Pluck[F any, T db.Modeler](ctx context.Context, s *Store[T], field string, 
 //	ids, _ := store.PluckIDs(ctx, sources, where.WithFilter("enabled", true))
 //	page, _ := books.List(ctx, where.WithFilterIn("source_id", ids))
 //
-// Key sets larger than where.MaxInList must be chunked by the caller.
+// Key sets larger than where.MaxInList ride ListIn, which chunks the IN
+// list automatically under the same read semantics.
 //
 // Like ListByIDs, this is server-side plumbing: the numeric keys never
 // belong in API responses (the public identifier is the RID, which the

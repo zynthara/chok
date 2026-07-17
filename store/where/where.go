@@ -299,7 +299,8 @@ func validOp(op Op) bool {
 // MaxInList is the maximum number of values accepted by WithFilterIn.
 // Above this, databases start rejecting queries: SQLite ~999, MySQL
 // limited by max_allowed_packet, PostgreSQL ~65535 bound parameters.
-// Callers with more values should chunk the IN list manually.
+// Callers with more values chunk the IN list — for reads, store.ListIn
+// does it automatically.
 const MaxInList = 500
 
 // WithFilterIn adds WHERE field IN (...).
