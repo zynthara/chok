@@ -290,9 +290,14 @@ func LoadMigrations(fsys fs.FS) ([]Migration, error) {
 	return out, nil
 }
 
-// ensureLedgerBase creates the complete current ledger for a fresh database.
-// Existing three-column ledgers are left untouched here so their additive
-// upgrade can happen only after the migration lock is held.
+// ensureLedgerBase creates the complete current ledger for a fresh database
+// and leaves existing three-column ledgers untouched (ensureLedgerColumns
+// upgrades those additively). Callers must hold the migration lock:
+// PostgreSQL's CREATE TABLE IF NOT EXISTS is not concurrency-safe, so two
+// sessions racing on first creation collide on the pg_type/pg_class catalog
+// uniques (SQLSTATE 23505). The SQLite lock branch is the one sanctioned
+// pre-lock caller — its lease row lives inside the ledger it ensures, and
+// SQLite's single-writer file lock serializes the creation anyway.
 func (e migrationEngine) ensureLedgerBase(gdb *gorm.DB) error {
 	return gdb.Exec(
 		"CREATE TABLE IF NOT EXISTS " + e.seq.ledger + " (" +
@@ -511,6 +516,11 @@ func (e migrationEngine) apply(ctx context.Context, h *DB) (*ApplyReport, error)
 			return report, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, e.seq.kind, e.seq.ledger)
 		}
 	}
+	lock, err := e.acquireMigrationLock(ctx, gdb)
+	if err != nil {
+		return report, err
+	}
+	defer lock.release()
 	if err := e.ensureLedgerBase(gdb); err != nil {
 		return report, fmt.Errorf("db: ensure %s base: %w", e.seq.ledger, err)
 	}
@@ -519,12 +529,6 @@ func (e migrationEngine) apply(ctx context.Context, h *DB) (*ApplyReport, error)
 			return report, fmt.Errorf("db: ensure %s base: %w", sequenceManifestTable, err)
 		}
 	}
-
-	lock, err := e.acquireMigrationLock(ctx, gdb)
-	if err != nil {
-		return report, err
-	}
-	defer lock.release()
 	if err := e.ensureLedgerColumns(gdb); err != nil {
 		return report, err
 	}
@@ -1132,6 +1136,11 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 		}
 		return nil, fmt.Errorf("%w: migration kind %q has no existing ledger", ErrSequenceUnclaimed, e.seq.kind)
 	}
+	lock, err := e.acquireMigrationLock(ctx, gdb)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.release()
 	if err := e.ensureLedgerBase(gdb); err != nil {
 		return nil, fmt.Errorf("db: ensure %s base: %w", e.seq.ledger, err)
 	}
@@ -1143,11 +1152,6 @@ func (e migrationEngine) repair(ctx context.Context, h *DB, opts RepairOptions) 
 	if err := ensureRepairHistoryBase(gdb); err != nil {
 		return nil, fmt.Errorf("db: ensure %s base: %w", sequenceRepairHistoryTable, err)
 	}
-	lock, err := e.acquireMigrationLock(ctx, gdb)
-	if err != nil {
-		return nil, err
-	}
-	defer lock.release()
 	if err := e.ensureLedgerColumns(gdb); err != nil {
 		return nil, err
 	}

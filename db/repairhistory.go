@@ -76,6 +76,8 @@ type RepairHistoryFilter struct {
 // ensureRepairHistoryBase creates the append-only history table. The three
 // blessed dialects need distinct auto-increment spellings; anything else
 // fails closed rather than minting a table whose inserts cannot work.
+// Callers must hold the migration lock — PostgreSQL's CREATE TABLE IF NOT
+// EXISTS races on the catalog uniques when two sessions create it at once.
 //
 // Column contract: the CREATE-time set below is frozen. reason and
 // repaired_at carry no default, so they can never be added by ALTER — every

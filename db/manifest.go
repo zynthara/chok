@@ -105,6 +105,9 @@ func (columns tableColumns) has(name string) bool {
 	return columns == nil || columns[strings.ToLower(name)]
 }
 
+// ensureManifestBase creates the shared manifest table on first use. Callers
+// must hold the migration lock — PostgreSQL's CREATE TABLE IF NOT EXISTS
+// races on the catalog uniques when two sessions create the table at once.
 func ensureManifestBase(gdb *gorm.DB) error {
 	return gdb.Exec(
 		"CREATE TABLE IF NOT EXISTS " + sequenceManifestTable + " (" +
@@ -562,15 +565,15 @@ func RepairSequenceClaim(ctx context.Context, h *DB, kind string, opts RepairCla
 	if !gdb.Migrator().HasTable(ledger) {
 		return nil, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, kind, ledger)
 	}
-	if err := ensureRepairHistoryBase(gdb); err != nil {
-		return nil, fmt.Errorf("db: ensure %s base: %w", sequenceRepairHistoryTable, err)
-	}
 	e := migrationEngine{seq: migrationSequence{kind: kind, ledger: ledger, dialect: gdb.Dialector.Name()}}
 	lock, err := e.acquireMigrationLock(ctx, gdb)
 	if err != nil {
 		return nil, err
 	}
 	defer lock.release()
+	if err := ensureRepairHistoryBase(gdb); err != nil {
+		return nil, fmt.Errorf("db: ensure %s base: %w", sequenceRepairHistoryTable, err)
+	}
 	if err := ensureManifestColumns(gdb); err != nil {
 		return nil, err
 	}

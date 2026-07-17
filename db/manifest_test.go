@@ -116,9 +116,14 @@ func TestSequenceManifest_ConcurrentFirstClaimConverges(t *testing.T) {
 	seq := manifestTestSequence(t, "claim_concurrent", "example.com/concurrent/claim", map[string]string{
 		"0001_init.sql": "CREATE TABLE manifest_concurrent_item (id BIGINT PRIMARY KEY);",
 	})
-	errs := make(chan error, 2)
+	// Four workers instead of two: the historical failure mode was the
+	// pre-lock CREATE TABLE IF NOT EXISTS colliding on PostgreSQL's catalog
+	// uniques, and more concurrent first claims widen the window enough to
+	// reproduce on slower CI runners too.
+	const workers = 4
+	errs := make(chan error, workers)
 	var wg sync.WaitGroup
-	for range 2 {
+	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
