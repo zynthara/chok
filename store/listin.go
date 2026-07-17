@@ -29,9 +29,18 @@ import (
 // Multiple chunks are multiple SELECTs, not one statement: under
 // concurrent writes the combined result is not a single-snapshot read
 // (a row updated between chunks may be observed in the first-seen
-// state or not at all). When cross-chunk consistency matters, run
-// ListIn inside a transaction (Store.Tx / db.RunInTx) and let the
-// database's transaction isolation provide the snapshot.
+// state or not at all). A transaction restores that only when its
+// isolation level provides a TRANSACTION-wide snapshot — and Store.Tx /
+// db.RunInTx open transactions at the database's default isolation.
+// That default qualifies on SQLite (the transaction owns the single
+// write connection; no concurrent writer exists) and on MySQL/InnoDB
+// (REPEATABLE READ pins the snapshot at the first read), but NOT on
+// PostgreSQL, whose default READ COMMITTED takes a fresh snapshot per
+// statement — chunks can still drift there. chok exposes no blessed
+// isolation knob; on Postgres either escalate the transaction yourself
+// through the Unsafe door (SET TRANSACTION ISOLATION LEVEL REPEATABLE
+// READ as the transaction's first statement) or accept per-chunk
+// snapshots.
 //
 // The field resolves through the query allowlist exactly like
 // WithFilterIn, and every chunk runs under the Store's scopes and

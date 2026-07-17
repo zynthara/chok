@@ -419,11 +419,20 @@ comments, err := commentStore.ListByIDs(ctx, ids)
 // 白名单 / 守卫 / fail-closed scope 照常校验，不会静默空页。只收过滤
 // option（排序 / 分页 / count 跨块不可组合，直接拒绝），结果不保证顺序、
 // 不受 Store 页大小 cap 限制——这是按值集定大小的服务端管道，对准键形
-// 字段用。多块 = 多条 SELECT 非单语句：并发写下合并结果不是单快照读，
-// 需要跨块一致性时放进事务（Store.Tx / db.RunInTx）
+// 字段用。多块 = 多条 SELECT 非单语句：并发写下合并结果不是单快照读；
+// 事务能救回来的前提是隔离级别给出**事务级快照**（见代码块下方说明）
 items, err := store.ListIn(ctx, bookStore, "source_id", ids,
     where.WithFilter("status", "active"))
 ```
+
+> ⚠️ **跨块快照一致性按方言诚实声明**：`Store.Tx` / `db.RunInTx` 以数据库
+> **默认隔离级别**开事务（空 `sql.TxOptions`）。SQLite（事务独占唯一写
+> 连接，不存在并发写者）与 MySQL/InnoDB（默认 REPEATABLE READ，首读定
+> 快照）在事务内即得事务级快照；**PostgreSQL 默认 READ COMMITTED 每条
+> 语句取新快照，放进事务也不够**。chok 不提供隔离级别旋钮；PG 上确需
+> 跨块快照时，在事务首句经 Unsafe 执行
+> `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`
+> （`h.Unsafe(txCtx)` 是事务感知的），或接受逐块快照。
 
 ### 5.6 看见软删行（管理 / 回收站视图）
 

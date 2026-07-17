@@ -350,7 +350,9 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   自动分块（锚定单条大 IN 的集合语义：值集 Go 等值去重 + 跨块结果按
   主键去重——CI collation 下数据库等值比 Go 宽；空值集仍走一次退化
   查询，白名单/守卫/fail-closed scope 照常；FILTERS-ONLY，绕开页
-  大小 cap；多块非单语句，跨块一致性交给事务）。
+  大小 cap；多块非单语句，跨块快照一致性要求**事务级快照**隔离——
+  事务走默认隔离，SQLite/InnoDB 满足、PG 默认 READ COMMITTED 不满足，
+  按方言诚实声明，见 db.md §5.5）。
 - `store.WithRowsAffected(&n)` 同时实现 UpdateOption/DeleteOption，
   观测 Where locator 批量写的命中行数；纯观测，不改变语义。
 - **游标分页钦定形态**：`ListWithCursor` = 复合 keyset `(field, rid)` +

@@ -124,8 +124,13 @@
 > 分页、count、页大小 cap 在单块内成立、跨块静默失效，这类「看着完整
 > 实则缺行/错序」的选项直接拒收；Store 的 max-page-size cap 同理被刻意
 > 绕开——那是面向客户端列表的护栏，按块套用等于把行悄悄裁掉。多块是
-> 多条 SELECT 而非单语句，并发写下合并结果不是单快照读——契约文档
-> 明示，跨块一致性交给事务隔离（`Store.Tx` / `db.RunInTx`）。结果因此
+> 多条 SELECT 而非单语句，并发写下合并结果不是单快照读——而且「放进
+> 事务」只在默认隔离给出**事务级快照**的方言上成立（`Store.Tx` /
+> `db.RunInTx` 用数据库默认隔离）：SQLite（事务独占唯一写连接）与
+> MySQL/InnoDB（REPEATABLE READ 首读定快照）满足，PostgreSQL 默认
+> READ COMMITTED 每语句新快照**不满足**——按方言诚实写进契约，PG 需要
+> 时经 Unsafe 在事务首句自行升级 REPEATABLE READ；不为此新开隔离级别
+> 旋钮（等真实需求）。结果因此
 > 不保证顺序、大小由值集决定，与 `ListByIDs` 同属服务端管道，文档明确
 > 指向键形字段。
 > 声明 owner，全局 manifest 用数据库 claim 把 kind/账本归属持久化，并以
