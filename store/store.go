@@ -142,8 +142,13 @@ func (e *VersionConflictError) Is(target error) bool { return target == ErrStale
 
 // DuplicateEntryError carries the raw database error detail so callers can
 // report which constraint was violated.
+//
+// Field is the public field name the violation maps to, populated when
+// the Store declared the violated constraint via WithConstraintFields;
+// empty otherwise. MapError prefers it over the raw constraint name.
 type DuplicateEntryError struct {
 	Detail string // driver-specific constraint/message
+	Field  string // declared constraint→field mapping hit, or empty
 }
 
 func (e *DuplicateEntryError) Error() string {
@@ -180,6 +185,7 @@ type Store[T db.Modeler] struct {
 	bus              *event.Bus        // nil unless WithBus was given
 	queryFieldMap    map[string]string // filter + order
 	updateFieldMap   map[string]string // update SET columns
+	constraintFields map[string]string // WithConstraintFields: constraint identifier → public field name
 	modelSchema      *schema.Schema    // GORM's authoritative field/column mapping
 	ridColumn        string            // RID's DB column — cursor tie-breaker, independent of the query allowlist
 	soft             bool              // true if T embeds SoftDeleteModel
@@ -216,6 +222,7 @@ type storeConfig struct {
 	queryFields         []string
 	updateFields        []string
 	aliases             map[string]string
+	constraintFields    map[string]string
 	scopes              []ScopeFunc
 	bus                 *event.Bus
 	defaultPageSize     int
@@ -395,6 +402,54 @@ func WithColumnAlias(field, column string) StoreOption {
 			c.aliases = make(map[string]string)
 		}
 		c.aliases[field] = column
+	}
+}
+
+// WithConstraintFields declares how unique-constraint violations report
+// themselves: a map from the constraint identifier the database names in
+// its duplicate-key error to the public field name the API should blame.
+// When a write returns ErrDuplicate and the violated constraint is
+// declared here, the error carries that field name —
+// DuplicateEntryError.Field, surfaced by MapError as response metadata
+// key field — instead of the raw constraint name: index names leak
+// schema layout and drift with migrations, while field names are the
+// API's own vocabulary (the reasoning behind Ecto's unique_constraint).
+// Undeclared constraints keep the existing behaviour (constraint-name
+// metadata).
+//
+// Keys match the identifier as the driver reports it, with table
+// qualifiers stripped (MySQL 8 reports keys as table.key). SQLite names
+// no index in its message — it reports the violated column list — so a
+// declaration that must hold across dialects lists both spellings; note
+// that SoftUnique indexes include delete_token in that list:
+//
+//	store.WithConstraintFields(map[string]string{
+//	    "uk_email":           "email", // Postgres / MySQL: index name
+//	    "email,delete_token": "email", // SQLite: column list of the SoftUnique index
+//	})
+//
+// The field name is reported to clients verbatim. It is deliberately
+// not validated against the query/update allowlists — create-path
+// fields legitimately live in neither. Empty keys or values panic at
+// construction. Multiple calls merge; later calls win on duplicate keys.
+func WithConstraintFields(fields map[string]string) StoreOption {
+	// Snapshot before validating, for the same reason WithAdminRoles
+	// does: the caller keeps a reference to the map, and a mutation after
+	// construction must not rewrite — or un-validate — the declaration.
+	cp := make(map[string]string, len(fields))
+	for constraint, field := range fields {
+		if strings.TrimSpace(constraint) == "" || strings.TrimSpace(field) == "" {
+			panic("store: WithConstraintFields: constraint and field names must not be empty")
+		}
+		cp[constraint] = field
+	}
+	return func(c *storeConfig) {
+		if c.constraintFields == nil {
+			c.constraintFields = make(map[string]string, len(cp))
+		}
+		for constraint, field := range cp {
+			c.constraintFields[constraint] = field
+		}
 	}
 }
 
@@ -811,6 +866,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		bus:              cfg.bus,
 		queryFieldMap:    queryFieldMap,
 		updateFieldMap:   updateFieldMap,
+		constraintFields: cfg.constraintFields,
 		modelSchema:      modelSchema,
 		ridColumn:        ridColumn,
 		soft:             db.IsSoftDeleteModel(model),
@@ -867,7 +923,7 @@ func (s *Store[T]) Create(ctx context.Context, obj *T) error {
 		}
 	}
 	if err := s.effectiveDB(ctx).Create(obj).Error; err != nil {
-		return mapError(err)
+		return s.mapError(err)
 	}
 	s.publishChanged(ctx, createdEvent(obj))
 	return nil
@@ -928,7 +984,7 @@ func (s *Store[T]) BatchCreate(ctx context.Context, objs []*T) error {
 		})
 	}
 	if err != nil {
-		return mapError(err)
+		return s.mapError(err)
 	}
 	for _, obj := range objs {
 		s.publishChanged(ctx, createdEvent(obj))
@@ -1061,7 +1117,7 @@ func (s *Store[T]) ListByIDs(ctx context.Context, ids []uint) ([]T, error) {
 	}
 	var items []T
 	if err := q.Where("id IN ?", ids).Find(&items).Error; err != nil {
-		return nil, mapError(err)
+		return nil, s.mapError(err)
 	}
 	if items == nil {
 		items = []T{}
@@ -1119,7 +1175,7 @@ func (s *Store[T]) listInternalWithMaxPageSize(ctx context.Context, qopts []Quer
 
 	var items []T
 	if err := query.Find(&items).Error; err != nil {
-		return nil, mapError(err)
+		return nil, s.mapError(err)
 	}
 
 	// Guarantee non-nil slice for JSON serialization.
@@ -1164,7 +1220,7 @@ func (s *Store[T]) countInternal(ctx context.Context, qopts []QueryOption, opts 
 	}
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
-		return 0, mapError(err)
+		return 0, s.mapError(err)
 	}
 	return total, nil
 }
@@ -1497,6 +1553,28 @@ func mapError(err error) error {
 		return &DuplicateEntryError{Detail: err.Error()}
 	}
 	return err
+}
+
+// mapError is the Store-aware layer over the package mapError: it applies
+// the WithConstraintFields declaration to duplicate errors, resolving the
+// violated constraint to the public field name the API should blame. The
+// resolution must happen here — package-level MapError is registered
+// app-wide and has no idea which Store produced the error, so the mapping
+// rides the error value itself.
+func (s *Store[T]) mapError(err error) error {
+	mapped := mapError(err)
+	if len(s.constraintFields) == 0 {
+		return mapped
+	}
+	var dup *DuplicateEntryError
+	if errors.As(mapped, &dup) && dup.Field == "" {
+		if constraint := extractConstraintName(dup.Detail); constraint != "" {
+			if field, ok := lookupConstraintField(s.constraintFields, constraint); ok {
+				dup.Field = field
+			}
+		}
+	}
+	return mapped
 }
 
 // Base model fields that must never be updated.

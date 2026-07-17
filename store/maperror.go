@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"regexp"
+	"strings"
 
 	"github.com/zynthara/chok/v2/apierr"
 )
@@ -32,12 +33,23 @@ func MapError(err error) *apierr.Error {
 		// (`"alice@example.com"`) plus SQL snippets that leak schema
 		// layout. Clients get enough to branch on (the constraint that
 		// failed), nothing more.
+		//
+		// A Store-declared constraint→field mapping (WithConstraintFields)
+		// is preferred over the raw name: the field is API vocabulary,
+		// stable across migrations, and leaks no schema naming.
 		var dup *DuplicateEntryError
-		if errors.As(err, &dup) && dup.Detail != "" {
-			if constraint := extractConstraintName(dup.Detail); constraint != "" {
+		if errors.As(err, &dup) {
+			if dup.Field != "" {
 				return apierr.ErrConflict.
 					WithMessage("duplicate entry").
-					WithMetadata("constraint", constraint)
+					WithMetadata("field", dup.Field)
+			}
+			if dup.Detail != "" {
+				if constraint := extractConstraintName(dup.Detail); constraint != "" {
+					return apierr.ErrConflict.
+						WithMessage("duplicate entry").
+						WithMetadata("constraint", constraint)
+				}
 			}
 		}
 		return apierr.ErrConflict.WithMessage("duplicate entry")
@@ -54,6 +66,11 @@ var (
 	reMySQL    = regexp.MustCompile(`for key '([^']+)'`)
 	rePostgres = regexp.MustCompile(`unique constraint "([^"]+)"`)
 	reSQLite   = regexp.MustCompile(`UNIQUE constraint failed:\s*([^\n]+)`)
+	// glebarez/sqlite appends the numeric extended result code to the
+	// message, so the extracted column list ends in a parenthesised code
+	// (2067 for UNIQUE). Stripped during declaration matching only — the
+	// undeclared-constraint metadata keeps the raw extraction.
+	reTrailingCode = regexp.MustCompile(`\s*\(\d+\)$`)
 )
 
 // extractConstraintName tries to pull the constraint identifier out of
@@ -70,4 +87,30 @@ func extractConstraintName(detail string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// lookupConstraintField resolves an extracted constraint identifier
+// against a WithConstraintFields declaration. Postgres reports the bare
+// constraint name and matches exactly; the second probe normalises the
+// dialects that qualify identifiers with the table: MySQL 8 reports keys
+// as table.key, and SQLite reports the violated COLUMN list (as
+// table.col, table.col — no index name at all), so table prefixes are
+// stripped from every comma-separated segment and the segments rejoined
+// bare (a composite column list matches a comma-joined key, in index
+// column order).
+func lookupConstraintField(fields map[string]string, constraint string) (string, bool) {
+	if field, ok := fields[constraint]; ok {
+		return field, true
+	}
+	constraint = reTrailingCode.ReplaceAllString(constraint, "")
+	segments := strings.Split(constraint, ",")
+	for i, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if dot := strings.LastIndex(segment, "."); dot >= 0 {
+			segment = segment[dot+1:]
+		}
+		segments[i] = segment
+	}
+	field, ok := fields[strings.Join(segments, ",")]
+	return field, ok
 }

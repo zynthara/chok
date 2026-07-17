@@ -92,7 +92,7 @@ func pluckColumn[F any, T db.Modeler](ctx context.Context, s *Store[T], col stri
 
 	out := []F{}
 	if err := q.Pluck(col, &out).Error; err != nil {
-		return nil, mapError(err)
+		return nil, s.mapError(err)
 	}
 	return out, nil
 }

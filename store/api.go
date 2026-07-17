@@ -272,7 +272,7 @@ func (s *Store[T]) getInternal(ctx context.Context, by Locator, opts []QueryOpti
 	}
 	var obj T
 	if err := q.First(&obj).Error; err != nil {
-		mapped := mapError(err)
+		mapped := s.mapError(err)
 		if errors.Is(mapped, ErrNotFound) {
 			return nil, newNotFoundError(by)
 		}
@@ -409,7 +409,7 @@ func (s *Store[T]) Delete(ctx context.Context, by Locator, opts ...DeleteOption)
 	recordAffected(cfg.affected, result)
 
 	if result.Error != nil {
-		return mapError(result.Error)
+		return s.mapError(result.Error)
 	}
 	if result.RowsAffected == 0 && cfg.versionSet && cfg.version > 0 {
 		// Unscoped: distinguish "row was soft-deleted by another txn"
@@ -470,7 +470,7 @@ func (s *Store[T]) Restore(ctx context.Context, by Locator) error {
 		"version":      gorm.Expr("version + 1"),
 	})
 	if result.Error != nil {
-		return mapError(result.Error)
+		return s.mapError(result.Error)
 	}
 	if result.RowsAffected == 0 {
 		// Distinguish "row is alive" (idempotent nil) from "no such
@@ -544,7 +544,7 @@ func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflictColumns []string,
 		Columns:   gormCols,
 		DoUpdates: clause.AssignmentColumns(doUpdateCols),
 	}).Create(obj).Error; err != nil {
-		return mapError(err)
+		return s.mapError(err)
 	}
 	// The SQL doesn't report a portable insert-vs-update branch or a truthful
 	// persisted object on every supported dialect. Publish a payload-free
@@ -624,7 +624,7 @@ func (s *Store[T]) BatchUpsert(ctx context.Context, objs []*T, conflictColumns [
 		err = s.h.RunInTx(ctx, write)
 	}
 	if err != nil {
-		return mapError(err)
+		return s.mapError(err)
 	}
 	// OpUpsert carries no row identity, so one event per call has the same
 	// information as one per input without amplifying type-wide invalidation.
@@ -763,7 +763,7 @@ func normalizeConflictValue(value any) (any, error) {
 
 func (s *Store[T]) finalizeUpdate(ctx context.Context, by Locator, result *gorm.DB, lockVer int, changes ChangeSnapshot) error {
 	if result.Error != nil {
-		return mapError(result.Error)
+		return s.mapError(result.Error)
 	}
 	if result.RowsAffected == 0 {
 		if lockVer > 0 {
@@ -823,7 +823,7 @@ func (s *Store[T]) existsByLocatorInternal(ctx context.Context, by Locator, incl
 	var dummy int
 	result := q.Model(new(T)).Select("1").Limit(1).Scan(&dummy)
 	if result.Error != nil {
-		return false, mapError(result.Error)
+		return false, s.mapError(result.Error)
 	}
 	return result.RowsAffected > 0, nil
 }
