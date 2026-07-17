@@ -357,14 +357,22 @@ func SequencePresent(ctx context.Context, h *DB, seq Sequence) (bool, error) {
 		return false, err
 	}
 	gdb := h.gdb.WithContext(ctx)
-	if gdb.Migrator().HasTable(e.seq.ledger) {
+	ledgerPresent, err := tableExists(gdb, e.seq.ledger)
+	if err != nil {
+		return false, err
+	}
+	if ledgerPresent {
 		return true, nil
 	}
 	if e.seq.baseline == nil || len(e.seq.baseline.Tables) == 0 {
 		return false, nil
 	}
 	for _, table := range e.seq.baseline.Tables {
-		if !gdb.Migrator().HasTable(table) {
+		present, err := tableExists(gdb, table)
+		if err != nil {
+			return false, err
+		}
+		if !present {
 			return false, nil
 		}
 	}
@@ -420,7 +428,11 @@ func SchemaFingerprint(ctx context.Context, h *DB, tables []string) (string, err
 	sort.Strings(names)
 	catalog := schemaCatalogSnapshot{Dialect: dialect}
 	for _, table := range names {
-		if !gdb.Migrator().HasTable(table) {
+		tablePresent, err := tableExists(gdb, table)
+		if err != nil {
+			return "", err
+		}
+		if !tablePresent {
 			return "", fmt.Errorf("db: schema fingerprint: missing table %s", table)
 		}
 		tableSnapshot, err := snapshotTable(gdb, dialect, table)

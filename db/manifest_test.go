@@ -541,3 +541,55 @@ func TestValidateSequenceKind_ExportedGate(t *testing.T) {
 		}
 	}
 }
+
+func TestManifestProbes_DeadContextIsNotAVerdict(t *testing.T) {
+	// CI regression (2026-07-17, PG lane): gorm's Migrator().HasTable
+	// swallows query errors into false, so a table-existence probe running
+	// under an expired context read as absence — and RepairSequenceClaim
+	// escalated it into a fabricated ErrSequenceManifestCorrupt (claim
+	// without ledger) instead of the deadline error the caller's context
+	// carried. For a repair tool, inventing corruption verdicts out of
+	// transport failures is the worst failure class. Deterministic pin: a
+	// pre-cancelled context must surface the context error on every probe
+	// path — never a verdict, never a result-shaped lie (empty manifest,
+	// absent ledger, empty history, sequence not present).
+	h := openTestHandle(t)
+	seq := manifestTestSequence(t, "dead_ctx", "example.com/dead/ctx", map[string]string{
+		"0001_init.sql": "CREATE TABLE manifest_dead_ctx_item (id BIGINT PRIMARY KEY);",
+	})
+	if _, err := ApplySequence(t.Context(), h, seq); err != nil {
+		t.Fatal(err)
+	}
+
+	dead, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := RepairSequenceClaim(dead, h, seq.Kind(), RepairClaimOptions{
+		ExpectedOwner: seq.Owner(), NewOwner: "example.com/new/ctx", Reason: "test transfer",
+	})
+	if errors.Is(err, ErrSequenceManifestCorrupt) || errors.Is(err, ErrSequenceUnclaimed) {
+		t.Fatalf("a dead-context probe must not fabricate a manifest verdict, got %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("claim repair under a dead context must surface the context error, got %v", err)
+	}
+
+	if _, err := ManifestEntries(dead, h); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ManifestEntries must not report an empty manifest under a dead context, got %v", err)
+	}
+	if _, err := LedgerSnapshot(dead, h, seq.Kind()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("LedgerSnapshot must not report an absent ledger under a dead context, got %v", err)
+	}
+	if _, err := RepairHistory(dead, h, RepairHistoryFilter{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RepairHistory must not report empty history under a dead context, got %v", err)
+	}
+	if _, err := SequencePresent(dead, h, seq); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SequencePresent must not report absence under a dead context, got %v", err)
+	}
+
+	// The live-context paths still work after the dead-context calls.
+	entries, err := ManifestEntries(t.Context(), h)
+	if err != nil || len(entries) != 1 || entries[0].Owner != seq.Owner() {
+		t.Fatalf("dead-context probes must leave the manifest untouched: entries=%+v err=%v", entries, err)
+	}
+}

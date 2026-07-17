@@ -766,7 +766,11 @@ func (e migrationEngine) planBaselineAdoption(
 	present := 0
 	var missing []string
 	for _, table := range baseline.Tables {
-		if gdb.Migrator().HasTable(table) {
+		tablePresent, err := tableExists(gdb, table)
+		if err != nil {
+			return nil, err
+		}
+		if tablePresent {
 			present++
 		} else {
 			missing = append(missing, table)
@@ -1052,7 +1056,11 @@ func (e migrationEngine) status(ctx context.Context, h *DB) (*MigrationStatus, e
 		return nil, err
 	}
 	gdb := h.gdb.WithContext(ctx)
-	if !gdb.Migrator().HasTable(e.seq.ledger) {
+	ledgerPresent, err := tableExists(gdb, e.seq.ledger)
+	if err != nil {
+		return nil, err
+	}
+	if !ledgerPresent {
 		return e.diffMigrations(files, nil), nil
 	}
 	columns, err := e.inspectLedgerColumns(gdb)

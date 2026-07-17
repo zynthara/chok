@@ -230,7 +230,11 @@ func RepairHistory(ctx context.Context, h *DB, filter RepairHistoryFilter) ([]Re
 	}
 
 	gdb := h.gdb.WithContext(ctx)
-	if !gdb.Migrator().HasTable(sequenceRepairHistoryTable) {
+	historyPresent, err := tableExists(gdb, sequenceRepairHistoryTable)
+	if err != nil {
+		return nil, err
+	}
+	if !historyPresent {
 		return []RepairRecord{}, nil
 	}
 	columns, err := inspectColumns(gdb, sequenceRepairHistoryTable)

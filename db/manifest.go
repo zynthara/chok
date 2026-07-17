@@ -202,6 +202,29 @@ func ensureManifestColumnsLocked(gdb *gorm.DB) error {
 	return nil
 }
 
+// tableExists probes for a table without fabricating an answer out of a
+// failed probe: gorm's Migrator().HasTable swallows query errors into
+// false, so a probe running under a dead context reads as absent — and
+// the callers here escalate absence into verdicts (corrupt manifest,
+// unclaimed kind, missing fingerprint table) or result-shaped reads
+// (empty manifest, empty history, every migration pending). When the
+// probe's context is already done, absence is not evidence; surface the
+// context error instead. A transport failure under a live context still
+// reads as absent — the gorm migrator API exposes no error channel — so
+// this narrows the fabrication window to what is detectable rather than
+// closing it entirely.
+func tableExists(gdb *gorm.DB, table string) (bool, error) {
+	if gdb.Migrator().HasTable(table) {
+		return true, nil
+	}
+	if gdb.Statement != nil && gdb.Statement.Context != nil {
+		if err := gdb.Statement.Context.Err(); err != nil {
+			return false, fmt.Errorf("db: probe table %s existence: %w", table, err)
+		}
+	}
+	return false, nil
+}
+
 // ManifestEntries returns every claimed sequence in kind order. It is strictly
 // read-only: a missing manifest returns an empty slice, and a legacy partial
 // manifest is read through column fallbacks rather than upgraded.
@@ -210,7 +233,11 @@ func ManifestEntries(ctx context.Context, h *DB) ([]ManifestEntry, error) {
 		return nil, fmt.Errorf("db: read migration manifest: nil database handle")
 	}
 	gdb := h.gdb.WithContext(ctx)
-	if !gdb.Migrator().HasTable(sequenceManifestTable) {
+	manifestPresent, err := tableExists(gdb, sequenceManifestTable)
+	if err != nil {
+		return nil, err
+	}
+	if !manifestPresent {
 		return []ManifestEntry{}, nil
 	}
 	columns, err := inspectManifestColumns(gdb)
@@ -333,7 +360,11 @@ func manifestEntryWithPolicy(gdb *gorm.DB, kind, allowedReservedOwnerMismatch st
 // distinction between a fresh sequence and a manifest claim whose ledger was
 // deleted, so apply cannot recreate and replay the missing ledger by accident.
 func manifestClaimExists(gdb *gorm.DB, kind string) (bool, error) {
-	if !gdb.Migrator().HasTable(sequenceManifestTable) {
+	manifestPresent, err := tableExists(gdb, sequenceManifestTable)
+	if err != nil {
+		return false, err
+	}
+	if !manifestPresent {
 		return false, nil
 	}
 	columns, err := inspectManifestColumns(gdb)
@@ -365,7 +396,11 @@ func (e migrationEngine) preflightSequenceClaim(gdb *gorm.DB) (bool, error) {
 	if e.seq.owner == "" {
 		return false, nil
 	}
-	if gdb.Migrator().HasTable(e.seq.ledger) {
+	ledgerPresent, err := tableExists(gdb, e.seq.ledger)
+	if err != nil {
+		return false, err
+	}
+	if ledgerPresent {
 		return true, nil
 	}
 	claimExists, err := manifestClaimExists(gdb, e.seq.kind)
@@ -375,7 +410,11 @@ func (e migrationEngine) preflightSequenceClaim(gdb *gorm.DB) (bool, error) {
 	if !claimExists {
 		return false, nil
 	}
-	if gdb.Migrator().HasTable(e.seq.ledger) {
+	ledgerPresent, err = tableExists(gdb, e.seq.ledger)
+	if err != nil {
+		return false, err
+	}
+	if ledgerPresent {
 		return true, nil
 	}
 	return false, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, e.seq.kind, e.seq.ledger)
@@ -529,7 +568,11 @@ func LedgerSnapshot(ctx context.Context, h *DB, kind string) (*SequenceLedgerSna
 	e := migrationEngine{seq: migrationSequence{kind: kind, ledger: ledgerForSequenceKind(kind), dialect: dialect}}
 	gdb := h.gdb.WithContext(ctx)
 	snapshot := &SequenceLedgerSnapshot{Kind: kind, Ledger: e.seq.ledger, Dialect: dialect}
-	if !gdb.Migrator().HasTable(e.seq.ledger) {
+	ledgerPresent, err := tableExists(gdb, e.seq.ledger)
+	if err != nil {
+		return nil, err
+	}
+	if !ledgerPresent {
 		return snapshot, nil
 	}
 	snapshot.Exists = true
@@ -592,10 +635,18 @@ func RepairSequenceClaim(ctx context.Context, h *DB, kind string, opts RepairCla
 
 	gdb := h.gdb.WithContext(ctx)
 	ledger := ledgerForSequenceKind(kind)
-	if !gdb.Migrator().HasTable(sequenceManifestTable) {
+	manifestPresent, err := tableExists(gdb, sequenceManifestTable)
+	if err != nil {
+		return nil, err
+	}
+	if !manifestPresent {
 		return nil, fmt.Errorf("%w: migration kind %q has no manifest claim", ErrSequenceUnclaimed, kind)
 	}
-	if !gdb.Migrator().HasTable(ledger) {
+	ledgerPresent, err := tableExists(gdb, ledger)
+	if err != nil {
+		return nil, err
+	}
+	if !ledgerPresent {
 		return nil, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, kind, ledger)
 	}
 	e := migrationEngine{seq: migrationSequence{kind: kind, ledger: ledger, dialect: gdb.Dialector.Name()}}
@@ -613,7 +664,11 @@ func RepairSequenceClaim(ctx context.Context, h *DB, kind string, opts RepairCla
 	if err := ensureRepairHistoryColumns(gdb); err != nil {
 		return nil, err
 	}
-	if !gdb.Migrator().HasTable(ledger) {
+	ledgerPresent, err = tableExists(gdb, ledger)
+	if err != nil {
+		return nil, err
+	}
+	if !ledgerPresent {
 		return nil, fmt.Errorf("%w: migration kind %q claim exists without ledger %s", ErrSequenceManifestCorrupt, kind, ledger)
 	}
 	// A reserved claim may be repaired only back to its canonical owner, so
