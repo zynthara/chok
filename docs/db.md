@@ -413,9 +413,14 @@ ids, err := store.PluckIDs(ctx, posts, where.WithFilter("status", "published"))
 comments, err := commentStore.ListByIDs(ctx, ids)
 
 // 值集超过 where.MaxInList（500）时用 ListIn：自动去重 + 分块，每块都走
-// List 的白名单 / scope / 软删路径，语义等价一条大 IN。只收过滤 option
-// （排序 / 分页 / count 跨块不可组合，直接拒绝），结果不保证顺序、不受
-// Store 页大小 cap 限制——这是按值集定大小的服务端管道，对准键形字段用
+// List 的白名单 / scope / 软删路径，语义等价一条大 IN 的**集合语义**——
+// 值集 Go 等值去重之外，跨块结果还按主键去重（大小写不敏感 collation 下
+// 数据库等值比 Go 宽，同一行可能命中两块）。空值集也走一次退化查询：
+// 白名单 / 守卫 / fail-closed scope 照常校验，不会静默空页。只收过滤
+// option（排序 / 分页 / count 跨块不可组合，直接拒绝），结果不保证顺序、
+// 不受 Store 页大小 cap 限制——这是按值集定大小的服务端管道，对准键形
+// 字段用。多块 = 多条 SELECT 非单语句：并发写下合并结果不是单快照读，
+// 需要跨块一致性时放进事务（Store.Tx / db.RunInTx）
 items, err := store.ListIn(ctx, bookStore, "source_id", ids,
     where.WithFilter("status", "active"))
 ```
