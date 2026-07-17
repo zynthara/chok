@@ -58,3 +58,7 @@ examples/**/cache/
 
 # Claude Code per-repo session state. Never goes upstream.
 .claude/
+
+# Machine-local Claude Code project notes (auto-loaded alongside
+# CLAUDE.md, personal by design — see the CLAUDE.local.md convention).
+CLAUDE.local.md
