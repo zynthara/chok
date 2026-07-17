@@ -224,12 +224,15 @@ func (s *Store[T]) Get(ctx context.Context, by Locator, opts ...QueryOption) (*T
 //
 // Dialects: PostgreSQL and MySQL render FOR UPDATE and block concurrent
 // lockers/writers of the row until commit. SQLite has no row locks and
-// its driver drops the clause — but chok's SQLite shape routes every
-// transaction onto the single write connection opened with
-// _txlock=immediate, so the enclosing transaction already holds the
-// database write lock: strictly stronger than a row lock. The observable
-// guarantee — no concurrent writer between the locked read and commit —
-// holds on all three dialects.
+// its driver drops the clause; the guarantee comes from chok's SQLite
+// shape instead — transactions and writes all ride a single write
+// connection (file databases pin a one-connection write pool, opened
+// with _txlock=immediate unless the DSN overrides it; memory databases
+// run everything on one pinned connection), so the enclosing
+// transaction holds that connection exclusively and no concurrent
+// writer can run before it commits: stronger than a row lock. The
+// observable guarantee — no concurrent writer between the locked read
+// and commit — holds on all three dialects.
 //
 // WithPreload is rejected with ErrLockPreload: association rows load
 // through separate queries the lock does not cover. Lock the row first,

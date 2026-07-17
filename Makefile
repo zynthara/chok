@@ -55,7 +55,7 @@ test-pg: ## Run the data and battery schema packages against Postgres (set CHOK_
 
 .PHONY: test-mysql
 test-mysql: ## Run MySQL store, migration, battery-equivalence and read-only tests (set CHOK_TEST_MYSQL_DSN)
-	$(GO) test -race -count=1 ./store ./db ./account ./audit ./authz/... -run 'TestBatchUpsert_MySQLIgnoresDeclaredConflictTarget|TestApplyMigrations_MySQLPartialDDL|TestSequenceManifest_MySQLClaimAndRepair|TestRepairHistory_MySQL|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent|TestMigrationBehavior_MySQL'
+	$(GO) test -race -count=1 ./store ./db ./account ./audit ./authz/... -run 'TestBatchUpsert_MySQLIgnoresDeclaredConflictTarget|TestApplyMigrations_MySQLPartialDDL|TestSequenceManifest_MySQLClaimAndRepair|TestRepairHistory_MySQL|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent|TestMigrationBehavior_MySQL|TestGetForUpdate_MySQL'
 
 .PHONY: cover
 cover: ## Generate a coverage report at _output/coverage.html

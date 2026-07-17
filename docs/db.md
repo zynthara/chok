@@ -633,9 +633,11 @@ err := wallets.Tx(ctx, func(tx *store.Store[Wallet]) error {
 - `WithPreload` 被拒（`ErrLockPreload`）：关联行走独立查询，锁盖不住；先锁
   行，需要时再用普通 `Get` 取关联。
 - **方言语义一致**：PG / MySQL 渲染 `FOR UPDATE`，并发锁者/写者阻塞到提交；
-  SQLite 没有行锁、驱动会丢弃该子句——但 chok 的 SQLite 形态把所有事务路由
-  到 `_txlock=immediate` 的唯一写连接，事务本身持有**整库写锁**（强于行锁）。
-  三方言的可观测保证相同：锁定读到提交之间无并发写者。
+  SQLite 没有行锁、驱动会丢弃该子句——保证来自 chok 的 SQLite 形态本身：
+  事务与写语句全部走**唯一写连接**（文件库=单连接写池，默认注入
+  `_txlock=immediate`、DSN 显式指定时以调用方为准；内存库=整库仅一条固定
+  连接），事务期间独占该连接，不可能出现并发写者，强于行锁。三方言的可观测
+  保证相同：锁定读到提交之间无并发写者。
 
 ### 7.2 数据变更事件：`EntityChanged`
 

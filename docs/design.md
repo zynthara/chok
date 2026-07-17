@@ -362,9 +362,10 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   强制本句柄事务（`Store.Tx` 的克隆或 `RunInTx` 的 `txCtx`，
   autocommit 直接 `ErrLockRequiresTx`）、只读 store 拒绝、
   `WithPreload` 拒绝（关联查询在锁外）。SQLite 语义不依赖驱动渲染
-  （glebarez 会静默丢弃 `FOR UPDATE`）而依赖既有形态：事务一律路由
-  到 `_txlock=immediate` 的单写连接，整库写锁 ⊇ 行锁，三方言可观测
-  保证一致。`SKIP LOCKED` / `NOWAIT` 未提供，按需求再议。
+  （glebarez 会静默丢弃 `FOR UPDATE`）而依赖既有形态：事务独占唯一
+  写连接（文件库单连接写池、默认 `_txlock=immediate`；内存库整库
+  单连接），并发写者不存在 ⊇ 行锁，三方言可观测保证一致。
+  `SKIP LOCKED` / `NOWAIT` 未提供，按需求再议。
 - **刻意不做**：JOIN DSL（单表 store 的边界；跨表读走两步 IN）、
   表达式 ORDER BY（无法白名单化）——这两类是 `Unsafe` 舱口的正当
   用途，逃逸应当稀少而非为零。

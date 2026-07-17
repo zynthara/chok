@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/dbtest"
 	"github.com/zynthara/chok/v2/log"
@@ -110,16 +112,26 @@ func TestGetForUpdate_NotFound(t *testing.T) {
 	}
 }
 
-// TestGetForUpdate_BlocksSecondLocker: on a server dialect a second
-// transaction attempting to lock the same row must wait for the first
-// to commit. If FOR UPDATE were dropped or ineffective, the second
-// locker would acquire inside the first transaction's hold window and
-// observe committed == false.
-func TestGetForUpdate_BlocksSecondLocker(t *testing.T) {
-	if dbtest.Driver() != "postgres" {
-		t.Skip("row-lock contention is observable only on a server dialect (sqlite transactions serialize on the single write connection)")
-	}
-	s, _, alice := setupLockStore(t)
+// lockProbe carries the dialect-specific SQL for observing a lock wait
+// on the server: sessionID runs inside the second locker's transaction
+// and returns its connection's server-side session identifier;
+// isBlocked reports whether that session is currently parked in the
+// server's lock-wait state.
+type lockProbe struct {
+	sessionID func(tx *gorm.DB) (int64, error)
+	isBlocked func(raw *gorm.DB, id int64) (bool, error)
+}
+
+// assertGetForUpdateBlocksSecondLocker proves the row lock on a server
+// dialect: a second transaction attempting GetForUpdate on the same row
+// must be observed by the server in a lock wait before the first
+// transaction commits, and must acquire only afterwards. The
+// commit-side handshake (server-confirmed wait, not a fixed sleep)
+// means a dropped or ineffective FOR UPDATE fails the wait probe
+// deterministically instead of racing the scheduler; every wait is
+// bounded so a regression hangs the test for seconds, not forever.
+func assertGetForUpdateBlocksSecondLocker(t *testing.T, h *db.DB, s *Store[Product], alice context.Context, probe lockProbe) {
+	t.Helper()
 	p := &Product{Name: "widget"}
 	if err := s.Create(alice, p); err != nil {
 		t.Fatal(err)
@@ -127,11 +139,21 @@ func TestGetForUpdate_BlocksSecondLocker(t *testing.T) {
 
 	var committed atomic.Bool
 	locked := make(chan struct{})
+	session := make(chan int64, 1)
 	second := make(chan error, 1)
 
 	go func() {
 		<-locked
 		second <- s.Tx(alice, func(tx *Store[Product]) error {
+			g, err := tx.Unsafe(alice)
+			if err != nil {
+				return err
+			}
+			id, err := probe.sessionID(g)
+			if err != nil {
+				return err
+			}
+			session <- id
 			if _, err := tx.GetForUpdate(alice, RID(p.RID)); err != nil {
 				return err
 			}
@@ -147,16 +169,100 @@ func TestGetForUpdate_BlocksSecondLocker(t *testing.T) {
 			return err
 		}
 		close(locked)
-		// Give the second locker time to reach and block on FOR UPDATE;
-		// were the lock ineffective it would acquire within this window.
-		time.Sleep(300 * time.Millisecond)
+
+		var id int64
+		select {
+		case id = <-session:
+		case <-time.After(15 * time.Second):
+			return errors.New("second locker never reported its session")
+		}
+		// Commit only after the server confirms the second session is
+		// parked in a lock wait — the strict proof that FOR UPDATE is
+		// in effect.
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			blocked, err := probe.isBlocked(h.Unsafe(alice), id)
+			if err != nil {
+				return err
+			}
+			if blocked {
+				break
+			}
+			if time.Now().After(deadline) {
+				return errors.New("second locker never entered the server's lock-wait state — FOR UPDATE ineffective?")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 		committed.Store(true)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := <-second; err != nil {
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("second locker did not finish after the first transaction committed")
+	}
+}
+
+// TestGetForUpdate_BlocksSecondLocker: PostgreSQL half of the row-lock
+// contract (runs in the Postgres lane; sqlite serializes all
+// transactions on the single write connection, so there is no
+// second-session contention to observe there).
+func TestGetForUpdate_BlocksSecondLocker(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("row-lock contention is observable only on a server dialect")
+	}
+	s, gdb, alice := setupLockStore(t)
+	assertGetForUpdateBlocksSecondLocker(t, gdb, s, alice, lockProbe{
+		sessionID: func(tx *gorm.DB) (int64, error) {
+			var id int64
+			err := tx.Raw("SELECT pg_backend_pid()").Scan(&id).Error
+			return id, err
+		},
+		isBlocked: func(raw *gorm.DB, id int64) (bool, error) {
+			var evt string
+			err := raw.Raw(
+				"SELECT COALESCE(wait_event_type, '') FROM pg_stat_activity WHERE pid = ?", id,
+			).Scan(&evt).Error
+			return evt == "Lock", err
+		},
+	})
+}
+
+// TestGetForUpdate_MySQLBlocksSecondLocker: MySQL half of the row-lock
+// contract — entry guard plus real InnoDB contention observed through
+// information_schema.innodb_trx. Runs in the MySQL lane (make
+// test-mysql); skips without CHOK_TEST_MYSQL_DSN.
+func TestGetForUpdate_MySQLBlocksSecondLocker(t *testing.T) {
+	h := dbtest.OpenMySQL(t)
+	if err := h.Migrate(t.Context(), db.Table(&Product{})); err != nil {
 		t.Fatal(err)
 	}
+	s := New[Product](h, log.Empty(),
+		WithQueryFields("id", "name"), WithUpdateFields("name"))
+	alice := userCtx("alice")
+
+	if _, err := s.GetForUpdate(alice, RID("prd_x")); !errors.Is(err, ErrLockRequiresTx) {
+		t.Fatalf("outside tx: err = %v, want ErrLockRequiresTx", err)
+	}
+
+	assertGetForUpdateBlocksSecondLocker(t, h, s, alice, lockProbe{
+		sessionID: func(tx *gorm.DB) (int64, error) {
+			var id int64
+			err := tx.Raw("SELECT CONNECTION_ID()").Scan(&id).Error
+			return id, err
+		},
+		isBlocked: func(raw *gorm.DB, id int64) (bool, error) {
+			var state string
+			err := raw.Raw(
+				"SELECT COALESCE(MAX(trx_state), '') FROM information_schema.innodb_trx WHERE trx_mysql_thread_id = ?", id,
+			).Scan(&state).Error
+			return state == "LOCK WAIT", err
+		},
+	})
 }

@@ -68,8 +68,9 @@
 > clause 只会制造静默降级（glebarez 恰好就是静默丢弃 Locking 的驱动）；
 > 只读 store 拒绝（锁是写意图）；`WithPreload` 拒绝（关联查询在锁外，
 > 拼在一起是「看起来原子」的陷阱）。SQLite 的语义不依赖驱动渲染而依赖
-> 既有形态：事务一律路由到 `_txlock=immediate` 的唯一写连接，整库写锁
-> ⊇ 行锁，三方言可观测保证一致（锁定读到提交之间无并发写者）。
+> 既有形态：事务独占唯一写连接（文件库单连接写池、默认
+> `_txlock=immediate`；内存库整库仅一条固定连接），并发写者不存在，
+> 强于行锁，三方言可观测保证一致（锁定读到提交之间无并发写者）。
 > `SKIP LOCKED` / `NOWAIT` 刻意未做，等真实需求出现再议。
 > 声明 owner，全局 manifest 用数据库 claim 把 kind/账本归属持久化，并以
 > engine floor 阻止较旧的 manifest-aware 引擎写入。claim 校验位于迁移锁内，
