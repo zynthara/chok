@@ -15,15 +15,13 @@ type listItem struct {
 	Name string `json:"name"`
 }
 
-// pageLister fakes a QueryLister returning canned items + meta.
+// pageLister fakes a QueryLister returning a canned page.
 type pageLister struct {
-	items []listItem
-	total int64
-	meta  where.PageInfo
+	page *where.Page[listItem]
 }
 
-func (f pageLister) ListFromQuery(context.Context, url.Values) ([]listItem, int64, where.PageInfo, error) {
-	return f.items, f.total, f.meta, nil
+func (f pageLister) ListFromQuery(context.Context, url.Values) (*where.Page[listItem], error) {
+	return f.page, nil
 }
 
 // TestHandleList_EnvelopeRendersEffectivePagination: the envelope's
@@ -32,11 +30,11 @@ func (f pageLister) ListFromQuery(context.Context, url.Values) ([]listItem, int6
 // deliberately contradicts the meta (size=5000&page=9): the old
 // re-parse would have echoed it.
 func TestHandleList_EnvelopeRendersEffectivePagination(t *testing.T) {
-	lister := pageLister{
-		items: []listItem{{Name: "a"}, {Name: "b"}},
-		total: 3,
-		meta:  where.PageInfo{Page: 2, Size: 2, Offset: 2, HasMore: false},
-	}
+	lister := pageLister{page: &where.Page[listItem]{
+		Items: []listItem{{Name: "a"}, {Name: "b"}},
+		Total: 3,
+		Meta:  where.PageInfo{Page: 2, Size: 2, Offset: 2, HasMore: false},
+	}}
 	h := HandleList[listItem](lister)
 
 	req := httptest.NewRequest(http.MethodGet, "/items?size=5000&page=9", nil)

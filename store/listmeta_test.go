@@ -31,29 +31,29 @@ func TestListFromQuery_PageInfoSameSourceAsSQL(t *testing.T) {
 
 	// Oversized request: the meta reports the clamped size, not an echo
 	// of the request, and HasMore comes from the true offset.
-	items, total, meta, err := s.ListFromQuery(alice, url.Values{"size": {"10"}})
+	page, err := s.ListFromQuery(alice, url.Values{"size": {"10"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 3 || len(items) != 2 {
-		t.Fatalf("clamp must hold: total=%d items=%d", total, len(items))
+	if page.Total != 3 || len(page.Items) != 2 {
+		t.Fatalf("clamp must hold: total=%d items=%d", page.Total, len(page.Items))
 	}
-	if want := (where.PageInfo{Page: 1, Size: 2, Offset: 0, HasMore: true}); meta != want {
-		t.Fatalf("meta = %+v, want %+v", meta, want)
+	if want := (where.PageInfo{Page: 1, Size: 2, Offset: 0, HasMore: true}); page.Meta != want {
+		t.Fatalf("meta = %+v, want %+v", page.Meta, want)
 	}
 
 	// Page 2 counts in clamped units: offset moves with the effective
 	// size, and the last page keeps Size = effective LIMIT — never
 	// len(items).
-	items, _, meta, err = s.ListFromQuery(alice, url.Values{"page": {"2"}, "size": {"10"}})
+	page, err = s.ListFromQuery(alice, url.Values{"page": {"2"}, "size": {"10"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("page 2 of size-2 pages over 3 rows: want 1 item, got %d", len(items))
+	if len(page.Items) != 1 {
+		t.Fatalf("page 2 of size-2 pages over 3 rows: want 1 item, got %d", len(page.Items))
 	}
-	if want := (where.PageInfo{Page: 2, Size: 2, Offset: 2, HasMore: false}); meta != want {
-		t.Fatalf("meta = %+v, want %+v", meta, want)
+	if want := (where.PageInfo{Page: 2, Size: 2, Offset: 2, HasMore: false}); page.Meta != want {
+		t.Fatalf("meta = %+v, want %+v", page.Meta, want)
 	}
 }
 

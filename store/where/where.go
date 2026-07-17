@@ -87,6 +87,28 @@ func (c *Config) PageInfo() PageInfo {
 	return PageInfo{Page: c.page, Size: c.limit, Offset: c.offset}
 }
 
+// Page is the result of a paginated list query. The store guarantees
+// Items is non-nil. Total is the total number of matching records when
+// WithCount() was included in the query options; zero when count was
+// not requested.
+//
+// Meta carries the pagination the query actually executed with — the
+// effective LIMIT/OFFSET after store caps, same-sourced with the SQL,
+// so envelopes render it instead of re-deriving values from the
+// request. Meta.HasMore is only computed when the query counted
+// (WithCount); zero-value Meta means the query was not paginated.
+//
+// It is declared here — in the query layer both the store and the
+// handler package already speak — so envelope renderers
+// (handler.HandleList) can consume it without importing store.
+// Application code normally spells it store.Page, an alias of this
+// type.
+type Page[T any] struct {
+	Items []T      `json:"items"`
+	Total int64    `json:"total"`
+	Meta  PageInfo `json:"meta,omitzero"`
+}
+
 // Option modifies a GORM query and/or query config.
 // fieldMap is provided by Store at apply-time.
 //

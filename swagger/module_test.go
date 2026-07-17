@@ -129,7 +129,7 @@ func TestBuildSpec_ListOperationEnvelope(t *testing.T) {
 // listerFunc adapts a func to handler.QueryLister for tests.
 type listerFunc[T any] func(context.Context) ([]T, int64, error)
 
-func (f listerFunc[T]) ListFromQuery(ctx context.Context, _ url.Values) ([]T, int64, where.PageInfo, error) {
+func (f listerFunc[T]) ListFromQuery(ctx context.Context, _ url.Values) (*where.Page[T], error) {
 	items, total, err := f(ctx)
-	return items, total, where.PageInfo{}, err
+	return &where.Page[T]{Items: items, Total: total}, err
 }

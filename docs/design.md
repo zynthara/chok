@@ -301,8 +301,9 @@ Version）;`BatchUpsert` 是分片 conflict-update，要求批内 conflict key
 可靠返回 conflict 分支的真实持久化对象，事件统一为无 payload 的
 `OpUpsert`，订阅者按实体类型失效；`BatchUpsert` 每次调用只发一条，避免
 N 个无身份 payload 触发 N 次相同失效。禁止把 create hook 生成的新 RID
-当成已存身份。批量能力放在独立 `BatchWriter[T]`，不扩张 `Writer[T]` 以免
-破坏下游窄接口 mock。
+当成已存身份。接口视图按**单行/批量**划线：`Writer[T]` 只含单行写
+（Create/Update/Upsert/Delete），批量三件套在独立 `BatchWriter[T]`——
+批量面再扩张也不触碰下游 `Writer` mock 的方法集。
 
 **安全策略应用级默认（`db.store` 块）**：strict /
 require_principal / admin_roles / 分页上限不再依赖每个构造点记得写
@@ -351,9 +352,12 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   identifier 校验）保留为可信服务端底层。
 - **分页信封同源**：`where.Config` 产出 `PageInfo`（生效
   page/size/offset，钳制时 offset 按生效 size 重算，保持三者自洽）；
-  `Page[T].Meta` 与 `ListFromQuery` 第三返回值携带它，
-  `handler.HandleList` 只渲染不重新解析请求——信封与 SQL
-  LIMIT/OFFSET 出自同一份 Config，结构上无法漂移。
+  `Page[T].Meta` 携带它（`List` 与 `ListFromQuery` 同返 `*Page[T]`；
+  类型本体在 `where`，`store.Page` 是别名，handler 因此不 import
+  store），`handler.HandleList` 只渲染不重新解析请求——信封与 SQL
+  LIMIT/OFFSET 出自同一份 Config，结构上无法漂移。`ListFromQuery`
+  是 `*Store` 上的 HTTP 糖，刻意不进 `Reader` 契约——解析传输层
+  输入属于边缘（handler），数据接口保持 transport-free。
 - **刻意不做**：JOIN DSL（单表 store 的边界；跨表读走两步 IN）、
   表达式 ORDER BY（无法白名单化）——这两类是 `Unsafe` 舱口的正当
   用途，逃逸应当稀少而非为零。

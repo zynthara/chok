@@ -11,12 +11,12 @@ import (
 
 // QueryLister is implemented by store.Store[T] (and wrappers that embed it).
 // The interface decouples handler from store — handler never imports the
-// store package (where is the shared query layer both already speak).
-// The where.PageInfo return is the pagination the query actually executed
-// with; HandleList renders the envelope from it instead of re-deriving
-// values from the raw request.
+// store package; where.Page (aliased as store.Page) lives in the query
+// layer both already speak. Page.Meta is the pagination the query actually
+// executed with; HandleList renders the envelope from it instead of
+// re-deriving values from the raw request.
 type QueryLister[T any] interface {
-	ListFromQuery(ctx context.Context, query url.Values) ([]T, int64, where.PageInfo, error)
+	ListFromQuery(ctx context.Context, query url.Values) (*where.Page[T], error)
 }
 
 // HandleList creates an http.Handler that parses page/size/order/filter
@@ -40,12 +40,13 @@ func HandleList[T any](lister QueryLister[T], opts ...HandleOption) http.Handler
 
 	return &metaHandler{
 		serve: func(w http.ResponseWriter, r *http.Request) {
-			items, total, pageInfo, err := lister.ListFromQuery(r.Context(), r.URL.Query())
+			page, err := lister.ListFromQuery(r.Context(), r.URL.Query())
 			if err != nil {
 				WriteResponse(w, r, 0, nil, err)
 				return
 			}
 			// Guarantee non-nil slice so JSON serializes as [] not null.
+			items := page.Items
 			if items == nil {
 				items = []T{}
 			}
@@ -54,10 +55,10 @@ func HandleList[T any](lister QueryLister[T], opts ...HandleOption) http.Handler
 			// defaults show up instead of an echo of the raw request.
 			WriteResponse(w, r, http.StatusOK, &ListResult[T]{
 				Items:   items,
-				Total:   total,
-				Page:    pageInfo.Page,
-				Size:    pageInfo.Size,
-				HasMore: pageInfo.HasMore,
+				Total:   page.Total,
+				Page:    page.Meta.Page,
+				Size:    page.Meta.Size,
+				HasMore: page.Meta.HasMore,
 			}, nil)
 		},
 		meta: Meta{
