@@ -43,6 +43,29 @@ import (
 // fail loudly instead of mis-paginating.
 const cursorTokenVersion = 1
 
+// Cursor size discipline — both bounds are public contract:
+//
+//   - MaxCursorTokenLen caps the opaque token ListWithCursor accepts from
+//     clients. The check runs before base64/JSON work, so an arbitrarily
+//     long token costs its length check, not a proportional decode
+//     allocation. Over-limit tokens are apierr.ErrInvalidArgument (400).
+//   - MaxCursorValueLen caps the string representation of a boundary
+//     value the encoder will sign. Only string fields can exceed it (every
+//     other kind renders a few dozen bytes at most); an over-limit
+//     boundary is refused as a server-side field-contract error — the
+//     framework never silently truncates a value into a token that would
+//     scan the next page from a wrong position.
+//
+// The two interlock: a signed token must stay decodable, so after
+// assembly the encoder also refuses any token longer than
+// MaxCursorTokenLen (JSON escaping can inflate a near-limit boundary —
+// control characters expand up to six bytes each — past what the repr
+// bound alone guarantees).
+const (
+	MaxCursorTokenLen = 4096
+	MaxCursorValueLen = 1024
+)
+
 type cursorToken struct {
 	V     int    `json:"v"`
 	Field string `json:"f"`
@@ -108,6 +131,13 @@ func encodeCursorValue(val any) (kind, repr string, err error) {
 	switch rv.Kind() {
 	case reflect.String:
 		s := rv.String()
+		// The length bound comes first: it is the cheap check, and it spares
+		// the UTF-8 scan from walking a value that is already refused.
+		// Truncating instead would sign a token that decodes to a DIFFERENT
+		// value and scans the next page from a wrong position.
+		if len(s) > MaxCursorValueLen {
+			return "", "", fmt.Errorf("cursor boundary string is %d bytes, exceeding MaxCursorValueLen %d; cursor fields must be short scalar keys", len(s), MaxCursorValueLen)
+		}
 		// json.Marshal replaces invalid UTF-8 with U+FFFD without erroring,
 		// so a token signed over such a boundary would decode to a DIFFERENT
 		// value and scan the next page from a wrong position — the silent
@@ -302,6 +332,13 @@ func encodeCursor(field string, direction where.CursorDirection, kind, value, ri
 // turns this into the invalid-argument 400 the rest of the query surface
 // produces.
 func decodeCursor(token, field string, direction where.CursorDirection, spec cursorFieldSpec) (fieldValue any, rid string, err error) {
+	// Length gate BEFORE any decoding: the token is client-supplied, and
+	// base64+JSON work on an unbounded input is allocation the server owes
+	// nobody. Legitimate tokens cannot exceed this — the encoder refuses to
+	// sign past the same bound.
+	if len(token) > MaxCursorTokenLen {
+		return nil, "", fmt.Errorf("%w: invalid cursor: token length %d exceeds MaxCursorTokenLen %d", where.ErrInvalidParam, len(token), MaxCursorTokenLen)
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: invalid cursor: not base64url", where.ErrInvalidParam)
@@ -376,5 +413,14 @@ func (s *Store[T]) encodeItemCursor(item T, field string, direction where.Cursor
 	if _, err := decodeCursorValue(kind, repr, spec.bits); err != nil {
 		return "", fmt.Errorf("store: ListWithCursor: cursor field %q encoded a boundary outside its schema-derived cursor domain: %w", field, err)
 	}
-	return encodeCursor(field, direction, kind, repr, rid), nil
+	token := encodeCursor(field, direction, kind, repr, rid)
+	// The repr bound alone does not guarantee the assembled token fits:
+	// JSON escaping inflates control-character-heavy strings up to six
+	// bytes per input byte, so a boundary near MaxCursorValueLen can render
+	// a token past MaxCursorTokenLen. decode refuses such a token, and a
+	// signed token must always be decodable — refuse at the source.
+	if len(token) > MaxCursorTokenLen {
+		return "", fmt.Errorf("store: ListWithCursor: cursor field %q produced a %d-byte token exceeding MaxCursorTokenLen %d (JSON escaping inflated the boundary value); pick a shorter cursor key", field, len(token), MaxCursorTokenLen)
+	}
+	return token, nil
 }

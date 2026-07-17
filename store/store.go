@@ -1226,9 +1226,11 @@ type CursorPage[T any] struct {
 // must not parse, build or store meaning into the token — it binds the
 // pagination contract (format version, field, direction) and is rejected
 // as apierr.ErrInvalidArgument when replayed against a different one.
-// Filters are deliberately not bound into the token (reusing a cursor
-// under different filters grants nothing the filters don't already);
-// keeping them stable across pages is the caller's side of the contract.
+// Tokens longer than MaxCursorTokenLen (4096 bytes) are rejected the same
+// way before any decode work. Filters are deliberately not bound into the
+// token (reusing a cursor under different filters grants nothing the
+// filters don't already); keeping them stable across pages is the
+// caller's side of the contract.
 //
 // The keyset is composite — (cursorField, rid) — so non-unique sort
 // columns (created_at and friends) never skip rows that share a boundary
@@ -1246,8 +1248,10 @@ type CursorPage[T any] struct {
 // serializer/driver.Valuer fields must keep that wire kind stable for all
 // values; a runtime drift from the zero probe is rejected before signing.
 // When the lookahead has proven a next page exists, a NULL, NaN or
-// non-RFC3339-representable time boundary returns an error rather than
-// silently ending — or poisoning — the client's pagination.
+// non-RFC3339-representable time boundary — or a string boundary longer
+// than MaxCursorValueLen (1024 bytes; a cursor key, not a payload) —
+// returns an error rather than silently ending — or poisoning — the
+// client's pagination.
 //
 // size is the max items per page. Additional opts may add FILTERS ONLY:
 // the cursor owns ORDER BY, LIMIT and the size+1 lookahead, so ordering,

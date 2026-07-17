@@ -10,7 +10,7 @@
 
 ---
 
-## Unreleased — 数据契约收口 + 批量写 + 接口划线 + 悲观锁 + 迁移 manifest/repair 留痕
+## Unreleased — 数据契约收口 + 批量写 + 接口划线 + 悲观锁 + 游标尺寸契约 + 迁移 manifest/repair 留痕
 
 > 架构复核暴露的八处数据层契约缺口在同一轮收口：显式 update 白名单和
 > alias 不能再把 RID/version/时间戳/软删/owner 等框架托管列重新打开，
@@ -72,6 +72,17 @@
 > `_txlock=immediate`；内存库整库仅一条固定连接），并发写者不存在，
 > 强于行锁，三方言可观测保证一致（锁定读到提交之间无并发写者）。
 > `SKIP LOCKED` / `NOWAIT` 刻意未做，等真实需求出现再议。
+>
+> 游标契约补上尺寸纪律。不透明令牌此前两侧皆无界：decode 侧任意长的
+> token 先解码再报错，令牌长度直接换服务端 base64/JSON 分配；encode 侧
+> 超长字符串边界照签，签出的令牌可能大到下一页 URL 装不下。现在两个
+> 数值成为公开契约（`MaxCursorTokenLen` 4KB / `MaxCursorValueLen` 1KB）：
+> 客户端令牌超限在任何解码前 400 拒收，边界值超限在签发侧作为服务端
+> 字段契约错误拒签——游标列是短标量键不是 payload。两界互锁：JSON 转义
+> 能把逼近 1KB 的控制字符边界膨胀过 4KB，因此签发侧在组装后再验一次
+> 令牌长度，「绝不签出自己拒收的令牌」由此机械成立而非靠推理。截断
+> 从一开始不在选项里——被截断的边界会让下一页从错误位置继续，是静默
+> 错页的另一种拼法。
 > 声明 owner，全局 manifest 用数据库 claim 把 kind/账本归属持久化，并以
 > engine floor 阻止较旧的 manifest-aware 引擎写入。claim 校验位于迁移锁内，
 > 覆盖 apply、repair 与 owner transfer；存量账本先完成只读 TOFU 预检，再在

@@ -651,3 +651,151 @@ func TestListWithCursor_IDFieldRidesPublicRID(t *testing.T) {
 		t.Fatalf("id-keyed cursor must traverse all rows, got %d", len(rids))
 	}
 }
+
+// Arch-backlog #16 regression tests: cursor size discipline. The decode
+// side bounds the client-supplied token BEFORE any base64/JSON work; the
+// encode side refuses over-long string boundaries — and any assembled
+// token past the decode bound — instead of signing a token the framework
+// itself rejects, or silently truncating the value.
+
+// CursorWide carries an unconstrained TEXT column so boundary values can
+// legitimately reach and exceed MaxCursorValueLen.
+type CursorWide struct {
+	db.Model
+	Val string `json:"val" gorm:"not null"`
+}
+
+func (CursorWide) RIDPrefix() string { return "cwd" }
+
+func setupCursorWideStore(t *testing.T) *Store[CursorWide] {
+	t.Helper()
+	gdb := setupDB(t)
+	if err := gdb.Migrate(context.Background(), db.Table(&CursorWide{})); err != nil {
+		t.Fatal(err)
+	}
+	return New[CursorWide](gdb, log.Empty(), WithQueryFields("val"))
+}
+
+func TestListWithCursor_OversizedTokenRejectedBeforeDecode(t *testing.T) {
+	s := setupCursorWideStore(t)
+
+	_, err := s.ListWithCursor(context.Background(), "val", where.CursorAfter,
+		strings.Repeat("A", MaxCursorTokenLen+1), 1)
+	if !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("over-limit token must be ErrInvalidArgument, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "MaxCursorTokenLen") {
+		t.Fatalf("rejection must come from the length gate, got %v", err)
+	}
+
+	// Exactly at the limit the length gate passes; the token then fails as
+	// ordinary garbage (still 400) — proving the bound is not off-by-one.
+	_, err = s.ListWithCursor(context.Background(), "val", where.CursorAfter,
+		strings.Repeat("A", MaxCursorTokenLen), 1)
+	if !errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("at-limit garbage token must still be ErrInvalidArgument, got %v", err)
+	}
+	if strings.Contains(err.Error(), "MaxCursorTokenLen") {
+		t.Fatalf("at-limit token must pass the length gate, got %v", err)
+	}
+}
+
+func TestListWithCursor_OversizedStringBoundaryRefusedAtSigning(t *testing.T) {
+	// The lookahead proves a next page exists, so the encoder cannot skip
+	// the over-long boundary — and must not truncate it into a token that
+	// scans from a wrong position. Server-side error, not client input.
+	s := setupCursorWideStore(t)
+	for _, v := range []string{
+		"a" + strings.Repeat("x", MaxCursorValueLen), // 1 byte over the bound
+		"b",
+	} {
+		if err := s.Create(context.Background(), &CursorWide{Val: v}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := s.ListWithCursor(context.Background(), "val", where.CursorAfter, "", 1)
+	if err == nil {
+		t.Fatal("over-limit boundary must error, not sign or truncate")
+	}
+	if errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("the refusal is a server-side field-contract error, not client input: %v", err)
+	}
+	if !strings.Contains(err.Error(), "MaxCursorValueLen") {
+		t.Fatalf("refusal must name the value bound, got %v", err)
+	}
+}
+
+func TestListWithCursor_MaxLenStringBoundarySignsAndRoundTrips(t *testing.T) {
+	// A boundary exactly AT MaxCursorValueLen is legitimate: it signs, the
+	// token stays under MaxCursorTokenLen, and the next page consumes it.
+	s := setupCursorWideStore(t)
+	for _, prefix := range []string{"a", "b", "c"} {
+		v := prefix + strings.Repeat("x", MaxCursorValueLen-1)
+		if err := s.Create(context.Background(), &CursorWide{Val: v}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var rids []string
+	cursor := ""
+	for range 10 {
+		page, err := s.ListWithCursor(context.Background(), "val", where.CursorAfter, cursor, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.NextCursor) > MaxCursorTokenLen {
+			t.Fatalf("signed token is %d bytes, past MaxCursorTokenLen %d", len(page.NextCursor), MaxCursorTokenLen)
+		}
+		for _, it := range page.Items {
+			rids = append(rids, it.RID)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if len(rids) != 3 {
+		t.Fatalf("at-limit boundary must round-trip all 3 rows, got %d", len(rids))
+	}
+}
+
+func TestListWithCursor_EscapeInflatedTokenRefusedAtSigning(t *testing.T) {
+	// A control-character string within MaxCursorValueLen still inflates
+	// ~6x under JSON escaping, assembling a token past MaxCursorTokenLen.
+	// decode would refuse that token, and a signed token must always be
+	// decodable — so the encoder refuses to sign it in the first place.
+	s := setupCursorWideStore(t)
+	for _, v := range []string{
+		strings.Repeat("\x01", MaxCursorValueLen), // within the repr bound
+		strings.Repeat("\x02", MaxCursorValueLen),
+	} {
+		if err := s.Create(context.Background(), &CursorWide{Val: v}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := s.ListWithCursor(context.Background(), "val", where.CursorAfter, "", 1)
+	if err == nil {
+		t.Fatal("escape-inflated token must be refused at signing")
+	}
+	if errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("the refusal is a server-side condition, not client input: %v", err)
+	}
+	if !strings.Contains(err.Error(), "MaxCursorTokenLen") {
+		t.Fatalf("refusal must name the token bound, got %v", err)
+	}
+}
+
+func TestEncodeCursorValue_StringLengthBound(t *testing.T) {
+	if _, _, err := encodeCursorValue(strings.Repeat("x", MaxCursorValueLen)); err != nil {
+		t.Fatalf("a boundary exactly at MaxCursorValueLen must encode: %v", err)
+	}
+	_, _, err := encodeCursorValue(strings.Repeat("x", MaxCursorValueLen+1))
+	if err == nil {
+		t.Fatal("a boundary past MaxCursorValueLen must be refused")
+	}
+	if !strings.Contains(err.Error(), "MaxCursorValueLen") {
+		t.Fatalf("refusal must name the bound, got %v", err)
+	}
+}

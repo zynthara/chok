@@ -371,6 +371,11 @@ cp, err := posts.ListWithCursor(ctx, "created_at", where.CursorAfter, cursor, 20
 > U+FFFD，令牌解码后不等于真实边界）都作为服务端字段契约错误拒签，绝不返回
 > 下一页无法消费或**变形**的令牌。确认还有下一页时遇到 NULL 边界值同样会
 > **报错**而非静默截断。
+> **尺寸纪律（公开契约）**：客户端令牌 ≤ **4KB**（`store.MaxCursorTokenLen`），
+> 超限在任何 base64/JSON 解码发生前就 400 拒收；边界值的字符串表示 ≤ **1KB**
+> （`store.MaxCursorValueLen`），超限——或 JSON 转义膨胀后组装出的令牌超过
+> 4KB——在签发侧作为**服务端错误**拒签。游标列是短标量键不是 payload，
+> 框架绝不把值截断进令牌。
 > tie-breaker 直接绑定模型的 RID 列，**不要求**把 `id` 暴露进查询白名单。
 > 服务端内部自组 keyset 时用 `where.WithCursorBy` / `WithCursorByField`。
 
@@ -935,6 +940,7 @@ gdb := h.Unsafe(ctx)           // 句柄级：无 scope，自己负责
 | 字段白名单 | 过滤 / 更新只认声明过的字段；托管列不能被显式列表 / alias 重开 | 无（修复走 `Unsafe`） |
 | 大文本防护 | 自动发现不把 text/blob 列放进过滤面 | tag / 显式声明可放行 |
 | 通配转义 | `WithFilterContains` 等对 `%`/`_` 转义 | `WithFilterLikeRaw`（自己负责） |
+| 游标尺寸 | 客户端令牌 ≤ 4KB（解码前拒收，400）；边界值 repr ≤ 1KB、组装令牌 ≤ 4KB（超限拒签，服务端错），绝不静默截断（§5.4） | 无 |
 | 敏感配置 | DSN / 密码带 `sensitive` 标注，日志自动掩码 | 无 |
 | 只读实例 | `read_only: true` 降 auto 为 off、拒显式 versioned，并拒事务 / DDL / store / GORM 写；driver 层再兜底 | 另装配可写具名实例 |
 
