@@ -10,7 +10,7 @@
 
 ---
 
-## Unreleased — 数据契约收口 + 批量写 + 接口划线 + 悲观锁 + 游标尺寸契约 + 两步 IN 工具补全 + 约束字段映射 + 错误 provenance 划界 + 迁移 manifest/repair 留痕
+## 2.0.0-beta.6 — 数据契约收口：接口划线 + 悲观锁 + 错误 provenance + 批量写与游标工具 + 迁移 manifest/repair 留痕
 
 > 架构复核暴露的八处数据层契约缺口在同一轮收口：显式 update 白名单和
 > alias 不能再把 RID/version/时间戳/软删/owner 等框架托管列重新打开，
