@@ -1088,6 +1088,9 @@ func TestPostFlow(t *testing.T) {
   service 自动跑同一套）。
 - MySQL 隐式 DDL 提交的 dirty / repair 主路径跑
   `CHOK_TEST_MYSQL_DSN=... make test-mysql`（CI 提供 MySQL 8.4 service）。
+  该 DSN 用户除建/删临时库外，还需**全局 `PROCESS` 权限**——`GetForUpdate`
+  的争锁测试要查 `information_schema.innodb_trx`（MySQL 以 PROCESS 门控
+  INNODB_* 信息表；root 自带，自建用户需 `GRANT PROCESS ON *.*`）。
 - 属主隔离的测试给 ctx 注入用户：
   `auth.WithPrincipal(ctx, auth.Principal{Subject: "usr_alice"})`。
 

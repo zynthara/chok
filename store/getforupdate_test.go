@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -128,12 +129,20 @@ type lockProbe struct {
 // transaction commits, and must acquire only afterwards. The
 // commit-side handshake (server-confirmed wait, not a fixed sleep)
 // means a dropped or ineffective FOR UPDATE fails the wait probe
-// deterministically instead of racing the scheduler; every wait is
-// bounded so a regression hangs the test for seconds, not forever.
+// deterministically instead of racing the scheduler.
+//
+// One end-to-end deadline context covers both transactions, every probe
+// query and every channel wait. It flows into gorm (effectiveDB /
+// Unsafe bind it), so even a hang at the driver or network layer is cut
+// by the context instead of stalling the suite; a first-transaction
+// failure releases the second goroutine through the same context.
 func assertGetForUpdateBlocksSecondLocker(t *testing.T, h *db.DB, s *Store[Product], alice context.Context, probe lockProbe) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(alice, 60*time.Second)
+	defer cancel()
+
 	p := &Product{Name: "widget"}
-	if err := s.Create(alice, p); err != nil {
+	if err := s.Create(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 
@@ -143,9 +152,14 @@ func assertGetForUpdateBlocksSecondLocker(t *testing.T, h *db.DB, s *Store[Produ
 	second := make(chan error, 1)
 
 	go func() {
-		<-locked
-		second <- s.Tx(alice, func(tx *Store[Product]) error {
-			g, err := tx.Unsafe(alice)
+		select {
+		case <-locked:
+		case <-ctx.Done():
+			second <- ctx.Err()
+			return
+		}
+		second <- s.Tx(ctx, func(tx *Store[Product]) error {
+			g, err := tx.Unsafe(ctx)
 			if err != nil {
 				return err
 			}
@@ -154,7 +168,7 @@ func assertGetForUpdateBlocksSecondLocker(t *testing.T, h *db.DB, s *Store[Produ
 				return err
 			}
 			session <- id
-			if _, err := tx.GetForUpdate(alice, RID(p.RID)); err != nil {
+			if _, err := tx.GetForUpdate(ctx, RID(p.RID)); err != nil {
 				return err
 			}
 			if !committed.Load() {
@@ -164,8 +178,8 @@ func assertGetForUpdateBlocksSecondLocker(t *testing.T, h *db.DB, s *Store[Produ
 		})
 	}()
 
-	err := s.Tx(alice, func(tx *Store[Product]) error {
-		if _, err := tx.GetForUpdate(alice, RID(p.RID)); err != nil {
+	err := s.Tx(ctx, func(tx *Store[Product]) error {
+		if _, err := tx.GetForUpdate(ctx, RID(p.RID)); err != nil {
 			return err
 		}
 		close(locked)
@@ -173,22 +187,23 @@ func assertGetForUpdateBlocksSecondLocker(t *testing.T, h *db.DB, s *Store[Produ
 		var id int64
 		select {
 		case id = <-session:
-		case <-time.After(15 * time.Second):
-			return errors.New("second locker never reported its session")
+		case <-ctx.Done():
+			return fmt.Errorf("second locker never reported its session: %w", ctx.Err())
 		}
 		// Commit only after the server confirms the second session is
 		// parked in a lock wait — the strict proof that FOR UPDATE is
-		// in effect.
+		// in effect. The shorter dedicated deadline separates "the lock
+		// never took effect" from the helper-wide timeout.
 		deadline := time.Now().Add(15 * time.Second)
 		for {
-			blocked, err := probe.isBlocked(h.Unsafe(alice), id)
+			blocked, err := probe.isBlocked(h.Unsafe(ctx), id)
 			if err != nil {
 				return err
 			}
 			if blocked {
 				break
 			}
-			if time.Now().After(deadline) {
+			if time.Now().After(deadline) || ctx.Err() != nil {
 				return errors.New("second locker never entered the server's lock-wait state — FOR UPDATE ineffective?")
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -204,8 +219,8 @@ func assertGetForUpdateBlocksSecondLocker(t *testing.T, h *db.DB, s *Store[Produ
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("second locker did not finish after the first transaction committed")
+	case <-ctx.Done():
+		t.Fatalf("second locker did not finish after the first transaction committed: %v", ctx.Err())
 	}
 }
 
@@ -237,7 +252,10 @@ func TestGetForUpdate_BlocksSecondLocker(t *testing.T) {
 // TestGetForUpdate_MySQLBlocksSecondLocker: MySQL half of the row-lock
 // contract — entry guard plus real InnoDB contention observed through
 // information_schema.innodb_trx. Runs in the MySQL lane (make
-// test-mysql); skips without CHOK_TEST_MYSQL_DSN.
+// test-mysql); skips without CHOK_TEST_MYSQL_DSN. Beyond the lane's
+// usual create-database grant, the wait probe needs the global PROCESS
+// privilege (MySQL gates the INNODB_* information_schema tables on it;
+// CI's root has it, custom lane users must be granted it).
 func TestGetForUpdate_MySQLBlocksSecondLocker(t *testing.T) {
 	h := dbtest.OpenMySQL(t)
 	if err := h.Migrate(t.Context(), db.Table(&Product{})); err != nil {
@@ -262,7 +280,10 @@ func TestGetForUpdate_MySQLBlocksSecondLocker(t *testing.T) {
 			err := raw.Raw(
 				"SELECT COALESCE(MAX(trx_state), '') FROM information_schema.innodb_trx WHERE trx_mysql_thread_id = ?", id,
 			).Scan(&state).Error
-			return state == "LOCK WAIT", err
+			if err != nil {
+				return false, fmt.Errorf("querying information_schema.innodb_trx (needs the global PROCESS privilege for the CHOK_TEST_MYSQL_DSN user): %w", err)
+			}
+			return state == "LOCK WAIT", nil
 		},
 	})
 }
