@@ -339,10 +339,11 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   Kind 期望由**零值行跑编码器完整管线**推导（`Field.ValueOf` 含 serializer
 	  包装 + Valuer 解析——`datatypes.Time`、`serializer:unixtime` 这类 wire ≠
 	  Go 底层类型的字段按 wire 定 Kind），令牌可伪造，类型事实源永远是 schema，
-	  解码按字段位宽做值域校验并拒绝 NaN（编码端对 NaN 同样拒签——编码器绝不
-	  签发解码器不认的令牌）；Kind 静态推不出的字段入口即拒，serializer/Valuer
+	  解码按字段位宽做值域校验并拒绝 NaN（编码端绝不签发解码器不认、或解码后
+	  变形的令牌）；Kind 静态推不出的字段入口即拒，serializer/Valuer
 	  还须保证所有值的 wire Kind 稳定；每个实际边界在签发前按 schema pin 复验
-	  Kind / 位宽 / 值域，动态类型漂移、NaN、RFC3339 不可表示时间均拒签；
+	  Kind / 位宽 / 值域，动态类型漂移、NaN、无效 UTF-8 字符串（JSON 静默替换
+	  U+FFFD）、RFC3339 不可表示时间均拒签；
 	  tie-breaker 直接绑定模型 RID 列，不依赖 `id` 是否进白名单，数字主键不进任何
 	  客户端可见令牌；filter 不绑定，跨页稳定是调用方契约；lookahead 确认有下一
 	  页时 NULL 边界值报错，绝不静默截断）。DSL 级 `WithCursor`（单列，等值边界会跳行）/

@@ -365,8 +365,10 @@ cp, err := posts.ListWithCursor(ctx, "created_at", where.CursorAfter, cursor, 20
 > serializer/`driver.Valuer` 字段；后两者还必须让所有值保持稳定的 wire Kind。
 > `sql.Null*`（零值即 NULL）与 `[]byte` 这类推不出的字段**入口即拒**；实际边界
 > 在签发前会按推导出的 Kind / 位宽 / 值域再次自校验，动态 Valuer 的类型漂移、
-> NaN、RFC3339 无法表示的时间都作为服务端字段契约错误拒签，绝不返回下一页
-> 无法消费的令牌。确认还有下一页时遇到 NULL 边界值同样会**报错**而非静默截断。
+> NaN、RFC3339 无法表示的时间、**无效 UTF-8 字符串**（JSON 会静默替换成
+> U+FFFD，令牌解码后不等于真实边界）都作为服务端字段契约错误拒签，绝不返回
+> 下一页无法消费或**变形**的令牌。确认还有下一页时遇到 NULL 边界值同样会
+> **报错**而非静默截断。
 > tie-breaker 直接绑定模型的 RID 列，**不要求**把 `id` 暴露进查询白名单。
 > 服务端内部自组 keyset 时用 `where.WithCursorBy` / `WithCursorByField`。
 

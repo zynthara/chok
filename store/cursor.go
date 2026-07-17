@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm/schema"
 
@@ -106,7 +107,17 @@ func encodeCursorValue(val any) (kind, repr string, err error) {
 	}
 	switch rv.Kind() {
 	case reflect.String:
-		return cursorKindString, rv.String(), nil
+		s := rv.String()
+		// json.Marshal replaces invalid UTF-8 with U+FFFD without erroring,
+		// so a token signed over such a boundary would decode to a DIFFERENT
+		// value and scan the next page from a wrong position — the silent
+		// variant of "signing what the decoder cannot consume". SQLite TEXT
+		// can genuinely hold such bytes; refuse at the source like NaN.
+		// Every other kind's repr is ASCII by construction.
+		if !utf8.ValidString(s) {
+			return "", "", fmt.Errorf("cursor boundary string is not valid UTF-8; it cannot ride a JSON token without silent mutation")
+		}
+		return cursorKindString, s, nil
 	case reflect.Bool:
 		return cursorKindBool, strconv.FormatBool(rv.Bool()), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:

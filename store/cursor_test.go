@@ -487,23 +487,71 @@ func TestListWithCursor_Round9DynamicValuerDriftRejectedBeforeSigning(t *testing
 	// The zero row pins tieDynamic to string, while non-zero boundaries
 	// return int64. The mismatch is a server-side field-contract error: it
 	// must be caught on the issuing page, never returned as a token that the
-	// next request rejects as forged client input.
+	// next request rejects as forged client input. Exercised off-database —
+	// encodeItemCursor takes the boundary item directly — so no dialect ever
+	// binds tieDynamic's non-zero int64 wire value against the text column
+	// (the previous DB-backed version was sqlite-only by accident).
 	s := setupCursorTieStore(t)
-	for _, v := range []tieDynamic{1, 2, 3} {
-		if err := s.Create(context.Background(), &CursorTie{Dynamic: v}); err != nil {
-			t.Fatal(err)
-		}
+
+	col, err := where.ResolveField(s.queryFieldMap, "dynamic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fieldSchema := s.modelSchema.LookUpField(col)
+	if fieldSchema == nil {
+		t.Fatal("dynamic column missing from schema")
+	}
+	spec, ok := cursorSpecForSchemaField(s.modelSchema.ModelType, fieldSchema)
+	if !ok {
+		t.Fatal("dynamic must derive a spec from its zero probe")
+	}
+	if spec.kind != cursorKindString {
+		t.Fatalf("zero probe must pin the wire kind to str, got %q", spec.kind)
 	}
 
-	page, err := s.ListWithCursor(context.Background(), "dynamic", where.CursorAfter, "", 1)
+	item := CursorTie{Dynamic: 1}
+	item.RID = "cti_drift" // satisfy the RID guard so the drift check is what fires
+	_, err = s.encodeItemCursor(item, "dynamic", where.CursorAfter, spec)
 	if err == nil {
-		t.Fatalf("wire-kind drift must fail before signing, got cursor %q", page.NextCursor)
+		t.Fatal("wire-kind drift must fail before signing")
 	}
 	if errors.Is(err, apierr.ErrInvalidArgument) {
 		t.Fatalf("wire-kind drift is a server-side field contract, not client input: %v", err)
 	}
 	if !strings.Contains(err.Error(), "wire kind changed") {
 		t.Fatalf("expected explicit wire-kind drift error, got %v", err)
+	}
+}
+
+func TestEncodeItemCursor_RejectsInvalidUTF8Boundary(t *testing.T) {
+	// Post-commit review #1: json.Marshal silently replaces invalid UTF-8
+	// with U+FFFD without erroring, so a token signed over such a boundary
+	// decodes to a DIFFERENT value and the next page scans from a wrong
+	// position — the silent variant of signing an unconsumable token.
+	// SQLite TEXT can genuinely hold such bytes. Exercised off-database:
+	// Postgres enforces valid UTF-8 and could never store the row, so a
+	// DB-backed version would be sqlite-only.
+	if _, _, err := encodeCursorValue("a\xffb"); err == nil {
+		t.Fatal("encoder must refuse an invalid-UTF-8 string boundary")
+	}
+
+	s := setupCursorTieStore(t)
+	col, err := where.ResolveField(s.queryFieldMap, "grp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := cursorSpecForSchemaField(s.modelSchema.ModelType, s.modelSchema.LookUpField(col))
+	if !ok {
+		t.Fatal("grp must derive a spec")
+	}
+	item := CursorTie{Grp: "a\xffb"}
+	item.RID = "cti_utf8"
+	_, err = s.encodeItemCursor(item, "grp", where.CursorAfter, spec)
+	if err == nil {
+		t.Fatal("signing over an invalid-UTF-8 boundary must error, not mutate silently")
+	}
+	if errors.Is(err, apierr.ErrInvalidArgument) {
+		t.Fatalf("the rejection is a server-side data condition, not client input: %v", err)
 	}
 }
 
