@@ -2,9 +2,12 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/zynthara/chok/v2/db/internal/testlane"
 )
 
 const ownedTestSequenceOwner = "example.com/choktest/sequence"
@@ -186,5 +189,57 @@ func TestSequence_LedgerAwareOlderBinaryRejectsNewerLedger(t *testing.T) {
 	}
 	if _, err := ApplySequence(t.Context(), h, older); err == nil || !strings.Contains(err.Error(), "no matching migration file") {
 		t.Fatalf("older sequence must fail closed against newer ledger, got %v", err)
+	}
+}
+
+// TestSchemaFingerprint_IgnoresSiblingSchemaIndexes locks the postgres index
+// introspection to the connection's own schema: two test handles share one
+// physical database (each pinned to its own throwaway schema via
+// search_path), the sibling schema carries a same-named table with an extra
+// unique index, and the victim's fingerprint must neither absorb that index
+// nor lose its own. Before the schema-scoped rebuild the sibling's index
+// leaked in through gorm GetIndexes as a name with no definition.
+func TestSchemaFingerprint_IgnoresSiblingSchemaIndexes(t *testing.T) {
+	if testlane.Driver() != "postgres" {
+		t.Skip("cross-schema index leakage is a postgres shared-database concern")
+	}
+	victim := openTestHandle(t)
+	sibling := openTestHandle(t)
+	const table = "fingerprint_scope_probe"
+	for _, h := range []*DB{victim, sibling} {
+		if err := h.gdb.Exec("CREATE TABLE " + table + " (id BIGINT PRIMARY KEY, email VARCHAR(200))").Error; err != nil {
+			t.Fatalf("create %s: %v", table, err)
+		}
+	}
+	if err := victim.gdb.Exec("CREATE INDEX ix_fingerprint_scope_own ON " + table + " (id)").Error; err != nil {
+		t.Fatalf("create victim index: %v", err)
+	}
+	if err := sibling.gdb.Exec("CREATE UNIQUE INDEX uk_fingerprint_scope_leak ON " + table + " (email)").Error; err != nil {
+		t.Fatalf("create sibling index: %v", err)
+	}
+
+	fingerprint, err := SchemaFingerprint(t.Context(), victim, []string{table})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog schemaCatalogSnapshot
+	if err := json.Unmarshal([]byte(fingerprint), &catalog); err != nil {
+		t.Fatalf("decode fingerprint: %v", err)
+	}
+	if len(catalog.Tables) != 1 {
+		t.Fatalf("fingerprint tables = %d, want 1", len(catalog.Tables))
+	}
+	indexes := make(map[string]schemaIndexSnapshot, len(catalog.Tables[0].Indexes))
+	for _, index := range catalog.Tables[0].Indexes {
+		indexes[index.Name] = index
+		if index.Definition == "" {
+			t.Fatalf("index %s has no definition — the phantom signature of a sibling-schema leak: %s", index.Name, fingerprint)
+		}
+	}
+	if _, leaked := indexes["uk_fingerprint_scope_leak"]; leaked {
+		t.Fatalf("fingerprint absorbed a sibling schema's index: %s", fingerprint)
+	}
+	if own, ok := indexes["ix_fingerprint_scope_own"]; !ok || own.Unique == nil || *own.Unique {
+		t.Fatalf("fingerprint must keep the current schema's own non-unique index, got %+v (present=%v)", own, ok)
 	}
 }

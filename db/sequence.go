@@ -464,15 +464,21 @@ func snapshotTable(gdb *gorm.DB, dialect, table string) (schemaTableSnapshot, er
 	}
 	sort.Slice(out.Columns, func(i, j int) bool { return out.Columns[i].Name < out.Columns[j].Name })
 
-	indexes, err := gdb.Migrator().GetIndexes(table)
-	if err != nil {
-		return out, fmt.Errorf("db: schema fingerprint: inspect %s indexes: %w", table, err)
-	}
-	for _, index := range indexes {
-		item := schemaIndexSnapshot{Name: index.Name(), Columns: append([]string(nil), index.Columns()...), Option: normalizeDDL(index.Option())}
-		item.PrimaryKey = optionalBool(index.PrimaryKey())
-		item.Unique = optionalBool(index.Unique())
-		out.Indexes = append(out.Indexes, item)
+	// postgres builds its index list inside enrichTableSnapshot from the
+	// schema-scoped catalog: gorm's postgres GetIndexes filters by relname
+	// alone, so a same-named table in a sibling schema of a shared database
+	// would leak its indexes into this snapshot.
+	if dialect != "postgres" {
+		indexes, err := gdb.Migrator().GetIndexes(table)
+		if err != nil {
+			return out, fmt.Errorf("db: schema fingerprint: inspect %s indexes: %w", table, err)
+		}
+		for _, index := range indexes {
+			item := schemaIndexSnapshot{Name: index.Name(), Columns: append([]string(nil), index.Columns()...), Option: normalizeDDL(index.Option())}
+			item.PrimaryKey = optionalBool(index.PrimaryKey())
+			item.Unique = optionalBool(index.Unique())
+			out.Indexes = append(out.Indexes, item)
+		}
 	}
 	if err := enrichTableSnapshot(gdb, dialect, table, &out); err != nil {
 		return out, err
@@ -522,26 +528,40 @@ func enrichTableSnapshot(gdb *gorm.DB, dialect, table string, out *schemaTableSn
 		if err := gdb.Raw("SELECT current_schema()").Scan(&schemaName).Error; err != nil {
 			return fmt.Errorf("db: schema fingerprint: inspect postgres current schema: %w", err)
 		}
-		var definitions []struct {
+		// The schema-scoped catalog is the sole authority for the index
+		// list: same semantics gorm's GetIndexes applies (constraint-backed
+		// indexes excluded, plain relations only) plus the namespace bound
+		// it lacks. indexdef rather than a column-name list is deliberate —
+		// it is stable across gorm's internal slice reuse and preserves
+		// predicates/expressions that column names cannot.
+		var indexes []struct {
 			Name       string
+			IsPrimary  bool
+			IsUnique   bool
 			Definition string
 		}
-		if err := gdb.Raw("SELECT indexname AS name, indexdef AS definition FROM pg_indexes WHERE schemaname = current_schema() AND tablename = ? ORDER BY indexname", table).Scan(&definitions).Error; err != nil {
+		if err := gdb.Raw(`SELECT ci.relname AS name, i.indisprimary AS is_primary,
+				i.indisunique AS is_unique, pg_get_indexdef(i.indexrelid) AS definition
+			FROM pg_index i
+			JOIN pg_class ct ON ct.oid = i.indrelid
+			JOIN pg_class ci ON ci.oid = i.indexrelid
+			JOIN pg_namespace n ON n.oid = ct.relnamespace
+			LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid
+			WHERE con.oid IS NULL AND ct.relkind = 'r'
+				AND n.nspname = current_schema() AND ct.relname = ?
+			ORDER BY ci.relname`, table).Scan(&indexes).Error; err != nil {
 			return fmt.Errorf("db: schema fingerprint: inspect postgres %s indexes: %w", table, err)
 		}
-		byName := make(map[string]string, len(definitions))
-		for _, definition := range definitions {
-			ddl := strings.ReplaceAll(definition.Definition, schemaName+".", "")
+		out.Indexes = make([]schemaIndexSnapshot, 0, len(indexes))
+		for _, index := range indexes {
+			ddl := strings.ReplaceAll(index.Definition, schemaName+".", "")
 			ddl = strings.ReplaceAll(ddl, `"`+schemaName+`".`, "")
-			byName[definition.Name] = normalizeDDL(ddl)
-		}
-		for i := range out.Indexes {
-			// gorm's postgres GetIndexes currently reuses an internal column
-			// slice across calls, which can duplicate Columns on repeated
-			// introspection. indexdef is the authoritative, stable shape and
-			// also preserves predicates/expressions that Columns cannot.
-			out.Indexes[i].Columns = nil
-			out.Indexes[i].Definition = byName[out.Indexes[i].Name]
+			out.Indexes = append(out.Indexes, schemaIndexSnapshot{
+				Name:       index.Name,
+				PrimaryKey: optionalBool(index.IsPrimary, true),
+				Unique:     optionalBool(index.IsUnique, true),
+				Definition: normalizeDDL(ddl),
+			})
 		}
 		if err := gdb.Raw(`SELECT pg_get_constraintdef(c.oid, true) AS definition
 			FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
