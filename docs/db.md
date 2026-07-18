@@ -508,11 +508,13 @@ serializer / `driver.Valuer` 字段按 wire 类型判定）：
   不用 SQLite 的 'auto' 启发——它会把 1970 年头 63 天的 Unix 秒误读成
   Julian day；Julian REAL 刻意不支持）。这只影响聚合，存储值、filter
   与排序不动。② **MySQL 的时间列是 DATETIME，存的是写入进程时区的
-  墙钟、不做 UTC 转换**（chok 固定驱动 Loc=time.Local）：单进程内写入
-  恒一致；跨进程靠**部署不变量——同一库的所有写入方必须同一时区**。
-  混合时区写成的存量墙钟不带时区、读取侧无法修复；这条不变量同样约束
-  排序 / 范围过滤 / 游标，不只聚合。PG（timestamptz）写入即归一 UTC，
-  无此约束。
+  墙钟、不做 UTC 转换**（chok 固定驱动 Loc=time.Local）。**部署不变量：
+  同一库的所有写入方必须使用同一个「固定偏移、无 DST」的时区——推荐
+  直接 TZ=UTC**。同时区是必要非充分：带 DST 的时区在每年秋季回拨时把
+  两个不同瞬间折成同一墙钟（America/New_York 的 11 月切换日 05:30Z 与
+  06:30Z 都是 01:30），**单进程也躲不开**；折叠或混合时区写成的存量
+  墙钟不带时区、读取侧无法修复。这条不变量同样约束排序 / 范围过滤 /
+  游标，不只聚合。PG（timestamptz）写入即归一 UTC，无此约束。
 - 🚫 **字段名 typo 是服务端 bug**：原样返回 `where.ErrUnknownField`
   （→ 500），provenance 划界与 `Pluck`/`List` 一致（§11.2 例外①）。
 - 字符串/布尔列不可聚合（文本 MIN/MAX 的序由方言 collation 定义，跨

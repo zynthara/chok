@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/store/where"
@@ -50,15 +51,18 @@ import (
 // returned in UTC. This normalisation is aggregate-only — stored values,
 // filters and ordering are untouched. MySQL time columns are DATETIME,
 // which stores the WALL CLOCK of the writing process's zone (db.Open
-// pins the driver Loc to time.Local) and performs no UTC conversion:
-// within one process every write lands in one zone and instants compare
-// correctly, but chok's standing deployment invariant — every writer of
-// one MySQL database runs in the same TZ — is what extends that across
-// processes. A mixed-TZ write history stores one instant as several
-// wall clocks and cannot be repaired at read time (the stored value
-// carries no zone); this bounds ordering, range filters and cursors the
-// same way, not just aggregates. PostgreSQL timestamptz normalises on
-// write and has no such constraint.
+// pins the driver Loc to time.Local) and performs no UTC conversion, so
+// instants only compare correctly under chok's standing deployment
+// invariant: every writer of one MySQL database runs in the same FIXED
+// (transition-free) zone — TZ=UTC is the recommendation. Sharing a zone
+// is necessary but not sufficient: a zone with DST transitions folds
+// distinct instants into one wall clock at every fall-back (in
+// America/New_York, 05:30Z and 06:30Z on the November switch are both
+// 01:30), even within a single process. A fold or a mixed-TZ write
+// history stores no zone to repair from at read time; the same bound
+// applies to ordering, range filters and cursors, not just aggregates.
+// PostgreSQL timestamptz normalises on write and has no such
+// constraint.
 //
 // Result typing is a deliberate three-dialect convergence. SUM of an
 // integer column returns bigint on PostgreSQL, DECIMAL on MySQL and a
@@ -142,7 +146,7 @@ func Max[N AggregateScalar, T db.Modeler](ctx context.Context, s *Store[T], fiel
 // values Go would call distinct as one. Zero matching rows count as 0 —
 // COUNT never returns SQL NULL, so there is no ok bool to consult.
 func CountDistinct[T db.Modeler](ctx context.Context, s *Store[T], field string, opts ...where.Option) (int64, error) {
-	col, spec, err := s.aggFieldSpec("CountDistinct", field)
+	col, spec, err := s.aggFieldSpec(ctx, "CountDistinct", field)
 	if err != nil {
 		return 0, err
 	}
@@ -297,7 +301,7 @@ func GroupBy[K comparable, T db.Modeler](ctx context.Context, s *Store[T], field
 	if len(aggs) == 0 {
 		return nil, fmt.Errorf("store: GroupBy: at least one Aggregate is required (distinct group keys alone are PluckDistinct's job)")
 	}
-	keyCol, keySpec, err := s.aggFieldSpec("GroupBy", field)
+	keyCol, keySpec, err := s.aggFieldSpec(ctx, "GroupBy", field)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +315,7 @@ func GroupBy[K comparable, T db.Modeler](ctx context.Context, s *Store[T], field
 	selects = append(selects, keyExpr)
 	kinds := make([]aggValueKind, len(aggs))
 	for i, agg := range aggs {
-		expr, kind, err := s.aggPlan(dialect, agg)
+		expr, kind, err := s.aggPlan(ctx, dialect, agg)
 		if err != nil {
 			return nil, err
 		}
@@ -385,7 +389,7 @@ const (
 // gate, Count's query skeleton, then convergence to the caller's N.
 func singleAggregate[N AggregateScalar, T db.Modeler](ctx context.Context, s *Store[T], fn aggFn, field string, opts []where.Option) (N, bool, error) {
 	var zero N
-	col, spec, err := s.aggFieldSpec(string(fn), field)
+	col, spec, err := s.aggFieldSpec(ctx, string(fn), field)
 	if err != nil {
 		return zero, false, err
 	}
@@ -533,7 +537,7 @@ func (s *Store[T]) aggColumn(field string) (string, error) {
 // strips it when it names the model's own table — aggregates only ever
 // read the store's own table, so a foreign qualifier is refused rather
 // than silently mis-resolved.
-func (s *Store[T]) aggFieldSpec(fnName, field string) (string, cursorFieldSpec, error) {
+func (s *Store[T]) aggFieldSpec(ctx context.Context, fnName, field string) (string, cursorFieldSpec, error) {
 	col, err := s.aggColumn(field)
 	if err != nil {
 		return "", cursorFieldSpec{}, err
@@ -552,14 +556,14 @@ func (s *Store[T]) aggFieldSpec(fnName, field string) (string, cursorFieldSpec, 
 	if fieldSchema == nil {
 		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q resolves to column %q, which is missing from the model schema", fnName, field, col)
 	}
-	// The wire kind alone is not enough: a Go string field declared as a
-	// database JSON column has kind str, but JSON documents are not
-	// comparable scalars on every dialect (PostgreSQL json, unlike jsonb,
-	// has no equality operator — COUNT(DISTINCT) and GROUP BY over it
-	// fail mid-query). Refused uniformly: grouping or counting raw
-	// document text is not a cross-dialect promise chok can keep.
-	if strings.Contains(strings.ToLower(string(fieldSchema.DataType)), "json") {
-		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q is declared as a JSON column (type %s); JSON documents are not comparable scalars across dialects and cannot be aggregated, grouped or distinct-counted — project a scalar column instead, or use Unsafe", fnName, field, fieldSchema.DataType)
+	// The wire kind alone is not enough: a Go string field can be backed
+	// by a database JSON column, and JSON documents are not comparable
+	// scalars on every dialect (PostgreSQL json, unlike jsonb, has no
+	// equality operator — COUNT(DISTINCT) and GROUP BY over it fail
+	// mid-query). Refused uniformly: grouping or counting raw document
+	// text is not a cross-dialect promise chok can keep.
+	if jsonType, isJSON := s.aggJSONColumnType(ctx, fieldSchema); isJSON {
+		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q is backed by a JSON column (type %s); JSON documents are not comparable scalars across dialects and cannot be aggregated, grouped or distinct-counted — project a scalar column instead, or use Unsafe", fnName, field, jsonType)
 	}
 	spec, ok := cursorSpecForSchemaField(s.modelSchema.ModelType, fieldSchema)
 	if !ok {
@@ -568,20 +572,40 @@ func (s *Store[T]) aggFieldSpec(fnName, field string) (string, cursorFieldSpec, 
 	return col, spec, nil
 }
 
+// aggJSONColumnType reports whether a field's database column is
+// JSON-typed, and the type name that decided it. Two sources must agree
+// with reality: the logical schema DataType covers `gorm:"type:json"`
+// tags and GormDataTypeInterface, but a custom type can also map to
+// JSON only at the dialect level via GormDBDataTypeInterface — the
+// migrator's FullDataTypeOf resolves that path, so the gate asks it too
+// (first token only: the rendered DDL may carry NOT NULL/DEFAULT
+// clauses whose literal values must not false-positive the check).
+func (s *Store[T]) aggJSONColumnType(ctx context.Context, field *schema.Field) (string, bool) {
+	if t := string(field.DataType); strings.Contains(strings.ToLower(t), "json") {
+		return t, true
+	}
+	if full := s.effectiveDB(ctx).Migrator().FullDataTypeOf(field).SQL; full != "" {
+		if tokens := strings.Fields(full); len(tokens) > 0 && strings.Contains(strings.ToLower(tokens[0]), "json") {
+			return tokens[0], true
+		}
+	}
+	return "", false
+}
+
 // aggPlan renders one Aggregate into its select expression and pins the
 // kind its values coerce to.
-func (s *Store[T]) aggPlan(dialect string, agg Aggregate) (string, aggValueKind, error) {
+func (s *Store[T]) aggPlan(ctx context.Context, dialect string, agg Aggregate) (string, aggValueKind, error) {
 	switch agg.fn {
 	case aggCountRows:
 		return "COUNT(*)", aggValueInt, nil
 	case aggCountDistinct:
-		col, spec, err := s.aggFieldSpec("CountDistinctOf", agg.field)
+		col, spec, err := s.aggFieldSpec(ctx, "CountDistinctOf", agg.field)
 		if err != nil {
 			return "", 0, err
 		}
 		return "COUNT(DISTINCT " + aggColumnExpr(dialect, col, spec.kind) + ")", aggValueInt, nil
 	case aggSum, aggAvg, aggMin, aggMax:
-		col, spec, err := s.aggFieldSpec(string(agg.fn), agg.field)
+		col, spec, err := s.aggFieldSpec(ctx, string(agg.fn), agg.field)
 		if err != nil {
 			return "", 0, err
 		}

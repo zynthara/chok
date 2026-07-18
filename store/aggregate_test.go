@@ -2,11 +2,17 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	gomysql "github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 
 	"github.com/zynthara/chok/v2/apierr"
 	"github.com/zynthara/chok/v2/db"
@@ -732,6 +738,47 @@ func TestAggregate_Round2SQLiteNumericEpochNotJulian(t *testing.T) {
 	}
 }
 
+// aggJSONText is a custom Go string type whose database column is JSON
+// on every dialect via GormDBDataTypeInterface — the round-3 review #2
+// bypass: schema.Field.DataType stays the kind-derived "string", so a
+// gate reading only DataType lets it through.
+type aggJSONText string
+
+func (aggJSONText) GormDBDataType(*gorm.DB, *schema.Field) string { return "JSON" }
+
+type aggJSONNote struct {
+	db.Model
+	Body aggJSONText `json:"body"`
+}
+
+func (aggJSONNote) RIDPrefix() string { return "ajn" }
+
+// TestAggregate_Round3GormDBDataTypeJSONRejected is the round-3 review
+// #2 regression: the JSON gate read the logical schema DataType only,
+// while GORM's own migrator resolves the REAL dialect column type
+// through GormDBDataTypeInterface — a custom string type mapping to a
+// JSON column sailed through and PostgreSQL failed mid-query. The gate
+// now consults the migrator's resolved type as well.
+func TestAggregate_Round3GormDBDataTypeJSONRejected(t *testing.T) {
+	gdb := setupDB(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&aggJSONNote{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[aggJSONNote](gdb, log.Empty(), WithQueryFields("id", "body"))
+
+	_, err := CountDistinct(ctx, s, "body")
+	if err == nil || !strings.Contains(err.Error(), "JSON") {
+		t.Fatalf("CountDistinct over a GormDBDataType JSON column must be refused, got %v", err)
+	}
+	if _, err := GroupBy[string](ctx, s, "body", []Aggregate{CountRows()}); err == nil {
+		t.Fatal("grouping by a GormDBDataType JSON column must be refused")
+	}
+	if _, err := GroupBy[string](ctx, s, "id", []Aggregate{CountDistinctOf("body")}); err == nil {
+		t.Fatal("CountDistinctOf over a GormDBDataType JSON column must be refused")
+	}
+}
+
 // TestAggregate_MySQLTypeMapping pins the dialect with the most exotic
 // aggregate wire types on a real server (make test-mysql lane): SUM over
 // ints returns DECIMAL as []byte, AVG returns DECIMAL(x,4), MIN/MAX over
@@ -797,19 +844,52 @@ func TestAggregate_MySQLTypeMapping(t *testing.T) {
 	}
 }
 
+// openMySQLLocWriter opens a second, raw go-sql-driver connection to
+// the SAME per-test database the store handle uses, with the driver Loc
+// pinned to loc — a faithful stand-in for another chok process running
+// in that zone (db.Open pins Loc to the process's time.Local). Writing
+// time.Time values through it exercises the driver's real wall-clock
+// conversion, so these tests pin driver and column-mapping behaviour,
+// not a hand-formatted string.
+func openMySQLLocWriter(t *testing.T, s *Store[AggSale], loc *time.Location) *sql.DB {
+	t.Helper()
+	cfg, err := gomysql.ParseDSN(os.Getenv(dbtest.MySQLDSNEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gdb, err := s.Unsafe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dbName string
+	if err := gdb.Raw("SELECT DATABASE()").Row().Scan(&dbName); err != nil {
+		t.Fatal(err)
+	}
+	cfg.DBName = dbName
+	cfg.ParseTime = true
+	cfg.Loc = loc
+	// NewConnector keeps the *time.Location as an object: a DSN round
+	// trip would serialise a FixedZone by name and fail LoadLocation.
+	connector, err := gomysql.NewConnector(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := sql.OpenDB(connector)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
 // TestAggregate_Round2MySQLDatetimeStoresWallClocks pins the mechanical
 // basis of the MySQL deployment invariant (round-2 review #1): time
 // columns are DATETIME(3), which stores the wall clock of the writing
-// process's zone (db.Open pins the driver Loc to time.Local) and — per
-// the MySQL manual, unlike TIMESTAMP — performs no UTC conversion. Two
-// writers in different TZs therefore store one instant as two values,
-// and no read-side expression can repair it (the stored wall clock
-// carries no zone). chok's documented invariant is that every writer of
-// one database shares one TZ; this test simulates the second writer with
-// the wall clock a differently-zoned process would have stored, and
-// pins that MySQL genuinely diverges — if a future driver or column
-// mapping change makes this converge, the invariant documentation must
-// be revisited along with this test.
+// connection's Loc and — per the MySQL manual, unlike TIMESTAMP —
+// performs no UTC conversion. Two writers in different zones therefore
+// store one instant as two values, and no read-side expression can
+// repair it (the stored wall clock carries no zone). The second writer
+// here is a real driver connection with a different Loc (round-3
+// hardening: the driver's own conversion is what gets pinned) — if a
+// future driver or column-mapping change makes this converge, the
+// invariant documentation must be revisited along with this test.
 func TestAggregate_Round2MySQLDatetimeStoresWallClocks(t *testing.T) {
 	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
 	ctx := context.Background()
@@ -825,19 +905,61 @@ func TestAggregate_Round2MySQLDatetimeStoresWallClocks(t *testing.T) {
 		t.Fatalf("single-writer baseline: CountDistinct = %d, %v; want 1", n, err)
 	}
 
-	// Rewrite the second row to the wall clock a writer running three
-	// hours east of this process would have stored for the SAME instant.
+	// A writer three hours east of this process rewrites the second row
+	// with the SAME instant — the driver converts it to that zone's wall
+	// clock before sending.
 	_, offset := inst.In(time.Local).Zone()
-	east := time.FixedZone("east3", offset+3*3600)
-	wall := inst.In(east).Format("2006-01-02 15:04:05.000")
-	gdb, err := s.Unsafe(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := gdb.Exec("UPDATE agg_sales SET at = ? WHERE status = 'w2'", wall).Error; err != nil {
+	east := openMySQLLocWriter(t, s, time.FixedZone("east3", offset+3*3600))
+	if _, err := east.Exec("UPDATE agg_sales SET at = ? WHERE status = 'w2'", inst); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 2 {
 		t.Fatalf("cross-TZ writers: CountDistinct = %d, %v; want the documented divergence to 2", n, err)
+	}
+}
+
+// TestAggregate_Round3MySQLDSTFoldCollapsesInstants pins the round-3
+// review #1 sharpening of the invariant: sharing one zone is NOT enough
+// when that zone has DST transitions. At the America/New_York 2026
+// fall-back, 05:30Z and 06:30Z are both wall clock 01:30 (EDT then
+// EST), so a single writer in that zone stores two DIFFERENT instants
+// as one identical DATETIME — CountDistinct folds, GROUP BY merges,
+// MIN/MAX cannot separate them, and the stored value carries nothing to
+// repair it with. Hence the deployment invariant demands one FIXED
+// zone, with TZ=UTC as the recommendation. Both writes go through a
+// real driver connection pinned to the DST zone.
+func TestAggregate_Round3MySQLDSTFoldCollapsesInstants(t *testing.T) {
+	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
+	ctx := context.Background()
+
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	beforeFold := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC) // 01:30 EDT
+	afterFold := time.Date(2026, 11, 1, 6, 30, 0, 0, time.UTC)  // 01:30 EST
+	if beforeFold.Equal(afterFold) {
+		t.Fatal("sanity: the two instants must differ")
+	}
+	for _, status := range []string{"w1", "w2"} {
+		if err := s.Create(ctx, &AggSale{Status: status, Qty: 1, Price: 1, Flag: true, At: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nyWriter := openMySQLLocWriter(t, s, ny)
+	for status, at := range map[string]time.Time{"w1": beforeFold, "w2": afterFold} {
+		if _, err := nyWriter.Exec("UPDATE agg_sales SET at = ? WHERE status = ?", at, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two distinct instants, one stored wall clock: the fold is real and
+	// unrepairable — the documented reason the invariant requires a
+	// fixed (transition-free) zone, recommending TZ=UTC.
+	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 1 {
+		t.Fatalf("DST fold: CountDistinct = %d, %v; the two instants collapse into 1 stored value", n, err)
+	}
+	groups, err := GroupBy[time.Time](ctx, s, "at", []Aggregate{CountRows()})
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("DST fold: groups = %v, %v; the two instants merge into 1 bucket", groups, err)
 	}
 }

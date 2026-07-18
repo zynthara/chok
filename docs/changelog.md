@@ -84,6 +84,20 @@
 > 门禁补查声明的 DB 类型，json 族列在所有方言统一入口拒绝（对 JSON
 > 文档做分组/去重计数不是 chok 能跨方言承诺的语义）。
 >
+> **round-3 复审修正**（两条）：① 「同一时区」仍不足——带 DST 的时区
+> 在秋季回拨把两个瞬间折成同一墙钟（America/New_York 2026-11-01 的
+> 05:30Z 与 06:30Z 都写成 01:30），**单进程也发生**，DATETIME 存量
+> 无从修复。不变量收紧为「同一**固定偏移、无 DST** 时区，推荐
+> TZ=UTC」；DST fold 回归经**真实驱动连接**（第二条 loc=America/
+> New_York 的 go-sql-driver 连接）落库断言折叠，round-2 的墙钟裂值
+> pin 测试同步升级为真驱动连接（原 raw UPDATE 手工拼串 pin 不住驱动
+> /列映射变更）；backlog #17 的 UTC 决策论据随之加重。② JSON 门禁只
+> 查逻辑 `DataType`，而自定义类型可经 `GormDBDataType` 仅在方言层映射
+> 到 JSON（schema 层仍是 kind 推导的 string）——复审经 Store 路径复现
+> 绕过。门禁补问 migrator 的 `FullDataTypeOf`（方言真实列型；只取首
+> token，DDL 尾部的 DEFAULT 字面量不得误伤），tag / GormDataType /
+> GormDBDataType 三条路径统一入口拒绝。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

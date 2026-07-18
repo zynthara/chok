@@ -368,9 +368,12 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   聚合读取处经框架自产 strftime 表达式归一 UTC/毫秒（混合偏移不再
   选错极值/裂组；数值存量按 Unix 秒读，不用会误读 1970 年初的
   'auto'；仅聚合，存储与 filter/排序/游标不动）；MySQL DATETIME 存
-  进程时区墙钟、不转 UTC——**同库所有写入方同一时区**是部署不变量
-  （约束排序/过滤/游标全部时间比较面，聚合只是继承），跨时区存量
-  读取侧不可修复；PG timestamptz 无此约束。类型收敛是显式契约：
+  进程时区墙钟、不转 UTC——部署不变量：**同库所有写入方同一「固定
+  无 DST」时区，推荐 TZ=UTC**（同时区必要非充分：DST 回拨把两个瞬间
+  折成同一墙钟，单进程也发生；约束排序/过滤/游标全部时间比较面，
+  聚合只是继承），折叠/跨时区存量读取侧不可修复；PG timestamptz 无
+  此约束。JSON 门禁同时查逻辑 DataType 与 migrator 解析的方言真实
+  列型（GormDBDataType 自定义类型不漏）。类型收敛是显式契约：
   `Sum[int64]` 精确、越 int64 值域响亮报错；`Avg` 恒 float64；SQL NULL
   （零行/全 NULL）→ comma-ok 的 `ok=false`，GroupBy 值走
   `AggValue.IsNull`，NULL group key 报错不折叠。`GroupBy` 恒按 group
