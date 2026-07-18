@@ -98,6 +98,24 @@
 > token，DDL 尾部的 DEFAULT 字面量不得误伤），tag / GormDataType /
 > GormDBDataType 三条路径统一入口拒绝。
 >
+> **round-4 复审修正**（两条，均红→绿）：① round-3 把 `FullDataTypeOf`
+> 放上了请求路径——但 migrator **不是只读的**（gorm mysql 解析时间列
+> 时原地写共享 `schema.Field.Precision`），并发聚合在 -race 下稳定报
+> 写写竞争；AutoMigrate 恰好提前写好 Precision 掩盖问题，`migrate:
+> versioned/off` 形态（store 句柄从未跑过迁移解析）首次并发时间聚合
+> 即触发——回归测试用「迁移走一个句柄、store 挂第二个未迁移句柄」还原
+> 该形态，真 MySQL 上红转绿。修法：列型改在 **Store 构造期**（最后的
+> 单线程时刻）于字段**副本**上解析并缓存（`aggColumnTypes`），请求
+> 路径零 migrator 调用，round-3 加的 ctx 线程随之撤销。② 方言列型此前
+> 只用于识别 JSON，其余错配静默算错——SQLite 上 `int64` +
+> `gorm:"type:text"` 的 Min 返回字典序极值（2 输给 10），PG 的
+> SUM(text) 运行期报错。能力矩阵补齐为两半：**wire kind 管 Go 结果
+> 收敛，方言列型管数据库操作合法性**，六 kind 各配一张按三方言实测
+> 渲染钉死的列型家族表（int→integer/bigint/serial/decimal 族、
+> float→real/double/float/decimal 族、time→*time*/date 前缀、
+> str→char/text/clob/uuid/enum 族、bool→bool/numeric(SQLite)/tinyint
+> 族），错配与不认识的列型一律 fail-closed 指向 Unsafe。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"net"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -779,6 +782,110 @@ func TestAggregate_Round3GormDBDataTypeJSONRejected(t *testing.T) {
 	}
 }
 
+// aggMistyped declares a numeric Go field over a text column — legal in
+// GORM, lethal to aggregation: the database computes under the COLUMN's
+// semantics, so SQLite would answer Min with the lexicographic extreme
+// (10 beats 2) and PostgreSQL would refuse SUM(text) mid-query.
+type aggMistyped struct {
+	db.Model
+	Qty int64 `json:"qty" gorm:"type:text"`
+}
+
+func (aggMistyped) RIDPrefix() string { return "amt" }
+
+// TestAggregate_Round4TextBackedIntRejected is the round-4 review #2
+// regression: the capability matrix now has two halves — the wire kind
+// governs Go result convergence, and the dialect column type decides
+// whether the database operation is legal. A mismatch fails closed at
+// entry instead of silently computing under text semantics.
+func TestAggregate_Round4TextBackedIntRejected(t *testing.T) {
+	gdb := setupDB(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&aggMistyped{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[aggMistyped](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	// No rows are seeded: the gate fires before any query, and the
+	// mismatch is unseedable on the strictest dialect anyway — pgx
+	// refuses to encode an int64 into a text column at INSERT time,
+	// which is the same class of wrongness the gate catches for the
+	// dialects that would happily store and then mis-compare it.
+	_, _, err := Min[int64](ctx, s, "qty")
+	if err == nil || !strings.Contains(err.Error(), "column type") {
+		t.Fatalf("Min over a text-backed int field must fail closed naming the column type, got %v", err)
+	}
+	if errIs400(err) {
+		t.Fatal("the rejection is a server-side error, not a client 400")
+	}
+	if _, _, err := Sum[int64](ctx, s, "qty"); err == nil {
+		t.Fatal("Sum over a text-backed int field must fail closed")
+	}
+	if _, err := GroupBy[int64](ctx, s, "qty", []Aggregate{CountRows()}); err == nil {
+		t.Fatal("grouping by a text-backed int field must fail closed")
+	}
+	if _, err := CountDistinct(ctx, s, "qty"); err == nil {
+		t.Fatal("CountDistinct over a text-backed int field must fail closed")
+	}
+}
+
+// TestAggregate_Round4MySQLConcurrentTimeAggregates is the round-4
+// review #1 regression: resolving a column's dialect type on the
+// request path handed the SHARED *schema.Field to the migrator, and
+// GORM's MySQL dialector writes field.Precision in place while
+// resolving time columns — concurrent first-time aggregates raced
+// (write-write under -race). AutoMigrate through the same handle
+// happens to pre-write Precision into the handle's schema cache and
+// masks the race, so the store here rides a SECOND handle that never
+// migrated — the migrate:versioned/off production shape. Dialect types
+// are now resolved once at Store construction, on field COPIES.
+func TestAggregate_Round4MySQLConcurrentTimeAggregates(t *testing.T) {
+	migrated := setupAggStoreOn(t, dbtest.OpenMySQL(t))
+	seedAggSales(t, migrated)
+
+	cfg, err := gomysql.ParseDSN(os.Getenv(dbtest.MySQLDSNEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(cfg.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := db.Open(db.Options{Driver: "mysql", MySQL: db.MySQLOptions{
+		Host: host, Port: port, Username: cfg.User, Password: cfg.Passwd,
+		Database: mysqlCurrentDatabase(t, migrated),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fresh.Close() })
+	s := New[AggSale](fresh, log.Empty(),
+		WithQueryFields("id", "status", "qty", "price", "rating", "flag", "at", "meta", "created_at"))
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for range 32 {
+		wg.Go(func() {
+			if _, _, err := Min[time.Time](ctx, s, "at"); err != nil {
+				errs <- err
+				return
+			}
+			if _, err := GroupBy[time.Time](ctx, s, "at", []Aggregate{CountRows()}); err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+}
+
 // TestAggregate_MySQLTypeMapping pins the dialect with the most exotic
 // aggregate wire types on a real server (make test-mysql lane): SUM over
 // ints returns DECIMAL as []byte, AVG returns DECIMAL(x,4), MIN/MAX over
@@ -851,12 +958,10 @@ func TestAggregate_MySQLTypeMapping(t *testing.T) {
 // time.Time values through it exercises the driver's real wall-clock
 // conversion, so these tests pin driver and column-mapping behaviour,
 // not a hand-formatted string.
-func openMySQLLocWriter(t *testing.T, s *Store[AggSale], loc *time.Location) *sql.DB {
+// mysqlCurrentDatabase reports the per-test database a store handle is
+// connected to, so further connections can target the same schema.
+func mysqlCurrentDatabase(t *testing.T, s *Store[AggSale]) string {
 	t.Helper()
-	cfg, err := gomysql.ParseDSN(os.Getenv(dbtest.MySQLDSNEnv))
-	if err != nil {
-		t.Fatal(err)
-	}
 	gdb, err := s.Unsafe(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -865,7 +970,16 @@ func openMySQLLocWriter(t *testing.T, s *Store[AggSale], loc *time.Location) *sq
 	if err := gdb.Raw("SELECT DATABASE()").Row().Scan(&dbName); err != nil {
 		t.Fatal(err)
 	}
-	cfg.DBName = dbName
+	return dbName
+}
+
+func openMySQLLocWriter(t *testing.T, s *Store[AggSale], loc *time.Location) *sql.DB {
+	t.Helper()
+	cfg, err := gomysql.ParseDSN(os.Getenv(dbtest.MySQLDSNEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DBName = mysqlCurrentDatabase(t, s)
 	cfg.ParseTime = true
 	cfg.Loc = loc
 	// NewConnector keeps the *time.Location as an object: a DSN round

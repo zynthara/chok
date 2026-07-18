@@ -146,7 +146,7 @@ func Max[N AggregateScalar, T db.Modeler](ctx context.Context, s *Store[T], fiel
 // values Go would call distinct as one. Zero matching rows count as 0 —
 // COUNT never returns SQL NULL, so there is no ok bool to consult.
 func CountDistinct[T db.Modeler](ctx context.Context, s *Store[T], field string, opts ...where.Option) (int64, error) {
-	col, spec, err := s.aggFieldSpec(ctx, "CountDistinct", field)
+	col, spec, err := s.aggFieldSpec("CountDistinct", field)
 	if err != nil {
 		return 0, err
 	}
@@ -301,7 +301,7 @@ func GroupBy[K comparable, T db.Modeler](ctx context.Context, s *Store[T], field
 	if len(aggs) == 0 {
 		return nil, fmt.Errorf("store: GroupBy: at least one Aggregate is required (distinct group keys alone are PluckDistinct's job)")
 	}
-	keyCol, keySpec, err := s.aggFieldSpec(ctx, "GroupBy", field)
+	keyCol, keySpec, err := s.aggFieldSpec("GroupBy", field)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +315,7 @@ func GroupBy[K comparable, T db.Modeler](ctx context.Context, s *Store[T], field
 	selects = append(selects, keyExpr)
 	kinds := make([]aggValueKind, len(aggs))
 	for i, agg := range aggs {
-		expr, kind, err := s.aggPlan(ctx, dialect, agg)
+		expr, kind, err := s.aggPlan(dialect, agg)
 		if err != nil {
 			return nil, err
 		}
@@ -389,7 +389,7 @@ const (
 // gate, Count's query skeleton, then convergence to the caller's N.
 func singleAggregate[N AggregateScalar, T db.Modeler](ctx context.Context, s *Store[T], fn aggFn, field string, opts []where.Option) (N, bool, error) {
 	var zero N
-	col, spec, err := s.aggFieldSpec(ctx, string(fn), field)
+	col, spec, err := s.aggFieldSpec(string(fn), field)
 	if err != nil {
 		return zero, false, err
 	}
@@ -537,7 +537,7 @@ func (s *Store[T]) aggColumn(field string) (string, error) {
 // strips it when it names the model's own table — aggregates only ever
 // read the store's own table, so a foreign qualifier is refused rather
 // than silently mis-resolved.
-func (s *Store[T]) aggFieldSpec(ctx context.Context, fnName, field string) (string, cursorFieldSpec, error) {
+func (s *Store[T]) aggFieldSpec(fnName, field string) (string, cursorFieldSpec, error) {
 	col, err := s.aggColumn(field)
 	if err != nil {
 		return "", cursorFieldSpec{}, err
@@ -562,50 +562,121 @@ func (s *Store[T]) aggFieldSpec(ctx context.Context, fnName, field string) (stri
 	// equality operator — COUNT(DISTINCT) and GROUP BY over it fail
 	// mid-query). Refused uniformly: grouping or counting raw document
 	// text is not a cross-dialect promise chok can keep.
-	if jsonType, isJSON := s.aggJSONColumnType(ctx, fieldSchema); isJSON {
+	if jsonType, isJSON := s.aggJSONColumnType(fieldSchema); isJSON {
 		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q is backed by a JSON column (type %s); JSON documents are not comparable scalars across dialects and cannot be aggregated, grouped or distinct-counted — project a scalar column instead, or use Unsafe", fnName, field, jsonType)
 	}
 	spec, ok := cursorSpecForSchemaField(s.modelSchema.ModelType, fieldSchema)
 	if !ok {
 		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q has no statically derivable scalar kind; aggregates need plain scalar columns", fnName, field)
 	}
+	// Both halves of the capability matrix must agree: the wire kind
+	// says what Go type the result converges to, the dialect column type
+	// says what the DATABASE will actually compute. A mismatch (an int64
+	// field on a text column) would aggregate under the column's
+	// semantics — lexicographic MIN, or a hard error on stricter
+	// dialects — so it fails closed here instead.
+	sqlType := s.aggColumnTypes[fieldSchema.DBName]
+	if !aggKindMatchesSQLType(spec.kind, sqlType) {
+		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q has wire kind %s, but its database column type %q cannot legally carry that aggregate class — the database would compute under the column's own semantics (lexicographic MIN on text, say) or fail mid-query; align the column type with the Go type, or use Unsafe", fnName, field, specKindName(spec.kind), sqlType)
+	}
 	return col, spec, nil
+}
+
+// aggregateColumnTypes resolves every column's dialect SQL type (first
+// token of the migrator's FullDataTypeOf — the same resolution DDL
+// uses, so `type:...` tags, GormDataType and GormDBDataType all land)
+// once at Store construction. Two rules are load-bearing:
+//
+//   - the migrator receives a COPY of each schema field, never the
+//     shared original: dialect migrators are not read-only (GORM's
+//     MySQL dialector writes field.Precision in place while resolving
+//     time columns), and Store construction is the last single-threaded
+//     moment — a request-path call would race concurrent aggregates on
+//     the shared schema;
+//   - only the first token is kept: the rendered DDL carries NOT
+//     NULL/DEFAULT clauses whose literal values must not leak into type
+//     checks.
+func aggregateColumnTypes(gdb *gorm.DB, modelSchema *schema.Schema) map[string]string {
+	out := make(map[string]string, len(modelSchema.FieldsByDBName))
+	migrator := gdb.Migrator()
+	for name, field := range modelSchema.FieldsByDBName {
+		fieldCopy := *field
+		if tokens := strings.Fields(migrator.FullDataTypeOf(&fieldCopy).SQL); len(tokens) > 0 {
+			out[name] = strings.ToLower(tokens[0])
+		}
+	}
+	return out
 }
 
 // aggJSONColumnType reports whether a field's database column is
 // JSON-typed, and the type name that decided it. Two sources must agree
 // with reality: the logical schema DataType covers `gorm:"type:json"`
-// tags and GormDataTypeInterface, but a custom type can also map to
-// JSON only at the dialect level via GormDBDataTypeInterface — the
-// migrator's FullDataTypeOf resolves that path, so the gate asks it too
-// (first token only: the rendered DDL may carry NOT NULL/DEFAULT
-// clauses whose literal values must not false-positive the check).
-func (s *Store[T]) aggJSONColumnType(ctx context.Context, field *schema.Field) (string, bool) {
+// tags and GormDataTypeInterface, while the construction-cached dialect
+// type covers custom types that map to JSON only through
+// GormDBDataTypeInterface.
+func (s *Store[T]) aggJSONColumnType(field *schema.Field) (string, bool) {
 	if t := string(field.DataType); strings.Contains(strings.ToLower(t), "json") {
 		return t, true
 	}
-	if full := s.effectiveDB(ctx).Migrator().FullDataTypeOf(field).SQL; full != "" {
-		if tokens := strings.Fields(full); len(tokens) > 0 && strings.Contains(strings.ToLower(tokens[0]), "json") {
-			return tokens[0], true
-		}
+	if t := s.aggColumnTypes[field.DBName]; strings.Contains(t, "json") {
+		return t, true
 	}
 	return "", false
 }
 
+// aggKindMatchesSQLType is the second half of the capability matrix:
+// the wire kind governs Go-side result convergence, and the dialect SQL
+// type decides whether the DATABASE operation is legal at all. A Go
+// int64 field declared `gorm:"type:text"` has kind int but a text
+// column — SQLite would MIN it lexicographically (2 loses to 10) and
+// PostgreSQL would refuse SUM outright. Every family below is pinned to
+// what the three blessed dialects actually render for chok models;
+// anything unrecognised fails closed.
+func aggKindMatchesSQLType(kind, sqlType string) bool {
+	if sqlType == "" {
+		return false
+	}
+	switch kind {
+	case cursorKindInt, cursorKindUint:
+		// integer / bigint / bigint unsigned / bigserial; decimal-family
+		// integer storage aggregates numerically too.
+		return strings.Contains(sqlType, "int") || strings.Contains(sqlType, "serial") ||
+			strings.Contains(sqlType, "decimal") || strings.Contains(sqlType, "numeric")
+	case cursorKindFloat:
+		// real (SQLite) / decimal (PostgreSQL) / double, float (MySQL).
+		return strings.Contains(sqlType, "real") || strings.Contains(sqlType, "double") ||
+			strings.Contains(sqlType, "float") || strings.Contains(sqlType, "decimal") ||
+			strings.Contains(sqlType, "numeric")
+	case cursorKindTime:
+		// datetime / datetime(3) / timestamp / timestamptz / date.
+		return strings.Contains(sqlType, "time") || strings.HasPrefix(sqlType, "date")
+	case cursorKindString:
+		// text (SQLite) / varchar(n); enum and uuid group and count fine.
+		return strings.Contains(sqlType, "char") || strings.Contains(sqlType, "text") ||
+			strings.Contains(sqlType, "clob") || strings.Contains(sqlType, "uuid") ||
+			strings.Contains(sqlType, "enum")
+	case cursorKindBool:
+		// boolean (PostgreSQL, MySQL) / numeric (SQLite) / tinyint.
+		return strings.Contains(sqlType, "bool") || sqlType == "numeric" ||
+			strings.Contains(sqlType, "tinyint")
+	}
+	return false
+}
+
 // aggPlan renders one Aggregate into its select expression and pins the
 // kind its values coerce to.
-func (s *Store[T]) aggPlan(ctx context.Context, dialect string, agg Aggregate) (string, aggValueKind, error) {
+func (s *Store[T]) aggPlan(dialect string, agg Aggregate) (string, aggValueKind, error) {
 	switch agg.fn {
 	case aggCountRows:
 		return "COUNT(*)", aggValueInt, nil
 	case aggCountDistinct:
-		col, spec, err := s.aggFieldSpec(ctx, "CountDistinctOf", agg.field)
+		col, spec, err := s.aggFieldSpec("CountDistinctOf", agg.field)
 		if err != nil {
 			return "", 0, err
 		}
 		return "COUNT(DISTINCT " + aggColumnExpr(dialect, col, spec.kind) + ")", aggValueInt, nil
 	case aggSum, aggAvg, aggMin, aggMax:
-		col, spec, err := s.aggFieldSpec(ctx, string(agg.fn), agg.field)
+		col, spec, err := s.aggFieldSpec(string(agg.fn), agg.field)
 		if err != nil {
 			return "", 0, err
 		}
