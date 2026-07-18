@@ -39,17 +39,26 @@ import (
 // string and bool columns are not aggregatable in v1 — MIN over text is
 // collation-defined and differs across dialects.
 //
-// Time columns get one dialect accommodation. PostgreSQL (timestamptz)
-// and MySQL (the driver rewrites every write into one session zone)
-// compare instants natively, but SQLite stores timestamps as text in the
-// writer's zone and compares them lexicographically — rows written under
-// different zone offsets would make MIN/MAX pick the wrong instant and
-// GROUP BY split one instant into two buckets. Aggregates therefore read
-// SQLite time columns through a UTC-normalising strftime expression:
-// instant-correct across mixed offsets, at millisecond precision (the
-// same precision MySQL's DATETIME(3) applies at write time; sub-ms
-// distinctions collapse) and returned in UTC. This normalisation is
-// aggregate-only — stored values, filters and ordering are untouched.
+// Time columns compare by instant, with two dialect notes. SQLite stores
+// timestamps as text in the writer's zone and compares them
+// lexicographically — rows written under different zone offsets would
+// make MIN/MAX pick the wrong instant and GROUP BY split one instant
+// into two buckets — so aggregates read SQLite time columns through a
+// UTC-normalising strftime expression: instant-correct across mixed
+// offsets, at millisecond precision (the same precision MySQL's
+// DATETIME(3) applies at write time; sub-ms distinctions collapse) and
+// returned in UTC. This normalisation is aggregate-only — stored values,
+// filters and ordering are untouched. MySQL time columns are DATETIME,
+// which stores the WALL CLOCK of the writing process's zone (db.Open
+// pins the driver Loc to time.Local) and performs no UTC conversion:
+// within one process every write lands in one zone and instants compare
+// correctly, but chok's standing deployment invariant — every writer of
+// one MySQL database runs in the same TZ — is what extends that across
+// processes. A mixed-TZ write history stores one instant as several
+// wall clocks and cannot be repaired at read time (the stored value
+// carries no zone); this bounds ordering, range filters and cursors the
+// same way, not just aggregates. PostgreSQL timestamptz normalises on
+// write and has no such constraint.
 //
 // Result typing is a deliberate three-dialect convergence. SUM of an
 // integer column returns bigint on PostgreSQL, DECIMAL on MySQL and a
@@ -471,20 +480,33 @@ func (s *Store[T]) dialectName(ctx context.Context) string {
 // through — the column itself, except for time columns on SQLite, which
 // are normalised to UTC at millisecond precision:
 //
-//	strftime('%Y-%m-%d %H:%M:%f', col, 'auto')
+//	CASE WHEN typeof(col) IN ('integer','real')
+//	     THEN strftime('%Y-%m-%d %H:%M:%f', col, 'unixepoch')
+//	     ELSE strftime('%Y-%m-%d %H:%M:%f', col) END
 //
 // SQLite stores timestamps as text in the writer's zone and compares
 // them lexicographically, so raw MIN/MAX would pick the lexicographic —
 // not chronological — extreme across mixed offsets, and GROUP BY /
 // COUNT(DISTINCT) would split one instant written under two offsets into
 // two values. The normalised form is fixed-width UTC text, on which
-// lexicographic order IS instant order. The 'auto' modifier keeps
-// integer unixepoch storage (serializer:unixtime columns) readable.
-// PostgreSQL (timestamptz) and MySQL (one session zone rewrites every
-// write) compare instants natively and need no expression.
+// lexicographic order IS instant order.
+//
+// The typeof branch reads numeric storage as Unix seconds. The blessed
+// write paths only ever store text here (a plain time.Time, and
+// serializer:unixtime too — its wire value is a time.Time, which the
+// SQLite driver renders as text), so numbers arrive from legacy data or
+// Unsafe writes, and in the Go ecosystem a numeric timestamp IS Unix
+// seconds. The explicit modifier replaces round-1's 'auto', whose
+// documented heuristic reads numbers in the Julian-day range as Julian
+// days — silently shifting Unix seconds from the first 63 days of 1970.
+// Julian-day REALs are deliberately not supported. MySQL and PostgreSQL
+// compare instants natively under their own regimes (see the package
+// comment) and need no expression.
 func aggColumnExpr(dialect, col, kind string) string {
 	if kind == cursorKindTime && dialect == "sqlite" {
-		return "strftime('%Y-%m-%d %H:%M:%f', " + col + ", 'auto')"
+		return "CASE WHEN typeof(" + col + ") IN ('integer','real')" +
+			" THEN strftime('%Y-%m-%d %H:%M:%f', " + col + ", 'unixepoch')" +
+			" ELSE strftime('%Y-%m-%d %H:%M:%f', " + col + ") END"
 	}
 	return col
 }
@@ -529,6 +551,15 @@ func (s *Store[T]) aggFieldSpec(fnName, field string) (string, cursorFieldSpec, 
 	fieldSchema := s.modelSchema.LookUpField(lookup)
 	if fieldSchema == nil {
 		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q resolves to column %q, which is missing from the model schema", fnName, field, col)
+	}
+	// The wire kind alone is not enough: a Go string field declared as a
+	// database JSON column has kind str, but JSON documents are not
+	// comparable scalars on every dialect (PostgreSQL json, unlike jsonb,
+	// has no equality operator — COUNT(DISTINCT) and GROUP BY over it
+	// fail mid-query). Refused uniformly: grouping or counting raw
+	// document text is not a cross-dialect promise chok can keep.
+	if strings.Contains(strings.ToLower(string(fieldSchema.DataType)), "json") {
+		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q is declared as a JSON column (type %s); JSON documents are not comparable scalars across dialects and cannot be aggregated, grouped or distinct-counted — project a scalar column instead, or use Unsafe", fnName, field, fieldSchema.DataType)
 	}
 	spec, ok := cursorSpecForSchemaField(s.modelSchema.ModelType, fieldSchema)
 	if !ok {

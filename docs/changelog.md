@@ -64,6 +64,26 @@
 > `where.Apply` 下运行使 `WithCount` 不再静默漏网；表限定列别名在
 > 限定名为本模型表时正常解析、异表限定显式拒绝。
 >
+> **round-2 复审修正**（三条，逐条真库红→绿）：① round-1 对 MySQL 的
+> 「驱动统一会话时区=瞬间正确」表述**过度承诺**——时间列是 DATETIME
+> （墙钟、不转 UTC，MySQL 手册明文；chok 固定 Loc=time.Local），单进程
+> 内恒一致，跨进程只在**部署不变量「同库所有写入方同一时区」**下成立；
+> 混合时区存量墙钟不带时区、读取侧原理上不可修复（与 SQLite 带偏移
+> 文本可归一是本质区别）。这条不变量先于聚合存在（排序/范围过滤/游标
+> 同样骑在上面），聚合的错在文档宣称——修正为诚实声明 + 机械 pin 测试
+> （模拟异时区写入方的墙钟、断言 MySQL 真实裂值），是否改为 UTC 写入
+> 基准（Breaking、需存量策略、牵动全部时间面）另立 backlog #17 决策，
+> 不混进正确性补丁（#16 先例）。② SQLite 数值时间的 'auto' 启发会把
+> 1970 年头 63 天的 Unix 秒误读成 Julian day（官方文档明写，复审经
+> Store 路径复现 2440588 → 1970-01-01T12:00Z）；且 serializer:unixtime
+> 在 SQLite 实存**文本**（wire 是 time.Time）而非 round-1 注释以为的
+> 整数——数值存量只来自 Unsafe/外部。改为显式 typeof 分支：数值一律按
+> Unix 秒（'unixepoch'）、文本走普通解析，Julian REAL 刻意不支持。
+> ③ wire kind 门禁挡不住 `string` + `gorm:"type:json"`（kind=str 放行，
+> PG 运行期在 COUNT(DISTINCT) 上炸——json 无等值运算符、jsonb 才有）；
+> 门禁补查声明的 DB 类型，json 族列在所有方言统一入口拒绝（对 JSON
+> 文档做分组/去重计数不是 chok 能跨方言承诺的语义）。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

@@ -484,7 +484,7 @@ serializer / `driver.Valuer` 字段按 wire 类型判定）：
 | `Sum[N]` / `SumOf` | 整数（含指针）、浮点 | `Sum[int64]` 仅限整数列——**精确**，超 int64 值域响亮报错、绝不静默截断（SUM(int) 在 PG 返 bigint/numeric、MySQL 返 DECIMAL、SQLite 动态类型，收敛函数逐 lane 测试钉死）；`Sum[float64]` 也可拓宽整数列（>2^53 精度取舍）。`SumOf` 按列定：整数列 → `Int64()`，浮点列 → `Float64()` |
 | `Avg` / `AvgOf` | 整数、浮点 | 恒 `float64`（三方言 AVG 都返回小数类型）。⚠️ 金额级精确统计不要用它——精确小数聚合是 raw SQL 的活 |
 | `Min[N]` / `Max[N]` / `MinOf` / `MaxOf` | 数值列之外**放开时间列**（“每组最新 created_at”是真实仪表盘需求；MIN/MAX 是序运算不是算术） | 数值同 Sum；时间列 → `time.Time`，**按瞬间比较**（见下方 SQLite 条目），比较结果用 `Equal` 而非 `==`（返回值的墙钟时区随方言） |
-| `CountDistinct` / `CountDistinctOf` | **可比较标量列**（六个可推导 kind：str/int/uint/float/bool/time）——数据库比较不了的列（如 PG `json`）构造期即拒，不等运行期报错 | `int64`；COUNT 永不为 SQL NULL。⚠️ 字符串基数遵循列的 collation（CI collation 下 Go 认为不同的值算一个），各方言自定 |
+| `CountDistinct` / `CountDistinctOf` | **可比较标量列**（六个可推导 kind：str/int/uint/float/bool/time）——数据库比较不了的列构造期即拒，不等运行期报错；`gorm:"type:json"` 声明的列即便 Go 侧是 string 也拒（PG `json` 无等值运算符，JSON 文档不是跨方言可比较标量，分组/去重计数同拒） | `int64`；COUNT 永不为 SQL NULL。⚠️ 字符串基数遵循列的 collation（CI collation 下 Go 认为不同的值算一个），各方言自定 |
 
 - **NULL 语义**：SQL 聚合忽略 NULL；单值入口零行/全 NULL → `ok=false`；
   GroupBy 聚合值用 `AggValue.IsNull()`（访问器此时一律返回 ok=false）。
@@ -500,13 +500,19 @@ serializer / `driver.Valuer` 字段按 wire 类型判定）：
   不说谎）；🚫 **GroupBy 拒收非 filter 选项**——行集结果上静默吞掉
   `WithOrder`+`WithLimit` 会伪装成 top-N（`ListIn` 守卫同理，报
   `ErrInvalidParam` → 400）。
-- **SQLite 时间聚合按瞬间归一**：SQLite 把时间戳按写入方时区存成文本、
-  按字典序比较——混合时区偏移下裸 MIN/MAX 会选错瞬间、同一瞬间两种
-  偏移写入会分成两组。聚合读取时间列时自动经
-  `strftime` 归一化到 **UTC / 毫秒精度**（与 MySQL DATETIME(3) 的写入
-  精度一致；亚毫秒差异折叠），返回 UTC 值；这只影响聚合，存储值、
-  filter 与排序不动。PG（timestamptz）/ MySQL（驱动统一会话时区写入）
-  原生按瞬间比较，无需归一。
+- **时间聚合按瞬间比较，两条方言注记**。① SQLite 把时间戳按写入方时区
+  存成文本、按字典序比较——混合时区偏移下裸 MIN/MAX 会选错瞬间、同一
+  瞬间两种偏移写入会分成两组。聚合读取时间列时自动经 `strftime` 归一化
+  到 **UTC / 毫秒精度**（与 MySQL DATETIME(3) 的写入精度一致；亚毫秒
+  差异折叠），返回 UTC 值；数值存量按 **Unix 秒**读取（typeof 分支，
+  不用 SQLite 的 'auto' 启发——它会把 1970 年头 63 天的 Unix 秒误读成
+  Julian day；Julian REAL 刻意不支持）。这只影响聚合，存储值、filter
+  与排序不动。② **MySQL 的时间列是 DATETIME，存的是写入进程时区的
+  墙钟、不做 UTC 转换**（chok 固定驱动 Loc=time.Local）：单进程内写入
+  恒一致；跨进程靠**部署不变量——同一库的所有写入方必须同一时区**。
+  混合时区写成的存量墙钟不带时区、读取侧无法修复；这条不变量同样约束
+  排序 / 范围过滤 / 游标，不只聚合。PG（timestamptz）写入即归一 UTC，
+  无此约束。
 - 🚫 **字段名 typo 是服务端 bug**：原样返回 `where.ErrUnknownField`
   （→ 500），provenance 划界与 `Pluck`/`List` 一致（§11.2 例外①）。
 - 字符串/布尔列不可聚合（文本 MIN/MAX 的序由方言 collation 定义，跨

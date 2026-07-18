@@ -656,6 +656,82 @@ func TestAggregate_Round1QualifiedAliasColumn(t *testing.T) {
 	}
 }
 
+// aggJSONDoc exercises the round-2 review #3 gate: a Go string field
+// declared as a database JSON column. The wire kind is str, but JSON
+// documents are not comparable scalars on every dialect (PostgreSQL
+// json has no equality operator), so aggregation must refuse at entry.
+type aggJSONDoc struct {
+	db.Model
+	Payload string `json:"payload" gorm:"type:json"`
+}
+
+func (aggJSONDoc) RIDPrefix() string { return "ajd" }
+
+// TestAggregate_Round2JSONColumnRejected is the round-2 review #3
+// regression: the wire-kind gate alone let a string field declared
+// gorm:"type:json" through, and PostgreSQL then failed COUNT(DISTINCT)
+// mid-query — json (unlike jsonb) has no equality operator. The gate now
+// also inspects the declared database type, uniformly on every dialect.
+func TestAggregate_Round2JSONColumnRejected(t *testing.T) {
+	gdb := setupDB(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&aggJSONDoc{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[aggJSONDoc](gdb, log.Empty(), WithQueryFields("id", "payload"))
+
+	_, err := CountDistinct(ctx, s, "payload")
+	if err == nil || !strings.Contains(err.Error(), "JSON") {
+		t.Fatalf("CountDistinct over a json column must be refused by name, got %v", err)
+	}
+	if errIs400(err) {
+		t.Fatal("the rejection is a server-side error, not a client 400")
+	}
+	if _, err := GroupBy[string](ctx, s, "payload", []Aggregate{CountRows()}); err == nil {
+		t.Fatal("grouping by a json column must be refused (GROUP BY needs equality)")
+	}
+	if _, err := GroupBy[string](ctx, s, "id", []Aggregate{CountDistinctOf("payload")}); err == nil {
+		t.Fatal("CountDistinctOf over a json column must be refused")
+	}
+}
+
+// TestAggregate_Round2SQLiteNumericEpochNotJulian is the round-2 review
+// #2 regression: the previous 'auto' modifier read numeric values in the
+// Julian-day range as Julian days, silently shifting Unix seconds from
+// the first 63 days of 1970 (2440588 = 1970-01-29T05:56:28Z came back as
+// 1970-01-01T12:00:00Z). Numeric storage now always reads as Unix
+// seconds via an explicit typeof branch, text as a plain timestamp.
+func TestAggregate_Round2SQLiteNumericEpochNotJulian(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("dynamic-typed integer time storage is a SQLite-only shape")
+	}
+	s := setupAggStore(t)
+	seedAggSales(t, s)
+	ctx := context.Background()
+
+	// A legacy integer-epoch row next to the seeded text rows: both
+	// typeof branches must land in one consistent UTC timeline.
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec("UPDATE agg_sales SET at = 2440588 WHERE status = 'draft'").Error; err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(1970, 1, 29, 5, 56, 28, 0, time.UTC)
+	lo, ok, err := Min[time.Time](ctx, s, "at")
+	if err != nil || !ok || !lo.Equal(want) {
+		t.Fatalf("Min over an early-epoch integer = %v, %v, %v; want %v (not a Julian-day misread)", lo, ok, err, want)
+	}
+	hi, ok, err := Max[time.Time](ctx, s, "at")
+	if err != nil || !ok || !hi.Equal(aggT0.Add(time.Hour)) {
+		t.Fatalf("Max across mixed text/integer storage = %v, %v, %v; want the text row t0+1h", hi, ok, err)
+	}
+	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 3 {
+		t.Fatalf("CountDistinct across mixed storage = %d, %v; want 3", n, err)
+	}
+}
+
 // TestAggregate_MySQLTypeMapping pins the dialect with the most exotic
 // aggregate wire types on a real server (make test-mysql lane): SUM over
 // ints returns DECIMAL as []byte, AVG returns DECIMAL(x,4), MIN/MAX over
@@ -705,9 +781,11 @@ func TestAggregate_MySQLTypeMapping(t *testing.T) {
 		t.Fatalf("MySQL bool groups = %v, %v; want 2", flags, err)
 	}
 
-	// Round-1 #1 convergence check: the driver rewrites every write into
-	// one session zone, so instants written under different Go zones must
-	// still aggregate by instant.
+	// Round-1 #1 convergence check, scoped by round-2 #1: WITHIN ONE
+	// process the driver rewrites every write into its one Loc, so
+	// instants written under different Go zones still aggregate as one
+	// value. Across processes in different TZs they would not — see
+	// TestAggregate_Round2MySQLDatetimeStoresWallClocks.
 	inst := time.Date(2026, 7, 3, 6, 0, 0, 0, time.UTC)
 	for _, at := range []time.Time{inst, inst.In(time.FixedZone("p8", 8*3600))} {
 		if err := s.Create(ctx, &AggSale{Status: "zoned", Qty: 1, Price: 1, Flag: true, At: at}); err != nil {
@@ -716,5 +794,50 @@ func TestAggregate_MySQLTypeMapping(t *testing.T) {
 	}
 	if n, err := CountDistinct(ctx, s, "at", where.WithFilter("status", "zoned")); err != nil || n != 1 {
 		t.Fatalf("MySQL: one instant in two zones counts %d distinct, %v; want 1", n, err)
+	}
+}
+
+// TestAggregate_Round2MySQLDatetimeStoresWallClocks pins the mechanical
+// basis of the MySQL deployment invariant (round-2 review #1): time
+// columns are DATETIME(3), which stores the wall clock of the writing
+// process's zone (db.Open pins the driver Loc to time.Local) and — per
+// the MySQL manual, unlike TIMESTAMP — performs no UTC conversion. Two
+// writers in different TZs therefore store one instant as two values,
+// and no read-side expression can repair it (the stored wall clock
+// carries no zone). chok's documented invariant is that every writer of
+// one database shares one TZ; this test simulates the second writer with
+// the wall clock a differently-zoned process would have stored, and
+// pins that MySQL genuinely diverges — if a future driver or column
+// mapping change makes this converge, the invariant documentation must
+// be revisited along with this test.
+func TestAggregate_Round2MySQLDatetimeStoresWallClocks(t *testing.T) {
+	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
+	ctx := context.Background()
+
+	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
+	for _, status := range []string{"w1", "w2"} {
+		if err := s.Create(ctx, &AggSale{Status: status, Qty: 1, Price: 1, Flag: true, At: inst}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Same process, same Loc: one instant, one value.
+	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 1 {
+		t.Fatalf("single-writer baseline: CountDistinct = %d, %v; want 1", n, err)
+	}
+
+	// Rewrite the second row to the wall clock a writer running three
+	// hours east of this process would have stored for the SAME instant.
+	_, offset := inst.In(time.Local).Zone()
+	east := time.FixedZone("east3", offset+3*3600)
+	wall := inst.In(east).Format("2006-01-02 15:04:05.000")
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec("UPDATE agg_sales SET at = ? WHERE status = 'w2'", wall).Error; err != nil {
+		t.Fatal(err)
+	}
+	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 2 {
+		t.Fatalf("cross-TZ writers: CountDistinct = %d, %v; want the documented divergence to 2", n, err)
 	}
 }
