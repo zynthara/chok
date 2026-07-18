@@ -10,6 +10,48 @@
 
 ---
 
+## Unreleased — 聚合正门：Sum/Avg/Min/Max/CountDistinct/GroupBy（arch-backlog #7）
+
+> 仪表盘聚合此前只能走 `Unsafe`，是数据层最后一块「DSL 层能保住安全语义、
+> blessed 面却没有」的能力缺口。这批 API 与 `Pluck` 家族同位：**自由函数**
+> （方法不能引入新类型参数，结果类型化只能走这条路；也因此天然不进
+> `Reader`/任何接口），字段引用维持**白名单内裸字符串**——typed 字段常量是
+> backlog #4 codegen 的统一职责，本项不预支。读语义完全等同 `Count`：
+> 白名单（字段名 typo 是服务端 bug，原样 `where.ErrUnknownField` → 500，
+> 对齐 #3 的 provenance 划界）、fail-closed scope、软删排除、filter 收窄，
+> 分页/排序选项按 Count 先例静默剥离（单值聚合是「总量形状」，剥了不会
+> 说谎）。**GroupBy 例外：拒收而非剥离**——行集结果上静默吞掉
+> `WithOrder`+`WithLimit` 会让调用方以为拿到了 top-N（ListIn 守卫同理）。
+>
+> **NULL 语义**（跨三方言钉死）：SQL 聚合忽略 NULL，零行/全 NULL 时数据库
+> 返回 SQL NULL——Go 侧收敛为 `(值, ok, error)` 的 comma-ok，`ok=false`
+> 永不与「合法的 0」混淆；不选指针（调用点解引用噪音）也不选错误（空集
+> 聚合是仪表盘常态而非异常）。GroupBy 聚合值同理走 `AggValue.IsNull`；
+> **NULL group key 直接报错**并指向 `WithFilterNotNull`——SQL 里 NULL 组
+> 与零值组是两个组，Go 侧静默折叠等于合并两个不同答案。
+>
+> **结果类型收敛**：SUM(int) 在 PG 返 bigint/numeric、MySQL 返 DECIMAL
+> （wire 是 []byte 十进制串）、SQLite 动态类型——收敛函数
+> （`coerceAggValue`）就是跨方言契约本身，三条 lane 用同一组断言钉死。
+> 调用方声明目标类型：`Sum[int64]` 仅限整数列（精确、超 int64 值域响亮
+> 报错，绝不静默截断）、`Sum[float64]` 允许拓宽整数列（2^53 精度取舍
+> 文档化）、`Avg` 固定 `float64`（三方言都返回小数类型，不存在精确整数
+> 读法；金额级精确统计不要用它）。`Min/Max` 额外放开**时间列**（“每组
+> 最新 created_at”是真实仪表盘需求，MIN/MAX 是序运算不是算术运算）；
+> 列类型校验复用游标的 schema wire-kind 探针（serializer/Valuer 字段按
+> wire 类型判定），构造期即拒，不等数据依赖的运行时 parse 失败。
+>
+> **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
+> 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
+> 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的
+> distinct 值，仪表盘量级在内存排序即可；若真实需求出现，预批准方向是
+> **序数 ORDER BY**——按框架自产 select 位置排序，不引入调用方表达式）；
+> 多列 GROUP BY（无 codegen 时结果形状无法类型化，留给 backlog #4）；
+> 字符串/布尔列的 MIN/MAX（文本序按方言 collation 定义，跨方言不可
+> 承诺）。`CountDistinct`/`CountDistinctOf` **进** v1：单列 COUNT(DISTINCT)
+> 三方言一致，对照框架（Rails/Django/Ecto）皆为标配，排除它会把最常见的
+> unique-count 仪表盘继续压回 Unsafe——正与本项立项理由相悖。
+
 ## 2.0.0-beta.6 — 数据契约收口：接口划线 + 悲观锁 + 错误 provenance + 批量写与游标工具 + 迁移 manifest/repair 留痕
 
 > 架构复核暴露的八处数据层契约缺口在同一轮收口：显式 update 白名单和

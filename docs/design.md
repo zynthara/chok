@@ -355,6 +355,19 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   按方言诚实声明，见 db.md §5.5）。
 - `store.WithRowsAffected(&n)` 同时实现 UpdateOption/DeleteOption，
   观测 Where locator 批量写的命中行数；纯观测，不改变语义。
+- **聚合正门**（arch-backlog #7）：`store.Sum[N]` / `Avg` / `Min[N]` /
+  `Max[N]` / `CountDistinct` / `GroupBy[K]`——仪表盘统计不再下 Unsafe。
+  读语义 = Count：白名单（字段 typo 原样 `ErrUnknownField` → 500）、
+  fail-closed scope、软删排除、filter 收窄、分页/排序按 Count 先例剥离
+  （GroupBy 例外：**拒收**非 filter 选项——行集结果上静默剥离
+  `WithOrder`+`WithLimit` 会伪装成 top-N）。列 kind 复用游标的 schema
+  wire-kind 探针：Sum/Avg 仅数值列，Min/Max 放开时间列（序运算），
+  字符串/布尔不可聚合（collation 序不跨方言）。类型收敛是显式契约：
+  `Sum[int64]` 精确、越 int64 值域响亮报错；`Avg` 恒 float64；SQL NULL
+  （零行/全 NULL）→ comma-ok 的 `ok=false`，GroupBy 值走
+  `AggValue.IsNull`，NULL group key 报错不折叠。`GroupBy` 恒按 group
+  key 升序，`K` 与列 wire kind 精确匹配。自由函数（类型参数），不进
+  `Reader`。
 - **游标分页钦定形态**：`ListWithCursor` = 复合 keyset `(field, rid)` +
   不透明令牌（base64url(JSON)，绑定格式版本/字段/方向；值带类型标签保真，
   Kind 期望由**零值行跑编码器完整管线**推导（`Field.ValueOf` 含 serializer
@@ -390,8 +403,13 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   单连接），并发写者不存在 ⊇ 行锁，三方言可观测保证一致。
   `SKIP LOCKED` / `NOWAIT` 未提供，按需求再议。
 - **刻意不做**：JOIN DSL（单表 store 的边界；跨表读走两步 IN）、
-  表达式 ORDER BY（无法白名单化）——这两类是 `Unsafe` 舱口的正当
-  用途，逃逸应当稀少而非为零。
+  表达式 ORDER BY（无法白名单化）、HAVING 与按聚合值排序的 top-N
+  下推（两者都是聚合结果上的表达式，表达式 ORDER BY 的同类——GroupBy
+  结果集按分组列 distinct 值定大小，仪表盘量级在内存排序/过滤；真到
+  百万组的下推需求再议**序数 ORDER BY**：按框架自产 select 位置排序，
+  不引入调用方表达式）、多列 GROUP BY（结果形状没有 codegen 无法
+  类型化，backlog #4 后再议）——这些是 `Unsafe` 舱口的正当用途，
+  逃逸应当稀少而非为零。
 
 ### 7.4 迁移双轨 + 框架表 ownership
 

@@ -29,6 +29,7 @@
 | 定义一张表 / 选属主与软删 | [§3 定义模型](#3-定义模型) |
 | 构造一个 Store、控制可查可写字段 | [§4 构造 Store](#4-构造-store) |
 | 按 ID 取一行 / 列表过滤分页 / 只要数量 | [§5 读取数据](#5-读取数据) |
+| 仪表盘统计：求和 / 均值 / 极值 / 分组计数 | [§5.7 聚合与分组统计](#57-聚合与分组统计sum--avg--min--max--groupby) |
 | 增、改（乐观锁）、删、恢复、批量、Upsert | [§6 写入数据](#6-写入数据) |
 | 跨 Store 同一事务 / 订阅数据变更 | [§7 事务与事件](#7-事务与事件) |
 | 建表、版本化迁移、修 dirty、追溯 repair | [§8 迁移](#8-迁移) |
@@ -344,7 +345,8 @@ n, err := posts.Count(ctx, where.WithFilter("status", "draft"))
 ```
 
 分页 / 排序选项被剥离（`Count(WithPage(1,1))` 仍是全量总数），软删行默认
-不计。
+不计。要的不是行数而是求和 / 均值 / 极值 / 分组计数，见
+[§5.7 聚合](#57-聚合与分组统计sum--avg--min--max--groupby)——同一读语义。
 
 ### 5.4 其他读法
 
@@ -443,6 +445,83 @@ page, err := posts.ListQ(ctx,
 ```
 
 > 🔒 scope 依旧生效：软删行可见，但依然只有属主 / 管理员能看到自己的。
+
+### 5.7 聚合与分组统计：`Sum` / `Avg` / `Min` / `Max` / `GroupBy`
+
+仪表盘统计（求和、均值、极值、分组计数）用聚合正门，别下 `Unsafe`——
+字段照走查询白名单、scope 与软删规则照旧、filter 收窄统计范围，读语义
+与 `Count` 完全一致。与 `Pluck` 同理都是自由函数（方法不能引入类型
+参数），分页/排序选项按 `Count` 先例剥离：
+
+```go
+// 单值聚合：返回 (值, ok, error)。SQL 聚合忽略 NULL；零行或全 NULL 时
+// 数据库返回 SQL NULL —— Go 侧 ok=false + 零值，绝不与「合法的 0」混淆。
+total, ok, err := store.Sum[int64](ctx, orders, "amount",
+    where.WithFilter("status", "paid"))
+avg, ok, err := store.Avg(ctx, orders, "amount")          // 恒为 float64
+latest, ok, err := store.Max[time.Time](ctx, orders, "created_at")
+users, err := store.CountDistinct(ctx, orders, "customer_id") // COUNT 无 NULL，无 ok
+
+// 分组聚合：按一个白名单列分桶，每组一到多个聚合值（位置对应）。
+// 结果恒按 group key 升序（确定性输出）。
+groups, err := store.GroupBy[string](ctx, orders, "status",
+    []store.Aggregate{store.CountRows(), store.SumOf("amount"), store.MaxOf("created_at")},
+    where.WithFilterOp("created_at", where.Gte, since))
+for _, g := range groups {
+    n, _ := g.Values[0].Int64()      // CountRows / CountDistinctOf → int64
+    sum, _ := g.Values[1].Int64()    // SumOf(整数列) → int64；浮点列 → Float64()
+    at, _ := g.Values[2].Time()      // MinOf/MaxOf(时间列) → time.Time
+    _ = g.Key                        // K 必须与列的 wire kind 精确匹配（见下）
+    _, _, _ = n, sum, at
+}
+```
+
+**列类型规则**（构造期校验，复用游标的 schema wire-kind 探针，
+serializer / `driver.Valuer` 字段按 wire 类型判定）：
+
+| 函数 | 接受的列 | Go 侧类型 |
+|---|---|---|
+| `Sum[N]` / `SumOf` | 整数（含指针）、浮点 | `Sum[int64]` 仅限整数列——**精确**，超 int64 值域响亮报错、绝不静默截断（SUM(int) 在 PG 返 bigint/numeric、MySQL 返 DECIMAL、SQLite 动态类型，收敛函数逐 lane 测试钉死）；`Sum[float64]` 也可拓宽整数列（>2^53 精度取舍）。`SumOf` 按列定：整数列 → `Int64()`，浮点列 → `Float64()` |
+| `Avg` / `AvgOf` | 整数、浮点 | 恒 `float64`（三方言 AVG 都返回小数类型）。⚠️ 金额级精确统计不要用它——精确小数聚合是 raw SQL 的活 |
+| `Min[N]` / `Max[N]` / `MinOf` / `MaxOf` | 数值列之外**放开时间列**（“每组最新 created_at”是真实仪表盘需求；MIN/MAX 是序运算不是算术） | 数值同 Sum；时间列 → `time.Time`，比较用 `Equal` 而非 `==`（SQLite 文本时间戳带写入方时区偏移） |
+| `CountDistinct` / `CountDistinctOf` | 任意已声明字段 | `int64`；COUNT 永不为 SQL NULL |
+
+- **NULL 语义**：SQL 聚合忽略 NULL；单值入口零行/全 NULL → `ok=false`；
+  GroupBy 聚合值用 `AggValue.IsNull()`（访问器此时一律返回 ok=false）。
+  🚫 **NULL group key 直接报错**（SQL 的 NULL 组 ≠ 零值组，Go 侧折叠等于
+  合并两个不同答案）——按 NOT NULL 列分组，或加
+  `where.WithFilterNotNull(field)`。
+- **group key 类型**：`K` 与列 wire kind 精确匹配——string / int64 /
+  uint64 / float64 / bool / time.Time 六选一，进查询前校验，错配即拒。
+- **AggValue 访问器纪律**：`Float64()` 可拓宽 int64 值（仪表盘一个访问器
+  读遍数值聚合）；`Int64()` 拒绝浮点值（截断方向不放行）；`Time()` 只认
+  时间值。kind 由构造该位置的 `Aggregate` 静态决定，调用点写死即可。
+- **选项纪律**：单值聚合剥离分页/排序（与 `Count` 一致，总量形状剥了
+  不说谎）；🚫 **GroupBy 拒收非 filter 选项**——行集结果上静默吞掉
+  `WithOrder`+`WithLimit` 会伪装成 top-N（`ListIn` 守卫同理，报
+  `ErrInvalidParam` → 400）。
+- 🚫 **字段名 typo 是服务端 bug**：原样返回 `where.ErrUnknownField`
+  （→ 500），provenance 划界与 `Pluck`/`List` 一致（§11.2 例外①）。
+- 字符串/布尔列不可聚合（文本 MIN/MAX 的序由方言 collation 定义，跨
+  方言不可承诺）；`Sum`/`Avg` 不接受时间列。
+
+> **top-N 与 HAVING 刻意不做**：按聚合值 ORDER BY 是表达式排序（红线，
+> 无法白名单化），HAVING 是聚合结果上的表达式谓词（同类）。GroupBy 结果
+> 集的大小 = 分组列的 distinct 值数——仪表盘形状的列（status/type/日期
+> 桶）就是几十上百行，**在内存排序/过滤后取前 N**：
+>
+> ```go
+> slices.SortFunc(groups, func(a, b store.Group[string]) int {
+>     x, _ := a.Values[1].Int64()
+>     y, _ := b.Values[1].Int64()
+>     return cmp.Compare(y, x)          // 按 sum 降序
+> })
+> top := groups[:min(10, len(groups))]
+> ```
+>
+> 组基数真到内存吃不下的量级（如按 user_id 分组的百万组 top-N 下推），
+> 那是 `Unsafe` 的正当用途（逃逸应当稀少而非为零）。多列 GROUP BY 也不
+> 在 v1（结果形状没有 codegen 无法类型化，backlog #4 之后再议）。
 
 ---
 
@@ -935,8 +1014,10 @@ olap := db.From(k, "analytics")    // 具名实例
 ## 10. 逃生门（Unsafe，危险区）
 
 > ✅ **先想想能不能不下探**：单列投影、跨表两步 IN 用 `store.Pluck` /
-> `PluckIDs` / `PluckDistinct`（§5.5），它们保留白名单与 scope。真写不出来时
-> 才动 Unsafe。
+> `PluckIDs` / `PluckDistinct`（§5.5）；仪表盘统计（求和/均值/极值/分组
+> 计数）用 `store.Sum` / `Avg` / `Min` / `Max` / `CountDistinct` /
+> `GroupBy`（§5.7）——以前这类查询只能下 Unsafe，现在它们是正门，保留
+> 白名单与 scope。真写不出来时才动 Unsafe。
 
 **返回 raw gorm 句柄**的门有两扇，都叫 `Unsafe`，选哪扇看你要不要租户语义：
 
@@ -1002,7 +1083,8 @@ gdb := h.Unsafe(ctx)           // 句柄级：无 scope，自己负责
 
 下表哨兵可 `errors.Is` 匹配；挂上 `store.MapError` 后 HTTP 状态码自动正确。
 ⚠️ 两点例外：① `where.ErrUnknownField` **按入口划界**——程序化读入口
-（`List` / `Count` / `Pluck*` / `ListIn` / 游标字段 / locator）原样返回，可正常
+（`List` / `Count` / `Pluck*` / `ListIn` / 聚合家族 `Sum`/`Avg`/`Min`/`Max`/
+`CountDistinct`/`GroupBy` / 游标字段 / locator）原样返回，可正常
 `errors.Is`，`MapError` 不映射它 → 500（字段名是服务端代码写的，typo 是编程
 bug）；`ListFromQuery` 链（字段名来自 URL）内部预映射 400 的 apierr，对**那条
 链**的返回值不要再 `errors.Is` 它。值错误 `where.ErrInvalidParam` 则在所有入口
@@ -1085,6 +1167,16 @@ Store[T]（读）
   store.Pluck[F](ctx, s, field, ...opts)     store.PluckDistinct[F](ctx, s, field, ...opts)
   store.PluckIDs(ctx, s, ...opts)            // 内部主键；两步 IN 的前半段
   store.ListIn(ctx, s, field, values, ...opts)   // 两步 IN 后半段；>MaxInList 自动分块
+
+聚合（§5.7；单值返回 (值, ok, error)，ok=false ⇔ SQL NULL）
+  store.Sum[int64|float64](ctx, s, field, ...opts)
+  store.Avg(ctx, s, field, ...opts)              // 恒 float64
+  store.Min[N](ctx, s, field, ...opts)   store.Max[N](ctx, s, field, ...opts)  // N 含 time.Time
+  store.CountDistinct(ctx, s, field, ...opts)    // int64，无 ok
+  store.GroupBy[K](ctx, s, field, []store.Aggregate{...}, ...opts)
+    store.CountRows()  store.CountDistinctOf(f)  store.SumOf(f)
+    store.AvgOf(f)     store.MinOf(f)            store.MaxOf(f)
+    Group[K]{Key, Values}   AggValue.Int64/Float64/Time/IsNull
 
 Store[T]（写）
   Create(ctx, *T)      BatchCreate(ctx, []*T)
