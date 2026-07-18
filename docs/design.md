@@ -362,7 +362,11 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   （GroupBy 例外：**拒收**非 filter 选项——行集结果上静默剥离
   `WithOrder`+`WithLimit` 会伪装成 top-N）。列 kind 复用游标的 schema
   wire-kind 探针：Sum/Avg 仅数值列，Min/Max 放开时间列（序运算），
-  字符串/布尔不可聚合（collation 序不跨方言）。类型收敛是显式契约：
+  字符串/布尔不可聚合（collation 序不跨方言），CountDistinct 限可比较
+  标量（PG json 入口即拒；字符串基数按列 collation）。时间聚合**按瞬间
+  比较**：SQLite 的 writer-zone 文本在聚合读取处经框架自产 strftime
+  表达式归一 UTC/毫秒（混合偏移不再选错极值/裂组；仅聚合，存储与
+  filter/排序/游标不动），PG/MySQL 原生瞬间序。类型收敛是显式契约：
   `Sum[int64]` 精确、越 int64 值域响亮报错；`Avg` 恒 float64；SQL NULL
   （零行/全 NULL）→ comma-ok 的 `ok=false`，GroupBy 值走
   `AggValue.IsNull`，NULL group key 报错不折叠。`GroupBy` 恒按 group

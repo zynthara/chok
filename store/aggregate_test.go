@@ -28,22 +28,23 @@ type AggSale struct {
 	Rating *int64    `json:"rating"`
 	Flag   bool      `json:"flag" gorm:"not null"`
 	At     time.Time `json:"at" gorm:"not null"`
+	Meta   []byte    `json:"meta"`
 }
 
 func (AggSale) RIDPrefix() string { return "ags" }
 
-func setupAggStore(t *testing.T) *Store[AggSale] {
+func setupAggStore(t *testing.T, opts ...StoreOption) *Store[AggSale] {
 	t.Helper()
-	return setupAggStoreOn(t, setupDB(t))
+	return setupAggStoreOn(t, setupDB(t), opts...)
 }
 
-func setupAggStoreOn(t *testing.T, gdb *db.DB) *Store[AggSale] {
+func setupAggStoreOn(t *testing.T, gdb *db.DB, opts ...StoreOption) *Store[AggSale] {
 	t.Helper()
 	if err := gdb.Migrate(context.Background(), db.Table(&AggSale{})); err != nil {
 		t.Fatal(err)
 	}
 	return New[AggSale](gdb, log.Empty(),
-		WithQueryFields("id", "status", "qty", "price", "rating", "flag", "at", "created_at"))
+		append([]StoreOption{WithQueryFields("id", "status", "qty", "price", "rating", "flag", "at", "meta", "created_at")}, opts...)...)
 }
 
 var aggT0 = time.Date(2026, 7, 1, 8, 0, 0, 0, time.UTC)
@@ -404,6 +405,10 @@ func TestGroupBy_GuardRejectsNonFilterOptions(t *testing.T) {
 		"offset": where.WithOffset(5),
 		"cursor": where.WithCursor("qty", where.CursorAfter, 1, 5),
 		"cap":    where.WithMaxPageSize(5),
+		// Round-1 review #5: WithCount used to slip through unseen —
+		// ApplyFiltersOnly's countOnly mode never records it into the
+		// Config, so the guard now runs under where.Apply.
+		"count": where.WithCount(),
 	} {
 		if _, err := GroupBy[string](ctx, s, "status", aggs, opt); !errIs400(err) {
 			t.Fatalf("GroupBy must reject %s options, got %v", name, err)
@@ -523,6 +528,134 @@ func TestAggregate_SeesRowsInsideTx(t *testing.T) {
 	}
 }
 
+// TestAggregate_Round1MixedOffsetInstantOrder is the round-1 review #1
+// regression: SQLite stores timestamps as text in the writer's zone, so
+// raw MIN/MAX compared lexicographically and picked the wrong INSTANT
+// across mixed offsets, and one instant written under two offsets
+// grouped/counted as two values. Aggregates now read SQLite time columns
+// through a UTC-normalising expression; PostgreSQL and MySQL compare
+// instants natively — the assertions here are the dialect-convergence
+// contract and run on every lane.
+func TestAggregate_Round1MixedOffsetInstantOrder(t *testing.T) {
+	s := setupAggStore(t)
+	ctx := context.Background()
+
+	// Lexicographic text order INVERTS instant order for this pair:
+	// "2026-06-30 13:00:00-12:00" sorts first but is the LATER instant.
+	early := time.Date(2026, 7, 1, 14, 0, 0, 0, time.FixedZone("p14", 14*3600))  // 2026-07-01T00:00:00Z
+	late := time.Date(2026, 6, 30, 13, 0, 0, 0, time.FixedZone("m12", -12*3600)) // 2026-07-01T01:00:00Z
+	for _, at := range []time.Time{early, late} {
+		if err := s.Create(ctx, &AggSale{Status: "mix", Qty: 1, Price: 1, Flag: true, At: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lo, ok, err := Min[time.Time](ctx, s, "at")
+	if err != nil || !ok || !lo.Equal(early) {
+		t.Fatalf("Min across mixed offsets = %v, %v, %v; want the instant-min %v", lo, ok, err, early.UTC())
+	}
+	hi, ok, err := Max[time.Time](ctx, s, "at")
+	if err != nil || !ok || !hi.Equal(late) {
+		t.Fatalf("Max across mixed offsets = %v, %v, %v; want the instant-max %v", hi, ok, err, late.UTC())
+	}
+
+	// One instant written under two zones is ONE value: one group, one
+	// distinct count — never two buckets that differ only by offset text.
+	inst := time.Date(2026, 7, 2, 8, 30, 0, 123_000_000, time.UTC)
+	for _, at := range []time.Time{inst, inst.In(time.FixedZone("p8", 8*3600))} {
+		if err := s.Create(ctx, &AggSale{Status: "same", Qty: 1, Price: 1, Flag: true, At: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	groups, err := GroupBy[time.Time](ctx, s, "at", []Aggregate{CountRows()},
+		where.WithFilter("status", "same"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || !groups[0].Key.Equal(inst) {
+		t.Fatalf("same instant under two offsets grouped as %d buckets (%v); want 1", len(groups), groups)
+	}
+	if n, _ := groups[0].Values[0].Int64(); n != 2 {
+		t.Fatalf("the merged instant group counts %d rows, want 2", n)
+	}
+	n, err := CountDistinct(ctx, s, "at", where.WithFilter("status", "same"))
+	if err != nil || n != 1 {
+		t.Fatalf("CountDistinct over one instant in two zones = %d, %v; want 1", n, err)
+	}
+}
+
+// TestGroupBy_Round1BoolNoncanonicalErrors is the round-1 review #3
+// regression: SQL groups raw 1 and 2 as two buckets, and folding both
+// onto Go true handed the caller duplicate Group keys that silently
+// overwrite each other in a map. Non-canonical storage now errors.
+func TestGroupBy_Round1BoolNoncanonicalErrors(t *testing.T) {
+	if dbtest.Driver() == "postgres" {
+		t.Skip("postgres bool columns cannot store non-canonical integers")
+	}
+	s := setupAggStore(t)
+	seedAggSales(t, s)
+	ctx := context.Background()
+
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec("UPDATE agg_sales SET flag = 2 WHERE status = 'draft'").Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = GroupBy[bool](ctx, s, "flag", []Aggregate{CountRows()})
+	if err == nil || !strings.Contains(err.Error(), "non-canonical") {
+		t.Fatalf("non-canonical bool storage must error loudly, got %v", err)
+	}
+}
+
+// TestCountDistinct_Round1NonComparableRejected is the round-1 review #4
+// regression: the CountDistinct contract is comparable scalars, not "any
+// declared field" — a column with no derivable scalar kind (bytes, JSON)
+// is refused up front as a server-side error instead of surfacing a
+// database comparison failure mid-query.
+func TestCountDistinct_Round1NonComparableRejected(t *testing.T) {
+	s := setupAggStore(t)
+	ctx := context.Background()
+
+	_, err := CountDistinct(ctx, s, "meta")
+	if err == nil || !strings.Contains(err.Error(), "scalar") {
+		t.Fatalf("CountDistinct over a bytes column must be rejected, got %v", err)
+	}
+	if errIs400(err) {
+		t.Fatal("the rejection is a server-side error, not a client 400")
+	}
+	_, err = GroupBy[string](ctx, s, "status", []Aggregate{CountDistinctOf("meta")})
+	if err == nil || !strings.Contains(err.Error(), "scalar") {
+		t.Fatalf("CountDistinctOf over a bytes column must be rejected, got %v", err)
+	}
+}
+
+// TestAggregate_Round1QualifiedAliasColumn is the round-1 review #6
+// regression: the allowlist legally maps a field to a table-qualified
+// column, which the schema lookup used to miss. A qualifier naming the
+// model's own table now resolves; a foreign qualifier is refused with an
+// explanation instead of a bare "missing from schema".
+func TestAggregate_Round1QualifiedAliasColumn(t *testing.T) {
+	s := setupAggStore(t, WithColumnAlias("qty", "agg_sales.qty"))
+	seedAggSales(t, s)
+	ctx := context.Background()
+
+	sum, ok, err := Sum[int64](ctx, s, "qty")
+	if err != nil || !ok || sum != 33 {
+		t.Fatalf("Sum over an own-table qualified alias = %d, %v, %v; want 33", sum, ok, err)
+	}
+	groups, err := GroupBy[string](ctx, s, "status", []Aggregate{SumOf("qty")})
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("GroupBy with qualified aggregate column = %v, %v; want 2 groups", groups, err)
+	}
+
+	foreign := setupAggStore(t, WithColumnAlias("qty", "other_table.qty"))
+	_, _, err = Sum[int64](ctx, foreign, "qty")
+	if err == nil || !strings.Contains(err.Error(), "own table") {
+		t.Fatalf("a foreign-table qualifier must be refused by name, got %v", err)
+	}
+}
+
 // TestAggregate_MySQLTypeMapping pins the dialect with the most exotic
 // aggregate wire types on a real server (make test-mysql lane): SUM over
 // ints returns DECIMAL as []byte, AVG returns DECIMAL(x,4), MIN/MAX over
@@ -570,5 +703,18 @@ func TestAggregate_MySQLTypeMapping(t *testing.T) {
 	flags, err := GroupBy[bool](ctx, s, "flag", []Aggregate{CountRows()})
 	if err != nil || len(flags) != 2 {
 		t.Fatalf("MySQL bool groups = %v, %v; want 2", flags, err)
+	}
+
+	// Round-1 #1 convergence check: the driver rewrites every write into
+	// one session zone, so instants written under different Go zones must
+	// still aggregate by instant.
+	inst := time.Date(2026, 7, 3, 6, 0, 0, 0, time.UTC)
+	for _, at := range []time.Time{inst, inst.In(time.FixedZone("p8", 8*3600))} {
+		if err := s.Create(ctx, &AggSale{Status: "zoned", Qty: 1, Price: 1, Flag: true, At: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := CountDistinct(ctx, s, "at", where.WithFilter("status", "zoned")); err != nil || n != 1 {
+		t.Fatalf("MySQL: one instant in two zones counts %d distinct, %v; want 1", n, err)
 	}
 }

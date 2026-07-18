@@ -483,8 +483,8 @@ serializer / `driver.Valuer` 字段按 wire 类型判定）：
 |---|---|---|
 | `Sum[N]` / `SumOf` | 整数（含指针）、浮点 | `Sum[int64]` 仅限整数列——**精确**，超 int64 值域响亮报错、绝不静默截断（SUM(int) 在 PG 返 bigint/numeric、MySQL 返 DECIMAL、SQLite 动态类型，收敛函数逐 lane 测试钉死）；`Sum[float64]` 也可拓宽整数列（>2^53 精度取舍）。`SumOf` 按列定：整数列 → `Int64()`，浮点列 → `Float64()` |
 | `Avg` / `AvgOf` | 整数、浮点 | 恒 `float64`（三方言 AVG 都返回小数类型）。⚠️ 金额级精确统计不要用它——精确小数聚合是 raw SQL 的活 |
-| `Min[N]` / `Max[N]` / `MinOf` / `MaxOf` | 数值列之外**放开时间列**（“每组最新 created_at”是真实仪表盘需求；MIN/MAX 是序运算不是算术） | 数值同 Sum；时间列 → `time.Time`，比较用 `Equal` 而非 `==`（SQLite 文本时间戳带写入方时区偏移） |
-| `CountDistinct` / `CountDistinctOf` | 任意已声明字段 | `int64`；COUNT 永不为 SQL NULL |
+| `Min[N]` / `Max[N]` / `MinOf` / `MaxOf` | 数值列之外**放开时间列**（“每组最新 created_at”是真实仪表盘需求；MIN/MAX 是序运算不是算术） | 数值同 Sum；时间列 → `time.Time`，**按瞬间比较**（见下方 SQLite 条目），比较结果用 `Equal` 而非 `==`（返回值的墙钟时区随方言） |
+| `CountDistinct` / `CountDistinctOf` | **可比较标量列**（六个可推导 kind：str/int/uint/float/bool/time）——数据库比较不了的列（如 PG `json`）构造期即拒，不等运行期报错 | `int64`；COUNT 永不为 SQL NULL。⚠️ 字符串基数遵循列的 collation（CI collation 下 Go 认为不同的值算一个），各方言自定 |
 
 - **NULL 语义**：SQL 聚合忽略 NULL；单值入口零行/全 NULL → `ok=false`；
   GroupBy 聚合值用 `AggValue.IsNull()`（访问器此时一律返回 ok=false）。
@@ -500,10 +500,19 @@ serializer / `driver.Valuer` 字段按 wire 类型判定）：
   不说谎）；🚫 **GroupBy 拒收非 filter 选项**——行集结果上静默吞掉
   `WithOrder`+`WithLimit` 会伪装成 top-N（`ListIn` 守卫同理，报
   `ErrInvalidParam` → 400）。
+- **SQLite 时间聚合按瞬间归一**：SQLite 把时间戳按写入方时区存成文本、
+  按字典序比较——混合时区偏移下裸 MIN/MAX 会选错瞬间、同一瞬间两种
+  偏移写入会分成两组。聚合读取时间列时自动经
+  `strftime` 归一化到 **UTC / 毫秒精度**（与 MySQL DATETIME(3) 的写入
+  精度一致；亚毫秒差异折叠），返回 UTC 值；这只影响聚合，存储值、
+  filter 与排序不动。PG（timestamptz）/ MySQL（驱动统一会话时区写入）
+  原生按瞬间比较，无需归一。
 - 🚫 **字段名 typo 是服务端 bug**：原样返回 `where.ErrUnknownField`
   （→ 500），provenance 划界与 `Pluck`/`List` 一致（§11.2 例外①）。
 - 字符串/布尔列不可聚合（文本 MIN/MAX 的序由方言 collation 定义，跨
-  方言不可承诺）；`Sum`/`Avg` 不接受时间列。
+  方言不可承诺）；`Sum`/`Avg` 不接受时间列。bool group key 只认规范的
+  0/1 存储值——`Unsafe`/动态类型写入的 2 会在 SQL 侧成为独立组，Go 侧
+  折叠成重复的 `true` key 会静默互相覆盖，因此**响亮报错**。
 
 > **top-N 与 HAVING 刻意不做**：按聚合值 ORDER BY 是表达式排序（红线，
 > 无法白名单化），HAVING 是聚合结果上的表达式谓词（同类）。GroupBy 结果

@@ -39,6 +39,18 @@ import (
 // string and bool columns are not aggregatable in v1 — MIN over text is
 // collation-defined and differs across dialects.
 //
+// Time columns get one dialect accommodation. PostgreSQL (timestamptz)
+// and MySQL (the driver rewrites every write into one session zone)
+// compare instants natively, but SQLite stores timestamps as text in the
+// writer's zone and compares them lexicographically — rows written under
+// different zone offsets would make MIN/MAX pick the wrong instant and
+// GROUP BY split one instant into two buckets. Aggregates therefore read
+// SQLite time columns through a UTC-normalising strftime expression:
+// instant-correct across mixed offsets, at millisecond precision (the
+// same precision MySQL's DATETIME(3) applies at write time; sub-ms
+// distinctions collapse) and returned in UTC. This normalisation is
+// aggregate-only — stored values, filters and ordering are untouched.
+//
 // Result typing is a deliberate three-dialect convergence. SUM of an
 // integer column returns bigint on PostgreSQL, DECIMAL on MySQL and a
 // dynamically-typed integer on SQLite; the framework converges every
@@ -95,10 +107,11 @@ func Avg[T db.Modeler](ctx context.Context, s *Store[T], field string, opts ...w
 
 // Min returns the smallest value of a declared field over the rows
 // matching the filter options. Numeric columns read as int64/float64
-// under the same rules as Sum; time columns read as N=time.Time —
-// compare instants with Equal, not ==: SQLite stores text timestamps in
-// the writer's zone and hands the offset back. Zero aggregated values
-// surface as ok=false.
+// under the same rules as Sum; time columns read as N=time.Time and
+// compare by INSTANT on every dialect — compare results with Equal, not
+// ==, because the wall-clock zone is dialect-flavoured (on SQLite the
+// value is UTC at millisecond precision, see the package comment). Zero
+// aggregated values surface as ok=false.
 func Min[N AggregateScalar, T db.Modeler](ctx context.Context, s *Store[T], field string, opts ...where.Option) (N, bool, error) {
 	return singleAggregate[N](ctx, s, aggMin, field, opts)
 }
@@ -112,15 +125,19 @@ func Max[N AggregateScalar, T db.Modeler](ctx context.Context, s *Store[T], fiel
 // CountDistinct returns the number of distinct non-NULL values of a
 // declared field over the rows matching the filter options — the
 // counting sibling of PluckDistinct that never materialises the values.
-// Any declared field qualifies (COUNT DISTINCT is type-agnostic), and
-// zero matching rows count as 0 — COUNT never returns SQL NULL, so there
-// is no ok bool to consult.
+// The field must be a comparable scalar (the six derivable wire kinds:
+// string, int, uint, float, bool, time) — a column the database cannot
+// compare (PostgreSQL json, say) is refused up front instead of failing
+// mid-query. String cardinality follows the column's collation, which
+// each dialect defines for itself: a case-insensitive collation counts
+// values Go would call distinct as one. Zero matching rows count as 0 —
+// COUNT never returns SQL NULL, so there is no ok bool to consult.
 func CountDistinct[T db.Modeler](ctx context.Context, s *Store[T], field string, opts ...where.Option) (int64, error) {
-	col, err := s.aggColumn(field)
+	col, spec, err := s.aggFieldSpec("CountDistinct", field)
 	if err != nil {
 		return 0, err
 	}
-	raw, err := s.runSingleAggregate(ctx, "COUNT(DISTINCT "+col+")", opts)
+	raw, err := s.runSingleAggregate(ctx, "COUNT(DISTINCT "+aggColumnExpr(s.dialectName(ctx), col, spec.kind)+")", opts)
 	if err != nil {
 		return 0, err
 	}
@@ -144,7 +161,9 @@ type Aggregate struct {
 func CountRows() Aggregate { return Aggregate{fn: aggCountRows} }
 
 // CountDistinctOf counts the distinct non-NULL values of a declared
-// field within each group (COUNT(DISTINCT field)). Reads as int64.
+// field within each group (COUNT(DISTINCT field)). Reads as int64. The
+// field must be a comparable scalar and string cardinality follows the
+// column's collation — see CountDistinct for both contracts.
 func CountDistinctOf(field string) Aggregate { return Aggregate{fn: aggCountDistinct, field: field} }
 
 // SumOf sums a declared numeric field within each group. Integer-kind
@@ -256,9 +275,10 @@ type Group[K comparable] struct {
 // by the group column's distinct values — dashboard-shaped columns
 // (status, type, day buckets) yield sets small enough to sort in memory.
 // For the same reason GroupBy carries no LIMIT, and non-filter options
-// are rejected rather than stripped: a silently dropped
-// WithOrder+WithLimit would look exactly like a top-N query while
-// returning key-ordered buckets.
+// (ordering, pagination, cursors, page-size caps, WithCount) are
+// rejected rather than stripped: a silently dropped WithOrder+WithLimit
+// would look exactly like a top-N query while returning key-ordered
+// buckets.
 //
 // Scopes and soft-delete rules apply as in every read; filters narrow
 // the rows BEFORE grouping (SQL WHERE — a HAVING equivalent is
@@ -275,12 +295,14 @@ func GroupBy[K comparable, T db.Modeler](ctx context.Context, s *Store[T], field
 	if err := validateGroupKeyType[K](field, keySpec); err != nil {
 		return nil, err
 	}
+	dialect := s.dialectName(ctx)
+	keyExpr := aggColumnExpr(dialect, keyCol, keySpec.kind)
 
 	selects := make([]string, 0, len(aggs)+1)
-	selects = append(selects, keyCol)
+	selects = append(selects, keyExpr)
 	kinds := make([]aggValueKind, len(aggs))
 	for i, agg := range aggs {
-		expr, kind, err := s.aggPlan(agg)
+		expr, kind, err := s.aggPlan(dialect, agg)
 		if err != nil {
 			return nil, err
 		}
@@ -293,8 +315,8 @@ func GroupBy[K comparable, T db.Modeler](ctx context.Context, s *Store[T], field
 		return nil, err
 	}
 	rows, err := q.Select(strings.Join(selects, ", ")).
-		Group(keyCol).
-		Order(keyCol + " ASC").
+		Group(keyExpr).
+		Order(keyExpr + " ASC").
 		Rows()
 	if err != nil {
 		return nil, s.mapError(err)
@@ -362,7 +384,7 @@ func singleAggregate[N AggregateScalar, T db.Modeler](ctx context.Context, s *St
 	if err != nil {
 		return zero, false, err
 	}
-	raw, err := s.runSingleAggregate(ctx, string(fn)+"("+col+")", opts)
+	raw, err := s.runSingleAggregate(ctx, string(fn)+"("+aggColumnExpr(s.dialectName(ctx), col, spec.kind)+")", opts)
 	if err != nil {
 		return zero, false, err
 	}
@@ -395,9 +417,13 @@ func (s *Store[T]) runSingleAggregate(ctx context.Context, expr string, opts []w
 }
 
 // aggBase builds the scoped, filtered *gorm.DB every aggregate runs
-// over. guarded appends the filters-only guard (GroupBy: non-filter
-// options are rejected, not stripped); without it, ApplyFiltersOnly
-// already no-ops pagination/order/count exactly as countInternal does.
+// over. guarded is GroupBy's path: non-filter options are rejected, not
+// stripped — and the option pipeline must run under where.Apply, because
+// ApplyFiltersOnly's countOnly mode never records WithCount into the
+// Config, which would let it slip past the guard unseen (the pagination
+// SQL a rejected option may have staged is irrelevant: the guard error
+// aborts before execution). The unguarded path is countInternal's:
+// ApplyFiltersOnly strips pagination/order/count silently.
 func (s *Store[T]) aggBase(ctx context.Context, opts []where.Option, guarded bool) (*gorm.DB, error) {
 	base, err := s.applyScopes(ctx, s.effectiveDB(ctx).Model(new(T)))
 	if err != nil {
@@ -407,6 +433,11 @@ func (s *Store[T]) aggBase(ctx context.Context, opts []where.Option, guarded boo
 		// Appended after the caller options so the guard observes their
 		// Config flags (same placement as ListIn's guard).
 		opts = append(append([]where.Option{}, opts...), groupByFilterOnlyGuard())
+		q, _, err := where.Apply(base, s.queryFieldMap, opts)
+		if err != nil {
+			return nil, mapQueryError(err)
+		}
+		return q, nil
 	}
 	q, err := where.ApplyFiltersOnly(base, s.queryFieldMap, opts)
 	if err != nil {
@@ -417,16 +448,45 @@ func (s *Store[T]) aggBase(ctx context.Context, opts []where.Option, guarded boo
 
 // groupByFilterOnlyGuard rejects options that do not compose with GROUP
 // BY, the aggregation sibling of listInFilterOnlyGuard: row ordering,
-// pagination, cursors and page-size caps all describe the ROW set, and
-// silently stripping them from a grouped query would let a
+// pagination, cursors, page-size caps and WithCount all describe the ROW
+// set, and silently stripping them from a grouped query would let a
 // WithOrder+WithLimit call masquerade as top-N.
 func groupByFilterOnlyGuard() where.Option {
 	return func(db *gorm.DB, cfg *where.Config, _ map[string]string) (*gorm.DB, error) {
-		if cfg.HasPage || cfg.HasCursor || cfg.HasOrder || cfg.MaxPageSize > 0 {
-			return nil, fmt.Errorf("%w: GroupBy accepts filter options only; ordering, pagination and page-size caps describe rows, not groups — sort or truncate the returned groups in memory", where.ErrInvalidParam)
+		if cfg.HasPage || cfg.HasCursor || cfg.HasOrder || cfg.Count || cfg.MaxPageSize > 0 {
+			return nil, fmt.Errorf("%w: GroupBy accepts filter options only; ordering, pagination, count and page-size caps describe rows, not groups — sort or truncate the returned groups in memory", where.ErrInvalidParam)
 		}
 		return db, nil
 	}
+}
+
+// dialectName reports the SQL dialect of the handle behind this
+// operation ("sqlite", "postgres", "mysql"). Transactions ride the same
+// handle, so the name is stable across effectiveDB's three sources.
+func (s *Store[T]) dialectName(ctx context.Context) string {
+	return s.effectiveDB(ctx).Dialector.Name()
+}
+
+// aggColumnExpr returns the SQL expression aggregates read a column
+// through — the column itself, except for time columns on SQLite, which
+// are normalised to UTC at millisecond precision:
+//
+//	strftime('%Y-%m-%d %H:%M:%f', col, 'auto')
+//
+// SQLite stores timestamps as text in the writer's zone and compares
+// them lexicographically, so raw MIN/MAX would pick the lexicographic —
+// not chronological — extreme across mixed offsets, and GROUP BY /
+// COUNT(DISTINCT) would split one instant written under two offsets into
+// two values. The normalised form is fixed-width UTC text, on which
+// lexicographic order IS instant order. The 'auto' modifier keeps
+// integer unixepoch storage (serializer:unixtime columns) readable.
+// PostgreSQL (timestamptz) and MySQL (one session zone rewrites every
+// write) compare instants natively and need no expression.
+func aggColumnExpr(dialect, col, kind string) string {
+	if kind == cursorKindTime && dialect == "sqlite" {
+		return "strftime('%Y-%m-%d %H:%M:%f', " + col + ", 'auto')"
+	}
+	return col
 }
 
 // aggColumn resolves a field through the query allowlist. The error
@@ -445,6 +505,12 @@ func (s *Store[T]) aggColumn(field string) (string, error) {
 // serializer and driver.Valuer fields classify by wire type). Fields
 // whose kind cannot be statically derived are refused: aggregating a
 // column the framework cannot type is a server-side configuration error.
+//
+// The allowlist accepts one optional table qualifier on a column
+// (WithColumnAlias("qty", "agg_sales.qty") is legal); the schema lookup
+// strips it when it names the model's own table — aggregates only ever
+// read the store's own table, so a foreign qualifier is refused rather
+// than silently mis-resolved.
 func (s *Store[T]) aggFieldSpec(fnName, field string) (string, cursorFieldSpec, error) {
 	col, err := s.aggColumn(field)
 	if err != nil {
@@ -453,7 +519,14 @@ func (s *Store[T]) aggFieldSpec(fnName, field string) (string, cursorFieldSpec, 
 	if s.modelSchema == nil {
 		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: model schema unavailable", fnName)
 	}
-	fieldSchema := s.modelSchema.LookUpField(col)
+	lookup := col
+	if qualifier, bare, qualified := strings.Cut(col, "."); qualified {
+		if qualifier != s.modelSchema.Table {
+			return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q resolves to column %q, whose qualifier is not the model table %q; aggregates read the store's own table only", fnName, field, col, s.modelSchema.Table)
+		}
+		lookup = bare
+	}
+	fieldSchema := s.modelSchema.LookUpField(lookup)
 	if fieldSchema == nil {
 		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q resolves to column %q, which is missing from the model schema", fnName, field, col)
 	}
@@ -466,16 +539,16 @@ func (s *Store[T]) aggFieldSpec(fnName, field string) (string, cursorFieldSpec, 
 
 // aggPlan renders one Aggregate into its select expression and pins the
 // kind its values coerce to.
-func (s *Store[T]) aggPlan(agg Aggregate) (string, aggValueKind, error) {
+func (s *Store[T]) aggPlan(dialect string, agg Aggregate) (string, aggValueKind, error) {
 	switch agg.fn {
 	case aggCountRows:
 		return "COUNT(*)", aggValueInt, nil
 	case aggCountDistinct:
-		col, err := s.aggColumn(agg.field)
+		col, spec, err := s.aggFieldSpec("CountDistinctOf", agg.field)
 		if err != nil {
 			return "", 0, err
 		}
-		return "COUNT(DISTINCT " + col + ")", aggValueInt, nil
+		return "COUNT(DISTINCT " + aggColumnExpr(dialect, col, spec.kind) + ")", aggValueInt, nil
 	case aggSum, aggAvg, aggMin, aggMax:
 		col, spec, err := s.aggFieldSpec(string(agg.fn), agg.field)
 		if err != nil {
@@ -485,7 +558,7 @@ func (s *Store[T]) aggPlan(agg Aggregate) (string, aggValueKind, error) {
 		if err != nil {
 			return "", 0, err
 		}
-		return string(agg.fn) + "(" + col + ")", kind, nil
+		return string(agg.fn) + "(" + aggColumnExpr(dialect, col, spec.kind) + ")", kind, nil
 	}
 	return "", 0, fmt.Errorf("store: GroupBy: invalid Aggregate (zero value?); use the CountRows/SumOf/... constructors")
 }
@@ -654,16 +727,21 @@ func parseAggFloat(s string) (float64, error) {
 	return f, nil
 }
 
-// aggTimeFormats are the text timestamp layouts a MIN/MAX over a time
-// column can come back in. PostgreSQL and MySQL (parseTime) hand over
-// time.Time directly; SQLite stores timestamps as text and expression
-// results carry no column decltype, so the driver returns the raw
-// string — in the writer's zone, offset included (the same property the
-// cursor encoder relies on).
+// aggTimeFormats are the text timestamp layouts a time aggregate can
+// come back in. PostgreSQL and MySQL (parseTime is forced by db.Open)
+// hand over time.Time directly; SQLite expression results carry no
+// column decltype, so the driver returns text — normally the fixed-width
+// UTC form aggColumnExpr produces, with offset-carrying and date-only
+// forms kept for defence. Zone-less layouts parse as UTC, which is both
+// SQLite's own convention for naive timestamps (CURRENT_TIMESTAMP writes
+// UTC) and what the normalising expression emits.
 var aggTimeFormats = []string{
+	"2006-01-02 15:04:05.999999999",
 	time.RFC3339Nano,
 	"2006-01-02 15:04:05.999999999-07:00",
 	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02",
 }
 
 func aggTime(raw any) (time.Time, error) {
@@ -793,13 +871,23 @@ func parseAggUint(s string) (uint64, error) {
 }
 
 // aggBool reads a bool group key: native bools (PostgreSQL), 0/1
-// integers (SQLite, MySQL TINYINT), or their text forms.
+// integers (SQLite, MySQL TINYINT), or their text forms. Only the
+// canonical 0/1 integers are accepted — SQL groups a raw 1 and a raw 2
+// (reachable through dynamic typing or Unsafe writes) as two buckets,
+// and folding both onto true would hand the caller duplicate Group keys
+// that silently overwrite each other in a map.
 func aggBool(raw any) (bool, error) {
 	switch v := raw.(type) {
 	case bool:
 		return v, nil
 	case int64:
-		return v != 0, nil
+		switch v {
+		case 0:
+			return false, nil
+		case 1:
+			return true, nil
+		}
+		return false, fmt.Errorf("bool group key stores non-canonical integer %d; only 0/1 are readable as bool", v)
 	case []byte:
 		return parseAggBool(string(v))
 	case string:

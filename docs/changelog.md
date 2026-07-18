@@ -41,6 +41,29 @@
 > 列类型校验复用游标的 schema wire-kind 探针（serializer/Valuer 字段按
 > wire 类型判定），构造期即拒，不等数据依赖的运行时 parse 失败。
 >
+> **SQLite 时间聚合的瞬间正确性**（round-1 复审修正）：SQLite 把
+> `time.Time` 按写入方时区存成文本、按字典序比较，混合偏移下裸
+> MIN/MAX 会选**字典序**而非**时间序**极值、同一瞬间两种偏移写入会
+> 分成两组/计成两个 distinct——复审实测坐实。修正不是拒绝该能力
+> （SQLite 是默认 lane 与钦定单机生产形态，聚合正是为它的仪表盘立项）
+> 也不是改写存储格式（游标一族依赖 writer-zone 文本不变量），而是**仅
+> 在聚合读取处**把时间列包进 `strftime('%Y-%m-%d %H:%M:%f', col,
+> 'auto')`：定宽 UTC 文本上字典序=时间序，毫秒精度与 MySQL DATETIME(3)
+> 的写入精度对齐（亚毫秒折叠是文档化取舍），`'auto'` 兼容
+> serializer:unixtime 的整数存储；本机 SQLite 3.41 无 `subsec` 修饰符，
+> 故用 strftime 而非 `datetime(...,'subsec')`。表达式由框架自产、列名
+> 仍过白名单——不触碰「调用方表达式不可白名单化」的红线。PG
+> （timestamptz）与 MySQL（驱动统一会话时区重写写入）原生瞬间比较，
+> 不加表达式；三方言用同一组混合偏移断言钉死。归一化只作用于聚合：
+> 存储、filter、排序、游标不动（后者的既有 writer-zone 语义另属其
+> 契约）。同轮收紧：`CountDistinct` 契约从「任意已声明字段」收窄为
+> **可比较标量**（PG `json` 无等值运算符，入口即拒好过查询中途炸；
+> 字符串基数按列 collation、方言自定，不再笼统承诺跨方言一致）；bool
+> group key 只认规范 0/1（SQL 把裸 2 分成独立组，Go 折叠成重复 true
+> key 会在调用方转 map 时静默覆盖——响亮报错）；GroupBy 守卫改在
+> `where.Apply` 下运行使 `WithCount` 不再静默漏网；表限定列别名在
+> 限定名为本模型表时正常解析、异表限定显式拒绝。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的
