@@ -476,13 +476,17 @@ for _, g := range groups {
 }
 ```
 
-**列类型规则**（构造期校验，复用游标的 schema wire-kind 探针，
-serializer / `driver.Valuer` 字段按 wire 类型判定）。能力矩阵有两半：
-**wire kind 管 Go 结果收敛，方言真实列型管数据库操作是否合法**——
-列型在 Store 构造期经 migrator 解析并缓存（migrator 不是只读的，会
-原地改写共享 schema 字段，绝不在请求路径调用），`int64` 字段配
-`gorm:"type:text"` 列这类错配在入口 fail-closed（否则 SQLite 按文本
-字典序算 MIN、PG 运行期报错），不认识的列型同样拒绝并指向 Unsafe：
+**列类型规则**（复用游标的 schema wire-kind 探针，serializer /
+`driver.Valuer` 字段按 wire 类型判定）。能力矩阵有两半：**wire kind
+管 Go 结果收敛，数据库真实列型管操作是否合法**——真实列型读自
+**catalog**（`Migrator.ColumnTypes`，首次聚合时懒解析并缓存；不是
+`FullDataTypeOf` 渲染的「模型将建成什么」——`migrate: versioned/off`
+下真列可能与模型不符），按方言用**精确白名单**匹配（不用子串——
+子串会把 PG 的 `interval`/`int4range` 当整数、`daterange` 当时间、
+`time`/`timetz` 当瞬间、`integer[]` 数组当整数）。`int64` 字段配
+真实 `TEXT` 列这类错配在入口 fail-closed（否则 SQLite 按文本字典序
+算 MIN、PG 运行期报错），range / interval / 数组 / 纯时刻(time)等
+不认识的列型同样拒绝并指向 Unsafe：
 
 | 函数 | 接受的列 | Go 侧类型 |
 |---|---|---|

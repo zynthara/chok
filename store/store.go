@@ -187,7 +187,7 @@ type Store[T db.Modeler] struct {
 	updateFieldMap   map[string]string // update SET columns
 	constraintFields map[string]string // WithConstraintFields: constraint identifier → public field name
 	modelSchema      *schema.Schema    // GORM's authoritative field/column mapping
-	aggColumnTypes   map[string]string // column → dialect SQL type (first token), resolved at construction on field COPIES — migrators mutate shared fields
+	aggCatalog       *aggCatalogCache  // real catalog column types for the aggregate gate, resolved lazily (shared across tx clones via pointer)
 	ridColumn        string            // RID's DB column — cursor tie-breaker, independent of the query allowlist
 	soft             bool              // true if T embeds SoftDeleteModel
 	scopes           []ScopeFunc
@@ -869,7 +869,7 @@ func New[T db.Modeler](h *db.DB, logger log.Logger, opts ...StoreOption) *Store[
 		updateFieldMap:   updateFieldMap,
 		constraintFields: cfg.constraintFields,
 		modelSchema:      modelSchema,
-		aggColumnTypes:   aggregateColumnTypes(stmt.DB, modelSchema),
+		aggCatalog:       &aggCatalogCache{},
 		ridColumn:        ridColumn,
 		soft:             db.IsSoftDeleteModel(model),
 		scopes:           scopes,

@@ -828,16 +828,150 @@ func TestAggregate_Round4TextBackedIntRejected(t *testing.T) {
 	}
 }
 
+// TestAggregate_Round5CatalogWhitelistRejectsExotics is the round-5
+// review #2 regression: the type gate was substring matching, which
+// swept PostgreSQL's exotic neighbours into the wrong family — "interval"
+// and "int4range" contain "int", "daterange" starts with "date",
+// "time"/"timetz" contain "time", "integer[]" (an array) contains "int".
+// The exact per-dialect whitelist must admit none of them, under ANY
+// wire kind, while still admitting the legitimate types.
+func TestAggregate_Round5CatalogWhitelistRejectsExotics(t *testing.T) {
+	exotic := []string{"interval", "int4range", "int8range", "daterange", "tsrange", "time", "timetz", "integer[]", "bigint[]", "json", "jsonb", "bytea", "point"}
+	kinds := []string{cursorKindInt, cursorKindUint, cursorKindFloat, cursorKindTime, cursorKindString, cursorKindBool}
+	for _, dialect := range []string{"sqlite", "postgres", "mysql"} {
+		for _, typ := range exotic {
+			for _, kind := range kinds {
+				if aggCatalogAllows(dialect, kind, typ) {
+					t.Errorf("aggCatalogAllows(%q, %q, %q) = true; exotic/incomparable types must fail closed", dialect, kind, typ)
+				}
+			}
+		}
+	}
+	// The legitimate mappings each dialect actually reports must pass —
+	// a whitelist that rejects everything is useless.
+	good := []struct{ dialect, kind, typ string }{
+		{"postgres", cursorKindInt, "int8"}, {"postgres", cursorKindFloat, "numeric"},
+		{"postgres", cursorKindTime, "timestamptz"}, {"postgres", cursorKindString, "varchar"},
+		{"postgres", cursorKindBool, "bool"},
+		{"mysql", cursorKindInt, "bigint"}, {"mysql", cursorKindFloat, "double"},
+		{"mysql", cursorKindTime, "datetime"}, {"mysql", cursorKindBool, "tinyint"},
+		{"sqlite", cursorKindInt, "integer"}, {"sqlite", cursorKindFloat, "real"},
+		{"sqlite", cursorKindTime, "datetime"}, {"sqlite", cursorKindString, "text"},
+		{"sqlite", cursorKindBool, "numeric"},
+	}
+	for _, g := range good {
+		if !aggCatalogAllows(g.dialect, g.kind, g.typ) {
+			t.Errorf("aggCatalogAllows(%q, %q, %q) = false; a real blessed mapping must pass", g.dialect, g.kind, g.typ)
+		}
+	}
+	// Unknown dialect fails closed.
+	if aggCatalogAllows("cockroach", cursorKindInt, "int8") {
+		t.Error("unknown dialect must fail closed")
+	}
+}
+
+// f1TextInt reproduces the round-5 review #1 shape: a Go int64 field with
+// no type tag, whose actual column was created as TEXT by an out-of-band
+// (versioned/off) migration. The model-rendered type says integer; only
+// the real catalog says text.
+type f1TextInt struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (f1TextInt) RIDPrefix() string { return "f1t" }
+
+// TestAggregate_Round5Finding1RealCatalogType is the round-5 review #1
+// regression: the gate cached FullDataTypeOf, which only renders the
+// type the MODEL would create — not the real column. Under
+// migrate:versioned/off the column can genuinely be TEXT while the model
+// says int64, and MIN then ran lexicographically (2 lost to 10),
+// silently wrong. The gate now reads the real catalog type and fails
+// closed on the mismatch.
+func TestAggregate_Round5Finding1RealCatalogType(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("the raw-DDL versioned/off shape is scripted for SQLite")
+	}
+	gdb := setupDB(t)
+	ctx := context.Background()
+	raw := gdb.Unsafe(ctx)
+	// The table the store's model maps to, but with qty as real TEXT.
+	if err := raw.Exec(`CREATE TABLE f1_text_ints (id integer PRIMARY KEY AUTOINCREMENT, rid text, version integer, created_at datetime, updated_at datetime, qty TEXT)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := New[f1TextInt](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	for _, q := range []string{"2", "10"} {
+		if err := raw.Exec(`INSERT INTO f1_text_ints (rid, version, qty) VALUES (?, 1, ?)`, "f1t_"+q, q).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Before the fix this returned 10, true, nil (lexicographic MIN over
+	// text). Now the real catalog type (TEXT) contradicts the int64 wire
+	// kind and the gate fails closed.
+	_, _, err := Min[int64](ctx, s, "qty")
+	if err == nil || !strings.Contains(err.Error(), "column type") {
+		t.Fatalf("Min[int64] over a real TEXT column must fail closed, got %v", err)
+	}
+	if errIs400(err) {
+		t.Fatal("the rejection is a server-side error, not a client 400")
+	}
+}
+
+// TestAggregate_Round5PGExoticColumnsRejected is the round-5 review #2
+// regression end-to-end on a real PostgreSQL catalog: a column whose
+// real type is interval / time-of-day / a range is rejected, proving the
+// gate reads and matches the actual catalog type (not the model's).
+func TestAggregate_Round5PGExoticColumnsRejected(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("interval/range/time-of-day catalog types are exercised on the PG lane")
+	}
+	gdb := setupDB(t)
+	ctx := context.Background()
+	raw := gdb.Unsafe(ctx)
+	// int8-backed model columns whose ACTUAL catalog type is exotic: the
+	// model says int64/time, the catalog says interval/time/int4range.
+	if err := raw.Exec(`CREATE TABLE exotic_rows (
+		id bigserial PRIMARY KEY, rid varchar(24), version bigint,
+		created_at timestamptz, updated_at timestamptz,
+		span interval, tod time, rng int4range)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	type exoticRow struct {
+		db.Model
+		Span int64     `json:"span" gorm:"column:span"`
+		Tod  time.Time `json:"tod" gorm:"column:tod"`
+		Rng  int64     `json:"rng" gorm:"column:rng"`
+	}
+	s := New[exoticRow](gdb, log.Empty(), WithQueryFields("id", "span", "tod", "rng"))
+	for _, field := range []string{"span", "tod", "rng"} {
+		if _, _, err := Sum[int64](ctx, s, field); err == nil {
+			// tod is time-kind so Sum rejects it on kind grounds anyway;
+			// use Min for a kind-compatible probe below.
+			if field != "tod" {
+				t.Fatalf("Sum over exotic column %q must fail closed", field)
+			}
+		}
+	}
+	if _, _, err := Min[time.Time](ctx, s, "tod"); err == nil || !strings.Contains(err.Error(), "column type") {
+		t.Fatalf("Min[time.Time] over a PG `time` (time-of-day) column must fail closed, got %v", err)
+	}
+	if _, _, err := Min[int64](ctx, s, "span"); err == nil || !strings.Contains(err.Error(), "column type") {
+		t.Fatalf("Min[int64] over a PG `interval` column must fail closed, got %v", err)
+	}
+	if _, err := GroupBy[int64](ctx, s, "rng", []Aggregate{CountRows()}); err == nil {
+		t.Fatal("grouping by a PG `int4range` column must fail closed")
+	}
+}
+
 // TestAggregate_Round4MySQLConcurrentTimeAggregates is the round-4
-// review #1 regression: resolving a column's dialect type on the
-// request path handed the SHARED *schema.Field to the migrator, and
-// GORM's MySQL dialector writes field.Precision in place while
-// resolving time columns — concurrent first-time aggregates raced
-// (write-write under -race). AutoMigrate through the same handle
-// happens to pre-write Precision into the handle's schema cache and
-// masks the race, so the store here rides a SECOND handle that never
-// migrated — the migrate:versioned/off production shape. Dialect types
-// are now resolved once at Store construction, on field COPIES.
+// review #1 regression, still load-bearing after round-5 moved type
+// resolution to the catalog: concurrent first-time aggregates must not
+// race while the lazy catalog cache resolves. (Round-4's original bug
+// was FullDataTypeOf mutating the shared *schema.Field on the request
+// path; round-5 replaced that with a mutex-guarded, non-mutating
+// Migrator.ColumnTypes read cached once per Store.) The store rides a
+// SECOND handle that never migrated — the migrate:versioned/off
+// production shape — so nothing pre-warms any cache.
 func TestAggregate_Round4MySQLConcurrentTimeAggregates(t *testing.T) {
 	migrated := setupAggStoreOn(t, dbtest.OpenMySQL(t))
 	seedAggSales(t, migrated)

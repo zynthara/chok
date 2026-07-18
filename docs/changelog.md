@@ -116,6 +116,26 @@
 > str→char/text/clob/uuid/enum 族、bool→bool/numeric(SQLite)/tinyint
 > 族），错配与不认识的列型一律 fail-closed 指向 Unsafe。
 >
+> **round-5 复审修正**（两条，均红→绿）：① round-4 缓存的
+> `FullDataTypeOf` 只渲染「模型将建成什么」、**不查 catalog**——
+> `versioned/off` 下真列可能与模型不符（SQL 迁移把列建成 TEXT、模型
+> 却是无 tag 的 int64），门禁缓存 integer、数据库却按文本求 MIN（2
+> 输给 10，静默错），复审经 Store 路径复现。改为读**真实 catalog 类型**
+> （`Migrator.ColumnTypes` 的 `DatabaseTypeName`）：请求路径首次聚合
+> 懒解析 + 互斥缓存（构造可能先于迁移，catalog 只在迁移后反映真相；
+> `ColumnTypes` 查 catalog 不改共享 schema，无 round-4 的 Precision
+> 原地写竞态——round-4 的构造期字段副本方案随之撤销），缓存挂 Store
+> 指针字段，跨 tx clone（`cp := *s` 浅拷贝）共享。② round-4 的类型族
+> 用**子串**匹配，非 fail-closed——PG 的 `interval`/`int4range` 含
+> "int" 混入整数族、`daterange` 前缀 "date" 混入时间族、`time`/`timetz`
+> 含 "time" 当瞬间、`integer[]` 数组含 "int"，最小探针全翻红。改为按
+> 方言的**精确白名单**（catalog `DatabaseTypeName` 逐名匹配，三方言
+> 实测枚举：PG int2/int4/int8、float4/float8/numeric、timestamptz/
+> timestamp/date、varchar/text/bpchar/uuid、bool；MySQL/SQLite 同理），
+> 键按 wire kind 分组以消解 "numeric"（PG 是 float、SQLite 是 bool 存储）
+> 的方言歧义——不在名单的 interval/range/array/time-of-day/json 一律
+> fail-closed。PG lane 加真 interval/time/int4range 列的端到端拒收回归。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

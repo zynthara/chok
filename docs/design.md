@@ -372,12 +372,18 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   无 DST」时区，推荐 TZ=UTC**（同时区必要非充分：DST 回拨把两个瞬间
   折成同一墙钟，单进程也发生；约束排序/过滤/游标全部时间比较面，
   聚合只是继承），折叠/跨时区存量读取侧不可修复；PG timestamptz 无
-  此约束。能力矩阵两半：wire kind 管 Go 收敛，方言真实列型管数据库
-  操作合法性（`type:text` 背书的 int64 拒收，不认识的列型 fail-closed；
-  JSON 门禁同时查逻辑 DataType 与方言列型，GormDBDataType 不漏）；
-  列型在**构造期**经 migrator 于字段**副本**上解析并缓存——migrator
-  会原地写共享 schema 字段（gorm mysql 写 Precision），请求路径调用
-  即数据竞争。类型收敛是显式契约：
+  此约束。能力矩阵两半：wire kind 管 Go 收敛，**数据库真实列型**管
+  操作合法性——真实列型读自 catalog（`Migrator.ColumnTypes`，首次
+  聚合懒解析+缓存；不是 `FullDataTypeOf` 渲染的模型 DDL 型，
+  `versioned/off` 下真列可能与模型不符），按方言**精确白名单**匹配
+  （不用子串——否则 PG 的 `interval`/`int4range` 混入整数族、
+  `daterange` 混入时间族、`time`/`timetz` 当瞬间、`integer[]` 数组
+  当整数）。真 `TEXT` 列上的 int64 拒收，range/interval/数组/纯时刻
+  及不认识列型 fail-closed 指 Unsafe；JSON 门禁查逻辑 DataType 与
+  catalog（json/jsonb，GormDBDataType 不漏）。懒解析（而非构造期）
+  因构造可能先于迁移，且 catalog 只在迁移后才反映真相；`ColumnTypes`
+  查 catalog 不改共享 schema（无 round-4 的 FullDataTypeOf 原地写
+  Precision 竞态），一次解析、互斥缓存。类型收敛是显式契约：
   `Sum[int64]` 精确、越 int64 值域响亮报错；`Avg` 恒 float64；SQL NULL
   （零行/全 NULL）→ comma-ok 的 `ok=false`，GroupBy 值走
   `AggValue.IsNull`，NULL group key 报错不折叠。`GroupBy` 恒按 group
