@@ -2006,6 +2006,39 @@ func TestAggregate_Round3MySQLDSTFoldCollapsesInstants(t *testing.T) {
 	}
 }
 
+// countAggCatalogReads registers query/row/raw callbacks on root that
+// count statements hitting the dialect's catalog metadata source —
+// pragma_table_info / pg_attribute / information_schema.columns.
+// Neither the data queries nor the PG relation probe (to_regclass)
+// mention those, so the count isolates aggregate metadata reads.
+func countAggCatalogReads(t *testing.T, root *gorm.DB, prefix string) *atomic.Int64 {
+	t.Helper()
+	marker := map[string]string{
+		"sqlite":   "pragma_table_info",
+		"postgres": "pg_attribute",
+		"mysql":    "information_schema.columns",
+	}[dbtest.Driver()]
+	if marker == "" {
+		t.Fatalf("no catalog marker for driver %q", dbtest.Driver())
+	}
+	reads := new(atomic.Int64)
+	count := func(tx *gorm.DB) {
+		if strings.Contains(tx.Statement.SQL.String(), marker) {
+			reads.Add(1)
+		}
+	}
+	for name, reg := range map[string]func(string, func(*gorm.DB)) error{
+		"raw":   root.Callback().Raw().Register,
+		"row":   root.Callback().Row().Register,
+		"query": root.Callback().Query().Register,
+	} {
+		if err := reg(prefix+":"+name, count); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return reads
+}
+
 type round12HerdAgg struct {
 	db.Model
 	Qty int64 `json:"qty"`
@@ -2034,33 +2067,8 @@ func TestAggregate_Round12ColdHerdSingleflight(t *testing.T) {
 		}
 	}
 
-	// Catalog reads are recognisable by the metadata source they query;
-	// neither the data queries nor the PG relation probe (to_regclass)
-	// mention it. Registered AFTER setup so migration noise never counts.
-	marker := map[string]string{
-		"sqlite":   "pragma_table_info",
-		"postgres": "pg_attribute",
-		"mysql":    "information_schema.columns",
-	}[dbtest.Driver()]
-	if marker == "" {
-		t.Fatalf("no catalog marker for driver %q", dbtest.Driver())
-	}
-	root := s.h.Unsafe(ctx)
-	var catalogReads atomic.Int64
-	count := func(tx *gorm.DB) {
-		if strings.Contains(tx.Statement.SQL.String(), marker) {
-			catalogReads.Add(1)
-		}
-	}
-	for name, reg := range map[string]func(string, func(*gorm.DB)) error{
-		"raw":   root.Callback().Raw().Register,
-		"row":   root.Callback().Row().Register,
-		"query": root.Callback().Query().Register,
-	} {
-		if err := reg("r12:"+name, count); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Registered AFTER setup so migration noise never counts.
+	catalogReads := countAggCatalogReads(t, s.h.Unsafe(ctx), "r12h")
 
 	const callers = 8
 	start := make(chan struct{})
@@ -2106,9 +2114,9 @@ func (round12TxBypassAgg) TableName() string { return "round12_tx_bypass_aggs" }
 // what starves the flight leader — so a transactional caller must never
 // join a flight; it reads on its own connection. The test wedges the
 // store's flight for the relation's cache key open and proves a
-// transactional cold aggregate completes anyway and publishes the
-// entry, while a parked NON-transactional caller (which holds nothing)
-// obeys its own context.
+// transactional cold aggregate completes anyway — without publishing —
+// while a parked NON-transactional caller (which holds nothing) obeys
+// its own context.
 func TestAggregate_Round12TxCallerNeverParksOnFlight(t *testing.T) {
 	gdb := dbtest.Open(t)
 	ctx := context.Background()
@@ -2197,9 +2205,158 @@ func TestAggregate_Round12TxCallerNeverParksOnFlight(t *testing.T) {
 		t.Fatal("explicit-transaction aggregate parked on a foreign flight; it must read on its own connection")
 	}
 
-	// Its read also published the types, so the wave after any explicit
-	// transaction hits the cache without ever forming a flight.
-	if _, ok := s.aggCatalog.entries.Load(key); !ok {
-		t.Fatal("the transactional read must publish through LoadOrStore")
+	// Its read must NOT have published: a transaction's view may include
+	// its own uncommitted DDL (round-12 review #1), so flight leaders —
+	// always non-transactional — are the cache's only writers.
+	if _, ok := s.aggCatalog.entries.Load(key); ok {
+		t.Fatal("a transactional read must never publish into the shared catalog cache")
+	}
+}
+
+type round12LeakAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round12LeakAgg) RIDPrefix() string { return "r12l" }
+func (round12LeakAgg) TableName() string { return "round12_leak_aggs" }
+
+// TestAggregate_Round12TxRollbackDoesNotLeakCatalog is the round-12
+// review #1 (High) regression: a transaction that created its table
+// in-tx used to publish the types only IT could see into the shared
+// key-0 cache; the entry survived ROLLBACK, and when the table was
+// later created for real with qty TEXT, Min[int64] hit the leaked
+// INTEGER entry, passed the gate and returned the lexicographic MIN —
+// silently, with no fail-closed. A transactional read must serve its
+// own call only.
+func TestAggregate_Round12TxRollbackDoesNotLeakCatalog(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("the repro needs transactional DDL over the shared cache key 0 — SQLite; PG keys by OID (a rolled-back table never resolves again) and MySQL DDL auto-commits. The publish line under test is shared by all dialects.")
+	}
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	s := New[round12LeakAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+
+	// A transaction creates the table with qty INTEGER, aggregates over
+	// it — reading catalog state only this transaction can see — and
+	// rolls back.
+	errRollback := errors.New("deliberate rollback")
+	err := db.RunInTx(ctx, gdb, func(txCtx context.Context) error {
+		if err := gdb.Unsafe(txCtx).Exec(`CREATE TABLE round12_leak_aggs (id integer PRIMARY KEY AUTOINCREMENT, rid varchar(24) NOT NULL, version bigint NOT NULL DEFAULT 1, created_at datetime, updated_at datetime, qty integer NOT NULL)`).Error; err != nil {
+			return err
+		}
+		if err := gdb.Unsafe(txCtx).Exec(`INSERT INTO round12_leak_aggs (rid, qty) VALUES ('r12l_a', 3), ('r12l_b', 4)`).Error; err != nil {
+			return err
+		}
+		total, ok, err := Sum[int64](txCtx, s, "qty")
+		if err != nil || !ok || total != 7 {
+			return fmt.Errorf("in-tx Sum over own DDL = %d ok=%v err=%v; want 7 true <nil>", total, ok, err)
+		}
+		return errRollback
+	})
+	if !errors.Is(err, errRollback) {
+		t.Fatalf("RunInTx = %v; want the deliberate rollback", err)
+	}
+	if _, ok := s.aggCatalog.entries.Load(int64(0)); ok {
+		t.Fatal("a rolled-back transaction leaked its private catalog into the shared cache")
+	}
+
+	// The table now really exists — with qty TEXT. The int64 gate must
+	// read THIS catalog and fail closed, not compute a lexicographic MIN
+	// under a leaked INTEGER entry.
+	if err := gdb.Unsafe(ctx).Exec(`CREATE TABLE round12_leak_aggs (id integer PRIMARY KEY AUTOINCREMENT, rid varchar(24) NOT NULL, version bigint NOT NULL DEFAULT 1, created_at datetime, updated_at datetime, qty TEXT NOT NULL)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Unsafe(ctx).Exec(`INSERT INTO round12_leak_aggs (rid, qty) VALUES ('r12l_c', '2'), ('r12l_d', '10')`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Min[int64](ctx, s, "qty"); err == nil || !strings.Contains(err.Error(), "column type") {
+		t.Fatalf("Min[int64] over the real TEXT column must fail closed, got %v", err)
+	}
+}
+
+type round12CancelAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round12CancelAgg) RIDPrefix() string { return "r12c" }
+func (round12CancelAgg) TableName() string { return "round12_cancel_aggs" }
+
+// TestAggregate_Round12CancelledLeaderRecoalesces is the round-12
+// review #2 regression: when a flight died of the leader's
+// cancellation, every healthy waiter retried DIRECTLY on its own
+// connection — 8 parked waiters meant 8 metadata reads, rebuilding the
+// very herd the flight exists to prevent from a single cancelled first
+// request. Healthy waiters now loop back into a SECOND flight (the
+// failed call is removed before its result is delivered), so the retry
+// wave re-coalesces to exactly ONE read.
+func TestAggregate_Round12CancelledLeaderRecoalesces(t *testing.T) {
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&round12CancelAgg{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[round12CancelAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	for _, qty := range []int64{5, 7} {
+		if err := s.Create(ctx, &round12CancelAgg{Qty: qty}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var key int64
+	if dbtest.Driver() == "postgres" {
+		oid, err := s.pgResolveRelation(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key = oid
+	}
+	catalogReads := countAggCatalogReads(t, s.h.Unsafe(ctx), "r12c")
+
+	// Wedge the first flight for the key and have it die of "the
+	// leader's cancellation" once released.
+	block := make(chan struct{})
+	entered := make(chan struct{})
+	wedgeDone := make(chan struct{})
+	go func() {
+		defer close(wedgeDone)
+		ch := s.aggCatalog.flights.DoChan(strconv.FormatInt(key, 10), func() (any, error) {
+			close(entered)
+			<-block
+			return nil, context.Canceled
+		})
+		<-ch
+	}()
+	<-entered
+	t.Cleanup(func() { <-wedgeDone })
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	sums := make([]int64, callers)
+	oks := make([]bool, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sums[i], oks[i], errs[i] = Sum[int64](ctx, s, "qty")
+		}(i)
+	}
+	// Give the callers time to park behind the wedged flight, then let
+	// it die. The timing only affects HOW MANY park — every schedule
+	// must still converge to one read.
+	time.Sleep(100 * time.Millisecond)
+	close(block)
+	wg.Wait()
+	for i := 0; i < callers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: %v", i, errs[i])
+		}
+		if !oks[i] || sums[i] != 12 {
+			t.Fatalf("caller %d: Sum = %d ok=%v; want 12 true", i, sums[i], oks[i])
+		}
+	}
+	if n := catalogReads.Load(); n != 1 {
+		t.Fatalf("after a cancelled leader, %d healthy waiters issued %d catalog reads; the retry wave must re-coalesce to exactly 1", callers, n)
 	}
 }
