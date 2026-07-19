@@ -1523,6 +1523,14 @@ func (s *Store[T]) effectiveDB(ctx context.Context) *gorm.DB {
 	return s.h.Unsafe(ctx)
 }
 
+// inExplicitTx reports whether this operation rides an explicit
+// transaction — the context's (db.RunInTx propagation) or the clone's
+// pinned one (Store.Tx) — i.e. whether effectiveDB resolves to anything
+// other than the root pool.
+func (s *Store[T]) inExplicitTx(ctx context.Context) bool {
+	return txctx.DB(ctx, s.h) != nil || s.txDB != nil
+}
+
 func (s *Store[T]) rejectWrite(op string) error {
 	if !s.readOnly {
 		return nil

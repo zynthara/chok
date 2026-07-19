@@ -385,7 +385,9 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   catalog（json/jsonb，GormDBDataType 不漏）。懒解析（而非构造期）
   因构造可能先于迁移，且 catalog 只在迁移后才反映真相；元数据查询
   不改共享 schema（无 round-4 的 FullDataTypeOf 原地写 Precision
-  竞态），解析结果按 relation 缓存。表名解析与数据查询同规则：限定
+  竞态），解析结果按 relation 缓存，并发冷首访按缓存键 singleflight
+  合并（显式事务调用者不进合并、在自己连接上直读：防有界池上的
+  等待环，保未提交 DDL / SET LOCAL 可见性）。表名解析与数据查询同规则：限定
   TableName 按**方言引用符**做 quote-aware 拆分（引号内的点是数据；
   引用符 PG 为双引号、MySQL/SQLite 为反引号，故同一串在两族方言下段
   数不同），拆分结果再用 GORM quoter 回渲校验、不符即 fail-closed；PG

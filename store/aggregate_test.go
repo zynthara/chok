@@ -2005,3 +2005,201 @@ func TestAggregate_Round3MySQLDSTFoldCollapsesInstants(t *testing.T) {
 		t.Fatalf("DST fold: groups = %v, %v; the two instants merge into 1 bucket", groups, err)
 	}
 }
+
+type round12HerdAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round12HerdAgg) RIDPrefix() string { return "r12h" }
+func (round12HerdAgg) TableName() string { return "round12_herd_aggs" }
+
+// TestAggregate_Round12ColdHerdSingleflight is the round-12 review
+// regression: K concurrent FIRST aggregates on one relation used to
+// issue K identical catalog metadata reads, because every cold caller
+// ran the full read before LoadOrStore picked a cache winner — the
+// round-11 "at most one duplicate" claim was wrong. Non-transactional
+// cold callers now coalesce per cache key: one wave, exactly ONE
+// catalog read, and every caller still gets the right answer.
+func TestAggregate_Round12ColdHerdSingleflight(t *testing.T) {
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&round12HerdAgg{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[round12HerdAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	for _, qty := range []int64{5, 7} {
+		if err := s.Create(ctx, &round12HerdAgg{Qty: qty}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Catalog reads are recognisable by the metadata source they query;
+	// neither the data queries nor the PG relation probe (to_regclass)
+	// mention it. Registered AFTER setup so migration noise never counts.
+	marker := map[string]string{
+		"sqlite":   "pragma_table_info",
+		"postgres": "pg_attribute",
+		"mysql":    "information_schema.columns",
+	}[dbtest.Driver()]
+	if marker == "" {
+		t.Fatalf("no catalog marker for driver %q", dbtest.Driver())
+	}
+	root := s.h.Unsafe(ctx)
+	var catalogReads atomic.Int64
+	count := func(tx *gorm.DB) {
+		if strings.Contains(tx.Statement.SQL.String(), marker) {
+			catalogReads.Add(1)
+		}
+	}
+	for name, reg := range map[string]func(string, func(*gorm.DB)) error{
+		"raw":   root.Callback().Raw().Register,
+		"row":   root.Callback().Row().Register,
+		"query": root.Callback().Query().Register,
+	} {
+		if err := reg("r12:"+name, count); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const callers = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	sums := make([]int64, callers)
+	oks := make([]bool, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			sums[i], oks[i], errs[i] = Sum[int64](ctx, s, "qty")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i := 0; i < callers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: %v", i, errs[i])
+		}
+		if !oks[i] || sums[i] != 12 {
+			t.Fatalf("caller %d: Sum = %d ok=%v; want 12 true", i, sums[i], oks[i])
+		}
+	}
+	if n := catalogReads.Load(); n != 1 {
+		t.Fatalf("%d concurrent cold aggregates issued %d catalog metadata reads; the flight must coalesce the wave to exactly 1", callers, n)
+	}
+}
+
+type round12TxBypassAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round12TxBypassAgg) RIDPrefix() string { return "r12t" }
+func (round12TxBypassAgg) TableName() string { return "round12_tx_bypass_aggs" }
+
+// TestAggregate_Round12TxCallerNeverParksOnFlight pins the flight's
+// deadlock-freedom shape (round-12 review): an explicit transaction
+// parks HOLDING ITS CONNECTION, and on bounded pools (the SQLite write
+// pool is pinned to one connection) a parked transaction can be exactly
+// what starves the flight leader — so a transactional caller must never
+// join a flight; it reads on its own connection. The test wedges the
+// store's flight for the relation's cache key open and proves a
+// transactional cold aggregate completes anyway and publishes the
+// entry, while a parked NON-transactional caller (which holds nothing)
+// obeys its own context.
+func TestAggregate_Round12TxCallerNeverParksOnFlight(t *testing.T) {
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&round12TxBypassAgg{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[round12TxBypassAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	if err := s.Create(ctx, &round12TxBypassAgg{Qty: 3}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The cache key the aggregate will use: the relation OID on PG, the
+	// shared key 0 elsewhere.
+	var key int64
+	if dbtest.Driver() == "postgres" {
+		oid, err := s.pgResolveRelation(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key = oid
+	}
+
+	// Wedge the flight for that key: the store is fresh, so this DoChan
+	// is the leader, and every non-transactional cold caller now parks
+	// behind it until released.
+	block := make(chan struct{})
+	entered := make(chan struct{})
+	wedgeDone := make(chan struct{})
+	go func() {
+		defer close(wedgeDone)
+		ch := s.aggCatalog.flights.DoChan(strconv.FormatInt(key, 10), func() (any, error) {
+			close(entered)
+			<-block
+			return nil, context.Canceled
+		})
+		<-ch
+	}()
+	<-entered
+	t.Cleanup(func() {
+		close(block)
+		<-wedgeDone
+	})
+
+	// A parked non-transactional caller holds no connection and obeys its
+	// OWN context while the flight is stuck. (Must run before the
+	// transactional read below publishes the entry and turns later cold
+	// calls into cache hits.)
+	cctx, cancel := context.WithCancel(ctx)
+	parked := make(chan error, 1)
+	go func() {
+		_, _, err := Sum[int64](cctx, s, "qty")
+		parked <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-parked:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("parked non-tx caller must surface its own context error, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("parked non-tx caller ignored its cancelled context")
+	}
+
+	// The explicit-transaction caller must not so much as glance at the
+	// wedged flight: it reads on its own connection and completes.
+	txDone := make(chan error, 1)
+	go func() {
+		txDone <- db.RunInTx(ctx, gdb, func(txCtx context.Context) error {
+			total, ok, err := Sum[int64](txCtx, s, "qty")
+			if err != nil {
+				return err
+			}
+			if !ok || total != 3 {
+				return fmt.Errorf("in-tx Sum = %d ok=%v; want 3 true", total, ok)
+			}
+			return nil
+		})
+	}()
+	select {
+	case err := <-txDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("explicit-transaction aggregate parked on a foreign flight; it must read on its own connection")
+	}
+
+	// Its read also published the types, so the wave after any explicit
+	// transaction hits the cache without ever forming a flight.
+	if _, ok := s.aggCatalog.entries.Load(key); !ok {
+		t.Fatal("the transactional read must publish through LoadOrStore")
+	}
+}

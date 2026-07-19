@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
@@ -637,13 +639,22 @@ type aggColumnCatalog struct {
 // touch of each new relation neither serialises against other tenants
 // nor copies the map, where the earlier copy-on-write single map cost
 // O(N²) accumulated copying across N tenant schemas, all first-loads
-// in one mutex. Concurrent first aggregates on ONE relation may
-// duplicate the metadata read; that is harmless (idempotent, metadata
-// only) and LoadOrStore keeps a single winner. A relation swapped by
-// DDL mid-life keeps its stale entry — schema changes require a
-// restart, the documented framework-wide contract.
+// in one mutex. Concurrent first aggregates on ONE relation coalesce
+// through flights (round-12 review): LoadOrStore alone only dedupes
+// the CACHE, not the loads — every cold caller used to run the full
+// catalog read before a winner was picked, so K simultaneous first
+// aggregates issued K identical metadata reads, not the "at most one
+// duplicate" the round-11 note claimed. Explicit-transaction callers
+// stay out of flights and read on their own connection (loadAggCatalog
+// explains why). A relation swapped by DDL mid-life keeps its stale
+// entry — schema changes require a restart, the documented
+// framework-wide contract.
 type aggCatalogCache struct {
 	entries sync.Map // cache key → map[string]string (column → base type)
+	// flights coalesces concurrent cold loads per cache key: one wave,
+	// one catalog read. Only non-transactional callers enter a flight;
+	// successes land in entries, failures are never retained anywhere.
+	flights singleflight.Group
 }
 
 // resolveAggCatalog returns the REAL database column types for the
@@ -694,10 +705,84 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 	if cached, ok := s.aggCatalog.entries.Load(relOID); ok {
 		return aggColumnCatalog{dialect: dialect, types: cached.(map[string]string)}, nil
 	}
-	cols, err := s.readCatalogColumnTypes(ctx, dialect, relOID)
+	types, err := s.loadAggCatalog(ctx, dialect, relOID)
 	if err != nil {
 		// Not cached, same rationale as the probe above.
 		return aggColumnCatalog{}, fmt.Errorf("store: aggregate: reading catalog column types for %s: %w", s.modelSchema.Table, err)
+	}
+	return aggColumnCatalog{dialect: dialect, types: types}, nil
+}
+
+// loadAggCatalog runs the cold-path catalog read for one cache key and
+// publishes the result. Non-transactional callers coalesce through a
+// per-key flight — K concurrent first aggregates on one relation issue
+// ONE metadata read (round-12 review: the bare Load → read →
+// LoadOrStore sequence only deduped the cache, never the loads) — and
+// they park holding no database resources, so a flight always makes
+// progress.
+//
+// Explicit-transaction callers NEVER join a flight; they read on their
+// own connection, for two reasons:
+//
+//   - Deadlock-freedom. A transaction parks holding its connection. On
+//     bounded pools — the SQLite write pool is pinned to a single
+//     connection (db/open.go) — a parked transaction can be exactly what
+//     starves the flight leader: the leader waits on the pool, the pool
+//     waits on the parked transaction, the transaction waits on the
+//     leader. Keeping connection-holders out of flights keeps the wait
+//     graph acyclic.
+//   - Visibility. An explicit transaction may see catalog state no other
+//     connection can — its own uncommitted DDL, its SET LOCAL
+//     search_path — so the only connection that answers for it is its
+//     own. The flip side holds too: a flight leader is always a
+//     non-transactional caller, so what a flight shares and caches is
+//     committed catalog state.
+//
+// The duplication this leaves is bounded by explicit transactions racing
+// one cold relation; each read is metadata-only and still publishes
+// through LoadOrStore for every wave after.
+//
+// A flight that fails with the LEADER's context error is retried once on
+// the waiter's own connection: the leader's caller cancelling its
+// request must not fail healthy callers that merely shared its flight.
+// Genuine catalog failures stay shared — one wave, one error — and are
+// never cached (a transient failure must not poison future aggregates).
+func (s *Store[T]) loadAggCatalog(ctx context.Context, dialect string, relOID int64) (map[string]string, error) {
+	if s.inExplicitTx(ctx) {
+		return s.readAndCacheAggCatalog(ctx, dialect, relOID)
+	}
+	ch := s.aggCatalog.flights.DoChan(strconv.FormatInt(relOID, 10), func() (any, error) {
+		// Double-check under the flight: a previous wave may have
+		// published between this caller's miss and the flight forming.
+		if cached, ok := s.aggCatalog.entries.Load(relOID); ok {
+			return cached.(map[string]string), nil
+		}
+		return s.readAndCacheAggCatalog(ctx, dialect, relOID)
+	})
+	select {
+	case res := <-ch:
+		if res.Err == nil {
+			return res.Val.(map[string]string), nil
+		}
+		if ctx.Err() == nil && (errors.Is(res.Err, context.Canceled) || errors.Is(res.Err, context.DeadlineExceeded)) {
+			return s.readAndCacheAggCatalog(ctx, dialect, relOID)
+		}
+		return nil, res.Err
+	case <-ctx.Done():
+		// The wait obeys THIS caller's context; the flight itself keeps
+		// running under the leader's and serves the rest of the wave.
+		return nil, ctx.Err()
+	}
+}
+
+// readAndCacheAggCatalog reads the relation's column types on THIS
+// caller's connection and publishes them. Publishing happens before any
+// flight resolves, so a caller that misses the cache afterwards can
+// only re-read because a genuinely new wave started.
+func (s *Store[T]) readAndCacheAggCatalog(ctx context.Context, dialect string, relOID int64) (map[string]string, error) {
+	cols, err := s.readCatalogColumnTypes(ctx, dialect, relOID)
+	if err != nil {
+		return nil, err
 	}
 	types := make(map[string]string, len(cols))
 	for _, c := range cols {
@@ -710,11 +795,11 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 		// PostgreSQL and MySQL readers report bare names.
 		types[aggCatalogKey(dialect, c.name)] = aggBaseType(c.typ)
 	}
-	// A concurrent first aggregate on the same relation may have read the
-	// same metadata; both maps are equal, so whichever landed first wins
-	// and every caller shares one immutable map from here on.
+	// A racing explicit-transaction read may have landed first; both maps
+	// are equal for committed state, so whichever landed first wins and
+	// every caller shares one immutable map from here on.
 	actual, _ := s.aggCatalog.entries.LoadOrStore(relOID, types)
-	return aggColumnCatalog{dialect: dialect, types: actual.(map[string]string)}, nil
+	return actual.(map[string]string), nil
 }
 
 // pgResolveRelation resolves the model table to its relation OID on the
