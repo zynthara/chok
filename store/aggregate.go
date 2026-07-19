@@ -454,21 +454,12 @@ func (s *Store[T]) runSingleAggregate(base *gorm.DB, expr string, opts []where.O
 	return raw, nil
 }
 
-// aggBase builds the scoped, filtered *gorm.DB every aggregate runs
-// over. guarded is GroupBy's path: non-filter options are rejected, not
-// stripped — and the option pipeline must run under where.Apply, because
-// ApplyFiltersOnly's countOnly mode never records WithCount into the
-// Config, which would let it slip past the guard unseen (the pagination
-// SQL a rejected option may have staged is irrelevant: the guard error
-// aborts before execution). The unguarded path is countInternal's:
-// ApplyFiltersOnly strips pagination/order/count silently.
 // aggScopedBase builds the scoped query base every aggregate runs over.
 // It is applied FIRST in each entry point — before any catalog read —
 // so a fail-closed scope (OwnerScope with no principal → 401) rejects
-// the request purely in memory, without the two catalog/table reads
-// Migrator.ColumnTypes issues (a sqlite_master / information_schema
-// query plus a SELECT ... LIMIT 1). An unauthenticated caller must never
-// touch the table, and must fail with the auth error, not a downstream
+// the request purely in memory, before even readCatalogColumnTypes'
+// single metadata query. An unauthenticated caller must never touch the
+// database, and must fail with the auth error, not a downstream
 // catalog/permission error that ran first.
 func (s *Store[T]) aggScopedBase(ctx context.Context) (*gorm.DB, error) {
 	return s.applyScopes(ctx, s.effectiveDB(ctx).Model(new(T)))
@@ -478,7 +469,10 @@ func (s *Store[T]) aggScopedBase(ctx context.Context) (*gorm.DB, error) {
 // scope runs exactly once per aggregate). guarded is GroupBy's path:
 // options run under where.Apply, not ApplyFiltersOnly's countOnly mode,
 // because the latter never records WithCount into the Config and the
-// filters-only guard would then miss it (round-1 review #5).
+// filters-only guard would then miss it (round-1 review #5). Any
+// pagination SQL a rejected option may already have staged is
+// irrelevant: the guard error aborts before execution. The unguarded
+// path strips pagination/order/count silently, like countInternal.
 func (s *Store[T]) aggApply(base *gorm.DB, opts []where.Option, guarded bool) (*gorm.DB, error) {
 	if guarded {
 		// Appended after the caller options so the guard observes their
@@ -637,9 +631,9 @@ type aggCatalogCache struct {
 	loaded atomic.Pointer[map[string]string]
 }
 
-// resolveAggCatalog returns the REAL database column types, read from the
-// catalog (Migrator.ColumnTypes) once and cached. This is deliberately
-// lazy, not resolved at construction, for two reasons:
+// resolveAggCatalog returns the REAL database column types, read once
+// from pure catalog metadata (readCatalogColumnTypes) and cached. This
+// is deliberately lazy, not resolved at construction, for two reasons:
 //
 //   - Correctness. FullDataTypeOf only renders the DDL a column WOULD get
 //     from the model; under migrate:versioned/off the actual column can
@@ -648,11 +642,11 @@ type aggCatalogCache struct {
 //     really compute over. Aggregates run at request time, always after
 //     startup migration, so the catalog is authoritative by then —
 //     whereas Store construction (app-controlled) may precede migration.
-//   - Safety. ColumnTypes queries the catalog and returns fresh values;
-//     it does not mutate the shared *schema.Field the way FullDataTypeOf
-//     did (the round-4 race), so calling it off the request path is safe.
-//     It runs once under the mutex; every later call takes the atomic
-//     fast path.
+//   - Safety. The reader issues metadata-only queries: it never touches
+//     the data table (round-8 review) and mutates no shared schema state
+//     the way FullDataTypeOf did (the round-4 race), so running it off
+//     the request path is safe. It runs once under the mutex; every
+//     later call takes the atomic fast path.
 func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, error) {
 	dialect := s.dialectName(ctx)
 	if m := s.aggCatalog.loaded.Load(); m != nil {
@@ -704,14 +698,26 @@ func aggBaseType(typ string) string {
 }
 
 // readCatalogColumnTypes reads column names and base types from PURE
-// catalog metadata — pragma_table_info on SQLite, information_schema on
-// PostgreSQL and MySQL. GORM's Migrator.ColumnTypes is deliberately NOT
-// used: its implementations sample the DATA table (SELECT * FROM
-// <table> LIMIT 1) without the store's scopes, which let the first
-// authenticated aggregate on an owned model read one arbitrary tenant's
-// row (round-8 review). Catalog tables are schema metadata, not tenant
-// data — no row-level scope applies to them, and no statement here ever
-// references the data table.
+// catalog metadata — pragma_table_info on SQLite, pg_catalog on
+// PostgreSQL, information_schema on MySQL. GORM's Migrator.ColumnTypes
+// is deliberately NOT used: its implementations sample the DATA table
+// (SELECT * FROM <table> LIMIT 1) without the store's scopes, which let
+// the first authenticated aggregate on an owned model read one arbitrary
+// tenant's row (round-8 review). Catalog tables are schema metadata, not
+// tenant data — no row-level scope applies to them, and no statement
+// here ever references the data table.
+//
+// The table name must resolve the way the DATA queries resolve it
+// (round-9 review #1/#2). A dot-qualified TableName (main.t on SQLite,
+// schema.t on PostgreSQL, db.t on MySQL) is split into qualifier and
+// bare name — the same split GORM's quoter applies when it renders the
+// aggregate's own FROM clause — instead of being matched wholesale
+// against bare catalog table names, which reported an existing table as
+// having zero columns. Unqualified PostgreSQL names resolve through
+// to_regclass, which walks the WHOLE search_path exactly like an
+// unqualified SELECT; the previous table_schema = current_schema()
+// filter consulted only the path's head, so a table living deeper in
+// the path aggregated as "not migrated" while data queries found it.
 //
 // Zero columns is an ERROR, not an empty result: these metadata queries
 // do not fail on a missing table, and caching an empty map would poison
@@ -726,14 +732,27 @@ func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string) (
 	var err error
 	switch dialect {
 	case "sqlite":
-		err = gdb.Raw("SELECT name, type AS typ FROM pragma_table_info(?)", table).Scan(&rows).Error
+		if qualifier, bare, qualified := strings.Cut(table, "."); qualified {
+			// The pragma's second (hidden-column) argument pins the attached
+			// database the qualifier names, mirroring how main.t reads in SQL.
+			err = gdb.Raw("SELECT name, type AS typ FROM pragma_table_info(?, ?)", bare, qualifier).Scan(&rows).Error
+		} else {
+			err = gdb.Raw("SELECT name, type AS typ FROM pragma_table_info(?)", table).Scan(&rows).Error
+		}
 	case "postgres":
-		// udt_name is the base type PostgreSQL actually stores under
-		// (int8, varchar, timestamptz, ...); current_schema() resolves the
-		// same search-path head unqualified DDL created the table in.
-		err = gdb.Raw("SELECT column_name AS name, udt_name AS typ FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?", table).Scan(&rows).Error
+		// typname is the base type PostgreSQL actually stores under (int8,
+		// varchar, timestamptz, ... — the same identifiers
+		// information_schema exposes as udt_name). to_regclass parses its
+		// argument the way the SQL parser parses a FROM clause: a qualified
+		// name resolves to its schema, an unqualified one through the whole
+		// search_path. A missing table yields NULL and therefore zero rows.
+		err = gdb.Raw("SELECT a.attname AS name, t.typname AS typ FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid = a.atttypid WHERE a.attrelid = to_regclass(?) AND a.attnum > 0 AND NOT a.attisdropped", pgRegclassText(table)).Scan(&rows).Error
 	case "mysql":
-		err = gdb.Raw("SELECT column_name AS name, data_type AS typ FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?", table).Scan(&rows).Error
+		if qualifier, bare, qualified := strings.Cut(table, "."); qualified {
+			err = gdb.Raw("SELECT column_name AS name, data_type AS typ FROM information_schema.columns WHERE table_schema = ? AND table_name = ?", qualifier, bare).Scan(&rows).Error
+		} else {
+			err = gdb.Raw("SELECT column_name AS name, data_type AS typ FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?", table).Scan(&rows).Error
+		}
 	default:
 		return nil, fmt.Errorf("no catalog reader for dialect %q", dialect)
 	}
@@ -748,6 +767,21 @@ func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string) (
 		out[i] = aggCatalogColumn{name: r.Name, typ: r.Typ}
 	}
 	return out, nil
+}
+
+// pgRegclassText renders a (possibly dot-qualified) GORM table name as
+// the identifier text to_regclass parses. Each dot-separated part is
+// quoted — the same split GORM's quoter applies when rendering the name
+// into SQL — so case survives verbatim instead of being folded the way
+// to_regclass folds UNQUOTED identifiers, and a contained quote is
+// doubled. Quoting affects only folding, not resolution: a single-part
+// name still resolves through the search_path.
+func pgRegclassText(table string) string {
+	parts := strings.Split(table, ".")
+	for i, p := range parts {
+		parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+	}
+	return strings.Join(parts, ".")
 }
 
 // aggCatalogKey normalises a column name for catalog lookup. SQLite and
@@ -807,8 +841,10 @@ func aggJSONColumnType(field *schema.Field, catalogType string) (string, bool) {
 // aggCatalogWhitelist is the second half of the capability matrix: the
 // wire kind governs Go-side result convergence, the REAL catalog column
 // type decides whether the database operation is legal. It is an EXACT
-// per-dialect allowlist of the catalog base types (Migrator.ColumnTypes'
-// DatabaseTypeName, lowercased) each wire kind may aggregate over —
+// per-dialect allowlist of the catalog base types (what the dialect
+// reader in readCatalogColumnTypes reports — SQLite's declared pragma
+// type, PostgreSQL's pg_type.typname, MySQL's DATA_TYPE — reduced to
+// lowercase base names by aggBaseType) each wire kind may aggregate over —
 // deliberately not substring matching, which silently swept in
 // PostgreSQL's exotic neighbours: "interval"/"int4range"/"integer[]"
 // all contain "int", "daterange" starts with "date", "time"/"timetz"

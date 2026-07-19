@@ -182,6 +182,24 @@
 > 数据表者必须带 owner 谓词（修前捕获到裸 `SELECT * FROM products
 > LIMIT 1`，红）；另 pin 缺表不毒化缓存的重试语义。
 >
+> **round-9 复审修正**（2M/1L，M 均红→绿）：① round-8 的纯元数据查询把
+> `modelSchema.Table` **整串**当裸 table_name——点限定 TableName
+> （SQLite `main.t`、PG `schema.t`、MySQL `db.t`，GORM quoter 渲染数据
+> 查询时按点拆分引用）在三方言 catalog 里都查不到，已迁移的表首次聚合
+> 即报 "no columns / 未迁移"。改为按方言拆 qualifier 与裸表名（与
+> quoter 拆分一致）：SQLite `pragma_table_info(?, ?)` 第二参数钉
+> attached 库、MySQL `table_schema = ?`。② PG 的
+> `table_schema = current_schema()` 只看 search_path **表头**：
+> `search_path = first, second` 且表只在 second 时，未限定 SELECT 照常
+> 解析、聚合却误报未迁移。改经 `pg_catalog`：`to_regclass`（各段 Go 侧
+> 预 quote，防未限定段被折小写）按 SQL parser 同款规则解析——限定名归
+> 属自己的 schema、未限定名走整条 search_path，列型取 `pg_attribute` +
+> `pg_type.typname`（与 udt_name 同拼法，白名单不变）。回归覆盖三方言
+> 限定表 + PG 双 schema search_path（事务内 SET LOCAL，同连接上裸
+> SELECT 正常而聚合曾红）。③（L）清理仍按现在时描述已删
+> `Migrator.ColumnTypes` 实现的内部注释（resolveAggCatalog / 白名单 /
+> aggScopedBase 及孤儿 aggBase 段落），db.md/design.md 同步真实机制。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

@@ -479,8 +479,8 @@ for _, g := range groups {
 **列类型规则**（复用游标的 schema wire-kind 探针，serializer /
 `driver.Valuer` 字段按 wire 类型判定）。能力矩阵有两半：**wire kind
 管 Go 结果收敛，数据库真实列型管操作是否合法**——真实列型读自
-**catalog 纯元数据**（SQLite `pragma_table_info` / PG·MySQL
-`information_schema`，首次聚合时懒解析并缓存；**绝不采样数据表**——
+**catalog 纯元数据**（SQLite `pragma_table_info` / PG `pg_catalog` /
+MySQL `information_schema`，首次聚合时懒解析并缓存；**绝不采样数据表**——
 gorm 的 `ColumnTypes` 会跑无 scope 的 `SELECT * ... LIMIT 1`，刻意
 不用；也不是 `FullDataTypeOf` 渲染的「模型将建成什么」——
 `migrate: versioned/off` 下真列可能与模型不符），按方言用
@@ -492,7 +492,11 @@ gorm 的 `ColumnTypes` 会跑无 scope 的 `SELECT * ... LIMIT 1`，刻意
 不认识的列型同样拒绝并指向 Unsafe（catalog 列名在 SQLite/MySQL 按
 **ASCII** 大小写不敏感匹配——`versioned/off` 建的 `QTY` 列照样认，
 与数据库自身的标识符比较一致，不做完整 Unicode 折叠；PG 保留 quoted
-标识符大小写）。属主/自定义 scope **先于** catalog 读执行：未认证
+标识符大小写）。catalog 读按**数据查询同款规则**解析表名：点限定
+`TableName`（`main.t`/`schema.t`/`db.t`）拆限定符后查 catalog（与
+GORM quoter 的按点拆分一致），PG 未限定名经 `to_regclass` 沿**整条**
+`search_path` 解析，不只 `current_schema()` 表头。属主/自定义 scope
+**先于** catalog 读执行：未认证
 请求在纯内存的 fail-closed 阶段即被拒（401），根本不碰数据库：
 
 | 函数 | 接受的列 | Go 侧类型 |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"math"
 	"net"
 	"os"
@@ -1101,8 +1102,8 @@ func TestAggregate_Round7ScopeBeforeCatalog(t *testing.T) {
 	root := s.h.Unsafe(context.Background())
 	var dbOps atomic.Int64
 	count := func(*gorm.DB) { dbOps.Add(1) }
-	// ColumnTypes reads via the Raw and Row callback chains; count all
-	// read paths so nothing slips through.
+	// The catalog metadata read and the aggregate itself ride the Raw and
+	// Row callback chains; count all read paths so nothing slips through.
 	if err := root.Callback().Raw().Register("r7:raw", count); err != nil {
 		t.Fatal(err)
 	}
@@ -1213,6 +1214,189 @@ func TestAggregate_Round8CatalogMissTableNotPoisoned(t *testing.T) {
 	// The earlier failure must not have cached an empty catalog.
 	if _, ok, err := Sum[int64](ctx, s, "qty"); err != nil || ok {
 		t.Fatalf("post-migration aggregate on the same store = ok=%v err=%v; want a clean empty-table NULL", ok, err)
+	}
+}
+
+// --- round-9 review regressions: the catalog reader must resolve the
+// table name the way the DATA queries resolve it — #1 a dot-qualified
+// TableName splits into qualifier + bare name per dialect (GORM's
+// quoter renders main.t as two identifiers; matching the whole string
+// against bare catalog table names reported a migrated table as having
+// no columns), #2 unqualified PostgreSQL names resolve through the
+// WHOLE search_path, not just current_schema()'s head. ----------------
+
+type round9QualifiedAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round9QualifiedAgg) RIDPrefix() string { return "r9q" }
+func (round9QualifiedAgg) TableName() string { return "main.round9_qualified_aggs" }
+
+func TestAggregate_Round9QualifiedTableSQLite(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("the attached-database qualifier main is a SQLite shape")
+	}
+	gdb := setupDB(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&round9QualifiedAgg{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[round9QualifiedAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	for _, qty := range []int64{3, 4} {
+		if err := s.Create(ctx, &round9QualifiedAgg{Qty: qty}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total, ok, err := Sum[int64](ctx, s, "qty")
+	if err != nil || !ok || total != 7 {
+		t.Fatalf("Sum over a main-qualified store = %d ok=%v err=%v; want 7 true <nil>", total, ok, err)
+	}
+}
+
+// round9PGSchema carries the per-run schema name into the model's
+// TableName; written once by the test before any schema parse reads it.
+var round9PGSchema string
+
+type round9PGQualifiedAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round9PGQualifiedAgg) RIDPrefix() string { return "r9p" }
+func (round9PGQualifiedAgg) TableName() string {
+	return round9PGSchema + ".round9_pg_qualified_aggs"
+}
+
+func TestAggregate_Round9QualifiedTablePG(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("schema-qualified catalog resolution is exercised on the PG lane")
+	}
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	// A schema OUTSIDE the lane's pinned search_path: qualified names
+	// must resolve to their own schema, independent of the path.
+	round9PGSchema = fmt.Sprintf("round9q_%d_%d", os.Getpid(), time.Now().UnixNano())
+	sch := round9PGSchema
+	if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf("CREATE SCHEMA %q", sch)).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = gdb.Unsafe(context.Background()).Exec(fmt.Sprintf("DROP SCHEMA %q CASCADE", sch)).Error
+	})
+	if err := gdb.Migrate(ctx, db.Table(&round9PGQualifiedAgg{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[round9PGQualifiedAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	for _, qty := range []int64{3, 4} {
+		if err := s.Create(ctx, &round9PGQualifiedAgg{Qty: qty}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total, ok, err := Sum[int64](ctx, s, "qty")
+	if err != nil || !ok || total != 7 {
+		t.Fatalf("Sum over a schema-qualified store = %d ok=%v err=%v; want 7 true <nil>", total, ok, err)
+	}
+}
+
+type round9SearchPathAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round9SearchPathAgg) RIDPrefix() string { return "r9s" }
+func (round9SearchPathAgg) TableName() string { return "round9_search_path_aggs" }
+
+func TestAggregate_Round9PGSearchPathResolution(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("search_path resolution is exercised on the PG lane")
+	}
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d_%d", os.Getpid(), time.Now().UnixNano())
+	first, second := "round9_sp_first_"+suffix, "round9_sp_second_"+suffix
+	for _, sch := range []string{first, second} {
+		if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf("CREATE SCHEMA %q", sch)).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, sch := range []string{first, second} {
+			_ = gdb.Unsafe(context.Background()).Exec(fmt.Sprintf("DROP SCHEMA %q CASCADE", sch)).Error
+		}
+	})
+	// The table exists ONLY in the second schema, so the path's HEAD has
+	// nothing to report — the shape current_schema() misread as "not
+	// migrated" while unqualified data queries kept resolving fine.
+	if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf(
+		`CREATE TABLE %q.round9_search_path_aggs (id bigserial PRIMARY KEY, rid varchar(24) NOT NULL, version bigint NOT NULL DEFAULT 1, created_at timestamptz, updated_at timestamptz, qty bigint NOT NULL)`,
+		second)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf(
+		`INSERT INTO %q.round9_search_path_aggs (rid, qty) VALUES ('r9s_sp_row_seed_0001', 7)`,
+		second)).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := New[round9SearchPathAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	if err := db.RunInTx(ctx, gdb, func(txCtx context.Context) error {
+		// SET LOCAL pins this transaction's connection to a two-schema
+		// path; both the aggregate and its catalog read ride the same
+		// connection via txCtx.
+		if err := gdb.Unsafe(txCtx).Exec(fmt.Sprintf("SET LOCAL search_path = %q, %q", first, second)).Error; err != nil {
+			return err
+		}
+		total, ok, err := Sum[int64](txCtx, s, "qty")
+		if err != nil {
+			return err
+		}
+		if !ok || total != 7 {
+			t.Fatalf("Sum through the search_path = %d ok=%v; want 7 true", total, ok)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// round9MySQLDatabase carries the throwaway database name into the
+// model's TableName; written once by the test before any schema parse
+// reads it.
+var round9MySQLDatabase string
+
+type round9MySQLQualifiedAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round9MySQLQualifiedAgg) RIDPrefix() string { return "r9m" }
+func (round9MySQLQualifiedAgg) TableName() string {
+	return round9MySQLDatabase + ".round9_mysql_qualified_aggs"
+}
+
+func TestAggregate_Round9MySQLQualifiedTable(t *testing.T) {
+	gdb := dbtest.OpenMySQL(t)
+	ctx := context.Background()
+	if err := gdb.Unsafe(ctx).Raw("SELECT DATABASE()").Scan(&round9MySQLDatabase).Error; err != nil {
+		t.Fatal(err)
+	}
+	if round9MySQLDatabase == "" {
+		t.Fatal("SELECT DATABASE() came back empty")
+	}
+	// Real DDL rather than AutoMigrate: the catalog fix is about READING
+	// an existing database-qualified table, not about migrating one.
+	if err := gdb.Unsafe(ctx).Exec("CREATE TABLE `" + round9MySQLDatabase + "`.`round9_mysql_qualified_aggs` (id bigint unsigned AUTO_INCREMENT PRIMARY KEY, rid varchar(24) NOT NULL, version bigint NOT NULL DEFAULT 1, created_at datetime(3), updated_at datetime(3), qty bigint NOT NULL)").Error; err != nil {
+		t.Fatal(err)
+	}
+	s := New[round9MySQLQualifiedAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	for _, qty := range []int64{3, 4} {
+		if err := s.Create(ctx, &round9MySQLQualifiedAgg{Qty: qty}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total, ok, err := Sum[int64](ctx, s, "qty")
+	if err != nil || !ok || total != 7 {
+		t.Fatalf("Sum over a database-qualified MySQL store = %d ok=%v err=%v; want 7 true <nil>", total, ok, err)
 	}
 }
 

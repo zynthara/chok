@@ -374,7 +374,8 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   聚合只是继承），折叠/跨时区存量读取侧不可修复；PG timestamptz 无
   此约束。能力矩阵两半：wire kind 管 Go 收敛，**数据库真实列型**管
   操作合法性——真实列型读自 catalog **纯元数据**（pragma_table_info /
-  information_schema，首次聚合懒解析+缓存；不用 gorm `ColumnTypes`——
+  PG pg_catalog / MySQL information_schema，首次聚合懒解析+缓存；不用
+  gorm `ColumnTypes`——
   它会无 scope 采样数据表一行；也不是 `FullDataTypeOf` 渲染的模型
   DDL 型，`versioned/off` 下真列可能与模型不符），按方言**精确白名单**匹配
   （不用子串——否则 PG 的 `interval`/`int4range` 混入整数族、
@@ -382,9 +383,12 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   当整数）。真 `TEXT` 列上的 int64 拒收，range/interval/数组/纯时刻
   及不认识列型 fail-closed 指 Unsafe；JSON 门禁查逻辑 DataType 与
   catalog（json/jsonb，GormDBDataType 不漏）。懒解析（而非构造期）
-  因构造可能先于迁移，且 catalog 只在迁移后才反映真相；`ColumnTypes`
-  查 catalog 不改共享 schema（无 round-4 的 FullDataTypeOf 原地写
-  Precision 竞态），一次解析、互斥缓存。catalog 列名在 SQLite/MySQL
+  因构造可能先于迁移，且 catalog 只在迁移后才反映真相；元数据查询
+  不改共享 schema（无 round-4 的 FullDataTypeOf 原地写 Precision
+  竞态），一次解析、互斥缓存。表名解析与数据查询同规则：点限定
+  TableName 按方言拆 qualifier 与裸表名（GORM quoter 同款拆分），PG
+  未限定名经 to_regclass 走整条 search_path（而非只看 current_schema()
+  表头）。catalog 列名在 SQLite/MySQL
   按大小写不敏感匹配（`versioned/off` 建的大写列照认）、PG 保留
   quoted 语义（折叠仅 ASCII，与数据库标识符比较一致，不做 Unicode
   折叠——否则 Kelvin U+212A 会误并到 ASCII k）；字符串族含 char/nchar/
