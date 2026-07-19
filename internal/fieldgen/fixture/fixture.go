@@ -77,6 +77,33 @@ type Box struct {
 	Money
 }
 
+// DV aliases the interface's result type: a signature written through
+// it is still an exact driver.Valuer implementation (review round-4).
+type DV = driver.Value
+
+// Sealed implements driver.Valuer via the alias.
+type Sealed struct {
+	S string
+}
+
+// Value implements driver.Valuer through the DV alias.
+func (s Sealed) Value() (DV, error) { return s.S, nil }
+
+// Clock returns the literal "time" from GormDataType — one of the two
+// values GORM's anonymous-embed rule exempts, so even as an EMBED it
+// stays a column (review round-4).
+type Clock struct {
+	Unix int64
+}
+
+// GormDataType implements the GORM data-type hook with the exempt
+// literal.
+func (Clock) GormDataType() string { return "time" }
+
+// Bytes is a generic defined type: instantiated with byte it IS []byte,
+// a bytes column (review round-4).
+type Bytes[T any] []T
+
 // Stamp is a defined type over time.Time: methods are lost but
 // reflect convertibility survives, and GORM maps it to a time column
 // (review round-3).
@@ -93,10 +120,13 @@ type Token [16]byte
 // shorthand.
 type Wallet struct {
 	db.Model
-	Money `json:"money" store:"query"`
-	Flags Flags          `json:"flags" store:"query,update"`
-	Box   Box            `json:"box" store:"query"`
-	Seal  Stamp          `json:"seal" store:"query"`
-	Token Token          `json:"token" store:"query"`
-	Meta  map[string]any `json:"meta" store:"query" gorm:"json"`
+	Money   `json:"money" store:"query"`
+	Clock   `json:"clock" store:"query"`
+	Flags   Flags          `json:"flags" store:"query,update"`
+	Box     Box            `json:"box" store:"query"`
+	Seal    Stamp          `json:"seal" store:"query"`
+	Token   Token          `json:"token" store:"query"`
+	Meta    map[string]any `json:"meta" store:"query" gorm:"json"`
+	Locker  Sealed         `json:"locker" store:"query"`
+	Payload Bytes[byte]    `json:"payload" store:"query"`
 }

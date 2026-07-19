@@ -212,7 +212,10 @@ func TestFieldGen_SemanticLatch_EdgeShapes(t *testing.T) {
 	// type over a real Valuer loses the method set (review round-3).
 	contacts := New[edge.Contact](h, log.Empty())
 	assertLatch(t, scanFixtureDir(t, edgeFixtureDir, "Contact"), contacts.queryFieldMap, contacts.updateFieldMap)
-	for _, relation := range []string{"profile", "badge", "sticker"} {
+	// profile: plain struct; badge: wrong-sig Value; sticker: defined
+	// type sheds the method set; purse: same-depth ambiguity; chest:
+	// shallow wrong-sig shadows the promoted exact one (round-4).
+	for _, relation := range []string{"profile", "badge", "sticker", "purse", "chest"} {
 		if _, err := where.ResolveField(contacts.queryFieldMap, relation); err == nil {
 			t.Errorf("relation key %q must not exist in the runtime query map either", relation)
 		}
@@ -358,6 +361,9 @@ func TestFieldGen_SemanticLatch_CompiledSymbols(t *testing.T) {
 		{"Wallet defined-time seal/query", wallets.queryFieldMap, fixture.WalletFields.Seal},
 		{"Wallet byte-array token/query", wallets.queryFieldMap, fixture.WalletFields.Token},
 		{"Wallet json-serializer meta/query", wallets.queryFieldMap, fixture.WalletFields.Meta},
+		{"Wallet gdt-time clock/query", wallets.queryFieldMap, fixture.WalletFields.Clock},
+		{"Wallet alias-sig locker/query", wallets.queryFieldMap, fixture.WalletFields.Locker},
+		{"Wallet generic payload/query", wallets.queryFieldMap, fixture.WalletFields.Payload},
 	} {
 		if _, err := where.ResolveField(tc.fm, tc.value); err != nil {
 			t.Errorf("%s: compiled constant %q rejected by the runtime map: %v", tc.name, tc.value, err)

@@ -60,23 +60,29 @@ var ShadowIDFields = struct {
 // compile-checked references. Values are the public field names the
 // store's whitelists key on; they are stable under WithColumnAlias.
 var WalletFields = struct {
-	Money string // faces: query
-	Flags string // faces: query, update
-	Box   string // faces: query
-	Seal  string // faces: query
-	Token string // faces: query
-	Meta  string // faces: query
+	Money   string // faces: query
+	Clock   string // faces: query
+	Flags   string // faces: query, update
+	Box     string // faces: query
+	Seal    string // faces: query
+	Token   string // faces: query
+	Meta    string // faces: query
+	Locker  string // faces: query
+	Payload string // faces: query
 
 	ID        string // base model, query-only (resolves to the rid column)
 	CreatedAt string // base model, query-only
 	UpdatedAt string // base model, query-only
 }{
-	Money: "money",
-	Flags: "flags",
-	Box:   "box",
-	Seal:  "seal",
-	Token: "token",
-	Meta:  "meta",
+	Money:   "money",
+	Clock:   "clock",
+	Flags:   "flags",
+	Box:     "box",
+	Seal:    "seal",
+	Token:   "token",
+	Meta:    "meta",
+	Locker:  "locker",
+	Payload: "payload",
 
 	ID:        "id",
 	CreatedAt: "created_at",

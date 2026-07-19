@@ -240,25 +240,33 @@ err = posts.Update(ctx, store.RID(rid), store.Fields(p, PostFields.Title))
   `chok gen fields --check --dir examples/blog`）。目录里最后一个 tag 消失
   时，再跑生成会**删除**孤儿生成文件。
 - **列性按语法判定**（无类型检查，包暂时编译不过也能再生成）：内建标量/
-  指针/`[]byte` 与 `[N]byte`、实现 `driver.Valuer`（**精确签名**——
-  `Value() (int, error)` 之类不算）或 `GormDataType() string` 的本地类型、
-  `time.Time` / `sql.Null*` / `gorm.DeletedAt` / `gorm.io/datatypes` 直接
-  生成；方法集按 Go 真语义计算——**别名**（`type A = B`）继承全部方法，
-  **定义类型**（`type Badge Money`）不继承来源方法、但保留底层 struct
-  匿名嵌入的**提升**（`type Box struct{ Money }` 是列）；本地定义类型沿
-  底层形状递归（`type Code string` 含匿名嵌入形态是列、`type Children
-  []Child` 是 has-many 关系、`type Stamp time.Time` 经可转换性仍是列）；
-  显式 `gorm:"type:..."`、serializer tag 或其简写 `gorm:"json"` 对任何
-  **具名**字段都是列性证明。**关系形状上的 `store` tag 跳过并 warn**——
-  运行时同样忽略它（DBName 为空，两侧一致）；跨包类型无法静态判定列性时
-  **直接报错**：用 type / serializer tag 自证，或去掉 tag。构建约束按
-  生成时平台生效（`//go:build`、平台后缀、`_` 前缀文件遵循 go/build
-  规则）。
+  指针/`[]byte` 与 `[N]byte`（`uintptr` 是 GORM 不支持的例外，直接报错）、
+  实现 `driver.Valuer` 或 `GormDataType() string` 的本地类型（**精确签名**
+  ——`Value() (int, error)` 之类不算；签名经**别名**书写仍精确，如
+  `type DV = driver.Value`）、`time.Time` / `sql.Null*` / `gorm.DeletedAt`
+  / `gorm.io/datatypes` 的**存储类型**（`JSON`/`Date`/`UUID` 等；
+  `JSONQueryExpression` 一类查询表达式不是列）直接生成。方法集按 Go 的
+  **selector 真规则**计算——最浅层且唯一才算：同层两个 `Value` 歧义、浅层
+  错签名方法或同名**字段**遮蔽深层正确方法，都不是 Valuer（运行时同样解析
+  为关系）；**别名**继承全部方法，**定义类型**（`type Badge Money`）不继承
+  来源方法、但保留底层 struct 匿名嵌入的**提升**（`type Box struct{ Money
+  }` 是列）。本地定义类型沿底层形状递归（`type Code string` 含匿名嵌入形态
+  是列、`type Children []Child` 是 has-many 关系、`type Stamp time.Time`
+  经可转换性仍是列），**泛型按实例化实参替换**（`type Bytes[T any] []T` 的
+  `Bytes[byte]` 是 bytes 列、`Bytes[string]` 是关系）；显式
+  `gorm:"type:..."`、serializer tag 或其简写 `gorm:"json"` 对任何**具名**
+  字段都是列性证明。**关系形状上的 `store` tag 跳过并 warn**——运行时同样
+  忽略它（DBName 为空，两侧一致）；无法静态判定列性时（陌生跨包类型、方法
+  集含扫不到的嵌入）**直接报错**：用 type / serializer tag 自证，或去掉
+  tag。构建约束按生成时平台生效（`//go:build`、平台后缀、`_` 前缀文件遵循
+  go/build 规则）。
 - ⚠️ **匿名 struct 形态另有一套嵌入规则**（与 GORM 一致）：匿名嵌入的
-  结构体只有**真 driver.Valuer**（或 time 可转换形态）才是列；
-  `GormDataType` / serializer / `gorm:"type:"` 都**不能**阻止它展开成
-  嵌入——嵌入行上的 `store` tag 是死的，生成器跳过并 warn。同一个
-  `GormDataType` 结构体作**具名**字段则是列。
+  结构体只有**真 driver.Valuer**、time 可转换形态、或 `GormDataType()`
+  **字面量返回 "time"/"bytes"**（GORM 嵌入条件豁免的两个值）才是列；其余
+  `GormDataType` 返回值、serializer、`gorm:"type:"` 都**不能**阻止它展开
+  成嵌入——嵌入行上的 `store` tag 是死的，生成器跳过并 warn；
+  `GormDataType` 返回值无法静态读出（非单一字面量 return）时**报错拒猜**。
+  同一个 `GormDataType` 结构体作**具名**字段则总是列。
 - ⚠️ **提升（promotion）是语法级扫描的已知边界**：匿名内嵌的**用户**结构体
   （或 `gorm:"embedded"` 字段）内部的 `store` tag，GORM 运行时会提升、生成
   器不展开。本包内可验证的形态会打 warn——包括「全部 tag 都来自嵌入」的

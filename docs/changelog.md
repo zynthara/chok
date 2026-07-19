@@ -29,16 +29,22 @@
 > 全程静默；裸字符串永远合法，`FromQuery` 的 HTTP 通道照旧运行时校验。
 > 扫描选语法级而非 go/types：包编译不过时再生成必须仍能跑（改模型→旧引
 > 用编译错→需先 gen 的鸡生蛋场景）。**列性由语法分类镜像 GORM 的解析结
-> 果**（round-1/2/3 复审逐轮收紧）：内建标量/`[]byte` 与 `[N]byte`/精确
-> `driver.Valuer`（`Value() (int, error)` 之类不算）/`GormDataType` 类型
-> /已知跨包列类型直接生成；方法集按 Go 真语义——别名继承、定义类型不继承
-> 但保留底层 struct 嵌入的提升（`Box{Money}` 是列、`type Badge Money` 是
-> 关系）；本地定义类型沿底层形状递归（定义标量含匿名嵌入是列、定义切片是
-> has-many、`type Stamp time.Time` 经可转换性仍是列），`gorm:"type:"`/
-> serializer（含 `gorm:"json"` 简写）对**具名**字段是证明；**匿名 struct
-> 另循 GORM 嵌入规则**——只有真 Valuer/time 形态是列，GormDataType/
-> serializer/type: 都不阻止展开（tag 死，warn）；关系形状跳过并 warn
-> （运行时同样忽略，不产死符号）；无法静态判定的跨包类型**报错拒猜**。
+> 果**（round-1〜4 复审逐轮收紧）：内建标量/`[]byte` 与 `[N]byte`（GORM
+> 不支持的 `uintptr` 报错）/精确 `driver.Valuer`（`Value() (int, error)`
+> 之类不算，签名经 alias 书写仍精确）/`GormDataType` 类型/已知跨包列类型
+> （datatypes 只认**存储类型**白名单，查询表达式类型排除）直接生成；方法
+> 集按 Go **selector 真规则**——最浅且唯一才算（同层歧义、浅层错签名或
+> 同名字段遮蔽 = 非 Valuer），别名继承、定义类型不继承但保留底层 struct
+> 嵌入的提升（`Box{Money}` 是列、`type Badge Money` 是关系）；本地定义
+> 类型沿底层形状递归（定义标量含匿名嵌入是列、定义切片是 has-many、
+> `type Stamp time.Time` 经可转换性仍是列），**泛型按实例化实参替换**
+> （`Bytes[byte]` 是 bytes 列），`gorm:"type:"`/serializer（含
+> `gorm:"json"` 简写）对**具名**字段是证明；**匿名 struct 另循 GORM 嵌入
+> 规则**——真 Valuer/time 形态/`GormDataType` 字面量 "time"/"bytes" 是
+> 列，其余 GormDataType/serializer/type: 都不阻止展开（tag 死，warn），
+> 动态 GormDataType **报错拒猜**；关系形状跳过并 warn（运行时同样忽略，
+> 不产死符号）；无法静态判定（陌生跨包类型、方法集含扫不到的嵌入）
+> **报错拒猜**。
 > 提升（promotion）是残留边界：本包内可验证的嵌入 tag 会
 > warn——含「全部 tag 来自嵌入」的静默形态（直接内嵌 chok 基座即点名）与
 > 未导出目标类型的具名 `gorm:"embedded"`（GORM 按字段名判导出性）；未导出

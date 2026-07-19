@@ -45,6 +45,8 @@ var ContactFields = struct {
 	ProfileID string // faces: query
 	BadgeID   string // faces: query
 	StickerID string // faces: query
+	PurseID   string // faces: query
+	ChestID   string // faces: query
 	Note      string // faces: query, update
 
 	ID        string // base model, query-only (resolves to the rid column)
@@ -54,6 +56,8 @@ var ContactFields = struct {
 	ProfileID: "profile_id",
 	BadgeID:   "badge_id",
 	StickerID: "sticker_id",
+	PurseID:   "purse_id",
+	ChestID:   "chest_id",
 	Note:      "note",
 
 	ID:        "id",

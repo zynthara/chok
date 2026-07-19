@@ -65,11 +65,13 @@ func TestScanAndRender_EdgeFixtureGolden(t *testing.T) {
 		"Contact.Profile: `store` tag ignored", // relation skip (review round-1 Medium)
 		"Contact.Badge: `store` tag ignored",   // wrong-signature Value() proves nothing (round-2)
 		"Contact.Sticker: `store` tag ignored", // defined type over a Valuer loses the method set (round-3)
+		"Contact.Purse: `store` tag ignored",   // same-depth Value ambiguity = no Valuer (round-4)
+		"Contact.Chest: `store` tag ignored",   // shallow wrong-sig Value shadows the promoted one (round-4)
 		"Parent.Children: `store` tag ignored", // defined slice = has-many relation (round-2)
 		"Event: embedded AuditBase carries",    // whole surface promoted — no silent vanishing
 		"Entry: embedded Extra carries",        // named gorm-embedded promotion
 		"Ticket: embedded Extra carries",       // ...even with an unexported target type (round-2)
-		"Player.Level: `store` tag ignored",    // anonymous GormDataType struct still expands (round-3)
+		"Player.Level: `store` tag ignored",    // anonymous GormDataType (non-time/bytes) still expands (round-3/4)
 	}
 	if len(pkg.Warnings) != len(wantWarnFragments) {
 		t.Fatalf("edge fixture must warn exactly %d times, got %q", len(wantWarnFragments), pkg.Warnings)
@@ -168,11 +170,14 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 	})
 	assertFields(t, pkg.Models[2], map[string]face{
 		"Money":     {value: "money", query: true},                  // anonymous driver.Valuer embed = a column
+		"Clock":     {value: "clock", query: true},                  // anonymous GormDataType "time" = exempt = a column (round-4)
 		"Flags":     {value: "flags", query: true, update: true},    // named GormDataType struct = a column
 		"Box":       {value: "box", query: true},                    // embed-promoted Valuer = a column (round-3)
 		"Seal":      {value: "seal", query: true},                   // defined time.Time = convertible = a column (round-3)
 		"Token":     {value: "token", query: true},                  // [16]byte = bytes column (round-3)
 		"Meta":      {value: "meta", query: true},                   // gorm:"json" serializer shorthand (round-3)
+		"Locker":    {value: "locker", query: true},                 // alias-signature Valuer (round-4)
+		"Payload":   {value: "payload", query: true},                // Bytes[byte] generic instantiation (round-4)
 		"ID":        {value: "id", query: true, base: true},         //
 		"CreatedAt": {value: "created_at", query: true, base: true}, //
 		"UpdatedAt": {value: "updated_at", query: true, base: true}, //
@@ -733,6 +738,369 @@ type Post struct {
 	// not the predeclared byte, so the array is not a bytes column.
 	if got["Odd"] {
 		t.Errorf("[4]DefinedByte must not be blessed as bytes, got %v", got)
+	}
+}
+
+// TestScan_SelectorRules is review round-4 finding 1: Go resolves a
+// member at the shallowest depth, uniquely. Same-depth ambiguity, a
+// wrong-signature direct method, or a mere field named Value all mean
+// the type does NOT implement driver.Valuer — GORM's type assertion
+// agrees, so these are relations.
+func TestScan_SelectorRules(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type MoneyA struct{ Cents int64 }
+
+func (m MoneyA) Value() (driver.Value, error) { return m.Cents, nil }
+
+type MoneyB struct{ Euros int64 }
+
+func (m MoneyB) Value() (driver.Value, error) { return m.Euros, nil }
+
+type Ambig struct {
+	ID uint
+	MoneyA
+	MoneyB
+}
+
+type Shadow struct {
+	ID uint
+	MoneyA
+}
+
+func (Shadow) Value() (int, error) { return 0, nil }
+
+type FieldShadow struct {
+	ID uint
+	MoneyA
+	Value string
+}
+
+type Deep struct {
+	ID uint
+	Shadow
+}
+
+type Post struct {
+	db.Model
+	AmbigID       uint        `+"`json:\"ambig_id\" store:\"query\"`"+`
+	Ambig         Ambig       `+"`json:\"ambig\" store:\"query\"`"+`
+	ShadowID      uint        `+"`json:\"shadow_id\" store:\"query\"`"+`
+	Shadow        Shadow      `+"`json:\"shadow\" store:\"query\"`"+`
+	FieldShadowID uint        `+"`json:\"field_shadow_id\" store:\"query\"`"+`
+	FieldShadow   FieldShadow `+"`json:\"field_shadow\" store:\"query\"`"+`
+	DeepID        uint        `+"`json:\"deep_id\" store:\"query\"`"+`
+	Deep          Deep        `+"`json:\"deep\" store:\"query\"`"+`
+	Fine          MoneyA      `+"`json:\"fine\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Post" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	if !got["Fine"] {
+		t.Errorf("the unambiguous Valuer must stay a column, got %v", got)
+	}
+	// Deep: Shadow's wrong-signature Value at depth 1 shadows MoneyA's
+	// exact one at depth 2 — still not a Valuer.
+	for _, absent := range []string{"Ambig", "Shadow", "FieldShadow", "Deep"} {
+		if got[absent] {
+			t.Errorf("%s must be a relation under Go selector rules, got %v", absent, got)
+		}
+	}
+}
+
+// TestScan_AliasSignatures is review round-4 finding 2: interface
+// signatures written through type ALIASES are still exact
+// implementations; defined types over the same are not.
+func TestScan_AliasSignatures(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type DV = driver.Value
+
+type Text = string
+
+type DefinedDV driver.Value
+
+type AliasSig struct{ Cents int64 }
+
+func (v AliasSig) Value() (DV, error) { return v.Cents, nil }
+
+type AliasGDT struct{ V uint8 }
+
+func (AliasGDT) GormDataType() Text { return "smallint" }
+
+type NotReally struct {
+	ID uint
+}
+
+func (NotReally) Value() (DefinedDV, error) { return nil, nil }
+
+type Post struct {
+	db.Model
+	AliasSig    AliasSig  `+"`json:\"alias_sig\" store:\"query\"`"+`
+	AliasGDT    AliasGDT  `+"`json:\"alias_gdt\" store:\"query\"`"+`
+	NotReallyID uint      `+"`json:\"not_really_id\" store:\"query\"`"+`
+	NotReally   NotReally `+"`json:\"not_really\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Post" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	if !got["AliasSig"] || !got["AliasGDT"] {
+		t.Errorf("alias-written signatures are exact implementations, got %v", got)
+	}
+	if got["NotReally"] {
+		t.Errorf("a DEFINED type over driver.Value is a different result type — not a Valuer, got %v", got)
+	}
+}
+
+// TestScan_AnonymousGormDataTypeLiterals is review round-4 finding 3:
+// GORM's embed condition exempts GORMDataType values "time" and
+// "bytes", so those anonymous embeds stay columns; other literals
+// expand; a dynamic return is statically undecidable and fails loud
+// when tagged.
+func TestScan_AnonymousGormDataTypeLiterals(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type PseudoTime struct{ Unix int64 }
+
+func (PseudoTime) GormDataType() string { return "time" }
+
+type Level struct{ V uint8 }
+
+func (Level) GormDataType() string { return "smallint" }
+
+type Player struct {
+	db.Model
+	PseudoTime `+"`json:\"pseudo_time\" store:\"query\"`"+`
+	Level      `+"`json:\"level\" store:\"query\"`"+`
+	Nick       string `+"`json:\"nick\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Player" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	if !got["PseudoTime"] {
+		t.Errorf("GormDataType \"time\" is exempt from the embed rule — a column, got %v", got)
+	}
+	if got["Level"] {
+		t.Errorf("other GormDataType literals still expand as embeds, got %v", got)
+	}
+
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Dyn struct{ V uint8 }
+
+func (d Dyn) GormDataType() string {
+	if d.V > 0 {
+		return "time"
+	}
+	return "smallint"
+}
+
+type Player struct {
+	db.Model
+	Dyn  `+"`json:\"dyn\" store:\"query\"`"+`
+	Nick string `+"`json:\"nick\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "Dyn") {
+		t.Fatalf("a dynamic GormDataType on a tagged embed is undecidable and must fail loud, got %v", err)
+	}
+}
+
+// TestScan_DatatypesStorageWhitelist is review round-4 finding 4: only
+// the storage types of gorm.io/datatypes are columns; the query
+// expression types are neither Valuers nor columns.
+func TestScan_DatatypesStorageWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"gorm.io/datatypes"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Post struct {
+	db.Model
+	Attrs datatypes.JSON    `+"`json:\"attrs\" store:\"query\"`"+`
+	Tags  datatypes.JSONMap `+"`json:\"tags\" store:\"query\"`"+`
+	Nick  string            `+"`json:\"nick\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	if !got["Attrs"] || !got["Tags"] {
+		t.Errorf("datatypes storage types are columns, got %v", got)
+	}
+
+	// A named expression-type field is undecidable → loud.
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"gorm.io/datatypes"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Post struct {
+	db.Model
+	Expr datatypes.JSONQueryExpression `+"`json:\"expr\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "Expr") {
+		t.Fatalf("a datatypes expression type must not be blessed as a column, got %v", err)
+	}
+
+	// A tagged anonymous expression embed is equally undecidable.
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"gorm.io/datatypes"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Post struct {
+	db.Model
+	datatypes.JSONQueryExpression `+"`json:\"expr\" store:\"query\"`"+`
+	Nick                          string `+"`json:\"nick\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(dir); err == nil {
+		t.Fatal("a tagged anonymous expression embed must fail loud, not mint a dead reference")
+	}
+}
+
+// TestScan_GenericInstantiation is review round-4 finding 5: local
+// generic types classify by their instantiated shape, with type
+// arguments substituted.
+func TestScan_GenericInstantiation(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Bytes[T any] []T
+
+type Wrap[T any] Bytes[T]
+
+type Pair[K any, V any] map[K]V
+
+type Post struct {
+	db.Model
+	Payload Bytes[byte]        `+"`json:\"payload\" store:\"query\"`"+`
+	Chained Wrap[byte]         `+"`json:\"chained\" store:\"query\"`"+`
+	Names   Bytes[string]      `+"`json:\"names\" store:\"query\"`"+`
+	Lookup  Pair[string, int]  `+"`json:\"lookup\" store:\"query\" gorm:\"serializer:json\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		if !f.Base {
+			got[f.GoName] = true
+		}
+	}
+	if !got["Payload"] || !got["Chained"] {
+		t.Errorf("byte-instantiated generics are bytes columns, got %v", got)
+	}
+	if !got["Lookup"] {
+		t.Errorf("serializer proof applies to generic types too, got %v", got)
+	}
+	if got["Names"] {
+		t.Errorf("Bytes[string] is []string — not a column, got %v", got)
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		warned = warned || strings.Contains(w, "Post.Names")
+	}
+	if !warned {
+		t.Fatalf("the non-byte instantiation must warn like any relation shape, got %q", pkg.Warnings)
+	}
+}
+
+// TestScan_UintptrFailsLoud is review round-4 finding 6: the pinned
+// GORM has no mapping for uintptr — schema parsing fails at runtime, so
+// blessing it as a scalar would be a lie.
+func TestScan_UintptrFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Post struct {
+	db.Model
+	Ptr uintptr `+"`json:\"ptr\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "Ptr") {
+		t.Fatalf("uintptr is unsupported by GORM and must fail loud, got %v", err)
 	}
 }
 

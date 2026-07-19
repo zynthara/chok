@@ -46,6 +46,34 @@ func (c Coin) Value() (driver.Value, error) { return c.Cents, nil }
 // belongs-to relation, not a column (review round-3).
 type Sticker Coin
 
+// Gem is a second Valuer, existing to make Purse ambiguous.
+type Gem struct {
+	Carat int64
+}
+
+// Value implements driver.Valuer.
+func (g Gem) Value() (driver.Value, error) { return g.Carat, nil }
+
+// Purse embeds TWO Valuers at the same depth: the promoted Value
+// selector is ambiguous, so Purse implements nothing and stays a
+// relation (review round-4, Go selector rules).
+type Purse struct {
+	ID uint
+	Coin
+	Gem
+}
+
+// Chest embeds a real Valuer but declares its own wrong-signature
+// Value: the shallow method shadows the promoted exact one, so Chest
+// is not a Valuer either (review round-4).
+type Chest struct {
+	ID uint
+	Coin
+}
+
+// Value is deliberately NOT driver.Valuer — it shadows Coin's.
+func (Chest) Value() (int, error) { return 0, nil }
+
 // Contact carries store tags on relation fields: GORM parses Profile
 // (a plain struct) and Badge (a struct whose Value method has the
 // wrong signature) with empty DBNames, so the runtime whitelist never
@@ -59,6 +87,10 @@ type Contact struct {
 	Badge     Badge   `json:"badge" store:"query"`
 	StickerID uint    `json:"sticker_id" store:"query"`
 	Sticker   Sticker `json:"sticker" store:"query"`
+	PurseID   uint    `json:"purse_id" store:"query"`
+	Purse     Purse   `json:"purse" store:"query"`
+	ChestID   uint    `json:"chest_id" store:"query"`
+	Chest     Chest   `json:"chest" store:"query"`
 	Note      string  `json:"note" store:"query,update" gorm:"size:64"`
 }
 
