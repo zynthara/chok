@@ -55,3 +55,22 @@ var ShadowIDFields = struct {
 	CreatedAt: "created_at",
 	UpdatedAt: "updated_at",
 }
+
+// WalletFields enumerates Wallet's declared field surface (`store` tags) as
+// compile-checked references. Values are the public field names the
+// store's whitelists key on; they are stable under WithColumnAlias.
+var WalletFields = struct {
+	Money string // faces: query
+	Flags string // faces: query, update
+
+	ID        string // base model, query-only (resolves to the rid column)
+	CreatedAt string // base model, query-only
+	UpdatedAt string // base model, query-only
+}{
+	Money: "money",
+	Flags: "flags",
+
+	ID:        "id",
+	CreatedAt: "created_at",
+	UpdatedAt: "updated_at",
+}

@@ -43,6 +43,7 @@ var AuditBaseFields = struct {
 // store's whitelists key on; they are stable under WithColumnAlias.
 var ContactFields = struct {
 	ProfileID string // faces: query
+	BadgeID   string // faces: query
 	Note      string // faces: query, update
 
 	ID        string // base model, query-only (resolves to the rid column)
@@ -50,6 +51,7 @@ var ContactFields = struct {
 	UpdatedAt string // base model, query-only
 }{
 	ProfileID: "profile_id",
+	BadgeID:   "badge_id",
 	Note:      "note",
 
 	ID:        "id",
@@ -68,6 +70,57 @@ var EntryFields = struct {
 	UpdatedAt string // base model, query-only
 }{
 	Title: "title",
+
+	ID:        "id",
+	CreatedAt: "created_at",
+	UpdatedAt: "updated_at",
+}
+
+// ParentFields enumerates Parent's declared field surface (`store` tags) as
+// compile-checked references. Values are the public field names the
+// store's whitelists key on; they are stable under WithColumnAlias.
+var ParentFields = struct {
+	Note string // faces: query
+
+	ID        string // base model, query-only (resolves to the rid column)
+	CreatedAt string // base model, query-only
+	UpdatedAt string // base model, query-only
+}{
+	Note: "note",
+
+	ID:        "id",
+	CreatedAt: "created_at",
+	UpdatedAt: "updated_at",
+}
+
+// TicketFields enumerates Ticket's declared field surface (`store` tags) as
+// compile-checked references. Values are the public field names the
+// store's whitelists key on; they are stable under WithColumnAlias.
+var TicketFields = struct {
+	Subject string // faces: query
+
+	ID        string // base model, query-only (resolves to the rid column)
+	CreatedAt string // base model, query-only
+	UpdatedAt string // base model, query-only
+}{
+	Subject: "subject",
+
+	ID:        "id",
+	CreatedAt: "created_at",
+	UpdatedAt: "updated_at",
+}
+
+// hiddenAuditFields enumerates hiddenAudit's declared field surface (`store` tags) as
+// compile-checked references. Values are the public field names the
+// store's whitelists key on; they are stable under WithColumnAlias.
+var hiddenAuditFields = struct {
+	Ref string // faces: query
+
+	ID        string // base model, query-only (resolves to the rid column)
+	CreatedAt string // base model, query-only
+	UpdatedAt string // base model, query-only
+}{
+	Ref: "ref",
 
 	ID:        "id",
 	CreatedAt: "created_at",

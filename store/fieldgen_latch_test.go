@@ -108,6 +108,12 @@ func TestFieldGen_SemanticLatch_TagDeclaredSurfaces(t *testing.T) {
 	m := scanFixture(t, "ShadowID")
 	assertLatch(t, m, shadow.queryFieldMap, shadow.updateFieldMap)
 
+	// Method-proven columns (exact driver.Valuer, GormDataType) —
+	// review round-2: both are real runtime columns, including the
+	// anonymous Valuer embed.
+	wallets := New[fixture.Wallet](h, log.Empty())
+	assertLatch(t, scanFixture(t, "Wallet"), wallets.queryFieldMap, wallets.updateFieldMap)
+
 	// The base trio yields to a declared field owning the public name:
 	// exactly one generated symbol carries "id", and it is the user's.
 	for _, f := range m.Fields {
@@ -200,14 +206,26 @@ func TestFieldGen_SemanticLatch_EdgeShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Contact: relation excluded on both sides — full latch holds.
+	// Contact: relations excluded on both sides — full latch holds.
+	// Badge doubly so: its wrong-signature Value method must not count
+	// as driver.Valuer (review round-2).
 	contacts := New[edge.Contact](h, log.Empty())
 	assertLatch(t, scanFixtureDir(t, edgeFixtureDir, "Contact"), contacts.queryFieldMap, contacts.updateFieldMap)
-	if _, err := where.ResolveField(contacts.queryFieldMap, "profile"); err == nil {
-		t.Error("relation key must not exist in the runtime query map either")
+	for _, relation := range []string{"profile", "badge"} {
+		if _, err := where.ResolveField(contacts.queryFieldMap, relation); err == nil {
+			t.Errorf("relation key %q must not exist in the runtime query map either", relation)
+		}
 	}
 	if col, err := where.ResolveField(contacts.queryFieldMap, edge.ContactFields.ProfileID); err != nil || col != "profile_id" {
 		t.Errorf("FK column stays a normal reference, got (%q, %v)", col, err)
+	}
+
+	// Parent: a defined slice resolves to a has-many relation through
+	// the type chain (review round-2) — excluded on both sides.
+	parents := New[edge.Parent](h, log.Empty())
+	assertLatch(t, scanFixtureDir(t, edgeFixtureDir, "Parent"), parents.queryFieldMap, parents.updateFieldMap)
+	if _, err := where.ResolveField(parents.queryFieldMap, "children"); err == nil {
+		t.Error("defined-slice relation must not be a runtime query key")
 	}
 
 	// Event: runtime model via promotion, generator has nothing — the
@@ -258,6 +276,40 @@ func TestFieldGen_SemanticLatch_EdgeShapes(t *testing.T) {
 	if _, err := where.ResolveField(entries.queryFieldMap, edge.EntryFields.Title); err != nil {
 		t.Errorf("compiled edge constant must resolve: %v", err)
 	}
+
+	// Ticket: identical promotion contract with an UNEXPORTED target
+	// type — GORM promotes by field name (review round-2), so the
+	// runtime has "ref", the scan has only Subject, and the warning
+	// must fire exactly like Entry's.
+	tickets := New[edge.Ticket](h, log.Empty())
+	if _, err := where.ResolveField(tickets.queryFieldMap, "ref"); err != nil {
+		t.Fatalf("runtime must promote the unexported-target embed (fixture premise): %v", err)
+	}
+	tm := scanFixtureDir(t, edgeFixtureDir, "Ticket")
+	genTicket := map[string]bool{}
+	for _, f := range tm.Fields {
+		if f.Query {
+			genTicket[f.Value] = true
+		}
+	}
+	var ticketMissing []string
+	for key := range tickets.queryFieldMap {
+		if !genTicket[key] {
+			ticketMissing = append(ticketMissing, key)
+		}
+	}
+	if len(ticketMissing) != 1 || ticketMissing[0] != "ref" {
+		t.Errorf("Ticket's generated/runtime gap must be exactly [ref], got %v", ticketMissing)
+	}
+	var ticketWarned bool
+	for _, w := range pkg.Warnings {
+		if strings.Contains(w, "Ticket") && strings.Contains(w, "Extra") {
+			ticketWarned = true
+		}
+	}
+	if !ticketWarned {
+		t.Fatalf("the unexported-target promotion must be diagnosed, got %q", pkg.Warnings)
+	}
 }
 
 // TestFieldGen_SemanticLatch_CompiledSymbols closes the loop through the
@@ -268,6 +320,7 @@ func TestFieldGen_SemanticLatch_CompiledSymbols(t *testing.T) {
 	h := dbtest.Open(t)
 	arts := New[fixture.Article](h, log.Empty())
 	shadow := New[fixture.ShadowID](h, log.Empty())
+	wallets := New[fixture.Wallet](h, log.Empty())
 
 	for _, tc := range []struct {
 		name  string
@@ -289,6 +342,8 @@ func TestFieldGen_SemanticLatch_CompiledSymbols(t *testing.T) {
 		{"ShadowID declared id/query", shadow.queryFieldMap, fixture.ShadowIDFields.PublicID},
 		{"ShadowID name/update", shadow.updateFieldMap, fixture.ShadowIDFields.Name},
 		{"ShadowID defined-scalar kind/query", shadow.queryFieldMap, fixture.ShadowIDFields.Kind},
+		{"Wallet valuer-embed money/query", wallets.queryFieldMap, fixture.WalletFields.Money},
+		{"Wallet gorm-data-type flags/update", wallets.updateFieldMap, fixture.WalletFields.Flags},
 	} {
 		if _, err := where.ResolveField(tc.fm, tc.value); err != nil {
 			t.Errorf("%s: compiled constant %q rejected by the runtime map: %v", tc.name, tc.value, err)

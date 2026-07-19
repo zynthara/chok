@@ -14,6 +14,7 @@
 package fixture
 
 import (
+	"database/sql/driver"
 	"time"
 
 	"github.com/zynthara/chok/v2/db"
@@ -48,4 +49,31 @@ type ShadowID struct {
 	PublicID string `json:"id" store:"query" gorm:"column:public_id;size:24"`
 	Name     string `json:"name" store:"query,update" gorm:"size:64"`
 	Kind     Code   `json:"kind" store:"query" gorm:"size:16"`
+}
+
+// Money implements driver.Valuer with the exact interface signature —
+// a struct-shaped column, both embedded and named.
+type Money struct {
+	Cents int64
+}
+
+// Value implements driver.Valuer.
+func (m Money) Value() (driver.Value, error) { return m.Cents, nil }
+
+// Flags carries its column type via GormDataType — GORM assigns the
+// struct a DataType (hence a DBName) from the method.
+type Flags struct {
+	V uint8
+}
+
+// GormDataType implements the GORM data-type hook.
+func (Flags) GormDataType() string { return "smallint" }
+
+// Wallet pins the method-proven column shapes (review round-2): an
+// anonymous driver.Valuer embed and a GormDataType struct field are
+// real runtime columns the classifier must include.
+type Wallet struct {
+	db.Model
+	Money `json:"money" store:"query"`
+	Flags Flags `json:"flags" store:"query,update"`
 }

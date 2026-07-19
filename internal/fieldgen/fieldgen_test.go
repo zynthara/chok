@@ -63,8 +63,11 @@ func TestScanAndRender_EdgeFixtureGolden(t *testing.T) {
 
 	wantWarnFragments := []string{
 		"Contact.Profile: `store` tag ignored", // relation skip (review round-1 Medium)
+		"Contact.Badge: `store` tag ignored",   // wrong-signature Value() proves nothing (round-2)
+		"Parent.Children: `store` tag ignored", // defined slice = has-many relation (round-2)
 		"Event: embedded AuditBase carries",    // whole surface promoted — no silent vanishing
 		"Entry: embedded Extra carries",        // named gorm-embedded promotion
+		"Ticket: embedded Extra carries",       // ...even with an unexported target type (round-2)
 	}
 	if len(pkg.Warnings) != len(wantWarnFragments) {
 		t.Fatalf("edge fixture must warn exactly %d times, got %q", len(wantWarnFragments), pkg.Warnings)
@@ -85,7 +88,7 @@ func TestScanAndRender_EdgeFixtureGolden(t *testing.T) {
 	for _, m := range pkg.Models {
 		names = append(names, m.Name)
 	}
-	if strings.Join(names, ",") != "Audit,AuditBase,Contact,Entry" {
+	if strings.Join(names, ",") != "Audit,AuditBase,Contact,Entry,Parent,Ticket,hiddenAudit" {
 		t.Fatalf("edge models = %v (Event must be absent — its surface is promoted)", names)
 	}
 
@@ -113,8 +116,8 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 	if pkg.Name != "fixture" {
 		t.Fatalf("package name = %q, want fixture", pkg.Name)
 	}
-	if len(pkg.Models) != 2 || pkg.Models[0].Name != "Article" || pkg.Models[1].Name != "ShadowID" {
-		t.Fatalf("models = %+v, want [Article ShadowID]", pkg.Models)
+	if len(pkg.Models) != 3 || pkg.Models[0].Name != "Article" || pkg.Models[1].Name != "ShadowID" || pkg.Models[2].Name != "Wallet" {
+		t.Fatalf("models = %+v, want [Article ShadowID Wallet]", pkg.Models)
 	}
 
 	type face struct {
@@ -159,6 +162,13 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 		"Name":      {value: "name", query: true, update: true},     //
 		"Kind":      {value: "kind", query: true},                   // local defined scalar as a named field
 		"CreatedAt": {value: "created_at", query: true, base: true}, // base ID skipped — name taken
+		"UpdatedAt": {value: "updated_at", query: true, base: true}, //
+	})
+	assertFields(t, pkg.Models[2], map[string]face{
+		"Money":     {value: "money", query: true},                  // anonymous driver.Valuer embed = a column
+		"Flags":     {value: "flags", query: true, update: true},    // GormDataType struct = a column
+		"ID":        {value: "id", query: true, base: true},         //
+		"CreatedAt": {value: "created_at", query: true, base: true}, //
 		"UpdatedAt": {value: "updated_at", query: true, base: true}, //
 	})
 
@@ -422,16 +432,19 @@ type Entry struct {
 	}
 }
 
-// TestScan_ColumnShapeClassification is the review round-1 Medium in
-// unit form: relation-ish fields are skipped with a warning, statically
-// provable columns are included, and undecidable cross-package types
-// fail loud instead of guessing.
+// TestScan_ColumnShapeClassification is the review round-1/round-2
+// Medium in unit form: relation shapes — including defined slices and
+// defined-type chains resolving to structs — are skipped with a
+// warning; method-proven columns (exact driver.Valuer, GormDataType)
+// and the known cross-package set are included; a Value method with
+// the wrong signature proves nothing.
 func TestScan_ColumnShapeClassification(t *testing.T) {
 	dir := t.TempDir()
 	writeGo(t, dir, "m.go", `package m
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"time"
 
 	"github.com/zynthara/chok/v2/db"
@@ -442,51 +455,174 @@ type Profile struct {
 	ID uint
 }
 
+// Sibling resolves to Profile through a defined-type chain — still a
+// relation.
+type Sibling Profile
+
+type Child struct {
+	ID     uint
+	PostID uint
+}
+
+// Children is a defined slice: a has-many relation, not a scalar.
+type Children []Child
+
+// Money implements driver.Valuer exactly — a column.
 type Money struct {
 	cents int64
 }
 
-func (m Money) Value() (any, error) { return m.cents, nil }
+func (m Money) Value() (driver.Value, error) { return m.cents, nil }
+
+// Badge has a Value method with the WRONG signature — not a Valuer,
+// still a relation (review round-2).
+type Badge struct {
+	ID uint
+}
+
+func (Badge) Value() (int, error) { return 0, nil }
+
+// Flags carries its column type via GormDataType — a column even
+// though it is a struct (review round-2).
+type Flags struct {
+	V uint8
+}
+
+func (Flags) GormDataType() string { return "smallint" }
 
 type Post struct {
 	db.Model
-	Profile   Profile        `+"`json:\"profile\" store:\"query\"`"+`
-	Tags      []string       `+"`json:\"tags\" store:\"query\"`"+`
-	Price     Money          `+"`json:\"price\" store:\"query\"`"+`
-	Seen      sql.NullTime   `+"`json:\"seen\" store:\"query\"`"+`
-	Gone      gorm.DeletedAt `+"`json:\"gone\" store:\"query\"`"+`
-	Due       *time.Time     `+"`json:\"due\" store:\"query\"`"+`
-	Raw       []byte         `+"`json:\"raw\" store:\"query\"`"+`
-	Title     string         `+"`json:\"title\" store:\"query\"`"+`
+	Profile  Profile        `+"`json:\"profile\" store:\"query\"`"+`
+	Twin     Sibling        `+"`json:\"twin\" store:\"query\"`"+`
+	Children Children       `+"`json:\"children\" store:\"query\"`"+`
+	Tags     []string       `+"`json:\"tags\" store:\"query\"`"+`
+	Badge    Badge          `+"`json:\"badge\" store:\"query\"`"+`
+	Price    Money          `+"`json:\"price\" store:\"query\"`"+`
+	Flags    Flags          `+"`json:\"flags\" store:\"query\"`"+`
+	Seen     sql.NullTime   `+"`json:\"seen\" store:\"query\"`"+`
+	Gone     gorm.DeletedAt `+"`json:\"gone\" store:\"query\"`"+`
+	Due      *time.Time     `+"`json:\"due\" store:\"query\"`"+`
+	Raw      []byte         `+"`json:\"raw\" store:\"query\"`"+`
+	Title    string         `+"`json:\"title\" store:\"query\"`"+`
 }
 `)
 	pkg, err := Scan(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var post Model
+	for _, m := range pkg.Models {
+		if m.Name == "Post" {
+			post = m
+		}
+	}
 	got := map[string]bool{}
-	for _, f := range pkg.Models[0].Fields {
+	for _, f := range post.Fields {
 		if !f.Base {
 			got[f.GoName] = true
 		}
 	}
-	for _, want := range []string{"Price", "Seen", "Gone", "Due", "Raw", "Title"} {
+	for _, want := range []string{"Price", "Flags", "Seen", "Gone", "Due", "Raw", "Title"} {
 		if !got[want] {
 			t.Errorf("%s must be classified as a column, got %v", want, got)
 		}
 	}
-	for _, absent := range []string{"Profile", "Tags"} {
+	for _, absent := range []string{"Profile", "Twin", "Children", "Tags", "Badge"} {
 		if got[absent] {
 			t.Errorf("%s is not a column at runtime and must be skipped, got %v", absent, got)
 		}
 	}
-	var profileWarn, tagsWarn bool
-	for _, w := range pkg.Warnings {
-		profileWarn = profileWarn || strings.Contains(w, "Post.Profile")
-		tagsWarn = tagsWarn || strings.Contains(w, "Post.Tags")
+	for _, wantWarn := range []string{"Post.Profile", "Post.Twin", "Post.Children", "Post.Tags", "Post.Badge"} {
+		var warned bool
+		for _, w := range pkg.Warnings {
+			warned = warned || strings.Contains(w, wantWarn)
+		}
+		if !warned {
+			t.Errorf("skipped relation shape %s must warn, got %q", wantWarn, pkg.Warnings)
+		}
 	}
-	if !profileWarn || !tagsWarn {
-		t.Fatalf("skipped relation shapes must warn, got %q", pkg.Warnings)
+}
+
+// TestScan_UnexportedEmbeddedTargetWarns is review round-2 finding 3:
+// a named gorm-embedded wrapper promotes by FIELD name — the target
+// TYPE's exportedness is irrelevant, so an unexported target with tags
+// must still warn.
+func TestScan_UnexportedEmbeddedTargetWarns(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type audit struct {
+	Actor string `+"`json:\"actor\" store:\"query\"`"+`
+}
+
+type Entry struct {
+	db.Model
+	Extra audit `+"`gorm:\"embedded\"`"+`
+	Title string `+"`json:\"title\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		if strings.Contains(w, "Entry") && strings.Contains(w, "Extra") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("gorm-embedded wrapper with an unexported tagged target must warn (GORM promotes by field name), got %q", pkg.Warnings)
+	}
+}
+
+// TestScan_AnonymousValuerEmbedIsField is review round-2 finding 2c:
+// an anonymous embed of a real driver.Valuer struct is a column at
+// runtime, so it must generate a field instead of being treated as a
+// promoted embed.
+func TestScan_AnonymousValuerEmbedIsField(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Money struct {
+	cents int64
+}
+
+func (m Money) Value() (driver.Value, error) { return m.cents, nil }
+
+type Wallet struct {
+	db.Model
+	Money `+"`json:\"money\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkg.Warnings) != 0 {
+		t.Fatalf("a Valuer embed is a plain column — no warnings, got %q", pkg.Warnings)
+	}
+	var found bool
+	for _, m := range pkg.Models {
+		if m.Name != "Wallet" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if f.GoName == "Money" && f.Value == "money" && f.Query {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("anonymous Valuer embed must generate a query field, got %+v", pkg.Models)
 	}
 }
 

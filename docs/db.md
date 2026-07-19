@@ -240,18 +240,23 @@ err = posts.Update(ctx, store.RID(rid), store.Fields(p, PostFields.Title))
   `chok gen fields --check --dir examples/blog`）。目录里最后一个 tag 消失
   时，再跑生成会**删除**孤儿生成文件。
 - **列性按语法判定**（无类型检查，包暂时编译不过也能再生成）：内建标量/
-  指针/`[]byte`、本地定义标量（含匿名嵌入形态）、带 `Value()` 方法的本地
-  结构体、`time.Time` / `sql.Null*` / `gorm.DeletedAt` / `gorm.io/datatypes`
-  直接生成；显式 `gorm:"type:..."` 或 serializer tag 对任何类型都是列性
-  证明。**关系形状（普通结构体 / 切片等）上的 `store` tag 跳过并 warn**——
-  运行时同样忽略它（DBName 为空，两侧一致）；跨包类型无法静态判定列性时
-  **直接报错**：用 type / serializer tag 自证，或去掉 tag。构建约束按生成时
-  平台生效（`//go:build`、平台后缀、`_` 前缀文件遵循 go/build 规则）。
+  指针/`[]byte`、实现 `driver.Valuer`（**精确签名**——`Value() (int, error)`
+  之类不算）或 `GormDataType() string` 的本地类型、`time.Time` /
+  `sql.Null*` / `gorm.DeletedAt` / `gorm.io/datatypes` 直接生成；本地定义
+  类型沿底层形状递归判定（`type Code string` 含匿名嵌入形态是列，
+  `type Children []Child` 是 has-many 关系）；显式 `gorm:"type:..."` 或
+  serializer tag 对任何类型都是列性证明。**关系形状（普通结构体 / 切片等）
+  上的 `store` tag 跳过并 warn**——运行时同样忽略它（DBName 为空，两侧
+  一致）；跨包类型无法静态判定列性时**直接报错**：用 type / serializer tag
+  自证，或去掉 tag。构建约束按生成时平台生效（`//go:build`、平台后缀、
+  `_` 前缀文件遵循 go/build 规则）。
 - ⚠️ **提升（promotion）是语法级扫描的已知边界**：匿名内嵌的**用户**结构体
   （或 `gorm:"embedded"` 字段）内部的 `store` tag，GORM 运行时会提升、生成
   器不展开。本包内可验证的形态会打 warn——包括「全部 tag 都来自嵌入」的
   结构体：只要它直接内嵌 chok 基座就会被点名，而不是静默消失；未导出的
-  本地嵌入运行时整体跳过（两侧一致，不告警）。**跨包**嵌入只在已识别为模型
+  **匿名**嵌入运行时整体跳过（两侧一致，不告警），而具名 `gorm:"embedded"`
+  包装按**字段名**判导出性——目标类型未导出照样提升、照样告警。**跨包**
+  嵌入只在已识别为模型
   的结构体上提示；纯靠跨包嵌入承载 tag 的模型对扫描不可见——这是唯一的
   诚实残留。需要时把 tag 上提到顶层结构体。chok 基座（`db.Model` 家族）
   不触发任何 warn。
