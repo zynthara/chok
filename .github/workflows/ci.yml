@@ -92,6 +92,9 @@ jobs:
       - name: blog assembly is current (sync --check)
         run: go run ./cmd/chok sync --check --config examples/blog/chok.yaml --dir examples/blog
 
+      - name: blog field references are current (gen fields --check)
+        run: go run ./cmd/chok gen fields --check --dir examples/blog
+
       - name: apidiff vs release baseline
         run: ./hack/apidiff.sh
 

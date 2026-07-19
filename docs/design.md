@@ -273,7 +273,11 @@ owner 强制覆盖）、`Fields` 乐观锁 + 零值强制落库、scope 化 stor
 交给 GORM 猜测字段与锁元数据。
 字段到列的映射以 GORM parser 的 `Field.DBName` 为唯一事实源，不另写
 snake_case；显式 update 列表与 alias 也不能重开 id/RID/version/时间戳/
-软删状态/owner 等框架托管列，执行内核再做第二道检查。`version` 是行修订号：
+软删状态/owner 等框架托管列，执行内核再做第二道检查。Go 调用点的字段名
+可用 `chok gen fields` 生成的 `<Model>Fields` 编译期引用书写（值即白名单
+公开名，对 alias 稳定，typo 变编译错；生成器与运行时命名推导的一致性由
+store 包的语义闩测试钉死）——纯编译期的壳，白名单解析路径与 HTTP 入口的
+运行时校验一行不变，裸字符串永远合法。`version` 是行修订号：
 普通 Update（含 `Set`/`NoLock`）、软删与 Restore 的成功 SQL 都推进它；
 是否带旧 version 条件只决定冲突检测，不决定修订号是否增长。Upsert 的
 conflict-update 不增 version 仍是单独、已文档化的方言能力限制。
@@ -632,6 +636,7 @@ v1 的 Down/Degraded 分级不再存在——单个 flaky cron job 或 sink
 |---|---|
 | `chok init <name>` | v2 脚手架：chok.yaml + 生成装配 + main.go + migrations/ 骨架，生成即可 `go run .` |
 | `chok sync [--check]` | chok.yaml ⇒ `chok_modules_gen.go`（幂等、字节稳定；`--check` 做 CI 闸）。定制走 `chok.Override`，永不改生成文件 |
+| `chok gen fields [--dir]... [--check]` | 模型 `store` tag ⇒ 同包 `chok_fields_gen.go` 的 `<Model>Fields` 编译期字段引用（值=白名单公开名；幂等、字节稳定；`--check` 做 CI 闸，tag 清空时删孤儿文件） |
 | `chok migrate create\|up\|status\|repair` | 带 checksum / dirty 审计的版本化迁移；`status --check` 可作 CI 闸 |
 | `chok docs gen [--check]` | 组件表（README ×2 + 本文生成区块）、docs/config.md、docs/chok.schema.json、db/framework_tables_gen.go |
 | `chok openapi export` | 取运行中应用的 spec 落 .json/.yaml |

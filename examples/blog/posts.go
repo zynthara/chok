@@ -63,18 +63,20 @@ func (h *postHandlers) update(ctx context.Context, req *updatePostRequest) (*Pos
 	if err != nil {
 		return nil, err
 	}
+	// Field names are the generated references (chok_fields_gen.go), so a
+	// typo'd column is a compile error rather than a runtime 500.
 	var cols []string
 	if req.Title != nil {
 		p.Title = *req.Title
-		cols = append(cols, "title")
+		cols = append(cols, PostFields.Title)
 	}
 	if req.Content != nil {
 		p.Content = *req.Content
-		cols = append(cols, "content")
+		cols = append(cols, PostFields.Content)
 	}
 	if req.Status != nil {
 		p.Status = *req.Status
-		cols = append(cols, "status")
+		cols = append(cols, PostFields.Status)
 	}
 	if len(cols) == 0 {
 		return p, nil

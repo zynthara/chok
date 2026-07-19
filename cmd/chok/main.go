@@ -27,6 +27,7 @@ func rootCmd() *cobra.Command {
 
 	root.AddCommand(initCmd())
 	root.AddCommand(syncCmd())
+	root.AddCommand(genCmd())
 	root.AddCommand(docsCmd())
 	root.AddCommand(openapiCmd())
 	root.AddCommand(versionCmd())
