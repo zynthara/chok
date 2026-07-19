@@ -150,6 +150,22 @@
 > 探针实测确认 catalog 名：SQLite `type:char(8)`→"char"、MySQL
 > `type:enum(...)`→"enum"、MySQL `nchar`→"char"（已被 char 覆盖）。
 >
+> **round-7 复审修正**（1H/1M，均红→绿）：① round-6 的大小写折叠用了
+> Go 的 `strings.ToLower`（完整 Unicode 折叠），把 Kelvin 记号 U+212A
+> 折成 ASCII `k`——但 SQLite 的标识符比较是 `sqlite3_stricmp`（**仅
+> ASCII**），一张同时含 `k TEXT` 与 Unicode-distinct `U+212A INTEGER`
+> 的表（SQLite 视为两列）会在 map 里键碰撞、后者覆盖前者，门禁把 TEXT
+> 列误判为 integer，`Min[int64]` 又退回文本字典序（2 输给 10，静默错，
+> Store 路径复现）。改 `asciiLower`（只折 A–Z），与数据库自身的标识符
+> 比较对齐——两列保持 distinct，TEXT 列 fail-closed。② 首次聚合的
+> catalog 读（`ColumnTypes` 会跑 `sqlite_master` 查询 + `SELECT ...
+> LIMIT 1`，MySQL 查 information_schema + 数据表）排在 scope **之前**，
+> 未认证请求对属主模型会先触碰数据库、可能先返回表/权限错误而非
+> `ErrUnauthenticated`。改为**先建 scoped base**（`applyScopes` 纯内存、
+> 无 round-trip，未认证即 401）再解析 catalog，并复用该 base 走查询
+> （scope 只跑一次）——回归用 gorm callback 计数断言未认证聚合的 DB
+> 操作数为 0、认证聚合 >0。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

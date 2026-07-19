@@ -148,6 +148,10 @@ func Max[N AggregateScalar, T db.Modeler](ctx context.Context, s *Store[T], fiel
 // values Go would call distinct as one. Zero matching rows count as 0 —
 // COUNT never returns SQL NULL, so there is no ok bool to consult.
 func CountDistinct[T db.Modeler](ctx context.Context, s *Store[T], field string, opts ...where.Option) (int64, error) {
+	base, err := s.aggScopedBase(ctx)
+	if err != nil {
+		return 0, err
+	}
 	cat, err := s.resolveAggCatalog(ctx)
 	if err != nil {
 		return 0, err
@@ -156,7 +160,7 @@ func CountDistinct[T db.Modeler](ctx context.Context, s *Store[T], field string,
 	if err != nil {
 		return 0, err
 	}
-	raw, err := s.runSingleAggregate(ctx, "COUNT(DISTINCT "+aggColumnExpr(cat.dialect, col, spec.kind)+")", opts)
+	raw, err := s.runSingleAggregate(base, "COUNT(DISTINCT "+aggColumnExpr(cat.dialect, col, spec.kind)+")", opts)
 	if err != nil {
 		return 0, err
 	}
@@ -307,6 +311,10 @@ func GroupBy[K comparable, T db.Modeler](ctx context.Context, s *Store[T], field
 	if len(aggs) == 0 {
 		return nil, fmt.Errorf("store: GroupBy: at least one Aggregate is required (distinct group keys alone are PluckDistinct's job)")
 	}
+	base, err := s.aggScopedBase(ctx)
+	if err != nil {
+		return nil, err
+	}
 	cat, err := s.resolveAggCatalog(ctx)
 	if err != nil {
 		return nil, err
@@ -332,7 +340,7 @@ func GroupBy[K comparable, T db.Modeler](ctx context.Context, s *Store[T], field
 		kinds[i] = kind
 	}
 
-	q, err := s.aggBase(ctx, opts, true)
+	q, err := s.aggApply(base, opts, true)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +406,10 @@ const (
 // gate, Count's query skeleton, then convergence to the caller's N.
 func singleAggregate[N AggregateScalar, T db.Modeler](ctx context.Context, s *Store[T], fn aggFn, field string, opts []where.Option) (N, bool, error) {
 	var zero N
+	base, err := s.aggScopedBase(ctx)
+	if err != nil {
+		return zero, false, err
+	}
 	cat, err := s.resolveAggCatalog(ctx)
 	if err != nil {
 		return zero, false, err
@@ -410,7 +422,7 @@ func singleAggregate[N AggregateScalar, T db.Modeler](ctx context.Context, s *St
 	if err != nil {
 		return zero, false, err
 	}
-	raw, err := s.runSingleAggregate(ctx, string(fn)+"("+aggColumnExpr(cat.dialect, col, spec.kind)+")", opts)
+	raw, err := s.runSingleAggregate(base, string(fn)+"("+aggColumnExpr(cat.dialect, col, spec.kind)+")", opts)
 	if err != nil {
 		return zero, false, err
 	}
@@ -430,8 +442,8 @@ func singleAggregate[N AggregateScalar, T db.Modeler](ctx context.Context, s *St
 // Count's skeleton: scopes first, then ApplyFiltersOnly so pagination /
 // ordering / count options are stripped — an aggregate is total-shaped,
 // they could not change the one result row.
-func (s *Store[T]) runSingleAggregate(ctx context.Context, expr string, opts []where.Option) (any, error) {
-	q, err := s.aggBase(ctx, opts, false)
+func (s *Store[T]) runSingleAggregate(base *gorm.DB, expr string, opts []where.Option) (any, error) {
+	q, err := s.aggApply(base, opts, false)
 	if err != nil {
 		return nil, err
 	}
@@ -450,11 +462,24 @@ func (s *Store[T]) runSingleAggregate(ctx context.Context, expr string, opts []w
 // SQL a rejected option may have staged is irrelevant: the guard error
 // aborts before execution). The unguarded path is countInternal's:
 // ApplyFiltersOnly strips pagination/order/count silently.
-func (s *Store[T]) aggBase(ctx context.Context, opts []where.Option, guarded bool) (*gorm.DB, error) {
-	base, err := s.applyScopes(ctx, s.effectiveDB(ctx).Model(new(T)))
-	if err != nil {
-		return nil, err
-	}
+// aggScopedBase builds the scoped query base every aggregate runs over.
+// It is applied FIRST in each entry point — before any catalog read —
+// so a fail-closed scope (OwnerScope with no principal → 401) rejects
+// the request purely in memory, without the two catalog/table reads
+// Migrator.ColumnTypes issues (a sqlite_master / information_schema
+// query plus a SELECT ... LIMIT 1). An unauthenticated caller must never
+// touch the table, and must fail with the auth error, not a downstream
+// catalog/permission error that ran first.
+func (s *Store[T]) aggScopedBase(ctx context.Context) (*gorm.DB, error) {
+	return s.applyScopes(ctx, s.effectiveDB(ctx).Model(new(T)))
+}
+
+// aggApply layers the filter options onto an ALREADY-scoped base (so the
+// scope runs exactly once per aggregate). guarded is GroupBy's path:
+// options run under where.Apply, not ApplyFiltersOnly's countOnly mode,
+// because the latter never records WithCount into the Config and the
+// filters-only guard would then miss it (round-1 review #5).
+func (s *Store[T]) aggApply(base *gorm.DB, opts []where.Option, guarded bool) (*gorm.DB, error) {
 	if guarded {
 		// Appended after the caller options so the guard observes their
 		// Config flags (same placement as ListIn's guard).
@@ -667,11 +692,36 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 // must resolve to one key. PostgreSQL folds UNQUOTED identifiers to
 // lowercase but keeps quoted ones case-sensitive, so its names (already
 // what GORM emitted for the model) are matched verbatim.
+//
+// The fold is ASCII-ONLY, matching how these databases actually compare
+// identifiers (SQLite's sqlite3_stricmp is ASCII-only; MySQL folds at
+// least ASCII). Full Unicode folding would be WRONG here: strings.ToLower
+// maps the Kelvin sign U+212A to ASCII 'k', so a table with distinct
+// columns k and U+212A — which SQLite keeps separate — would collapse to
+// one map key, one silently overwriting the other and mistyping the gate.
 func aggCatalogKey(dialect, name string) string {
 	if dialect == "postgres" {
 		return name
 	}
-	return strings.ToLower(name)
+	return asciiLower(name)
+}
+
+// asciiLower lowercases only ASCII A–Z, leaving every other byte (and all
+// multi-byte runes) untouched — the identifier-fold these databases use.
+func asciiLower(s string) string {
+	var b []byte
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'A' && c <= 'Z' {
+			if b == nil {
+				b = []byte(s)
+			}
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	if b == nil {
+		return s
+	}
+	return string(b)
 }
 
 // aggJSONColumnType reports whether a field's database column is

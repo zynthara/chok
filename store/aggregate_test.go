@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1045,6 +1046,88 @@ func TestAggregate_Round6SQLiteCharColumn(t *testing.T) {
 	groups, err := GroupBy[string](ctx, s, "code", []Aggregate{CountRows()})
 	if err != nil || len(groups) != 2 {
 		t.Fatalf("GroupBy over a CHAR column = %v, %v; want 2 groups", groups, err)
+	}
+}
+
+// r7Kelvin exercises round-7 review #1: a Go int64 field on column k,
+// over a table that also has a DISTINCT column named with the Kelvin
+// sign (U+212A), which strings.ToLower folds to ASCII 'k'.
+type r7Kelvin struct {
+	db.Model
+	K int64 `json:"k" gorm:"column:k"`
+}
+
+func (r7Kelvin) RIDPrefix() string { return "r7k" }
+
+// TestAggregate_Round7UnicodeFoldCollision is the round-7 review #1
+// regression: the catalog key folded with full Unicode case rules, so
+// the Kelvin sign U+212A (a real, DISTINCT SQLite column) collapsed onto
+// ASCII 'k' and overwrote the real k → TEXT entry with INTEGER. The gate
+// then mistyped the TEXT column as integer and MIN ran lexicographically
+// (2 lost to 10). ASCII-only folding keeps the two columns distinct.
+func TestAggregate_Round7UnicodeFoldCollision(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("the distinct-Unicode-column shape is scripted for SQLite")
+	}
+	gdb := setupDB(t)
+	ctx := context.Background()
+	raw := gdb.Unsafe(ctx)
+	// ASCII k is TEXT; the Kelvin-sign column (U+212A) is INTEGER and is
+	// declared LAST, so a colliding fold would leave map["k"] = integer.
+	ddl := "CREATE TABLE r7_kelvins (id integer PRIMARY KEY AUTOINCREMENT, rid text, version integer, created_at datetime, updated_at datetime, k TEXT, \"K\" INTEGER)"
+	if err := raw.Exec(ddl).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := New[r7Kelvin](gdb, log.Empty(), WithQueryFields("id", "k"))
+	if err := raw.Exec("INSERT INTO r7_kelvins (rid, version, k) VALUES ('r7k_a',1,'2'),('r7k_b',1,'10')").Error; err != nil {
+		t.Fatal(err)
+	}
+	// The real k column is TEXT; the int64 wire kind must fail closed,
+	// not compute a lexicographic MIN over text.
+	_, _, err := Min[int64](ctx, s, "k")
+	if err == nil || !strings.Contains(err.Error(), "column type") {
+		t.Fatalf("Min[int64] over a real TEXT column (Unicode-distinct sibling) must fail closed, got %v", err)
+	}
+}
+
+// TestAggregate_Round7ScopeBeforeCatalog is the round-7 review #2
+// regression: resolveAggCatalog ran a real catalog read (a sqlite_master
+// query plus SELECT ... LIMIT 1) BEFORE the fail-closed scope, so an
+// unauthenticated caller touched the database before being rejected. The
+// scope is now applied first, in memory, so a rejected caller issues no
+// DB operations at all.
+func TestAggregate_Round7ScopeBeforeCatalog(t *testing.T) {
+	s := setupProductStore(t) // OwnedModel → fail-closed OwnerScope; fresh, no aggregate cached
+	root := s.h.Unsafe(context.Background())
+	var dbOps atomic.Int64
+	count := func(*gorm.DB) { dbOps.Add(1) }
+	// ColumnTypes reads via the Raw and Row callback chains; count all
+	// read paths so nothing slips through.
+	if err := root.Callback().Raw().Register("r7:raw", count); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Callback().Row().Register("r7:row", count); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Callback().Query().Register("r7:query", count); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := CountDistinct(context.Background(), s, "name")
+	if !errors.Is(err, apierr.ErrUnauthenticated) {
+		t.Fatalf("unauthenticated aggregate must fail closed with ErrUnauthenticated, got %v", err)
+	}
+	if n := dbOps.Load(); n != 0 {
+		t.Fatalf("unauthenticated aggregate issued %d DB operations before failing closed; the scope must gate before the catalog read", n)
+	}
+
+	// Sanity: an authenticated caller does reach the database (proves the
+	// counter is wired to the paths the aggregate actually uses).
+	if _, err := CountDistinct(userCtx("u1"), s, "name"); err != nil {
+		t.Fatal(err)
+	}
+	if dbOps.Load() == 0 {
+		t.Fatal("authenticated aggregate issued no DB operations; the counter is not observing the read path")
 	}
 }
 
