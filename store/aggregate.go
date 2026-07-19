@@ -3,11 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
-	"maps"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
@@ -631,16 +629,21 @@ type aggColumnCatalog struct {
 // resolution there is fixed by connection configuration; the blessed
 // stack never ATTACHes databases or switches with USE). The cache is
 // shared across the Store's transaction clones by pointer (Store is
-// copied by value in txClone; a mutex or atomic embedded by value would
-// be copied and flagged, so it lives behind this pointer). Entries are
-// added copy-on-write under the mutex; readers ride the atomic pointer.
-// Growth is bounded by the distinct relations the table name can
-// resolve to (per-tenant schemas); a relation swapped by DDL mid-life
-// keeps its stale entry — schema changes require a restart, the
-// documented framework-wide contract.
+// copied by value in txClone; sync.Map must not be copied, so it lives
+// behind this pointer).
+//
+// A sync.Map is the exact fit for the shape (round-11 review #2):
+// append-only stable keys, read-mostly after warm-up — and the first
+// touch of each new relation neither serialises against other tenants
+// nor copies the map, where the earlier copy-on-write single map cost
+// O(N²) accumulated copying across N tenant schemas, all first-loads
+// in one mutex. Concurrent first aggregates on ONE relation may
+// duplicate the metadata read; that is harmless (idempotent, metadata
+// only) and LoadOrStore keeps a single winner. A relation swapped by
+// DDL mid-life keeps its stale entry — schema changes require a
+// restart, the documented framework-wide contract.
 type aggCatalogCache struct {
-	mu     sync.Mutex
-	loaded atomic.Pointer[map[string]map[string]string]
+	entries sync.Map // cache key → map[string]string (column → base type)
 }
 
 // resolveAggCatalog returns the REAL database column types for the
@@ -659,8 +662,8 @@ type aggCatalogCache struct {
 //   - Safety. The reader issues metadata-only queries: it never touches
 //     the data table (round-8 review) and mutates no shared schema state
 //     the way FullDataTypeOf did (the round-4 race), so running it off
-//     the request path is safe. Each relation resolves once under the
-//     mutex; later calls take the atomic fast path.
+//     the request path is safe. Each relation resolves on its first
+//     aggregate; later calls take the sync.Map read path.
 //
 // On PostgreSQL every call re-probes the relation OID first
 // (pgResolveRelation) and consults the cache under it: one Store can
@@ -674,8 +677,11 @@ type aggCatalogCache struct {
 // makes the data queries themselves nondeterministic).
 func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, error) {
 	dialect := s.dialectName(ctx)
+	// The cache key is the resolved relation OID on PostgreSQL; the other
+	// dialects resolve the name per connection configuration, never per
+	// transaction, so they share key 0 (never a valid PG OID here — the
+	// probe rejects InvalidOid).
 	var relOID int64
-	cacheKey := ""
 	if dialect == "postgres" {
 		oid, err := s.pgResolveRelation(ctx)
 		if err != nil {
@@ -684,19 +690,9 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 			return aggColumnCatalog{}, fmt.Errorf("store: aggregate: reading catalog column types for %s: %w", s.modelSchema.Table, err)
 		}
 		relOID = oid
-		cacheKey = strconv.FormatInt(oid, 10)
 	}
-	if m := s.aggCatalog.loaded.Load(); m != nil {
-		if types, ok := (*m)[cacheKey]; ok {
-			return aggColumnCatalog{dialect: dialect, types: types}, nil
-		}
-	}
-	s.aggCatalog.mu.Lock()
-	defer s.aggCatalog.mu.Unlock()
-	if m := s.aggCatalog.loaded.Load(); m != nil {
-		if types, ok := (*m)[cacheKey]; ok {
-			return aggColumnCatalog{dialect: dialect, types: types}, nil
-		}
+	if cached, ok := s.aggCatalog.entries.Load(relOID); ok {
+		return aggColumnCatalog{dialect: dialect, types: cached.(map[string]string)}, nil
 	}
 	cols, err := s.readCatalogColumnTypes(ctx, dialect, relOID)
 	if err != nil {
@@ -714,15 +710,11 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 		// PostgreSQL and MySQL readers report bare names.
 		types[aggCatalogKey(dialect, c.name)] = aggBaseType(c.typ)
 	}
-	var next map[string]map[string]string
-	if m := s.aggCatalog.loaded.Load(); m != nil {
-		next = maps.Clone(*m)
-	} else {
-		next = make(map[string]map[string]string, 1)
-	}
-	next[cacheKey] = types
-	s.aggCatalog.loaded.Store(&next)
-	return aggColumnCatalog{dialect: dialect, types: types}, nil
+	// A concurrent first aggregate on the same relation may have read the
+	// same metadata; both maps are equal, so whichever landed first wins
+	// and every caller shares one immutable map from here on.
+	actual, _ := s.aggCatalog.entries.LoadOrStore(relOID, types)
+	return aggColumnCatalog{dialect: dialect, types: actual.(map[string]string)}, nil
 }
 
 // pgResolveRelation resolves the model table to its relation OID on the
@@ -731,8 +723,16 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 // hit. OID 0 (InvalidOid, via COALESCE over to_regclass' NULL) means
 // nothing resolves: surfaced as the not-migrated error, never cached.
 func (s *Store[T]) pgResolveRelation(ctx context.Context) (int64, error) {
+	gdb := s.effectiveDB(ctx)
+	parts, err := s.aggTableParts(gdb)
+	if err != nil {
+		return 0, err
+	}
+	// Quoting affects only folding, not resolution: a single-part name
+	// still resolves through the whole search_path, while a quoted part
+	// keeps the case and the dots the data queries address it by.
 	var oid int64
-	if err := s.effectiveDB(ctx).Raw("SELECT COALESCE(to_regclass(?)::oid::int8, 0)", pgRegclassText(s.modelSchema.Table)).Scan(&oid).Error; err != nil {
+	if err := gdb.Raw("SELECT COALESCE(to_regclass(?)::oid::int8, 0)", aggQuoteParts(parts, '"')).Scan(&oid).Error; err != nil {
 		return 0, err
 	}
 	if oid == 0 {
@@ -798,12 +798,16 @@ func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string, p
 	var err error
 	switch dialect {
 	case "sqlite":
-		if qualifier, bare, qualified := strings.Cut(table, "."); qualified {
+		var qualifier, bare string
+		if qualifier, bare, err = s.aggQualifiedTable(gdb, dialect); err != nil {
+			return nil, err
+		}
+		if qualifier != "" {
 			// The pragma's second (hidden-column) argument pins the attached
 			// database the qualifier names, mirroring how main.t reads in SQL.
 			err = gdb.Raw("SELECT name, type AS typ FROM pragma_table_info(?, ?)", bare, qualifier).Scan(&rows).Error
 		} else {
-			err = gdb.Raw("SELECT name, type AS typ FROM pragma_table_info(?)", table).Scan(&rows).Error
+			err = gdb.Raw("SELECT name, type AS typ FROM pragma_table_info(?)", bare).Scan(&rows).Error
 		}
 	case "postgres":
 		// Each column's type resolves to its FINAL base type: domains
@@ -827,10 +831,14 @@ func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string, p
 				" FROM cols c JOIN pg_catalog.pg_type t ON t.oid = c.typeoid JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype <> 'd'",
 			pgRelOID).Scan(&rows).Error
 	case "mysql":
-		if qualifier, bare, qualified := strings.Cut(table, "."); qualified {
+		var qualifier, bare string
+		if qualifier, bare, err = s.aggQualifiedTable(gdb, dialect); err != nil {
+			return nil, err
+		}
+		if qualifier != "" {
 			err = gdb.Raw("SELECT column_name AS name, data_type AS typ FROM information_schema.columns WHERE table_schema = ? AND table_name = ?", qualifier, bare).Scan(&rows).Error
 		} else {
-			err = gdb.Raw("SELECT column_name AS name, data_type AS typ FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?", table).Scan(&rows).Error
+			err = gdb.Raw("SELECT column_name AS name, data_type AS typ FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?", bare).Scan(&rows).Error
 		}
 	default:
 		return nil, fmt.Errorf("no catalog reader for dialect %q", dialect)
@@ -848,19 +856,123 @@ func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string, p
 	return out, nil
 }
 
-// pgRegclassText renders a (possibly dot-qualified) GORM table name as
-// the identifier text to_regclass parses. Each dot-separated part is
-// quoted — the same split GORM's quoter applies when rendering the name
-// into SQL — so case survives verbatim instead of being folded the way
-// to_regclass folds UNQUOTED identifiers, and a contained quote is
-// doubled. Quoting affects only folding, not resolution: a single-part
-// name still resolves through the search_path.
-func pgRegclassText(table string) string {
-	parts := strings.Split(table, ".")
-	for i, p := range parts {
-		parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+// aggTableParts splits the model's table name into the identifier parts
+// the DIALECT'S OWN QUOTER produces, unquoted and unescaped, and proves
+// the split by re-rendering it against that quoter.
+//
+// A plain strings.Split on "." is wrong (round-11 review #1): every
+// dialect protects dots inside a quoted identifier, and which character
+// quotes is dialect-specific — GORM renders
+// `"round11.schema".t` as "round11.schema"."t" on PostgreSQL (two
+// parts, the quoted dot is data) but as `"round11`.`schema"`.`t` on
+// MySQL/SQLite, where the quote character is a backtick and the double
+// quotes are ordinary name bytes. Splitting blind turned the PostgreSQL
+// name into three parts and made a working table unaggregatable
+// ("cross-database references are not implemented"), while the reverse
+// error — folding two real parts into one — would look up the wrong
+// relation.
+//
+// The re-render check is what makes this safe rather than merely
+// careful: whatever the quoter does with an input this parser did not
+// anticipate (an unterminated quote, a dialect that changes its rules
+// in a later release), the two renderings disagree and the aggregate
+// fails closed instead of reading some other table's column types.
+func (s *Store[T]) aggTableParts(gdb *gorm.DB) ([]string, error) {
+	table := s.modelSchema.Table
+	quote, err := aggQuoteChar(gdb)
+	if err != nil {
+		return nil, err
 	}
-	return strings.Join(parts, ".")
+	parts, ok := aggIdentifierParts(table, quote)
+	if ok {
+		var rendered strings.Builder
+		gdb.Dialector.QuoteTo(&rendered, table)
+		if aggQuoteParts(parts, quote) == rendered.String() {
+			return parts, nil
+		}
+	}
+	return nil, fmt.Errorf("table name %q cannot be split into identifier parts that reproduce how the %s driver quotes it; aggregate this model through Unsafe, or give it a plainly-quoted name", table, gdb.Dialector.Name())
+}
+
+// aggQuoteChar asks the dialector which character it quotes identifiers
+// with, by quoting a trivial name (PostgreSQL renders "a", MySQL and
+// SQLite render `a`). Reading it from the driver rather than hardcoding
+// a table keeps the split honest for any dialector the handle carries.
+func aggQuoteChar(gdb *gorm.DB) (byte, error) {
+	var b strings.Builder
+	gdb.Dialector.QuoteTo(&b, "a")
+	q := b.String()
+	if len(q) != 3 || q[1] != 'a' || q[0] != q[2] {
+		return 0, fmt.Errorf("cannot determine the identifier quote character of the %s driver (it renders the name a as %s)", gdb.Dialector.Name(), q)
+	}
+	return q[0], nil
+}
+
+// aggIdentifierParts splits a qualified name on unquoted dots, stripping
+// the quotes and unescaping doubled quote characters — the standard SQL
+// identifier rule every blessed dialect follows. ok is false for an
+// unterminated quoted run.
+func aggIdentifierParts(name string, quote byte) ([]string, bool) {
+	var (
+		parts   []string
+		cur     strings.Builder
+		inQuote bool
+	)
+	for i := 0; i < len(name); i++ {
+		switch c := name[i]; {
+		case inQuote && c == quote:
+			// A doubled quote inside a quoted run is one literal quote.
+			if i+1 < len(name) && name[i+1] == quote {
+				cur.WriteByte(quote)
+				i++
+				continue
+			}
+			inQuote = false
+		case c == quote:
+			inQuote = true
+		case c == '.' && !inQuote:
+			parts = append(parts, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if inQuote {
+		return nil, false
+	}
+	return append(parts, cur.String()), true
+}
+
+// aggQuoteParts renders identifier parts back into dialect-quoted text:
+// every part quoted (so nothing case-folds and no dot re-reads as a
+// separator) with contained quote characters doubled. It produces both
+// the string to_regclass parses and the re-render aggTableParts checks
+// the split against.
+func aggQuoteParts(parts []string, quote byte) string {
+	q := string(quote)
+	quoted := make([]string, len(parts))
+	for i, p := range parts {
+		quoted[i] = q + strings.ReplaceAll(p, q, q+q) + q
+	}
+	return strings.Join(quoted, ".")
+}
+
+// aggQualifiedTable resolves the table name to an optional qualifier
+// (attached database on SQLite, schema on MySQL) and the bare table
+// name. Deeper nesting has no meaning for these catalog readers, so it
+// is refused rather than silently truncated to its first two parts.
+func (s *Store[T]) aggQualifiedTable(gdb *gorm.DB, dialect string) (qualifier, bare string, err error) {
+	parts, err := s.aggTableParts(gdb)
+	if err != nil {
+		return "", "", err
+	}
+	switch len(parts) {
+	case 1:
+		return "", parts[0], nil
+	case 2:
+		return parts[0], parts[1], nil
+	}
+	return "", "", fmt.Errorf("table name %q has %d identifier parts; %s addresses a table as [qualifier.]table", s.modelSchema.Table, len(parts), dialect)
 }
 
 // aggCatalogKey normalises a column name for catalog lookup. SQLite and

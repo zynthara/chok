@@ -218,6 +218,27 @@
 > 双 schema 同名异型表三事务往返（换 relation 各自 fail-closed/正确，
 > 回到首个 relation 缓存仍有效）。
 >
+> **round-11 复审修正**（2M）：① 表名拆分用裸 `strings.Split(".")`，
+> 不认引用边界——而 GORM quoter 是 **quote-aware 且引用符分方言**的：
+> `"a.b".t` 在 PG（引用符 `"`）是两段、引号内的点属于 schema 名，在
+> MySQL/SQLite（引用符反引号）却真是三段。盲拆把 PG 上可正常迁移/写入
+> 的表打成三段，聚合报 `cross-database references are not implemented`
+> （红测复现原文）。改为按方言引用符拆分（引号内点不分割、`""` 反转义
+> 为字面引号），引用符**问 dialector 自己**（渲染 `a` 取首字节）而非
+> 硬编码；拆完再用 GORM quoter **回渲比对**，任何不一致（未闭合引号、
+> 未来 GORM 改规则）一律 fail-closed 指向 Unsafe——这条校验才是安全性
+> 的来源，而非拆分器本身写得多细。回归：三方言真 dialector 逐例比对
+> 拆分回渲（含 `"a.b".t` 的 PG 两段 / MySQL 三段分歧、`"W""Q".t`
+> 转义、未闭合引号闭门），加 PG 上「schema 名含点」真库端到端。
+> ② round-10 的 catalog cache 用 atomic copy-on-write 单 map，每发现
+> 一个新 relation 都在全局锁下整份复制——正是文档承诺支持的
+> schema-per-tenant 形态，N 个租户首访累计 O(N²) 复制且彼此串行。改
+> `sync.Map`（键稳定、只增、warm-up 后读多写少），首访不复制不串行；
+> 同一 relation 并发首访至多重复一次纯元数据读，`LoadOrStore` 定唯一
+> 赢家。无独立红测（性能特征，非正确性回归——正确性由 round-10 的
+> relation 分键回归守着），改以 8 租户并发首访测试在 `-race` 下证明新
+> 路径无竞态且各租户拿到自己的列型与结果。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

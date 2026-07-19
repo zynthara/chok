@@ -385,13 +385,16 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   catalog（json/jsonb，GormDBDataType 不漏）。懒解析（而非构造期）
   因构造可能先于迁移，且 catalog 只在迁移后才反映真相；元数据查询
   不改共享 schema（无 round-4 的 FullDataTypeOf 原地写 Precision
-  竞态），解析结果互斥缓存。表名解析与数据查询同规则：点限定
-  TableName 按方言拆 qualifier 与裸表名（GORM quoter 同款拆分），PG
+  竞态），解析结果按 relation 缓存。表名解析与数据查询同规则：限定
+  TableName 按**方言引用符**做 quote-aware 拆分（引号内的点是数据；
+  引用符 PG 为双引号、MySQL/SQLite 为反引号，故同一串在两族方言下段
+  数不同），拆分结果再用 GORM quoter 回渲校验、不符即 fail-closed；PG
   未限定名经 to_regclass 走整条 search_path（而非只看 current_schema()
   表头）；PG 列型递归解 domain 至最终 pg_catalog 基类型，用户类型
   渲染 schema 限定名 fail-closed（裸 typname 可被 domain 冒充内建
   名），缓存按 relation OID 分键（SET LOCAL 动态 search_path 下同一
-  Store 会解析到不同表）。catalog 列名在 SQLite/MySQL
+  Store 会解析到不同表），载体是 sync.Map——schema-per-tenant 下各
+  relation 首访不互相串行、不复制既有条目。catalog 列名在 SQLite/MySQL
   按大小写不敏感匹配（`versioned/off` 建的大写列照认）、PG 保留
   quoted 语义（折叠仅 ASCII，与数据库标识符比较一致，不做 Unicode
   折叠——否则 Kelvin U+212A 会误并到 ASCII k）；字符串族含 char/nchar/

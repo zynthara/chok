@@ -15,7 +15,10 @@ import (
 	"testing"
 	"time"
 
+	sqlite "github.com/glebarez/sqlite"
 	gomysql "github.com/go-sql-driver/mysql"
+	gormmysql "gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
@@ -1488,6 +1491,193 @@ func TestAggregate_Round10PGDynamicSearchPathCache(t *testing.T) {
 	// still correct.
 	if v, err := minOn(numSch); err != nil || v != 2 {
 		t.Fatalf("Min back on the bigint relation = %d err=%v; want 2 <nil>", v, err)
+	}
+}
+
+// --- round-11 review regressions: the catalog reader splits qualified
+// table names the way each dialect's own quoter does (a dot inside a
+// quoted identifier is data, and WHICH character quotes is
+// dialect-specific), and the per-relation cache is a sync.Map so a
+// schema-per-tenant fleet neither serialises nor re-copies on first
+// touch. ---------------------------------------------------------------
+
+// TestAggregate_Round11IdentifierSplitMatchesGORM pins the split
+// against the REAL quoters of all three blessed dialects: a plain
+// strings.Split on "." read `"a.b".t` as three parts on PostgreSQL (a
+// working table became unaggregatable) while the same string really IS
+// three parts on MySQL/SQLite, where the quote character is a backtick.
+// The cases are the ones GORM's quoter was measured on.
+func TestAggregate_Round11IdentifierSplitMatchesGORM(t *testing.T) {
+	dialects := []struct {
+		name  string
+		quote byte
+		d     gorm.Dialector
+	}{
+		{"postgres", '"', postgres.Dialector{Config: &postgres.Config{}}},
+		{"mysql", '`', gormmysql.Dialector{Config: &gormmysql.Config{}}},
+		{"sqlite", '`', sqlite.Dialector{}},
+	}
+	names := []string{
+		"plain_table",
+		"main.plain_table",
+		`"round11.schema".quoted_dot_aggs`,
+		`"Weird""Quote".t`,
+		"`bt.schema`.t",
+		"a.b.c",
+		`sch."Tbl"`,
+	}
+	for _, d := range dialects {
+		for _, name := range names {
+			parts, ok := aggIdentifierParts(name, d.quote)
+			if !ok {
+				t.Errorf("%s: %q did not split", d.name, name)
+				continue
+			}
+			var want strings.Builder
+			d.d.QuoteTo(&want, name)
+			if got := aggQuoteParts(parts, d.quote); got != want.String() {
+				t.Errorf("%s: %q split into %q, which re-renders as %s; the driver renders %s",
+					d.name, name, parts, got, want.String())
+			}
+		}
+	}
+	// The dialect-specific reading is the whole point: the same string is
+	// two parts on PostgreSQL and three on MySQL/SQLite.
+	if parts, _ := aggIdentifierParts(`"round11.schema".t`, '"'); len(parts) != 2 || parts[0] != "round11.schema" {
+		t.Errorf(`postgres: "round11.schema".t split into %q; want ["round11.schema" "t"]`, parts)
+	}
+	if parts, _ := aggIdentifierParts(`"round11.schema".t`, '`'); len(parts) != 3 {
+		t.Errorf(`mysql: "round11.schema".t split into %q; want three parts`, parts)
+	}
+	// An unterminated quoted run has no honest reading — fail closed.
+	if _, ok := aggIdentifierParts(`"unterminated.t`, '"'); ok {
+		t.Error(`postgres: "unterminated.t split without error; want the closed door`)
+	}
+}
+
+// round11QuotedSchema carries the per-run schema name (which contains a
+// DOT, so it only addresses correctly while quoted) into TableName.
+var round11QuotedSchema string
+
+type round11QuotedDotAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round11QuotedDotAgg) RIDPrefix() string { return "r11q" }
+func (round11QuotedDotAgg) TableName() string {
+	return `"` + round11QuotedSchema + `".round11_quoted_dot_aggs`
+}
+
+func TestAggregate_Round11QuotedDotTableName(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("a quoted dot inside a schema name is exercised on the PG lane")
+	}
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	// The schema name itself contains a dot: GORM quotes it, so migration
+	// and Create work — the catalog reader must read it the same way
+	// instead of seeing three identifier parts.
+	round11QuotedSchema = fmt.Sprintf("round11.schema_%d_%d", os.Getpid(), time.Now().UnixNano())
+	sch := round11QuotedSchema
+	if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf("CREATE SCHEMA %q", sch)).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = gdb.Unsafe(context.Background()).Exec(fmt.Sprintf("DROP SCHEMA %q CASCADE", sch)).Error
+	})
+	if err := gdb.Migrate(ctx, db.Table(&round11QuotedDotAgg{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[round11QuotedDotAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	for _, qty := range []int64{3, 4} {
+		if err := s.Create(ctx, &round11QuotedDotAgg{Qty: qty}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total, ok, err := Sum[int64](ctx, s, "qty")
+	if err != nil || !ok || total != 7 {
+		t.Fatalf("Sum over a quoted-dot schema = %d ok=%v err=%v; want 7 true <nil>", total, ok, err)
+	}
+}
+
+type round11TenantAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round11TenantAgg) RIDPrefix() string { return "r11t" }
+func (round11TenantAgg) TableName() string { return "round11_tenant_aggs" }
+
+// TestAggregate_Round11ConcurrentTenantRelations exercises the
+// per-relation cache the way a schema-per-tenant fleet does: many
+// relations first-touched CONCURRENTLY through one Store. Under -race
+// it pins that the sync.Map path is sound, and each tenant must get its
+// OWN column types and its own answer.
+func TestAggregate_Round11ConcurrentTenantRelations(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("per-transaction relation resolution is a PostgreSQL shape")
+	}
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	const tenants = 8
+	suffix := fmt.Sprintf("%d_%d", os.Getpid(), time.Now().UnixNano())
+	schemas := make([]string, tenants)
+	for i := range schemas {
+		schemas[i] = fmt.Sprintf("round11_t%d_%s", i, suffix)
+		if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf("CREATE SCHEMA %q", schemas[i])).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf(
+			`CREATE TABLE %q.round11_tenant_aggs (id bigserial PRIMARY KEY, rid varchar(24) NOT NULL, version bigint NOT NULL DEFAULT 1, created_at timestamptz, updated_at timestamptz, qty bigint NOT NULL)`,
+			schemas[i])).Error; err != nil {
+			t.Fatal(err)
+		}
+		// Tenant i sums to i+1, so a cross-tenant cache hit is visible.
+		if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf(
+			`INSERT INTO %q.round11_tenant_aggs (rid, qty) VALUES ('r11t_seed_%08d', %d)`,
+			schemas[i], i, i+1)).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, sch := range schemas {
+			_ = gdb.Unsafe(context.Background()).Exec(fmt.Sprintf("DROP SCHEMA %q CASCADE", sch)).Error
+		}
+	})
+
+	s := New[round11TenantAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	var wg sync.WaitGroup
+	errs := make([]error, tenants)
+	sums := make([]int64, tenants)
+	for i := range schemas {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = db.RunInTx(ctx, gdb, func(txCtx context.Context) error {
+				if err := gdb.Unsafe(txCtx).Exec(fmt.Sprintf("SET LOCAL search_path = %q", schemas[i])).Error; err != nil {
+					return err
+				}
+				total, ok, err := Sum[int64](txCtx, s, "qty")
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return fmt.Errorf("tenant %d: Sum reported no rows", i)
+				}
+				sums[i] = total
+				return nil
+			})
+		}(i)
+	}
+	wg.Wait()
+	for i := range schemas {
+		if errs[i] != nil {
+			t.Fatalf("tenant %d: %v", i, errs[i])
+		}
+		if want := int64(i + 1); sums[i] != want {
+			t.Errorf("tenant %d summed to %d; want %d (a cross-tenant catalog cache hit?)", i, sums[i], want)
+		}
 	}
 }
 
