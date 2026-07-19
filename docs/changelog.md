@@ -28,12 +28,19 @@
 > 反而全数吃转换噪音）。因此本项**零新增可 import 公开 Go API**，apidiff
 > 全程静默；裸字符串永远合法，`FromQuery` 的 HTTP 通道照旧运行时校验。
 > 扫描选语法级而非 go/types：包编译不过时再生成必须仍能跑（改模型→旧引
-> 用编译错→需先 gen 的鸡生蛋场景），代价是匿名嵌入用户结构体内的 tag 扫
-> 不到（warn 提示上提）。命名推导自此双实现（生成器 vs GORM 运行时），
-> 这一长期架构代价由 store 包的**语义闩测试**钉死：对 fixture 模型跑生成
-> → 建真 store → 双向断言生成值集合与两面白名单键集合完全一致。
-> `--check` 进 CI（blog 已挂），生成物随代码 commit，与 sync/docs gen
-> 同一纪律。
+> 用编译错→需先 gen 的鸡生蛋场景）。**列性由语法分类镜像 GORM 的解析结
+> 果**（round-1 复审收紧）：内建标量/`[]byte`/本地定义标量（含匿名嵌入）
+> /本地 Valuer 结构体/已知跨包列类型直接生成，`gorm:"type:"`/serializer
+> 对任何类型都是证明；关系形状跳过并 warn（运行时同样忽略，不产死符号）；
+> 无法静态判定的跨包类型**报错拒猜**。提升（promotion）是残留边界：本包
+> 内可验证的嵌入 tag 会 warn——含「全部 tag 来自嵌入」的静默形态（直接内
+> 嵌 chok 基座即点名）；未导出嵌入运行时整体跳过（两侧一致）；纯跨包嵌入
+> 承载 tag 的模型不可见，文档诚实记录。命名推导自此双实现（生成器 vs
+> GORM 运行时），这一长期架构代价由 store 包的**语义闩测试**钉死：对
+> fixture 模型跑生成 → 建真 store → 双向断言生成值集合与两面白名单键集合
+> 完全一致，边界形态（关系字段、提升嵌入）在 edge fixture 里对真 store
+> 钉住精确差集。`--check` 进 CI（blog 已挂），生成物随代码 commit，与
+> sync/docs gen 同一纪律。
 
 ## Unreleased — 聚合正门：Sum/Avg/Min/Max/CountDistinct/GroupBy（arch-backlog #7）
 

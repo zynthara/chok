@@ -8,6 +8,7 @@ package fixture
 // compile-checked references. Values are the public field names the
 // store's whitelists key on; they are stable under WithColumnAlias.
 var ArticleFields = struct {
+	Code         string // faces: query
 	Title        string // faces: query, update
 	Body         string // faces: update
 	Secret       string // faces: query
@@ -15,11 +16,13 @@ var ArticleFields = struct {
 	HTTPStatus   string // faces: query
 	LegacyBody   string // faces: update
 	Aliased      string // faces: query
+	PublishedAt  string // faces: query
 
 	ID        string // base model, query-only (resolves to the rid column)
 	CreatedAt string // base model, query-only
 	UpdatedAt string // base model, query-only
 }{
+	Code:         "code",
 	Title:        "title",
 	Body:         "body",
 	Secret:       "secret",
@@ -27,6 +30,7 @@ var ArticleFields = struct {
 	HTTPStatus:   "http_status",
 	LegacyBody:   "body_raw",
 	Aliased:      "aliased",
+	PublishedAt:  "published_at",
 
 	ID:        "id",
 	CreatedAt: "created_at",
@@ -39,12 +43,14 @@ var ArticleFields = struct {
 var ShadowIDFields = struct {
 	PublicID string // faces: query
 	Name     string // faces: query, update
+	Kind     string // faces: query
 
 	CreatedAt string // base model, query-only
 	UpdatedAt string // base model, query-only
 }{
 	PublicID: "id",
 	Name:     "name",
+	Kind:     "kind",
 
 	CreatedAt: "created_at",
 	UpdatedAt: "updated_at",

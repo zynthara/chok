@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -67,12 +69,19 @@ func runGenFields(cmd *cobra.Command, dirs []string, check bool) error {
 
 		outPath := filepath.Join(dir, fieldgen.GenFileName)
 		existing, readErr := os.ReadFile(outPath)
+		// Only "does not exist" means missing; EACCES, EISDIR and
+		// friends must surface, not masquerade as a clean state
+		// (--check would otherwise bless a target it never read).
+		if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+			return fmt.Errorf("gen fields: read %s: %w", outPath, readErr)
+		}
+		missing := readErr != nil
 
 		// No tagged models: the generated file must not linger as an
 		// orphan referencing symbols that no longer exist.
 		if len(pkg.Models) == 0 {
 			switch {
-			case readErr != nil:
+			case missing:
 				fmt.Fprintln(cmd.OutOrStdout(), dir, "has no store-tagged models — nothing to do")
 			case check:
 				drift = true
@@ -92,13 +101,13 @@ func runGenFields(cmd *cobra.Command, dirs []string, check bool) error {
 		}
 		switch {
 		case check:
-			if readErr != nil || string(existing) != string(src) {
+			if missing || string(existing) != string(src) {
 				drift = true
 				fmt.Fprintf(cmd.ErrOrStderr(), "gen fields --check: %s is stale\n", outPath)
 				continue
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), outPath, "up to date")
-		case readErr == nil && string(existing) == string(src):
+		case !missing && string(existing) == string(src):
 			fmt.Fprintln(cmd.OutOrStdout(), outPath, "unchanged")
 		default:
 			if err := os.WriteFile(outPath, src, 0o644); err != nil {

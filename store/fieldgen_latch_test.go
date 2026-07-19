@@ -12,21 +12,26 @@ package store
 // runtime rejects.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/zynthara/chok/v2/db/dbtest"
 	"github.com/zynthara/chok/v2/internal/fieldgen"
 	"github.com/zynthara/chok/v2/internal/fieldgen/fixture"
+	"github.com/zynthara/chok/v2/internal/fieldgen/fixture/edge"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store/where"
 )
 
-const fixtureDir = "../internal/fieldgen/fixture"
+const (
+	fixtureDir     = "../internal/fieldgen/fixture"
+	edgeFixtureDir = "../internal/fieldgen/fixture/edge"
+)
 
-// scanFixture returns the generator's view of a fixture model.
-func scanFixture(t *testing.T, model string) fieldgen.Model {
+// scanFixtureDir returns the generator's view of one model in dir.
+func scanFixtureDir(t *testing.T, dir, model string) fieldgen.Model {
 	t.Helper()
-	pkg, err := fieldgen.Scan(fixtureDir)
+	pkg, err := fieldgen.Scan(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +42,12 @@ func scanFixture(t *testing.T, model string) fieldgen.Model {
 	}
 	t.Fatalf("fixture model %s not found in scan (got %+v)", model, pkg.Models)
 	return fieldgen.Model{}
+}
+
+// scanFixture returns the generator's view of a main-fixture model.
+func scanFixture(t *testing.T, model string) fieldgen.Model {
+	t.Helper()
+	return scanFixtureDir(t, fixtureDir, model)
 }
 
 // assertLatch checks both directions between the generated surface and a
@@ -171,6 +182,84 @@ func TestFieldGen_SemanticLatch_AliasStability(t *testing.T) {
 	}
 }
 
+// TestFieldGen_SemanticLatch_EdgeShapes pins the review round-1 shapes
+// against real stores, both directions:
+//
+//   - a store-tagged relation field is a column on NEITHER side —
+//     runtime (DBName empty) and generator (classified, skipped, warned)
+//     agree, so the exact-set latch holds for Contact;
+//   - promoted embeds exist at runtime but not in the generated surface
+//     — Event (whole surface promoted, scan absent + warned) and Entry
+//     (generated ⊂ runtime with the missing set exactly {"by"}) pin the
+//     documented residual instead of letting it drift silently.
+func TestFieldGen_SemanticLatch_EdgeShapes(t *testing.T) {
+	h := dbtest.Open(t)
+
+	pkg, err := fieldgen.Scan(edgeFixtureDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Contact: relation excluded on both sides — full latch holds.
+	contacts := New[edge.Contact](h, log.Empty())
+	assertLatch(t, scanFixtureDir(t, edgeFixtureDir, "Contact"), contacts.queryFieldMap, contacts.updateFieldMap)
+	if _, err := where.ResolveField(contacts.queryFieldMap, "profile"); err == nil {
+		t.Error("relation key must not exist in the runtime query map either")
+	}
+	if col, err := where.ResolveField(contacts.queryFieldMap, edge.ContactFields.ProfileID); err != nil || col != "profile_id" {
+		t.Errorf("FK column stays a normal reference, got (%q, %v)", col, err)
+	}
+
+	// Event: runtime model via promotion, generator has nothing — the
+	// gap must be exactly the promoted key, and loudly diagnosed.
+	events := New[edge.Event](h, log.Empty())
+	if _, err := where.ResolveField(events.queryFieldMap, "actor"); err != nil {
+		t.Fatalf("runtime must promote the embedded tag (fixture premise): %v", err)
+	}
+	for _, m := range pkg.Models {
+		if m.Name == "Event" {
+			t.Fatal("Event must not scan as a model — its surface is promoted")
+		}
+	}
+	var eventWarned bool
+	for _, w := range pkg.Warnings {
+		if strings.Contains(w, "Event") && strings.Contains(w, "AuditBase") {
+			eventWarned = true
+		}
+	}
+	if !eventWarned {
+		t.Fatalf("the promoted-only model must be diagnosed, got %q", pkg.Warnings)
+	}
+
+	// Entry: generated ⊂ runtime, missing exactly the promoted "by".
+	entries := New[edge.Entry](h, log.Empty())
+	m := scanFixtureDir(t, edgeFixtureDir, "Entry")
+	genQuery := map[string]bool{}
+	for _, f := range m.Fields {
+		if f.Query {
+			genQuery[f.Value] = true
+			if _, err := where.ResolveField(entries.queryFieldMap, f.Value); err != nil {
+				t.Errorf("Entry.%s: generated value %q must resolve: %v", f.GoName, f.Value, err)
+			}
+		}
+	}
+	var missing []string
+	for key := range entries.queryFieldMap {
+		if !genQuery[key] {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) != 1 || missing[0] != "by" {
+		t.Errorf("the generated/runtime gap must be exactly the promoted key [by], got %v", missing)
+	}
+	if len(entries.updateFieldMap) != 0 {
+		t.Errorf("Entry declares no update face, runtime has %v", entries.updateFieldMap)
+	}
+	if _, err := where.ResolveField(entries.queryFieldMap, edge.EntryFields.Title); err != nil {
+		t.Errorf("compiled edge constant must resolve: %v", err)
+	}
+}
+
 // TestFieldGen_SemanticLatch_CompiledSymbols closes the loop through the
 // checked-in generated file: the constants a user's code would actually
 // reference (compiled from fixture/chok_fields_gen.go, byte-pinned by
@@ -185,6 +274,8 @@ func TestFieldGen_SemanticLatch_CompiledSymbols(t *testing.T) {
 		fm    map[string]string
 		value string
 	}{
+		{"Article anonymous code/query", arts.queryFieldMap, fixture.ArticleFields.Code},
+		{"Article published_at/query", arts.queryFieldMap, fixture.ArticleFields.PublishedAt},
 		{"Article title/query", arts.queryFieldMap, fixture.ArticleFields.Title},
 		{"Article title/update", arts.updateFieldMap, fixture.ArticleFields.Title},
 		{"Article body/update", arts.updateFieldMap, fixture.ArticleFields.Body},
@@ -197,6 +288,7 @@ func TestFieldGen_SemanticLatch_CompiledSymbols(t *testing.T) {
 		{"Article base updated_at/query", arts.queryFieldMap, fixture.ArticleFields.UpdatedAt},
 		{"ShadowID declared id/query", shadow.queryFieldMap, fixture.ShadowIDFields.PublicID},
 		{"ShadowID name/update", shadow.updateFieldMap, fixture.ShadowIDFields.Name},
+		{"ShadowID defined-scalar kind/query", shadow.queryFieldMap, fixture.ShadowIDFields.Kind},
 	} {
 		if _, err := where.ResolveField(tc.fm, tc.value); err != nil {
 			t.Errorf("%s: compiled constant %q rejected by the runtime map: %v", tc.name, tc.value, err)

@@ -139,6 +139,23 @@ func TestGenFields_NothingToDoAndOrphanRemoval(t *testing.T) {
 	}
 }
 
+// TestGenFields_ReadErrorsSurface: only ENOENT means "missing" — a
+// directory (EISDIR on read) or otherwise unreadable target must fail
+// loud instead of passing --check as "nothing to do" (review round-1).
+func TestGenFields_ReadErrorsSurface(t *testing.T) {
+	dir := t.TempDir()
+	writeModel(t, dir, "dto.go", "package main\n\ntype Req struct {\n\tQ string `json:\"q\"`\n}\n")
+	if err := os.Mkdir(filepath.Join(dir, fieldgen.GenFileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runGenFieldsForTest(t, []string{dir}, "--check"); err == nil {
+		t.Fatal("--check with an unreadable target must error, not report nothing to do")
+	}
+	if _, _, err := runGenFieldsForTest(t, []string{dir}); err == nil {
+		t.Fatal("generation with an unreadable target must error")
+	}
+}
+
 func TestGenFields_ConflictingSymbolFailsLoud(t *testing.T) {
 	dir := t.TempDir()
 	writeModel(t, dir, "main.go", blogLikeModel)
@@ -183,10 +200,10 @@ func TestGenFields_WarningsSurfaceOnStderr(t *testing.T) {
 	dir := t.TempDir()
 	writeModel(t, dir, "m.go", `package main
 
-type custom struct{ X string }
+import "example.com/vendor/mixins"
 
 type Post struct {
-	custom
+	mixins.Custom
 	Title string `+"`json:\"title\" store:\"query\"`"+`
 }
 `)
@@ -194,7 +211,7 @@ type Post struct {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "warning:") || !strings.Contains(out, "custom") {
-		t.Fatalf("unknown embeds must warn on stderr, got %q", out)
+	if !strings.Contains(out, "warning:") || !strings.Contains(out, "mixins.Custom") {
+		t.Fatalf("opaque cross-package embeds in a model must warn on stderr, got %q", out)
 	}
 }

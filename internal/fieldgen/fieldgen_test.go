@@ -52,6 +52,56 @@ func TestScanAndRender_FixturePackageGolden(t *testing.T) {
 	}
 }
 
+// TestScanAndRender_EdgeFixtureGolden pins the expected-warning fixture
+// package the same way: exact rendered bytes AND the exact warning set —
+// the diagnostics are part of the generator's contract, not noise.
+func TestScanAndRender_EdgeFixtureGolden(t *testing.T) {
+	pkg, err := Scan(filepath.Join("fixture", "edge"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantWarnFragments := []string{
+		"Contact.Profile: `store` tag ignored", // relation skip (review round-1 Medium)
+		"Event: embedded AuditBase carries",    // whole surface promoted — no silent vanishing
+		"Entry: embedded Extra carries",        // named gorm-embedded promotion
+	}
+	if len(pkg.Warnings) != len(wantWarnFragments) {
+		t.Fatalf("edge fixture must warn exactly %d times, got %q", len(wantWarnFragments), pkg.Warnings)
+	}
+	for _, frag := range wantWarnFragments {
+		found := false
+		for _, w := range pkg.Warnings {
+			if strings.Contains(w, frag) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected a warning containing %q, got %q", frag, pkg.Warnings)
+		}
+	}
+
+	var names []string
+	for _, m := range pkg.Models {
+		names = append(names, m.Name)
+	}
+	if strings.Join(names, ",") != "Audit,AuditBase,Contact,Entry" {
+		t.Fatalf("edge models = %v (Event must be absent — its surface is promoted)", names)
+	}
+
+	got, err := Render(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(filepath.Join("fixture", "edge", GenFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("fixture/edge/%s is stale — regenerate it (or the renderer drifted):\n--- got ---\n%s\n--- want ---\n%s", GenFileName, got, want)
+	}
+}
+
 // TestScan_FixtureSurfaces asserts the structured scan result — model
 // set, per-field faces and public-name derivation — independent of the
 // rendered bytes, so a failure names the exact field instead of a diff.
@@ -91,6 +141,7 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 	}
 
 	assertFields(t, pkg.Models[0], map[string]face{
+		"Code":         {value: "code", query: true},                   // anonymous local scalar embed = a regular column
 		"Title":        {value: "title", query: true, update: true},    // json name, comma option truncated
 		"Body":         {value: "body", update: true},                  // update-only
 		"Secret":       {value: "secret", query: true},                 // json:"-" → default column
@@ -98,6 +149,7 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 		"HTTPStatus":   {value: "http_status", query: true},            // acronym via NamingStrategy
 		"LegacyBody":   {value: "body_raw", update: true},              // explicit gorm column
 		"Aliased":      {value: "aliased", query: true},                // aliased at store.New in the latch test
+		"PublishedAt":  {value: "published_at", query: true},           // known cross-package column type
 		"ID":           {value: "id", query: true, base: true},         // base trio
 		"CreatedAt":    {value: "created_at", query: true, base: true}, //
 		"UpdatedAt":    {value: "updated_at", query: true, base: true}, //
@@ -105,6 +157,7 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 	assertFields(t, pkg.Models[1], map[string]face{
 		"PublicID":  {value: "id", query: true},                     // user field owns the "id" key
 		"Name":      {value: "name", query: true, update: true},     //
+		"Kind":      {value: "kind", query: true},                   // local defined scalar as a named field
 		"CreatedAt": {value: "created_at", query: true, base: true}, // base ID skipped — name taken
 		"UpdatedAt": {value: "updated_at", query: true, base: true}, //
 	})
@@ -215,19 +268,34 @@ type Post struct {
 	}
 }
 
-func TestScan_UnknownAnonymousEmbedWarns(t *testing.T) {
+// TestScan_PromotedEmbedWarns pins the promotion contract: an exported
+// local struct embed carrying store tags warns (GORM promotes what the
+// scan cannot expand), an unexported embed stays silent (GORM skips
+// unexported fields entirely — verified against the runtime), and a
+// verified tag-free embed stays silent too (nothing promotable).
+func TestScan_PromotedEmbedWarns(t *testing.T) {
 	dir := t.TempDir()
 	writeGo(t, dir, "m.go", `package m
 
 import "github.com/zynthara/chok/v2/db"
 
-type base struct {
+type Base struct {
 	Common string `+"`store:\"query\"`"+`
+}
+
+type hidden struct {
+	Silent string `+"`store:\"query\"`"+`
+}
+
+type Mixin struct {
+	Note string `+"`json:\"note\"`"+`
 }
 
 type Post struct {
 	db.Model
-	base
+	Base
+	hidden
+	Mixin
 	Title string `+"`store:\"query\"`"+`
 }
 `)
@@ -235,16 +303,23 @@ type Post struct {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// base itself is unexported but still a tagged top-level struct — it
-	// scans as a model too; the point here is Post's embed warning.
-	var warned bool
+	var base, hid, mixin bool
 	for _, w := range pkg.Warnings {
-		if strings.Contains(w, "base") && strings.Contains(w, "Post") {
-			warned = true
+		if !strings.Contains(w, "Post") {
+			continue
 		}
+		base = base || strings.Contains(w, "Base")
+		hid = hid || strings.Contains(w, "hidden")
+		mixin = mixin || strings.Contains(w, "Mixin")
 	}
-	if !warned {
-		t.Fatalf("unknown anonymous embed must warn, got %q", pkg.Warnings)
+	if !base {
+		t.Fatalf("tagged exported embed must warn about promotion, got %q", pkg.Warnings)
+	}
+	if hid {
+		t.Fatalf("unexported embeds never reach GORM — warning is a false alarm: %q", pkg.Warnings)
+	}
+	if mixin {
+		t.Fatalf("verified tag-free embeds must stay silent, got %q", pkg.Warnings)
 	}
 	for _, m := range pkg.Models {
 		if m.Name == "Post" {
@@ -254,6 +329,237 @@ type Post struct {
 				}
 			}
 		}
+	}
+}
+
+// TestScan_SilentPromotionStillWarns is the review round-1 Medium: a
+// struct whose WHOLE tag surface rides a promoted embed is a runtime
+// model the generator cannot represent — it must warn, not vanish. A
+// DTO wrapping a tagged model (no direct chok base embed) must NOT
+// warn: model-ness is signaled by the db base.
+func TestScan_SilentPromotionStillWarns(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type AuditBase struct {
+	Actor string `+"`json:\"actor\" store:\"query\"`"+`
+}
+
+type Event struct {
+	db.Model
+	AuditBase
+}
+
+type Post struct {
+	db.Model
+	Title string `+"`json:\"title\" store:\"query\"`"+`
+}
+
+type PostResponse struct {
+	Post
+	Extra string `+"`json:\"extra\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range pkg.Models {
+		if m.Name == "Event" || m.Name == "PostResponse" {
+			t.Fatalf("%s must not scan as a model", m.Name)
+		}
+	}
+	var eventWarn, dtoWarn bool
+	for _, w := range pkg.Warnings {
+		if strings.Contains(w, "Event") {
+			eventWarn = true
+		}
+		if strings.Contains(w, "PostResponse") {
+			dtoWarn = true
+		}
+	}
+	if !eventWarn {
+		t.Fatalf("a base-embedding struct with only promoted tags must warn, got %q", pkg.Warnings)
+	}
+	if dtoWarn {
+		t.Fatalf("a DTO wrapping a model (no direct db base) must stay silent, got %q", pkg.Warnings)
+	}
+}
+
+// TestScan_EmbeddedWrapperPromotionWarns covers the named form: a
+// gorm-embedded field promotes its target's tags at runtime whether or
+// not the wrapper itself carries a store tag.
+func TestScan_EmbeddedWrapperPromotionWarns(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Audit struct {
+	By string `+"`json:\"by\" store:\"query\"`"+`
+}
+
+type Entry struct {
+	db.Model
+	Extra Audit `+"`gorm:\"embedded\"`"+`
+	Title string `+"`json:\"title\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		if strings.Contains(w, "Entry") && strings.Contains(w, "Extra") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("untagged gorm-embedded wrapper with tagged target must warn, got %q", pkg.Warnings)
+	}
+}
+
+// TestScan_ColumnShapeClassification is the review round-1 Medium in
+// unit form: relation-ish fields are skipped with a warning, statically
+// provable columns are included, and undecidable cross-package types
+// fail loud instead of guessing.
+func TestScan_ColumnShapeClassification(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql"
+	"time"
+
+	"github.com/zynthara/chok/v2/db"
+	"gorm.io/gorm"
+)
+
+type Profile struct {
+	ID uint
+}
+
+type Money struct {
+	cents int64
+}
+
+func (m Money) Value() (any, error) { return m.cents, nil }
+
+type Post struct {
+	db.Model
+	Profile   Profile        `+"`json:\"profile\" store:\"query\"`"+`
+	Tags      []string       `+"`json:\"tags\" store:\"query\"`"+`
+	Price     Money          `+"`json:\"price\" store:\"query\"`"+`
+	Seen      sql.NullTime   `+"`json:\"seen\" store:\"query\"`"+`
+	Gone      gorm.DeletedAt `+"`json:\"gone\" store:\"query\"`"+`
+	Due       *time.Time     `+"`json:\"due\" store:\"query\"`"+`
+	Raw       []byte         `+"`json:\"raw\" store:\"query\"`"+`
+	Title     string         `+"`json:\"title\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		if !f.Base {
+			got[f.GoName] = true
+		}
+	}
+	for _, want := range []string{"Price", "Seen", "Gone", "Due", "Raw", "Title"} {
+		if !got[want] {
+			t.Errorf("%s must be classified as a column, got %v", want, got)
+		}
+	}
+	for _, absent := range []string{"Profile", "Tags"} {
+		if got[absent] {
+			t.Errorf("%s is not a column at runtime and must be skipped, got %v", absent, got)
+		}
+	}
+	var profileWarn, tagsWarn bool
+	for _, w := range pkg.Warnings {
+		profileWarn = profileWarn || strings.Contains(w, "Post.Profile")
+		tagsWarn = tagsWarn || strings.Contains(w, "Post.Tags")
+	}
+	if !profileWarn || !tagsWarn {
+		t.Fatalf("skipped relation shapes must warn, got %q", pkg.Warnings)
+	}
+}
+
+func TestScan_AmbiguousCrossPackageTypeFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/shopspring/decimal"
+
+type Order struct {
+	Amount decimal.Decimal `+"`json:\"amount\" store:\"query\"`"+`
+}
+`)
+	_, err := Scan(dir)
+	if err == nil || !strings.Contains(err.Error(), "Order.Amount") || !strings.Contains(err.Error(), `gorm:"type:`) {
+		t.Fatalf("undecidable cross-package type must fail loud pointing at the static proof, got %v", err)
+	}
+
+	// The gorm type tag (or a serializer) is that proof.
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/shopspring/decimal"
+
+type Order struct {
+	Amount decimal.Decimal `+"`json:\"amount\" store:\"query\" gorm:\"type:decimal(20,8)\"`"+`
+	Meta   map[string]any  `+"`json:\"meta\" store:\"query\" gorm:\"serializer:json\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	if !got["Amount"] || !got["Meta"] {
+		t.Fatalf("type/serializer tags prove column-ness for any Go type, got %v", got)
+	}
+}
+
+// TestScan_BuildConstraintsHonored: files Go itself would not build are
+// invisible to the scan (review round-1 Low).
+func TestScan_BuildConstraintsHonored(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+type Post struct {
+	Title string `+"`json:\"title\" store:\"query\"`"+`
+}
+`)
+	writeGo(t, dir, "excluded.go", `//go:build mips64 && ignore
+
+package other
+
+type Excluded struct {
+	X string `+"`store:\"query\"`"+`
+}
+
+var PostFields = 1
+`)
+	writeGo(t, dir, "_hidden.go", `package other2
+
+type Hidden struct {
+	Y string `+"`store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkg.Models) != 1 || pkg.Models[0].Name != "Post" {
+		t.Fatalf("constraint-excluded and underscore files must be invisible (their package clause, models and symbols), got %+v", pkg.Models)
 	}
 }
 
