@@ -2114,9 +2114,10 @@ func (round12TxBypassAgg) TableName() string { return "round12_tx_bypass_aggs" }
 // what starves the flight leader — so a transactional caller must never
 // join a flight; it reads on its own connection. The test wedges the
 // store's flight for the relation's cache key open and proves a
-// transactional cold aggregate completes anyway — without publishing —
-// while a parked NON-transactional caller (which holds nothing) obeys
-// its own context.
+// transactional cold aggregate completes anyway — publishing nothing
+// mid-transaction and exactly its committed view at COMMIT — while a
+// parked NON-transactional caller (which holds nothing) obeys its own
+// context.
 func TestAggregate_Round12TxCallerNeverParksOnFlight(t *testing.T) {
 	gdb := dbtest.Open(t)
 	ctx := context.Background()
@@ -2162,8 +2163,8 @@ func TestAggregate_Round12TxCallerNeverParksOnFlight(t *testing.T) {
 
 	// A parked non-transactional caller holds no connection and obeys its
 	// OWN context while the flight is stuck. (Must run before the
-	// transactional read below publishes the entry and turns later cold
-	// calls into cache hits.)
+	// transactional caller below COMMITS — the commit publishes the entry
+	// and turns later cold calls into cache hits.)
 	cctx, cancel := context.WithCancel(ctx)
 	parked := make(chan error, 1)
 	go func() {
@@ -2193,6 +2194,12 @@ func TestAggregate_Round12TxCallerNeverParksOnFlight(t *testing.T) {
 			if !ok || total != 3 {
 				return fmt.Errorf("in-tx Sum = %d ok=%v; want 3 true", total, ok)
 			}
+			// Mid-transaction nothing is published: the view this read
+			// reflects may include the transaction's own uncommitted DDL
+			// (round-12 review #1) and becomes shareable only at COMMIT.
+			if _, ok := s.aggCatalog.entries.Load(key); ok {
+				return errors.New("the transactional read published before commit")
+			}
 			return nil
 		})
 	}()
@@ -2205,11 +2212,11 @@ func TestAggregate_Round12TxCallerNeverParksOnFlight(t *testing.T) {
 		t.Fatal("explicit-transaction aggregate parked on a foreign flight; it must read on its own connection")
 	}
 
-	// Its read must NOT have published: a transaction's view may include
-	// its own uncommitted DDL (round-12 review #1), so flight leaders —
-	// always non-transactional — are the cache's only writers.
-	if _, ok := s.aggCatalog.entries.Load(key); ok {
-		t.Fatal("a transactional read must never publish into the shared catalog cache")
+	// COMMIT is what publishes — through the after-commit buffer — so
+	// transaction-only workloads warm the cache for the waves after
+	// (round-12 review pass-3 #1) while a rollback still leaks nothing.
+	if _, ok := s.aggCatalog.entries.Load(key); !ok {
+		t.Fatal("a committed transaction must publish its catalog read through the after-commit buffer")
 	}
 }
 
@@ -2227,8 +2234,9 @@ func (round12LeakAgg) TableName() string { return "round12_leak_aggs" }
 // key-0 cache; the entry survived ROLLBACK, and when the table was
 // later created for real with qty TEXT, Min[int64] hit the leaked
 // INTEGER entry, passed the gate and returned the lexicographic MIN —
-// silently, with no fail-closed. A transactional read must serve its
-// own call only.
+// silently, with no fail-closed. A transactional read serves its own
+// call, and a ROLLBACK discards its staged publication — only a commit
+// may share what the transaction saw.
 func TestAggregate_Round12TxRollbackDoesNotLeakCatalog(t *testing.T) {
 	if dbtest.Driver() != "sqlite" {
 		t.Skip("the repro needs transactional DDL over the shared cache key 0 — SQLite; PG keys by OID (a rolled-back table never resolves again) and MySQL DDL auto-commits. The publish line under test is shared by all dialects.")
@@ -2358,5 +2366,55 @@ func TestAggregate_Round12CancelledLeaderRecoalesces(t *testing.T) {
 	}
 	if n := catalogReads.Load(); n != 1 {
 		t.Fatalf("after a cancelled leader, %d healthy waiters issued %d catalog reads; the retry wave must re-coalesce to exactly 1", callers, n)
+	}
+}
+
+type round12WarmAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round12WarmAgg) RIDPrefix() string { return "r12w" }
+func (round12WarmAgg) TableName() string { return "round12_warm_aggs" }
+
+// TestAggregate_Round12CommittedTxWarmsCache is the round-12 review
+// pass-3 #1 regression: with transactions reading the shared cache but
+// never writing it, a transaction-only workload — exactly the
+// SET LOCAL schema-per-tenant flow the shared read path exists for —
+// had NO cache writer at all: two consecutive successful transactions
+// on one relation issued two identical catalog reads, and every
+// transaction after them another one, forever. A COMMITTED transaction
+// now publishes its read through the after-commit buffer, so the
+// second transaction hits the cache.
+func TestAggregate_Round12CommittedTxWarmsCache(t *testing.T) {
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&round12WarmAgg{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[round12WarmAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	for _, qty := range []int64{5, 7} {
+		if err := s.Create(ctx, &round12WarmAgg{Qty: qty}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalogReads := countAggCatalogReads(t, s.h.Unsafe(ctx), "r12w")
+
+	for i := 0; i < 2; i++ {
+		if err := db.RunInTx(ctx, gdb, func(txCtx context.Context) error {
+			total, ok, err := Sum[int64](txCtx, s, "qty")
+			if err != nil {
+				return err
+			}
+			if !ok || total != 12 {
+				return fmt.Errorf("tx %d: Sum = %d ok=%v; want 12 true", i, total, ok)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := catalogReads.Load(); n != 1 {
+		t.Fatalf("two consecutive committed transactions issued %d catalog reads; the first commit must warm the cache for the second (want 1)", n)
 	}
 }

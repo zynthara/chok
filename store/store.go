@@ -1531,6 +1531,21 @@ func (s *Store[T]) inExplicitTx(ctx context.Context) bool {
 	return txctx.DB(ctx, s.h) != nil || s.txDB != nil
 }
 
+// stageOnCommit stages fn on the after-commit buffer of the operation's
+// transaction — via the ctx when it carries this handle's transaction
+// (db.RunInTx propagation), else via the clone's captured txCtx
+// (Store.Tx callers use their own outer ctx with the tx-bound clone) —
+// and reports whether staging happened. The ownership gate mirrors
+// effectiveDB: a ctx carrying another handle's transaction did not
+// perform this operation, so its buffer must not decide the staged
+// work's fate.
+func (s *Store[T]) stageOnCommit(ctx context.Context, fn func(context.Context)) bool {
+	if txctx.DB(ctx, s.h) != nil && db.AfterCommit(ctx, fn) {
+		return true
+	}
+	return s.txCtx != nil && db.AfterCommit(s.txCtx, fn)
+}
+
 func (s *Store[T]) rejectWrite(op string) error {
 	if !s.readOnly {
 		return nil

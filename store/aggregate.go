@@ -645,17 +645,19 @@ type aggColumnCatalog struct {
 // catalog read before a winner was picked, so K simultaneous first
 // aggregates issued K identical metadata reads, not the "at most one
 // duplicate" the round-11 note claimed. Explicit-transaction callers
-// stay out of flights: they read on their own connection and publish
-// nothing, because their view may include their own uncommitted DDL
-// (loadAggCatalog explains both). A relation swapped by DDL mid-life
-// keeps its stale entry — schema changes require a restart, the
-// documented framework-wide contract.
+// stay out of flights: they read on their own connection — their view
+// may include their own uncommitted DDL — and publish only when their
+// commit makes that view committed state (loadAggCatalog explains
+// both). A relation swapped by DDL mid-life keeps its stale entry —
+// schema changes require a restart, the documented framework-wide
+// contract.
 type aggCatalogCache struct {
 	entries sync.Map // cache key → map[string]string (column → base type)
 	// flights coalesces concurrent cold loads per cache key: one wave,
-	// one catalog read. Only non-transactional callers enter a flight,
-	// and flight leaders are the only writers to entries; failures are
-	// never retained anywhere.
+	// one catalog read. Only non-transactional callers enter a flight.
+	// entries is written by flight leaders and by after-commit staged
+	// transactional reads — committed catalog state either way; failures
+	// are never retained anywhere.
 	flights singleflight.Group
 }
 
@@ -735,30 +737,32 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 //     graph acyclic.
 //   - Visibility (round-12 review #1). What a transaction reads may
 //     include ITS OWN uncommitted DDL, which no other caller may ever
-//     observe. Publishing it poisoned the shared key across a rollback:
-//     create qty INTEGER in-tx → aggregate → roll back → recreate the
-//     table with qty TEXT, and Min[int64] passed the integer gate over
-//     text — lexicographic MIN, silently. The result now serves this
-//     call only and is discarded. Not even staged via db.AfterCommit:
-//     deferred publication would save exactly one coalesced metadata
-//     read for the first post-commit aggregate, not worth the staging
-//     machinery.
+//     observe. Publishing it during the transaction poisoned the shared
+//     key across a rollback: create qty INTEGER in-tx → aggregate →
+//     roll back → recreate the table with qty TEXT, and Min[int64]
+//     passed the integer gate over text — lexicographic MIN, silently.
+//     The result serves this call now and is PUBLISHED ONLY AT COMMIT,
+//     staged on the after-commit buffer (stageOnCommit — the same
+//     anchor WithBus events ride): commit is precisely what turns the
+//     transaction's view into committed catalog state, and a rollback
+//     discards the staged publication wholesale, so nothing private
+//     ever leaks. Commit-time publication is load-bearing, not an
+//     optimisation (round-12 review pass-3 #1): transaction-only
+//     workloads — the SET LOCAL schema-per-tenant flow aggregates
+//     inside transactions by construction — would otherwise have NO
+//     cache writer at all and re-read metadata on every aggregate.
 //
 // Transactions DO take the shared read path in resolveAggCatalog:
-// entries only ever hold committed catalog state (every writer is a
-// non-transactional flight leader), and an entry can never mask a
-// transaction's own NEW relation — on PostgreSQL a just-created table
-// has a fresh OID no flight can have published; on SQLite/MySQL a
-// key-0 entry means this Store's table already aggregated on a
-// committed connection, i.e. it already existed, contradicting an
-// in-tx CREATE of it. What remains — in-tx DDL over an EXISTING cached
-// relation — is mid-life schema change, the documented restart
-// contract, and exactly the staleness every non-transactional caller
-// sees once such DDL commits. Keeping the read path shared is what
-// keeps the OID cache effective for its primary audience: the
-// SET LOCAL search_path schema-per-tenant flow (round-10 review #2) is
-// transactional by construction, and bypassing reads would re-read
-// metadata on every tenant aggregate.
+// entries only ever hold committed catalog state (its writers are
+// non-transactional flight leaders and the post-commit publications
+// above), and an entry can never mask a transaction's own NEW
+// relation — on PostgreSQL a just-created table has a fresh OID
+// nobody can have published; on SQLite/MySQL a key-0 entry means this
+// Store's table already aggregated over committed state, i.e. it
+// already existed, contradicting an in-tx CREATE of it. What remains —
+// in-tx DDL over an EXISTING cached relation — is mid-life schema
+// change, the documented restart contract, and exactly the staleness
+// every non-transactional caller sees once such DDL commits.
 //
 // A flight that fails with the LEADER's context error sends healthy
 // waiters back around the loop into a SECOND flight: singleflight
@@ -776,7 +780,16 @@ func (s *Store[T]) loadAggCatalog(ctx context.Context, dialect string, relOID in
 		if err != nil {
 			return nil, err
 		}
-		return aggTypesFromCols(dialect, cols), nil
+		types := aggTypesFromCols(dialect, cols)
+		// Publish only if this transaction COMMITS — the moment the view
+		// this read reflects becomes committed catalog state. A rollback
+		// drops the staged publication with the buffer; if staging is
+		// unavailable (a transactional shape without a RunInTx buffer),
+		// simply not publishing is the safe direction.
+		s.stageOnCommit(ctx, func(context.Context) {
+			s.aggCatalog.entries.LoadOrStore(relOID, types)
+		})
+		return types, nil
 	}
 	for {
 		ch := s.aggCatalog.flights.DoChan(strconv.FormatInt(relOID, 10), func() (any, error) {

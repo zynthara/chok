@@ -5,8 +5,6 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/zynthara/chok/v2/db"
-	"github.com/zynthara/chok/v2/internal/txctx"
 	"github.com/zynthara/chok/v2/kernel/event"
 )
 
@@ -114,26 +112,16 @@ func (c ChangeSnapshot) Value(field string) (any, bool) {
 }
 
 // publishChanged emits ev on the Store's bus, if any. Inside a
-// transaction the event is staged on the after-commit buffer — via the
-// operation ctx when it carries this handle's transaction (db.RunInTx
-// propagation), else via the clone's captured txCtx (Store.Tx callers
-// use their own outer ctx with the tx-bound clone) — so rollbacks drop
-// it. Outside any transaction it publishes immediately.
-//
-// The ctx branch is gated on transaction ownership for the same reason
-// effectiveDB is: a ctx carrying another handle's transaction did not
-// receive this write (it ran on our own pool, autocommitted), so its
-// buffer must not decide this event's fate — a foreign rollback would
-// drop the event of a committed write.
+// transaction the event is staged on the after-commit buffer
+// (stageOnCommit carries the ownership rules) so rollbacks drop it —
+// a foreign rollback must never drop the event of a committed write.
+// Outside any transaction it publishes immediately.
 func (s *Store[T]) publishChanged(ctx context.Context, ev EntityChanged[T]) {
 	if s.bus == nil {
 		return
 	}
 	publish := func(c context.Context) { event.Publish(c, s.bus, ev) }
-	if txctx.DB(ctx, s.h) != nil && db.AfterCommit(ctx, publish) {
-		return
-	}
-	if s.txCtx != nil && db.AfterCommit(s.txCtx, publish) {
+	if s.stageOnCommit(ctx, publish) {
 		return
 	}
 	publish(ctx)
