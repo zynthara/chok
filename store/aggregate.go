@@ -663,7 +663,7 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 	if m := s.aggCatalog.loaded.Load(); m != nil {
 		return aggColumnCatalog{dialect: dialect, types: *m}, nil
 	}
-	cols, err := s.effectiveDB(ctx).Migrator().ColumnTypes(new(T))
+	cols, err := s.readCatalogColumnTypes(ctx, dialect)
 	if err != nil {
 		// Not cached — a transient failure (table not migrated yet, a
 		// permissions gap) must not poison every future aggregate.
@@ -674,16 +674,80 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 		// The KEY (column name) is folded per dialect — SQLite/MySQL
 		// identifiers are case-insensitive, so a versioned/off migration
 		// declaring QTY must still match a model field mapped to qty (see
-		// aggCatalogKey). The VALUE (type name) is lowercased outright:
-		// DatabaseTypeName preserves the declared case on SQLite (a raw
-		// "TEXT" migration reports "TEXT") but type keywords are
-		// case-insensitive. It also omits length/precision, so
-		// "varchar(24)" arrives as "varchar" — but it KEEPS "[]" for
-		// arrays, which we reject.
-		m[aggCatalogKey(dialect, c.Name())] = strings.ToLower(c.DatabaseTypeName())
+		// aggCatalogKey). The VALUE reduces to the lowercased bare base
+		// type: pragma_table_info reports the declared spelling verbatim —
+		// case ("TEXT") AND length ("char(8)") included — while udt_name
+		// and data_type are already bare.
+		m[aggCatalogKey(dialect, c.name)] = aggBaseType(c.typ)
 	}
 	s.aggCatalog.loaded.Store(&m)
 	return aggColumnCatalog{dialect: dialect, types: m}, nil
+}
+
+// aggCatalogColumn is one catalog row: a column name and its base type.
+type aggCatalogColumn struct {
+	name string
+	typ  string
+}
+
+// aggBaseType reduces a catalog type to its lowercased base name:
+// declared length/precision is cut ("char(8)" → "char", "decimal(10,2)"
+// → "decimal") — SQLite's pragma reports the declared DDL spelling
+// verbatim — and ASCII case is folded. Anything else (multi-word
+// declarations, exotic suffixes) stays intact and simply fails the exact
+// whitelist, closed.
+func aggBaseType(typ string) string {
+	if i := strings.IndexByte(typ, '('); i >= 0 {
+		typ = typ[:i]
+	}
+	return asciiLower(strings.TrimSpace(typ))
+}
+
+// readCatalogColumnTypes reads column names and base types from PURE
+// catalog metadata — pragma_table_info on SQLite, information_schema on
+// PostgreSQL and MySQL. GORM's Migrator.ColumnTypes is deliberately NOT
+// used: its implementations sample the DATA table (SELECT * FROM
+// <table> LIMIT 1) without the store's scopes, which let the first
+// authenticated aggregate on an owned model read one arbitrary tenant's
+// row (round-8 review). Catalog tables are schema metadata, not tenant
+// data — no row-level scope applies to them, and no statement here ever
+// references the data table.
+//
+// Zero columns is an ERROR, not an empty result: these metadata queries
+// do not fail on a missing table, and caching an empty map would poison
+// every future aggregate on a store built before its migration ran.
+func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string) ([]aggCatalogColumn, error) {
+	gdb := s.effectiveDB(ctx)
+	table := s.modelSchema.Table
+	var rows []struct {
+		Name string
+		Typ  string
+	}
+	var err error
+	switch dialect {
+	case "sqlite":
+		err = gdb.Raw("SELECT name, type AS typ FROM pragma_table_info(?)", table).Scan(&rows).Error
+	case "postgres":
+		// udt_name is the base type PostgreSQL actually stores under
+		// (int8, varchar, timestamptz, ...); current_schema() resolves the
+		// same search-path head unqualified DDL created the table in.
+		err = gdb.Raw("SELECT column_name AS name, udt_name AS typ FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?", table).Scan(&rows).Error
+	case "mysql":
+		err = gdb.Raw("SELECT column_name AS name, data_type AS typ FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?", table).Scan(&rows).Error
+	default:
+		return nil, fmt.Errorf("no catalog reader for dialect %q", dialect)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("table %q reports no columns — not migrated yet?", table)
+	}
+	out := make([]aggCatalogColumn, len(rows))
+	for i, r := range rows {
+		out[i] = aggCatalogColumn{name: r.Name, typ: r.Typ}
+	}
+	return out, nil
 }
 
 // aggCatalogKey normalises a column name for catalog lookup. SQLite and

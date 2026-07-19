@@ -373,9 +373,10 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   折成同一墙钟，单进程也发生；约束排序/过滤/游标全部时间比较面，
   聚合只是继承），折叠/跨时区存量读取侧不可修复；PG timestamptz 无
   此约束。能力矩阵两半：wire kind 管 Go 收敛，**数据库真实列型**管
-  操作合法性——真实列型读自 catalog（`Migrator.ColumnTypes`，首次
-  聚合懒解析+缓存；不是 `FullDataTypeOf` 渲染的模型 DDL 型，
-  `versioned/off` 下真列可能与模型不符），按方言**精确白名单**匹配
+  操作合法性——真实列型读自 catalog **纯元数据**（pragma_table_info /
+  information_schema，首次聚合懒解析+缓存；不用 gorm `ColumnTypes`——
+  它会无 scope 采样数据表一行；也不是 `FullDataTypeOf` 渲染的模型
+  DDL 型，`versioned/off` 下真列可能与模型不符），按方言**精确白名单**匹配
   （不用子串——否则 PG 的 `interval`/`int4range` 混入整数族、
   `daterange` 混入时间族、`time`/`timetz` 当瞬间、`integer[]` 数组
   当整数）。真 `TEXT` 列上的 int64 拒收，range/interval/数组/纯时刻

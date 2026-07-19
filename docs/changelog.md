@@ -166,6 +166,22 @@
 > （scope 只跑一次）——回归用 gorm callback 计数断言未认证聚合的 DB
 > 操作数为 0、认证聚合 >0。
 >
+> **round-8 复审修正**（1M，红→绿）：round-7 只挡住了未认证路径——
+> **已认证**的首次聚合里，gorm `Migrator.ColumnTypes` 的实现会对数据表
+> 跑无 scope 的 `SELECT * FROM <table> LIMIT 1` 来嗅探列型（SQLite/
+> MySQL migrator 皆如此），等于读了任意租户的一行（值不外泄，但违反
+> 「所有读取经过 scope」边界；round-7 的操作数回归只数次数、看不出
+> SQL 形状，故漏检）。按复审首选方案改**纯元数据查询**：SQLite
+> `pragma_table_info(?)`、PG `information_schema.columns` 的
+> `udt_name`、MySQL 的 `data_type`——catalog 表是 schema 元数据非租户
+> 数据，且任何语句不再引用数据表。类型名与既有白名单兼容（udt_name/
+> data_type 正是此前 probe 到的拼法；SQLite pragma 原样带长度，补
+> `aggBaseType` 截 "(" 归一——"char(8)"→"char"）；零列改为**报错不缓存**
+> （元数据查询对缺表不报错，缓存空 map 会把先建 store 后迁移的形态
+> 永久毒化）。回归改为 **SQL 形状断言**：callback 捕获全部语句，凡引用
+> 数据表者必须带 owner 谓词（修前捕获到裸 `SELECT * FROM products
+> LIMIT 1`，红）；另 pin 缺表不毒化缓存的重试语义。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

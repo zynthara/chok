@@ -1131,6 +1131,91 @@ func TestAggregate_Round7ScopeBeforeCatalog(t *testing.T) {
 	}
 }
 
+// TestAggregate_Round8CatalogNeverSamplesDataRows is the round-8 review
+// regression: the catalog resolver used GORM's Migrator.ColumnTypes,
+// whose implementation samples the DATA table (SELECT * FROM <table>
+// LIMIT 1) without the store's scopes — the first authenticated
+// aggregate on an owned model read one arbitrary tenant's row to sniff
+// column types. Types now come from pure catalog metadata
+// (pragma_table_info / information_schema), so no statement may touch
+// the data table unless it carries the scope predicate. The assertion is
+// on SQL SHAPE, not operation counts — a count can't tell a scoped read
+// from an unscoped one.
+func TestAggregate_Round8CatalogNeverSamplesDataRows(t *testing.T) {
+	s := setupProductStore(t) // fresh OwnedModel store: catalog not yet resolved
+	seedCtx := userCtx("usr_a")
+	if err := s.Create(seedCtx, &Product{Name: "w"}); err != nil {
+		t.Fatal(err)
+	}
+
+	root := s.h.Unsafe(context.Background())
+	var mu sync.Mutex
+	var stmts []string
+	capture := func(tx *gorm.DB) {
+		mu.Lock()
+		defer mu.Unlock()
+		stmts = append(stmts, tx.Statement.SQL.String())
+	}
+	for name, reg := range map[string]func(string, func(*gorm.DB)) error{
+		"raw":   root.Callback().Raw().Register,
+		"row":   root.Callback().Row().Register,
+		"query": root.Callback().Query().Register,
+	} {
+		if err := reg("r8:"+name, capture); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// First authenticated aggregate: resolves the catalog AND runs the
+	// real query. Every captured statement that references the data table
+	// must carry the owner-scope predicate; catalog metadata queries
+	// reference pragma/information_schema instead.
+	if _, err := CountDistinct(userCtx("usr_a"), s, "name"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stmts) == 0 {
+		t.Fatal("no SQL captured; the assertion is not observing the read path")
+	}
+	sawScopedRead := false
+	for _, sql := range stmts {
+		if !strings.Contains(sql, "products") {
+			continue // catalog metadata query — never touches the data table
+		}
+		if !strings.Contains(sql, "owner_id") {
+			t.Fatalf("statement touches the data table without the owner scope: %s", sql)
+		}
+		sawScopedRead = true
+	}
+	if !sawScopedRead {
+		t.Fatal("no scoped data-table read captured; the assertion is not observing the aggregate query")
+	}
+}
+
+// TestAggregate_Round8CatalogMissTableNotPoisoned pins the retry
+// semantics the metadata reader must keep: aggregating before the table
+// exists errors loudly (zero catalog columns is an error, not a cached
+// empty map), and the SAME store recovers once the table is created.
+func TestAggregate_Round8CatalogMissTableNotPoisoned(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("scripted table lifecycle is exercised on the SQLite lane")
+	}
+	gdb := setupDB(t)
+	ctx := context.Background()
+	s := New[f1TextInt](gdb, log.Empty(), WithQueryFields("id", "qty")) // table not created
+	if _, _, err := Sum[int64](ctx, s, "qty"); err == nil {
+		t.Fatal("aggregating before the table exists must error")
+	}
+	if err := gdb.Unsafe(ctx).Exec(`CREATE TABLE f1_text_ints (id integer PRIMARY KEY AUTOINCREMENT, rid text, version integer, created_at datetime, updated_at datetime, qty INTEGER)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	// The earlier failure must not have cached an empty catalog.
+	if _, ok, err := Sum[int64](ctx, s, "qty"); err != nil || ok {
+		t.Fatalf("post-migration aggregate on the same store = ok=%v err=%v; want a clean empty-table NULL", ok, err)
+	}
+}
+
 // TestAggregate_Round4MySQLConcurrentTimeAggregates is the round-4
 // review #1 regression, still load-bearing after round-5 moved type
 // resolution to the catalog: concurrent first-time aggregates must not

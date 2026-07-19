@@ -479,9 +479,12 @@ for _, g := range groups {
 **列类型规则**（复用游标的 schema wire-kind 探针，serializer /
 `driver.Valuer` 字段按 wire 类型判定）。能力矩阵有两半：**wire kind
 管 Go 结果收敛，数据库真实列型管操作是否合法**——真实列型读自
-**catalog**（`Migrator.ColumnTypes`，首次聚合时懒解析并缓存；不是
-`FullDataTypeOf` 渲染的「模型将建成什么」——`migrate: versioned/off`
-下真列可能与模型不符），按方言用**精确白名单**匹配（不用子串——
+**catalog 纯元数据**（SQLite `pragma_table_info` / PG·MySQL
+`information_schema`，首次聚合时懒解析并缓存；**绝不采样数据表**——
+gorm 的 `ColumnTypes` 会跑无 scope 的 `SELECT * ... LIMIT 1`，刻意
+不用；也不是 `FullDataTypeOf` 渲染的「模型将建成什么」——
+`migrate: versioned/off` 下真列可能与模型不符），按方言用
+**精确白名单**匹配（不用子串——
 子串会把 PG 的 `interval`/`int4range` 当整数、`daterange` 当时间、
 `time`/`timetz` 当瞬间、`integer[]` 数组当整数）。`int64` 字段配
 真实 `TEXT` 列这类错配在入口 fail-closed（否则 SQLite 按文本字典序
