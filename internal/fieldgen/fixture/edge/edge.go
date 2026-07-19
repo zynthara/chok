@@ -74,6 +74,36 @@ type Chest struct {
 // Value is deliberately NOT driver.Valuer — it shadows Coin's.
 func (Chest) Value() (int, error) { return 0, nil }
 
+// LeftPocket and RightPocket each embed the same Valuer, giving
+// Satchel two same-depth paths to Coin.Value.
+type LeftPocket struct{ Coin }
+
+// RightPocket mirrors LeftPocket for the diamond.
+type RightPocket struct{ Coin }
+
+// Satchel reaches Coin.Value through BOTH pockets at depth two: the
+// promoted selector is ambiguous, so Satchel implements nothing and
+// stays a relation — each embedding path counts separately, they must
+// not be deduplicated into one promotion (review round-5).
+type Satchel struct {
+	ID uint
+	LeftPocket
+	RightPocket
+}
+
+// PV aliases the POINTER to driver.Value: not the interface's result
+// type, so a Value method returning it is NOT driver.Valuer — the
+// constructor must survive alias resolution (review round-5).
+type PV = *driver.Value
+
+// Parcel carries the pointer-aliased signature.
+type Parcel struct {
+	ID uint
+}
+
+// Value is deliberately NOT driver.Valuer — it returns *driver.Value.
+func (Parcel) Value() (PV, error) { return nil, nil }
+
 // Contact carries store tags on relation fields: GORM parses Profile
 // (a plain struct) and Badge (a struct whose Value method has the
 // wrong signature) with empty DBNames, so the runtime whitelist never
@@ -91,6 +121,10 @@ type Contact struct {
 	Purse     Purse   `json:"purse" store:"query"`
 	ChestID   uint    `json:"chest_id" store:"query"`
 	Chest     Chest   `json:"chest" store:"query"`
+	SatchelID uint    `json:"satchel_id" store:"query"`
+	Satchel   Satchel `json:"satchel" store:"query"`
+	ParcelID  uint    `json:"parcel_id" store:"query"`
+	Parcel    Parcel  `json:"parcel" store:"query"`
 	Note      string  `json:"note" store:"query,update" gorm:"size:64"`
 }
 

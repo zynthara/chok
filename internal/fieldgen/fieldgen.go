@@ -279,7 +279,7 @@ func Scan(dir string) (*Package, error) {
 	// Pass 1.5: resolve methods. Receivers written as aliases attach to
 	// the aliased type; signature types resolve through alias chains.
 	for _, m := range rawMethods {
-		recv := sc.aliasTerminal(m.recv)
+		recv := sc.aliasTerminal(m.recv).name
 		state := methodState{}
 		switch m.decl.Name.Name {
 		case "Value":
@@ -420,7 +420,11 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 			if !ast.IsExported(fieldName) {
 				continue
 			}
-			verdict, why := sc.classifyAnonymous(typ, gormSettings, imports)
+			// Classification sees the ORIGINAL expression — generic
+			// arguments intact (review round-5: an embedded Bytes[byte]
+			// IS a bytes column); the unwrapped form serves only the
+			// name/base/promotion duties above.
+			verdict, why := sc.classifyAnonymous(f.Type, gormSettings, imports)
 			switch verdict {
 			case colYes:
 				// Column-shaped embed: a field under the type's name.
@@ -790,15 +794,12 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 		return colUnknown, ""
 	case *ast.ArrayType:
 		// GORM maps both slices AND fixed arrays of byte to a bytes
-		// column (review round-3); the element must be the predeclared
-		// byte type — a defined byte type loses the identity.
-		elem := t.Elt
-		if elemIdent, ok := elem.(*ast.Ident); ok {
-			if b, bound := env[elemIdent.Name]; bound {
-				elem = b.expr
-			}
-		}
-		if elemIdent, ok := elem.(*ast.Ident); ok && (elemIdent.Name == "byte" || elemIdent.Name == "uint8") {
+		// column (review round-3); the element must be IDENTICAL to the
+		// predeclared byte type — reflect matches uint8 by type identity
+		// (schema/field.go ByteReflectType), which generic substitution
+		// and local alias chains preserve (review round-5) and a defined
+		// byte type does not.
+		if sc.isByteIdent(t.Elt, env) {
 			return colYes, ""
 		}
 		return colNo, "a slice or array (a relation, or unsupported without a serializer)"
@@ -808,6 +809,38 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 		return colNo, "not a scalar type (no column without a serializer)"
 	default:
 		return colUnknown, ""
+	}
+}
+
+// isByteIdent reports whether an element expression denotes the
+// predeclared byte/uint8 type IDENTICALLY: spelled directly, through
+// the generic environment, or through local alias chains — the three
+// constructs reflect sees straight through. A defined byte type is a
+// different type and stays rejected, as does a local declaration
+// shadowing the predeclared names.
+func (sc *scanner) isByteIdent(elem ast.Expr, env map[string]binding) bool {
+	seen := map[string]bool{}
+	for {
+		ident, ok := elem.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		if b, bound := env[ident.Name]; bound {
+			elem, env = b.expr, nil // the argument was written at the instantiation site
+			continue
+		}
+		if seen[ident.Name] {
+			return false // alias cycle: broken code
+		}
+		seen[ident.Name] = true
+		if info, local := sc.types[ident.Name]; local {
+			if !info.isAlias || len(info.typeParams) > 0 {
+				return false // a defined type never keeps the predeclared identity
+			}
+			elem = info.decl
+			continue
+		}
+		return ident.Name == "byte" || ident.Name == "uint8"
 	}
 }
 
@@ -870,43 +903,97 @@ const (
 	methodUnsure
 )
 
+// embedEntry is one node of the promotion BFS: a local type name (or
+// the known-valuer sentinel) at the current depth. multiples records
+// that the node is reachable through two or more embedding paths at
+// this same depth — Go then counts every member it contributes at
+// least twice, ambiguous on its own (review round-5, the diamond).
+type embedEntry struct {
+	name      string
+	multiples bool
+}
+
+// consolidateLevel merges duplicate entries of one BFS depth into a
+// single entry with multiples set — same-depth path multiplicity is
+// what Go's ambiguity rule counts, so it must survive deduplication
+// (mirrors go/types lookupFieldOrMethod's consolidateMultiples).
+// Entries stay in first-appearance order.
+func consolidateLevel(entries []embedEntry) []embedEntry {
+	if len(entries) < 2 {
+		return entries
+	}
+	idx := make(map[string]int, len(entries))
+	out := make([]embedEntry, 0, len(entries))
+	for _, e := range entries {
+		if i, ok := idx[e.name]; ok {
+			out[i].multiples = true
+			continue
+		}
+		idx[e.name] = len(out)
+		out = append(out, e)
+	}
+	return out
+}
+
 // resolveColumnMethod resolves member ("Value" or "GormDataType")
 // against a local type under Go's REAL selector rules (review round-4):
 // the shallowest depth with any same-named field or method wins, and it
 // must be exactly one exact-signature method — ambiguity at a depth, a
 // wrong-signature method, or a mere field shadowing a deeper method all
 // mean the interface is NOT implemented, which is exactly what GORM's
-// type assertion sees.
+// type assertion sees. The walk is breadth-first with same-depth path
+// multiplicity kept (review round-5): one type reached through two
+// embedding paths at a depth contributes its members twice, and a
+// deeper occurrence of an already-seen type loses to the shallower one.
 func (sc *scanner) resolveColumnMethod(typeName, member string) (methodVerdict, methodState) {
-	level := []string{sc.aliasTerminal(typeName)}
+	root := sc.aliasTerminal(typeName)
+	if root.sel != nil {
+		// The local name denotes a cross-package type outright — the
+		// same rules as the selector written in place (review round-5).
+		if selectorIsKnownValuer(root.sel, root.imports) {
+			if member == "Value" {
+				return methodYes, methodState{exact: true}
+			}
+			return methodNo, methodState{} // GormDataType unmodeled — Value already proves the column
+		}
+		if isTimeTime(root.sel, root.imports) {
+			return methodNo, methodState{} // no such members; shape rules own time.Time
+		}
+		return methodUnsure, methodState{} // opaque cross-package identity
+	}
+	level := []embedEntry{{name: root.name}}
 	seen := map[string]bool{}
 	for len(level) > 0 {
 		var (
 			candidates int
 			exactState methodState
 			exactHits  int
-			next       []string
+			next       []embedEntry
 			tainted    bool
 		)
-		for _, name := range level {
-			if name == knownValuerNode {
-				candidates++
-				exactHits++
+		for _, e := range level {
+			weight := 1
+			if e.multiples {
+				weight = 2
+			}
+			if e.name == knownValuerNode {
+				candidates += weight
+				exactHits += weight
 				exactState = methodState{exact: true}
 				continue
 			}
-			if seen[name] {
-				continue
+			if seen[e.name] {
+				continue // reached at a shallower depth — that occurrence wins
 			}
-			seen[name] = true
-			if st, ok := sc.methods[name][member]; ok {
-				candidates++
+			seen[e.name] = true
+			if st, ok := sc.methods[e.name][member]; ok {
+				candidates += weight
 				if st.exact {
-					exactHits++
+					exactHits += weight
 					exactState = st
 				}
 			}
-			st, stImports := sc.underlyingStructWithImports(name, map[string]bool{})
+			st, stImports := sc.underlyingStructWithImports(e.name, map[string]bool{})
 			if st == nil {
 				continue
 			}
@@ -914,23 +1001,40 @@ func (sc *scanner) resolveColumnMethod(typeName, member string) (methodVerdict, 
 				if len(f.Names) > 0 {
 					for _, ident := range f.Names {
 						if ident.Name == member {
-							candidates++ // a field shadows any deeper method
+							candidates += weight // a field shadows any deeper method
 						}
 					}
 					continue
 				}
 				embedName := embedFieldName(unwrapType(f.Type))
 				if embedName == member {
-					candidates++ // the embedded field's own name shadows too
+					candidates += weight // the embedded field's own name shadows too
 					continue
 				}
 				switch t := unwrapType(f.Type).(type) {
 				case *ast.Ident:
-					if _, local := sc.types[t.Name]; local {
-						next = append(next, sc.aliasTerminal(t.Name))
+					if _, local := sc.types[t.Name]; !local {
+						// Undeclared identifier: broken code, invisible.
+						tainted = true
 						continue
 					}
-					// Undeclared identifier: broken code, invisible.
+					term := sc.aliasTerminal(t.Name)
+					if term.sel == nil {
+						next = append(next, embedEntry{name: term.name, multiples: e.multiples})
+						continue
+					}
+					// A local alias denoting a cross-package type embeds
+					// that type itself (review round-5) — resolve it
+					// exactly like the selector written directly.
+					if selectorIsKnownValuer(term.sel, term.imports) {
+						if member == "Value" {
+							next = append(next, embedEntry{name: knownValuerNode, multiples: e.multiples})
+						}
+						continue
+					}
+					if isTimeTime(term.sel, term.imports) {
+						continue
+					}
 					tainted = true
 				case *ast.SelectorExpr:
 					if selectorIsKnownValuer(t, stImports) {
@@ -939,7 +1043,7 @@ func (sc *scanner) resolveColumnMethod(typeName, member string) (methodVerdict, 
 						// GormDataType surface is not modeled — the
 						// Value promotion already proves the column.
 						if member == "Value" {
-							next = append(next, knownValuerNode)
+							next = append(next, embedEntry{name: knownValuerNode, multiples: e.multiples})
 						}
 						continue
 					}
@@ -960,7 +1064,7 @@ func (sc *scanner) resolveColumnMethod(typeName, member string) (methodVerdict, 
 		case tainted:
 			return methodUnsure, methodState{}
 		}
-		level = next
+		level = consolidateLevel(next)
 	}
 	return methodNo, methodState{}
 }
@@ -969,27 +1073,42 @@ func (sc *scanner) resolveColumnMethod(typeName, member string) (methodVerdict, 
 // driver.Valuer embed: one exact Value method, nothing else.
 const knownValuerNode = "\x00known-valuer"
 
-// aliasTerminal follows local alias chains (`type A = B`) to the name
-// they denote; methods declared with an alias receiver attach there.
-func (sc *scanner) aliasTerminal(name string) string {
+// aliasTerm is where a local alias chain lands: a local (non-alias)
+// type name — or, when the chain leaves the package, the cross-package
+// selector it denotes plus the imports of the file that declared the
+// final alias (review round-5: `type Null = sql.NullString` embeds
+// sql.NullString itself, so its promotions must apply).
+type aliasTerm struct {
+	name    string
+	sel     *ast.SelectorExpr
+	imports map[string]string
+}
+
+// aliasTerminal follows local alias chains (`type A = B`) to what they
+// denote; methods declared with an alias receiver attach to the
+// terminal local name.
+func (sc *scanner) aliasTerminal(name string) aliasTerm {
 	seen := map[string]bool{}
 	for {
 		if seen[name] {
-			return name
+			return aliasTerm{name: name}
 		}
 		seen[name] = true
 		info, ok := sc.types[name]
 		if !ok || !info.isAlias {
-			return name
+			return aliasTerm{name: name}
 		}
-		ident, ok := unwrapType(info.decl).(*ast.Ident)
-		if !ok {
-			return name
+		switch t := unwrapType(info.decl).(type) {
+		case *ast.Ident:
+			if _, local := sc.types[t.Name]; !local {
+				return aliasTerm{name: name}
+			}
+			name = t.Name
+		case *ast.SelectorExpr:
+			return aliasTerm{name: name, sel: t, imports: info.imports}
+		default:
+			return aliasTerm{name: name}
 		}
-		if _, local := sc.types[ident.Name]; !local {
-			return name
-		}
-		name = ident.Name
 	}
 }
 
@@ -1202,7 +1321,10 @@ func resultTypes(ft *ast.FuncType) []ast.Expr {
 // construct that preserves type identity — so signature types written
 // through aliases (review round-4: `type DV = driver.Value`) resolve to
 // what they denote. Defined types stop the chase: `type DV
-// driver.Value` is a different type and must not match.
+// driver.Value` is a different type and must not match. The denoted
+// expression is kept WHOLE — an alias to *driver.Value or to a generic
+// instantiation is that constructed type, not its base, and stripping
+// the constructor minted false Valuers (review round-5).
 func (sc *scanner) resolveAliasedType(typ ast.Expr, imports map[string]string, seen map[string]bool) (ast.Expr, map[string]string) {
 	ident, ok := typ.(*ast.Ident)
 	if !ok {
@@ -1213,7 +1335,7 @@ func (sc *scanner) resolveAliasedType(typ ast.Expr, imports map[string]string, s
 		return typ, imports
 	}
 	seen[ident.Name] = true
-	return sc.resolveAliasedType(unwrapType(info.decl), info.imports, seen)
+	return sc.resolveAliasedType(info.decl, info.imports, seen)
 }
 
 // isValuerMethod matches driver.Valuer exactly: `func (T) Value()

@@ -62,6 +62,7 @@ var ShadowIDFields = struct {
 var WalletFields = struct {
 	Money   string // faces: query
 	Clock   string // faces: query
+	Bytes   string // faces: query
 	Flags   string // faces: query, update
 	Box     string // faces: query
 	Seal    string // faces: query
@@ -69,6 +70,10 @@ var WalletFields = struct {
 	Meta    string // faces: query
 	Locker  string // faces: query
 	Payload string // faces: query
+	Vault   string // faces: query
+	Strip   string // faces: query
+	Slab    string // faces: query
+	Packed  string // faces: query
 
 	ID        string // base model, query-only (resolves to the rid column)
 	CreatedAt string // base model, query-only
@@ -76,6 +81,7 @@ var WalletFields = struct {
 }{
 	Money:   "money",
 	Clock:   "clock",
+	Bytes:   "chunk",
 	Flags:   "flags",
 	Box:     "box",
 	Seal:    "seal",
@@ -83,6 +89,10 @@ var WalletFields = struct {
 	Meta:    "meta",
 	Locker:  "locker",
 	Payload: "payload",
+	Vault:   "vault",
+	Strip:   "strip",
+	Slab:    "slab",
+	Packed:  "packed",
 
 	ID:        "id",
 	CreatedAt: "created_at",

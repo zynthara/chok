@@ -67,6 +67,8 @@ func TestScanAndRender_EdgeFixtureGolden(t *testing.T) {
 		"Contact.Sticker: `store` tag ignored", // defined type over a Valuer loses the method set (round-3)
 		"Contact.Purse: `store` tag ignored",   // same-depth Value ambiguity = no Valuer (round-4)
 		"Contact.Chest: `store` tag ignored",   // shallow wrong-sig Value shadows the promoted one (round-4)
+		"Contact.Satchel: `store` tag ignored", // two same-depth PATHS to one Valuer = ambiguous too (round-5)
+		"Contact.Parcel: `store` tag ignored",  // alias to *driver.Value keeps the pointer = not a Valuer (round-5)
 		"Parent.Children: `store` tag ignored", // defined slice = has-many relation (round-2)
 		"Event: embedded AuditBase carries",    // whole surface promoted — no silent vanishing
 		"Entry: embedded Extra carries",        // named gorm-embedded promotion
@@ -171,6 +173,7 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 	assertFields(t, pkg.Models[2], map[string]face{
 		"Money":     {value: "money", query: true},                  // anonymous driver.Valuer embed = a column
 		"Clock":     {value: "clock", query: true},                  // anonymous GormDataType "time" = exempt = a column (round-4)
+		"Bytes":     {value: "chunk", query: true},                  // anonymous generic instantiation = bytes column (round-5)
 		"Flags":     {value: "flags", query: true, update: true},    // named GormDataType struct = a column
 		"Box":       {value: "box", query: true},                    // embed-promoted Valuer = a column (round-3)
 		"Seal":      {value: "seal", query: true},                   // defined time.Time = convertible = a column (round-3)
@@ -178,6 +181,10 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 		"Meta":      {value: "meta", query: true},                   // gorm:"json" serializer shorthand (round-3)
 		"Locker":    {value: "locker", query: true},                 // alias-signature Valuer (round-4)
 		"Payload":   {value: "payload", query: true},                // Bytes[byte] generic instantiation (round-4)
+		"Vault":     {value: "vault", query: true},                  // alias-embedded cross-package Valuer (round-5)
+		"Strip":     {value: "strip", query: true},                  // defined slice over a byte alias (round-5)
+		"Slab":      {value: "slab", query: true},                   // []Byte alias element (round-5)
+		"Packed":    {value: "packed", query: true},                 // generic instantiated with the byte alias (round-5)
 		"ID":        {value: "id", query: true, base: true},         //
 		"CreatedAt": {value: "created_at", query: true, base: true}, //
 		"UpdatedAt": {value: "updated_at", query: true, base: true}, //
@@ -1356,5 +1363,399 @@ func TestScan_MixedPackagesFailLoud(t *testing.T) {
 	writeGo(t, dir, "b.go", "package b\n")
 	if _, err := Scan(dir); err == nil {
 		t.Fatal("mixed package clauses in one directory must error")
+	}
+}
+
+// TestScan_Round5DiamondPathMultiplicity is review round-5 finding 1:
+// the same Valuer reached through TWO embedding paths at one depth is
+// ambiguous under Go's selector rules — the runtime type assertion
+// fails, so the field is a relation. The BFS must count same-depth path
+// multiplicity instead of deduplicating the shared type; a single-path
+// chain of the same depth stays promoted, and two paths to a KNOWN
+// cross-package Valuer are ambiguous the same way.
+func TestScan_Round5DiamondPathMultiplicity(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql"
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Money struct {
+	ID    uint
+	Cents int64
+}
+
+func (m Money) Value() (driver.Value, error) { return m.Cents, nil }
+
+type Left struct{ Money }
+
+type Right struct{ Money }
+
+type Diamond struct {
+	ID uint
+	Left
+	Right
+}
+
+type NullLeft struct{ sql.NullString }
+
+type NullRight struct{ sql.NullString }
+
+type NullDiamond struct {
+	ID uint
+	NullLeft
+	NullRight
+}
+
+type Deep struct{ Left }
+
+type Post struct {
+	db.Model
+	DiamondID     uint        `+"`json:\"diamond_id\" store:\"query\"`"+`
+	Diamond       Diamond     `+"`json:\"diamond\" store:\"query\"`"+`
+	NullDiamondID uint        `+"`json:\"null_diamond_id\" store:\"query\"`"+`
+	NullDiamond   NullDiamond `+"`json:\"null_diamond\" store:\"query\"`"+`
+	Deep          Deep        `+"`json:\"deep\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Post" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	for _, absent := range []string{"Diamond", "NullDiamond"} {
+		if got[absent] {
+			t.Errorf("%s must be a relation — two same-depth paths to Value are ambiguous, got %v", absent, got)
+		}
+	}
+	// One path at depth three: Deep→Left→Money.Value promotes fine.
+	if !got["Deep"] || !got["DiamondID"] || !got["NullDiamondID"] {
+		t.Errorf("single-path promotion and FK columns must survive, got %v", got)
+	}
+	for _, wantWarn := range []string{"Post.Diamond:", "Post.NullDiamond:"} {
+		var warned bool
+		for _, w := range pkg.Warnings {
+			warned = warned || strings.Contains(w, wantWarn)
+		}
+		if !warned {
+			t.Errorf("the ambiguous diamond %s must warn as a skipped relation, got %q", wantWarn, pkg.Warnings)
+		}
+	}
+}
+
+// TestScan_Round5AliasSignatureConstructors is review round-5 finding
+// 2: alias resolution in signatures must keep the type constructor —
+// an alias to *driver.Value (or *string) denotes the POINTER type, so
+// a method returning it does not implement the interface and the type
+// stays a relation. The plain alias chain keeps matching.
+func TestScan_Round5AliasSignatureConstructors(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type PV = *driver.Value
+
+type Parcel struct{ ID uint }
+
+func (Parcel) Value() (PV, error) { return nil, nil }
+
+type PS = *string
+
+type Gauge struct{ ID uint }
+
+func (Gauge) GormDataType() PS { return nil }
+
+type DV = driver.Value
+
+type DV2 = DV
+
+type Sealed struct{ S string }
+
+func (s Sealed) Value() (DV2, error) { return s.S, nil }
+
+type Post struct {
+	db.Model
+	ParcelID uint   `+"`json:\"parcel_id\" store:\"query\"`"+`
+	Parcel   Parcel `+"`json:\"parcel\" store:\"query\"`"+`
+	GaugeID  uint   `+"`json:\"gauge_id\" store:\"query\"`"+`
+	Gauge    Gauge  `+"`json:\"gauge\" store:\"query\"`"+`
+	Locker   Sealed `+"`json:\"locker\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Post" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	for _, absent := range []string{"Parcel", "Gauge"} {
+		if got[absent] {
+			t.Errorf("%s must be a relation — the aliased pointer result is not the interface signature, got %v", absent, got)
+		}
+	}
+	if !got["Locker"] {
+		t.Errorf("the constructor-free alias chain must still prove driver.Valuer, got %v", got)
+	}
+	for _, wantWarn := range []string{"Post.Parcel:", "Post.Gauge:"} {
+		var warned bool
+		for _, w := range pkg.Warnings {
+			warned = warned || strings.Contains(w, wantWarn)
+		}
+		if !warned {
+			t.Errorf("the false implementer %s must warn as a skipped relation, got %q", wantWarn, pkg.Warnings)
+		}
+	}
+}
+
+// TestScan_Round5AliasToSelectorTerminals is review round-5 finding 3:
+// a local alias denoting a cross-package type embeds that type itself.
+// A known Valuer target promotes Value (the embedder IS a column), a
+// time.Time target stays invisible to method resolution without taint,
+// and an UNKNOWN target taints — silently calling the embedder a
+// relation would be a guess.
+func TestScan_Round5AliasToSelectorTerminals(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql"
+	"time"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Null = sql.NullString
+
+type Box struct{ Null }
+
+type When = time.Time
+
+type Slot struct{ When }
+
+type Post struct {
+	db.Model
+	Null   `+"`json:\"tag\" store:\"query\"`"+`
+	Box    Box  `+"`json:\"box\" store:\"query\"`"+`
+	SlotID uint `+"`json:\"slot_id\" store:\"query\"`"+`
+	Slot   Slot `+"`json:\"slot\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Post" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	// Box promotes NullString.Value through the alias embed; the model's
+	// own anonymous alias embed is a column under the alias name.
+	if !got["Box"] || !got["Null"] {
+		t.Errorf("alias-to-known-Valuer embeds must prove columns, got %v", got)
+	}
+	if got["Slot"] {
+		t.Errorf("Slot promotes nothing from time.Time — a plain struct relation, got %v", got)
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		warned = warned || strings.Contains(w, "Post.Slot:")
+	}
+	if !warned {
+		t.Fatalf("Slot must warn as a skipped relation (not fail loud — time.Time cannot shadow), got %q", pkg.Warnings)
+	}
+}
+
+// TestScan_Round5AliasToUnknownSelectorFailsLoud is the taint half of
+// round-5 finding 3: an alias to an unclassifiable cross-package type
+// could promote anything, so a tagged field over the embedder must
+// fail loud exactly like the selector embedded directly (round-4).
+func TestScan_Round5AliasToUnknownSelectorFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"example.com/other"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Ext = other.Thing
+
+type Crate struct{ Ext }
+
+type Post struct {
+	db.Model
+	Crate Crate `+"`json:\"crate\" store:\"query\"`"+`
+}
+`)
+	_, err := Scan(dir)
+	if err == nil || !strings.Contains(err.Error(), "cannot statically decide") {
+		t.Fatalf("the opaque alias embed must fail loud, got %v", err)
+	}
+}
+
+// TestScan_Round5ByteIdentity is review round-5 finding 4: GORM matches
+// the element type against uint8 by REFLECT IDENTITY, which local alias
+// chains and generic substitution preserve — []Byte, [4]Chain and
+// Bytes[Byte] are bytes columns. Defined byte types and pointer
+// aliases stay rejected.
+func TestScan_Round5ByteIdentity(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Byte = byte
+
+type Chain = Byte
+
+type Token []Byte
+
+type Bytes[T any] []T
+
+type Defined byte
+
+type PB = *byte
+
+type Blob struct {
+	db.Model
+	Token  Token          `+"`json:\"token\" store:\"query\"`"+`
+	Raw    []Byte         `+"`json:\"raw\" store:\"query\"`"+`
+	Arr    [4]Chain       `+"`json:\"arr\" store:\"query\"`"+`
+	Packed Bytes[Byte]    `+"`json:\"packed\" store:\"query\"`"+`
+	Bad    []Defined      `+"`json:\"bad\" store:\"query\"`"+`
+	Worse  Bytes[Defined] `+"`json:\"worse\" store:\"query\"`"+`
+	Ptr    []PB           `+"`json:\"ptr\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Blob" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	for _, want := range []string{"Token", "Raw", "Arr", "Packed"} {
+		if !got[want] {
+			t.Errorf("%s rides alias chains to the predeclared byte — a bytes column, got %v", want, got)
+		}
+	}
+	for _, absent := range []string{"Bad", "Worse", "Ptr"} {
+		if got[absent] {
+			t.Errorf("%s must stay rejected — its element is not identical to uint8, got %v", absent, got)
+		}
+	}
+	for _, wantWarn := range []string{"Blob.Bad:", "Blob.Worse:", "Blob.Ptr:"} {
+		var warned bool
+		for _, w := range pkg.Warnings {
+			warned = warned || strings.Contains(w, wantWarn)
+		}
+		if !warned {
+			t.Errorf("the rejected element shape %s must warn, got %q", wantWarn, pkg.Warnings)
+		}
+	}
+}
+
+// TestScan_Round5AnonymousGenericInstantiation is review round-5
+// finding 5: an anonymously embedded generic INSTANTIATION keeps its
+// arguments for classification — Bytes[byte] is a bytes column under
+// the type's base name, not a bare generic error. A generic STRUCT
+// instantiation still expands as an embed like any struct.
+func TestScan_Round5AnonymousGenericInstantiation(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Byte = byte
+
+type Bytes[T any] []T
+
+type Pair[T any] struct{ A, B T }
+
+type Doc struct {
+	db.Model
+	Bytes[byte] `+"`json:\"payload\" store:\"query\"`"+`
+	Pair[int]   `+"`json:\"pair\" store:\"query\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+
+type Doc2 struct {
+	db.Model
+	Bytes[Byte] `+"`json:\"chunk\" store:\"query\"`"+`
+	Note string `+"`json:\"note\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]map[string]string{}
+	for _, m := range pkg.Models {
+		fields[m.Name] = map[string]string{}
+		for _, f := range m.Fields {
+			if !f.Base {
+				fields[m.Name][f.GoName] = f.Value
+			}
+		}
+	}
+	if fields["Doc"]["Bytes"] != "payload" {
+		t.Errorf("the embedded instantiation must be a column under the base name, got %v", fields["Doc"])
+	}
+	if fields["Doc2"]["Bytes"] != "chunk" {
+		t.Errorf("an aliased byte argument classifies the same way, got %v", fields["Doc2"])
+	}
+	if _, ok := fields["Doc"]["Pair"]; ok {
+		t.Errorf("a generic struct instantiation still expands as an embed, got %v", fields["Doc"])
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		warned = warned || strings.Contains(w, "Doc.Pair:")
+	}
+	if !warned {
+		t.Fatalf("the dead tag on the expanding struct embed must warn, got %q", pkg.Warnings)
 	}
 }

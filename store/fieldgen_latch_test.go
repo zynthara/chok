@@ -214,8 +214,10 @@ func TestFieldGen_SemanticLatch_EdgeShapes(t *testing.T) {
 	assertLatch(t, scanFixtureDir(t, edgeFixtureDir, "Contact"), contacts.queryFieldMap, contacts.updateFieldMap)
 	// profile: plain struct; badge: wrong-sig Value; sticker: defined
 	// type sheds the method set; purse: same-depth ambiguity; chest:
-	// shallow wrong-sig shadows the promoted exact one (round-4).
-	for _, relation := range []string{"profile", "badge", "sticker", "purse", "chest"} {
+	// shallow wrong-sig shadows the promoted exact one (round-4);
+	// satchel: two same-depth PATHS to one Valuer are just as ambiguous;
+	// parcel: an alias to *driver.Value keeps the pointer (round-5).
+	for _, relation := range []string{"profile", "badge", "sticker", "purse", "chest", "satchel", "parcel"} {
 		if _, err := where.ResolveField(contacts.queryFieldMap, relation); err == nil {
 			t.Errorf("relation key %q must not exist in the runtime query map either", relation)
 		}
@@ -364,6 +366,11 @@ func TestFieldGen_SemanticLatch_CompiledSymbols(t *testing.T) {
 		{"Wallet gdt-time clock/query", wallets.queryFieldMap, fixture.WalletFields.Clock},
 		{"Wallet alias-sig locker/query", wallets.queryFieldMap, fixture.WalletFields.Locker},
 		{"Wallet generic payload/query", wallets.queryFieldMap, fixture.WalletFields.Payload},
+		{"Wallet anonymous generic chunk/query", wallets.queryFieldMap, fixture.WalletFields.Bytes},
+		{"Wallet alias-embedded valuer vault/query", wallets.queryFieldMap, fixture.WalletFields.Vault},
+		{"Wallet defined alias-elem slice strip/query", wallets.queryFieldMap, fixture.WalletFields.Strip},
+		{"Wallet alias-elem slice slab/query", wallets.queryFieldMap, fixture.WalletFields.Slab},
+		{"Wallet alias-instantiated generic packed/query", wallets.queryFieldMap, fixture.WalletFields.Packed},
 	} {
 		if _, err := where.ResolveField(tc.fm, tc.value); err != nil {
 			t.Errorf("%s: compiled constant %q rejected by the runtime map: %v", tc.name, tc.value, err)
