@@ -62,6 +62,10 @@ var ShadowIDFields = struct {
 var WalletFields = struct {
 	Money string // faces: query
 	Flags string // faces: query, update
+	Box   string // faces: query
+	Seal  string // faces: query
+	Token string // faces: query
+	Meta  string // faces: query
 
 	ID        string // base model, query-only (resolves to the rid column)
 	CreatedAt string // base model, query-only
@@ -69,6 +73,10 @@ var WalletFields = struct {
 }{
 	Money: "money",
 	Flags: "flags",
+	Box:   "box",
+	Seal:  "seal",
+	Token: "token",
+	Meta:  "meta",
 
 	ID:        "id",
 	CreatedAt: "created_at",

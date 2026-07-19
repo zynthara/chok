@@ -140,6 +140,7 @@ func isKnownColumnType(importPath, name string) bool {
 // typeInfo is the pass-1 index entry for a package-local type.
 type typeInfo struct {
 	decl     ast.Expr // the TypeSpec's type expression — the underlying shape
+	isAlias  bool     // `type A = B`: full identity, methods included
 	exported bool
 	imports  map[string]string // the declaring file's imports, for resolving decl
 }
@@ -231,7 +232,7 @@ func Scan(dir string) (*Package, error) {
 						}
 					case *ast.TypeSpec:
 						topLevel[s.Name.Name] = true
-						sc.types[s.Name.Name] = typeInfo{decl: s.Type, exported: s.Name.IsExported(), imports: imports}
+						sc.types[s.Name.Name] = typeInfo{decl: s.Type, isAlias: s.Assign.IsValid(), exported: s.Name.IsExported(), imports: imports}
 					}
 				}
 			}
@@ -362,7 +363,7 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 			if !ast.IsExported(fieldName) {
 				continue
 			}
-			verdict, why := sc.classifyColumn(typ, gormSettings, imports)
+			verdict, why := sc.classifyAnonymous(typ, gormSettings, imports)
 			switch verdict {
 			case colYes:
 				// Column-shaped embed: a field under the type's name.
@@ -502,25 +503,31 @@ func (sc *scanner) promotionWarn(model, fieldLabel string, typ ast.Expr, anonymo
 		"%s: embedded %s carries `store` tags the runtime will promote but the generator cannot see — lift the tags onto %s, or expect these references to be missing", model, fieldLabel, model)}
 }
 
-// underlyingStruct resolves a local type name through defined-type
-// chains (`type B A`) to its struct declaration, when the underlying
-// shape is one.
-func (sc *scanner) underlyingStruct(name string, seen map[string]bool) *ast.StructType {
+// underlyingStructWithImports resolves a local type name through type
+// chains (`type B A`, aliases included — shape survives both) to its
+// struct declaration and that declaration's file imports, when the
+// underlying shape is a struct.
+func (sc *scanner) underlyingStructWithImports(name string, seen map[string]bool) (*ast.StructType, map[string]string) {
 	if seen[name] {
-		return nil
+		return nil, nil
 	}
 	seen[name] = true
 	info, ok := sc.types[name]
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	switch t := unwrapType(info.decl).(type) {
 	case *ast.StructType:
-		return t
+		return t, info.imports
 	case *ast.Ident:
-		return sc.underlyingStruct(t.Name, seen)
+		return sc.underlyingStructWithImports(t.Name, seen)
 	}
-	return nil
+	return nil, nil
+}
+
+func (sc *scanner) underlyingStruct(name string, seen map[string]bool) *ast.StructType {
+	st, _ := sc.underlyingStructWithImports(name, seen)
+	return st
 }
 
 // transitivelyTagged reports whether a local struct-shaped type carries
@@ -588,49 +595,70 @@ const (
 	colUnknown
 )
 
-// classifyColumn is the syntactic mirror of "does GORM give this field
-// a DBName": explicit gorm type/serializer settings prove a column for
-// any Go type; everything else is decided by the type's shape.
+// classifyColumn is the syntactic mirror of "does GORM give this NAMED
+// field a DBName": explicit gorm type/serializer settings (including
+// the `gorm:"json"` serializer shorthand) prove a column for any Go
+// type; everything else is decided by the type's method set and shape.
+// Anonymous fields must go through classifyAnonymous instead — GORM's
+// embed rule ignores these proofs for struct shapes.
 func (sc *scanner) classifyColumn(typ ast.Expr, gormSettings map[string]string, imports map[string]string) (colVerdict, string) {
-	if gormSettings["TYPE"] != "" || gormSettings["SERIALIZER"] != "" {
+	if gormSettings["TYPE"] != "" || gormSettings["SERIALIZER"] != "" || gormSettings["JSON"] != "" {
 		return colYes, "" // explicit column proof, any type goes
 	}
-	return sc.classifyType(typ, imports, map[string]bool{})
+	return sc.classifyType(typ, imports)
 }
 
-// classifyType decides column-ness by shape, following local
-// defined-type chains to the underlying declaration (review round-2:
-// `type Children []Child` is a has-many relation, not a scalar):
-// builtins, []byte, driver.Valuer / GormDataType implementers and the
-// known cross-package set are columns; structs, slices, maps and
-// friends are relations or unsupported (no DBName — the runtime skips
-// their store tag); anything else is undecidable and must fail loud
-// rather than guess.
-func (sc *scanner) classifyType(typ ast.Expr, imports map[string]string, seen map[string]bool) (colVerdict, string) {
+// classifyType decides column-ness for a named field's type: first by
+// method set (exact driver.Valuer or GormDataType, under Go's real
+// rules — see satisfies), then by underlying shape.
+func (sc *scanner) classifyType(typ ast.Expr, imports map[string]string) (colVerdict, string) {
+	t := unwrapType(typ)
+	if ident, ok := t.(*ast.Ident); ok {
+		if _, local := sc.types[ident.Name]; local {
+			if sc.satisfies(ident.Name, valuerKind, map[string]bool{}) ||
+				sc.satisfies(ident.Name, dataTyperKind, map[string]bool{}) {
+				return colYes, ""
+			}
+		}
+	}
+	return sc.classifyShape(t, imports, map[string]bool{}, false)
+}
+
+// classifyShape resolves a type expression to its underlying shape,
+// following local type chains. identityLost flips when a chain crosses
+// a defined (non-alias) type: methods and named-type identity do not
+// survive it, so a known cross-package column type reached that way is
+// no longer provably a column — with one exception, time.Time, whose
+// column-ness comes from reflect convertibility (verified against the
+// runtime), which any underlying-preserving chain keeps.
+func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, seen map[string]bool, identityLost bool) (colVerdict, string) {
 	switch t := unwrapType(typ).(type) {
 	case *ast.Ident:
 		if info, local := sc.types[t.Name]; local {
-			if sc.valuers[t.Name] || sc.gormDataTypers[t.Name] {
-				return colYes, "" // column by method contract, whatever the shape
-			}
 			if seen[t.Name] {
 				return colUnknown, "" // defined-type cycle: broken code, don't hang
 			}
 			seen[t.Name] = true
-			return sc.classifyType(info.decl, info.imports, seen)
+			return sc.classifyShape(info.decl, info.imports, seen, identityLost || !info.isAlias)
 		}
 		if builtinScalars[t.Name] {
 			return colYes, ""
 		}
 		return colUnknown, ""
 	case *ast.SelectorExpr:
-		if selectorIsKnownColumn(t, imports) {
+		if isTimeTime(t, imports) {
+			return colYes, "" // ConvertibleTo(time.Time) — survives defined types
+		}
+		if !identityLost && selectorIsKnownColumn(t, imports) {
 			return colYes, ""
 		}
 		return colUnknown, ""
 	case *ast.ArrayType:
-		if elem, ok := t.Elt.(*ast.Ident); ok && (elem.Name == "byte" || elem.Name == "uint8") && t.Len == nil {
-			return colYes, "" // []byte is a bytes column
+		// GORM maps both slices AND fixed arrays of byte to a bytes
+		// column (review round-3); the element must be the predeclared
+		// byte type — a defined byte type loses the identity.
+		if elem, ok := t.Elt.(*ast.Ident); ok && (elem.Name == "byte" || elem.Name == "uint8") {
+			return colYes, ""
 		}
 		return colNo, "a slice or array (a relation, or unsupported without a serializer)"
 	case *ast.StructType:
@@ -640,6 +668,127 @@ func (sc *scanner) classifyType(typ ast.Expr, imports map[string]string, seen ma
 	default:
 		return colUnknown, ""
 	}
+}
+
+// classifyAnonymous mirrors GORM's embed rule for anonymous fields
+// (gorm/schema/field.go: the EMBEDDED branch): a struct-shaped embed
+// stays a column ONLY as a driver.Valuer — GormDataType, serializer
+// and even `gorm:"type:..."` do not prevent expansion, because the
+// GORMDataType snapshot the condition reads predates the TYPE override
+// and never equals Time/Bytes for those (verified against a real
+// store). Non-struct shapes never expand and classify like named
+// fields, quick proofs included.
+func (sc *scanner) classifyAnonymous(typ ast.Expr, gormSettings map[string]string, imports map[string]string) (colVerdict, string) {
+	t := unwrapType(typ)
+	if ident, ok := t.(*ast.Ident); ok {
+		if _, local := sc.types[ident.Name]; local {
+			if sc.satisfies(ident.Name, valuerKind, map[string]bool{}) {
+				return colYes, ""
+			}
+			if sc.underlyingStruct(ident.Name, map[string]bool{}) != nil {
+				return colNo, "an embedded struct (GormDataType / serializer / type tags do not prevent expansion)"
+			}
+		}
+	}
+	return sc.classifyColumn(typ, gormSettings, imports)
+}
+
+// methodKind selects which column-proving interface satisfies checks.
+type methodKind int
+
+const (
+	valuerKind    methodKind = iota // driver.Valuer — exact signature
+	dataTyperKind                   // GormDataType() string
+)
+
+// satisfies reports whether the local type's method set carries the
+// interface, under Go's real method-set rules (review round-3): direct
+// declarations count; an alias is full identity and inherits the
+// target's; a defined type does NOT inherit the source type's methods
+// but keeps promotions from its underlying struct's embedded fields.
+func (sc *scanner) satisfies(name string, kind methodKind, seen map[string]bool) bool {
+	if seen[name] {
+		return false
+	}
+	seen[name] = true
+	direct := sc.valuers
+	if kind == dataTyperKind {
+		direct = sc.gormDataTypers
+	}
+	if direct[name] {
+		return true
+	}
+	info, ok := sc.types[name]
+	if !ok {
+		return false
+	}
+	if info.isAlias {
+		switch t := unwrapType(info.decl).(type) {
+		case *ast.Ident:
+			if _, local := sc.types[t.Name]; local {
+				return sc.satisfies(t.Name, kind, seen)
+			}
+			return false
+		case *ast.SelectorExpr:
+			return kind == valuerKind && selectorIsKnownValuer(t, info.imports)
+		case *ast.StructType:
+			return sc.embedsCarry(t, info.imports, kind, seen)
+		}
+		return false
+	}
+	// Defined type: only promotions from the underlying struct's
+	// embedded fields survive the shape.
+	st, stImports := sc.underlyingStructWithImports(name, map[string]bool{})
+	if st == nil {
+		return false
+	}
+	return sc.embedsCarry(st, stImports, kind, seen)
+}
+
+// embedsCarry walks a struct's anonymous fields for promoted
+// column-proving methods.
+func (sc *scanner) embedsCarry(st *ast.StructType, imports map[string]string, kind methodKind, seen map[string]bool) bool {
+	for _, f := range st.Fields.List {
+		if len(f.Names) != 0 {
+			continue
+		}
+		switch t := unwrapType(f.Type).(type) {
+		case *ast.Ident:
+			if sc.satisfies(t.Name, kind, seen) {
+				return true
+			}
+		case *ast.SelectorExpr:
+			if kind == valuerKind && selectorIsKnownValuer(t, imports) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// selectorIsKnownValuer reports cross-package types known to implement
+// driver.Valuer (so embedding them promotes Value) — the known-column
+// set minus time.Time, whose column-ness is convertibility, not a
+// method.
+func selectorIsKnownValuer(sel *ast.SelectorExpr, imports map[string]string) bool {
+	x, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	switch imports[x.Name] {
+	case "database/sql":
+		return strings.HasPrefix(sel.Sel.Name, "Null")
+	case "gorm.io/gorm":
+		return sel.Sel.Name == "DeletedAt"
+	case "gorm.io/datatypes":
+		return true
+	}
+	return false
+}
+
+func isTimeTime(sel *ast.SelectorExpr, imports map[string]string) bool {
+	x, ok := sel.X.(*ast.Ident)
+	return ok && imports[x.Name] == "time" && sel.Sel.Name == "Time"
 }
 
 // addDeclared mirrors store.addDeclaredField: one public name per face

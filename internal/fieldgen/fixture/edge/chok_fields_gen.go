@@ -44,6 +44,7 @@ var AuditBaseFields = struct {
 var ContactFields = struct {
 	ProfileID string // faces: query
 	BadgeID   string // faces: query
+	StickerID string // faces: query
 	Note      string // faces: query, update
 
 	ID        string // base model, query-only (resolves to the rid column)
@@ -52,6 +53,7 @@ var ContactFields = struct {
 }{
 	ProfileID: "profile_id",
 	BadgeID:   "badge_id",
+	StickerID: "sticker_id",
 	Note:      "note",
 
 	ID:        "id",
@@ -87,6 +89,23 @@ var ParentFields = struct {
 	UpdatedAt string // base model, query-only
 }{
 	Note: "note",
+
+	ID:        "id",
+	CreatedAt: "created_at",
+	UpdatedAt: "updated_at",
+}
+
+// PlayerFields enumerates Player's declared field surface (`store` tags) as
+// compile-checked references. Values are the public field names the
+// store's whitelists key on; they are stable under WithColumnAlias.
+var PlayerFields = struct {
+	Nick string // faces: query
+
+	ID        string // base model, query-only (resolves to the rid column)
+	CreatedAt string // base model, query-only
+	UpdatedAt string // base model, query-only
+}{
+	Nick: "nick",
 
 	ID:        "id",
 	CreatedAt: "created_at",

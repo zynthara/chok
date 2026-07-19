@@ -64,10 +64,12 @@ func TestScanAndRender_EdgeFixtureGolden(t *testing.T) {
 	wantWarnFragments := []string{
 		"Contact.Profile: `store` tag ignored", // relation skip (review round-1 Medium)
 		"Contact.Badge: `store` tag ignored",   // wrong-signature Value() proves nothing (round-2)
+		"Contact.Sticker: `store` tag ignored", // defined type over a Valuer loses the method set (round-3)
 		"Parent.Children: `store` tag ignored", // defined slice = has-many relation (round-2)
 		"Event: embedded AuditBase carries",    // whole surface promoted — no silent vanishing
 		"Entry: embedded Extra carries",        // named gorm-embedded promotion
 		"Ticket: embedded Extra carries",       // ...even with an unexported target type (round-2)
+		"Player.Level: `store` tag ignored",    // anonymous GormDataType struct still expands (round-3)
 	}
 	if len(pkg.Warnings) != len(wantWarnFragments) {
 		t.Fatalf("edge fixture must warn exactly %d times, got %q", len(wantWarnFragments), pkg.Warnings)
@@ -88,7 +90,7 @@ func TestScanAndRender_EdgeFixtureGolden(t *testing.T) {
 	for _, m := range pkg.Models {
 		names = append(names, m.Name)
 	}
-	if strings.Join(names, ",") != "Audit,AuditBase,Contact,Entry,Parent,Ticket,hiddenAudit" {
+	if strings.Join(names, ",") != "Audit,AuditBase,Contact,Entry,Parent,Player,Ticket,hiddenAudit" {
 		t.Fatalf("edge models = %v (Event must be absent — its surface is promoted)", names)
 	}
 
@@ -166,7 +168,11 @@ func TestScan_FixtureSurfaces(t *testing.T) {
 	})
 	assertFields(t, pkg.Models[2], map[string]face{
 		"Money":     {value: "money", query: true},                  // anonymous driver.Valuer embed = a column
-		"Flags":     {value: "flags", query: true, update: true},    // GormDataType struct = a column
+		"Flags":     {value: "flags", query: true, update: true},    // named GormDataType struct = a column
+		"Box":       {value: "box", query: true},                    // embed-promoted Valuer = a column (round-3)
+		"Seal":      {value: "seal", query: true},                   // defined time.Time = convertible = a column (round-3)
+		"Token":     {value: "token", query: true},                  // [16]byte = bytes column (round-3)
+		"Meta":      {value: "meta", query: true},                   // gorm:"json" serializer shorthand (round-3)
 		"ID":        {value: "id", query: true, base: true},         //
 		"CreatedAt": {value: "created_at", query: true, base: true}, //
 		"UpdatedAt": {value: "updated_at", query: true, base: true}, //
@@ -540,6 +546,193 @@ type Post struct {
 		if !warned {
 			t.Errorf("skipped relation shape %s must warn, got %q", wantWarn, pkg.Warnings)
 		}
+	}
+}
+
+// TestScan_MethodSetSemantics is review round-3 finding 1: Go's real
+// method-set rules. A defined type does NOT inherit its source type's
+// methods (Sticker = relation), an alias DOES (identity), and a struct
+// embedding a Valuer promotes the method (Box = column).
+func TestScan_MethodSetSemantics(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Money struct {
+	ID    uint
+	Cents int64
+}
+
+func (m Money) Value() (driver.Value, error) { return m.Cents, nil }
+
+type Sticker Money
+
+type Alias = Money
+
+type Box struct {
+	Money
+}
+
+type Wrapped Box
+
+type Post struct {
+	db.Model
+	StickerID uint    `+"`json:\"sticker_id\" store:\"query\"`"+`
+	Sticker   Sticker `+"`json:\"sticker\" store:\"query\"`"+`
+	Twin      Alias   `+"`json:\"twin\" store:\"query\"`"+`
+	Box       Box     `+"`json:\"box\" store:\"query\"`"+`
+	Wrapped   Wrapped `+"`json:\"wrapped\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Post" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	// Alias keeps Money's identity; Box promotes Value from the embed;
+	// Wrapped (defined over Box) keeps the promotion — it rides Box's
+	// struct shape, not Box's name.
+	for _, want := range []string{"Twin", "Box", "Wrapped"} {
+		if !got[want] {
+			t.Errorf("%s must be a column (method set carries), got %v", want, got)
+		}
+	}
+	if got["Sticker"] {
+		t.Errorf("Sticker must be a relation — defined types do not inherit methods, got %v", got)
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		warned = warned || strings.Contains(w, "Post.Sticker")
+	}
+	if !warned {
+		t.Fatalf("the de-methoded relation must warn, got %q", pkg.Warnings)
+	}
+}
+
+// TestScan_AnonymousStructEmbedRules is review round-3 finding 2: for
+// ANONYMOUS struct-shaped fields only a real driver.Valuer stays a
+// column — GormDataType, serializer and type tags do not prevent GORM's
+// embedded expansion, so the store tag on the embed line is dead.
+func TestScan_AnonymousStructEmbedRules(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"time"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Flags struct{ V uint8 }
+
+func (Flags) GormDataType() string { return "smallint" }
+
+type Blob struct{ X string }
+
+type Typed struct{ Y string }
+
+type Clock time.Time
+
+type Player struct {
+	db.Model
+	Flags `+"`json:\"flags\" store:\"query\"`"+`
+	Blob  `+"`json:\"blob\" store:\"query\" gorm:\"serializer:json\"`"+`
+	Typed `+"`json:\"typed\" store:\"query\" gorm:\"type:jsonb\"`"+`
+	Clock `+"`json:\"clock\" store:\"query\"`"+`
+	Nick  string `+"`json:\"nick\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Player" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	for _, absent := range []string{"Flags", "Blob", "Typed"} {
+		if got[absent] {
+			t.Errorf("anonymous %s must expand as an embed (no quick proofs for anonymous structs), got %v", absent, got)
+		}
+	}
+	// Clock (defined over time.Time) is time-convertible — GORM's embed
+	// rule exempts the Time data type, so it stays a column.
+	if !got["Clock"] || !got["Nick"] {
+		t.Errorf("Clock and Nick must be columns, got %v", got)
+	}
+	for _, wantWarn := range []string{"Player.Flags", "Player.Blob", "Player.Typed"} {
+		var warned bool
+		for _, w := range pkg.Warnings {
+			warned = warned || strings.Contains(w, wantWarn)
+		}
+		if !warned {
+			t.Errorf("dead tag on anonymous embed %s must warn, got %q", wantWarn, pkg.Warnings)
+		}
+	}
+}
+
+// TestScan_BytesAndJSONSerializerShapes is review round-3 finding 3:
+// fixed byte arrays are bytes columns like byte slices, and
+// `gorm:"json"` is the serializer shorthand GORM accepts.
+func TestScan_BytesAndJSONSerializerShapes(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Token [16]byte
+
+type DefinedByte byte
+
+type Post struct {
+	db.Model
+	Token   Token          `+"`json:\"token\" store:\"query\"`"+`
+	Direct  [8]byte        `+"`json:\"direct\" store:\"query\"`"+`
+	Meta    map[string]any `+"`json:\"meta\" store:\"query\" gorm:\"json\"`"+`
+	Odd     [4]DefinedByte `+"`json:\"odd\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		if !f.Base {
+			got[f.GoName] = true
+		}
+	}
+	for _, want := range []string{"Token", "Direct", "Meta"} {
+		if !got[want] {
+			t.Errorf("%s must be a column, got %v", want, got)
+		}
+	}
+	// GORM compares the element type identity: a defined byte type is
+	// not the predeclared byte, so the array is not a bytes column.
+	if got["Odd"] {
+		t.Errorf("[4]DefinedByte must not be blessed as bytes, got %v", got)
 	}
 }
 

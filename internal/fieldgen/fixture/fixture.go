@@ -61,7 +61,9 @@ type Money struct {
 func (m Money) Value() (driver.Value, error) { return m.Cents, nil }
 
 // Flags carries its column type via GormDataType — GORM assigns the
-// struct a DataType (hence a DBName) from the method.
+// struct a DataType (hence a DBName) from the method, so it is a
+// column as a NAMED field (anonymous is the opposite — see the edge
+// package's Player).
 type Flags struct {
 	V uint8
 }
@@ -69,11 +71,32 @@ type Flags struct {
 // GormDataType implements the GORM data-type hook.
 func (Flags) GormDataType() string { return "smallint" }
 
-// Wallet pins the method-proven column shapes (review round-2): an
-// anonymous driver.Valuer embed and a GormDataType struct field are
-// real runtime columns the classifier must include.
+// Box embeds Money: Go promotes Value into Box's method set, so Box is
+// itself a driver.Valuer column (review round-3).
+type Box struct {
+	Money
+}
+
+// Stamp is a defined type over time.Time: methods are lost but
+// reflect convertibility survives, and GORM maps it to a time column
+// (review round-3).
+type Stamp time.Time
+
+// Token is a fixed byte array — GORM maps arrays of byte to a bytes
+// column exactly like slices (review round-3).
+type Token [16]byte
+
+// Wallet pins the method-proven and shape-proven column forms
+// (review rounds 2–3): an anonymous driver.Valuer embed, a
+// GormDataType struct field, an embed-promoted Valuer, a defined
+// time.Time, a byte array, and the `gorm:"json"` serializer
+// shorthand.
 type Wallet struct {
 	db.Model
 	Money `json:"money" store:"query"`
-	Flags Flags `json:"flags" store:"query,update"`
+	Flags Flags          `json:"flags" store:"query,update"`
+	Box   Box            `json:"box" store:"query"`
+	Seal  Stamp          `json:"seal" store:"query"`
+	Token Token          `json:"token" store:"query"`
+	Meta  map[string]any `json:"meta" store:"query" gorm:"json"`
 }

@@ -208,10 +208,11 @@ func TestFieldGen_SemanticLatch_EdgeShapes(t *testing.T) {
 
 	// Contact: relations excluded on both sides — full latch holds.
 	// Badge doubly so: its wrong-signature Value method must not count
-	// as driver.Valuer (review round-2).
+	// as driver.Valuer (review round-2); Sticker triply — a defined
+	// type over a real Valuer loses the method set (review round-3).
 	contacts := New[edge.Contact](h, log.Empty())
 	assertLatch(t, scanFixtureDir(t, edgeFixtureDir, "Contact"), contacts.queryFieldMap, contacts.updateFieldMap)
-	for _, relation := range []string{"profile", "badge"} {
+	for _, relation := range []string{"profile", "badge", "sticker"} {
 		if _, err := where.ResolveField(contacts.queryFieldMap, relation); err == nil {
 			t.Errorf("relation key %q must not exist in the runtime query map either", relation)
 		}
@@ -226,6 +227,15 @@ func TestFieldGen_SemanticLatch_EdgeShapes(t *testing.T) {
 	assertLatch(t, scanFixtureDir(t, edgeFixtureDir, "Parent"), parents.queryFieldMap, parents.updateFieldMap)
 	if _, err := where.ResolveField(parents.queryFieldMap, "children"); err == nil {
 		t.Error("defined-slice relation must not be a runtime query key")
+	}
+
+	// Player: an anonymous GormDataType struct expands as an embed at
+	// runtime (review round-3) — the tag on the embed line is dead on
+	// both sides, so the exact-set latch holds without a "level" key.
+	players := New[edge.Player](h, log.Empty())
+	assertLatch(t, scanFixtureDir(t, edgeFixtureDir, "Player"), players.queryFieldMap, players.updateFieldMap)
+	if _, err := where.ResolveField(players.queryFieldMap, "level"); err == nil {
+		t.Error("anonymous GormDataType embed must not be a runtime query key")
 	}
 
 	// Event: runtime model via promotion, generator has nothing — the
@@ -344,6 +354,10 @@ func TestFieldGen_SemanticLatch_CompiledSymbols(t *testing.T) {
 		{"ShadowID defined-scalar kind/query", shadow.queryFieldMap, fixture.ShadowIDFields.Kind},
 		{"Wallet valuer-embed money/query", wallets.queryFieldMap, fixture.WalletFields.Money},
 		{"Wallet gorm-data-type flags/update", wallets.updateFieldMap, fixture.WalletFields.Flags},
+		{"Wallet promoted-valuer box/query", wallets.queryFieldMap, fixture.WalletFields.Box},
+		{"Wallet defined-time seal/query", wallets.queryFieldMap, fixture.WalletFields.Seal},
+		{"Wallet byte-array token/query", wallets.queryFieldMap, fixture.WalletFields.Token},
+		{"Wallet json-serializer meta/query", wallets.queryFieldMap, fixture.WalletFields.Meta},
 	} {
 		if _, err := where.ResolveField(tc.fm, tc.value); err != nil {
 			t.Errorf("%s: compiled constant %q rejected by the runtime map: %v", tc.name, tc.value, err)

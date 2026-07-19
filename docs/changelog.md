@@ -29,12 +29,17 @@
 > 全程静默；裸字符串永远合法，`FromQuery` 的 HTTP 通道照旧运行时校验。
 > 扫描选语法级而非 go/types：包编译不过时再生成必须仍能跑（改模型→旧引
 > 用编译错→需先 gen 的鸡生蛋场景）。**列性由语法分类镜像 GORM 的解析结
-> 果**（round-1/2 复审收紧）：内建标量/`[]byte`/精确 `driver.Valuer`（
-> `Value() (int, error)` 之类不算）/`GormDataType` 类型/已知跨包列类型
-> 直接生成，本地定义类型沿底层形状递归（定义标量含匿名嵌入是列、定义切片
-> 是 has-many 关系），`gorm:"type:"`/serializer 对任何类型都是证明；关系
-> 形状跳过并 warn（运行时同样忽略，不产死符号）；无法静态判定的跨包类型
-> **报错拒猜**。提升（promotion）是残留边界：本包内可验证的嵌入 tag 会
+> 果**（round-1/2/3 复审逐轮收紧）：内建标量/`[]byte` 与 `[N]byte`/精确
+> `driver.Valuer`（`Value() (int, error)` 之类不算）/`GormDataType` 类型
+> /已知跨包列类型直接生成；方法集按 Go 真语义——别名继承、定义类型不继承
+> 但保留底层 struct 嵌入的提升（`Box{Money}` 是列、`type Badge Money` 是
+> 关系）；本地定义类型沿底层形状递归（定义标量含匿名嵌入是列、定义切片是
+> has-many、`type Stamp time.Time` 经可转换性仍是列），`gorm:"type:"`/
+> serializer（含 `gorm:"json"` 简写）对**具名**字段是证明；**匿名 struct
+> 另循 GORM 嵌入规则**——只有真 Valuer/time 形态是列，GormDataType/
+> serializer/type: 都不阻止展开（tag 死，warn）；关系形状跳过并 warn
+> （运行时同样忽略，不产死符号）；无法静态判定的跨包类型**报错拒猜**。
+> 提升（promotion）是残留边界：本包内可验证的嵌入 tag 会
 > warn——含「全部 tag 来自嵌入」的静默形态（直接内嵌 chok 基座即点名）与
 > 未导出目标类型的具名 `gorm:"embedded"`（GORM 按字段名判导出性）；未导出
 > **匿名**嵌入运行时整体跳过（两侧一致）；纯跨包嵌入承载 tag 的模型不可

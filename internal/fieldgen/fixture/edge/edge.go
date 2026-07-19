@@ -8,7 +8,11 @@
 // fixture package warning-free; new expected-warning shapes go here.
 package edge
 
-import "github.com/zynthara/chok/v2/db"
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
 
 // Profile is the belongs-to target for Contact — a plain struct, not a
 // column, so a store tag on a field of this type is dead at runtime.
@@ -27,6 +31,21 @@ type Badge struct {
 // Value is deliberately NOT driver.Valuer.
 func (Badge) Value() (int, error) { return 0, nil }
 
+// Coin is a real driver.Valuer (with a primary key so the defined type
+// below can still parse as a relation target).
+type Coin struct {
+	ID    uint
+	Cents int64
+}
+
+// Value implements driver.Valuer.
+func (c Coin) Value() (driver.Value, error) { return c.Cents, nil }
+
+// Sticker is a DEFINED type over Coin: Go method sets do not carry
+// over, so Sticker is not a Valuer — at runtime it parses as a
+// belongs-to relation, not a column (review round-3).
+type Sticker Coin
+
 // Contact carries store tags on relation fields: GORM parses Profile
 // (a plain struct) and Badge (a struct whose Value method has the
 // wrong signature) with empty DBNames, so the runtime whitelist never
@@ -38,6 +57,8 @@ type Contact struct {
 	Profile   Profile `json:"profile" store:"query"`
 	BadgeID   uint    `json:"badge_id" store:"query"`
 	Badge     Badge   `json:"badge" store:"query"`
+	StickerID uint    `json:"sticker_id" store:"query"`
+	Sticker   Sticker `json:"sticker" store:"query"`
 	Note      string  `json:"note" store:"query,update" gorm:"size:64"`
 }
 
@@ -104,4 +125,24 @@ type Ticket struct {
 	db.Model
 	Extra   hiddenAudit `gorm:"embedded"`
 	Subject string      `json:"subject" store:"query" gorm:"size:64"`
+}
+
+// Level carries GormDataType — a column as a NAMED field, but GORM's
+// anonymous-embed rule only exempts real Valuers (and time/bytes
+// shapes), so as an EMBED it still expands (review round-3).
+type Level struct {
+	V uint8
+}
+
+// GormDataType implements the GORM data-type hook.
+func (Level) GormDataType() string { return "smallint" }
+
+// Player embeds Level anonymously with a store tag: the tag is dead at
+// runtime (Level expands as an embedded struct; its untagged V
+// contributes nothing) — the generator must skip it with a warning
+// instead of minting a "level" symbol.
+type Player struct {
+	db.Model
+	Level `json:"level" store:"query"`
+	Nick  string `json:"nick" store:"query" gorm:"size:32"`
 }
