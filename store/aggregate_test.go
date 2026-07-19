@@ -1138,7 +1138,8 @@ func TestAggregate_Round7ScopeBeforeCatalog(t *testing.T) {
 // LIMIT 1) without the store's scopes — the first authenticated
 // aggregate on an owned model read one arbitrary tenant's row to sniff
 // column types. Types now come from pure catalog metadata
-// (pragma_table_info / information_schema), so no statement may touch
+// (pragma_table_info / pg_catalog / information_schema), so no
+// statement may touch
 // the data table unless it carries the scope predicate. The assertion is
 // on SQL SHAPE, not operation counts — a count can't tell a scoped read
 // from an unscoped one.
@@ -1356,6 +1357,137 @@ func TestAggregate_Round9PGSearchPathResolution(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// --- round-10 review regressions: the PG catalog read must bind to the
+// REAL type and the REAL relation — #1 a user domain's bare typname can
+// masquerade as a built-in (CREATE DOMAIN app."int8" AS text), so types
+// resolve through typbasetype to a pg_catalog-namespace base; #2 an
+// unqualified table resolves per-transaction under SET LOCAL
+// search_path, so the catalog cache keys by resolved relation OID
+// instead of holding one map per Store. -------------------------------
+
+type round10DomainAgg struct {
+	db.Model
+	Qty  int64 `json:"qty"`
+	Qty2 int64 `json:"qty2"`
+}
+
+func (round10DomainAgg) RIDPrefix() string { return "r10d" }
+func (round10DomainAgg) TableName() string { return "round10_domain_aggs" }
+
+func TestAggregate_Round10PGDomainShadowsBuiltinType(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("user-defined domains are a PostgreSQL shape")
+	}
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	var sch string
+	if err := gdb.Unsafe(ctx).Raw("SELECT current_schema()").Scan(&sch).Error; err != nil {
+		t.Fatal(err)
+	}
+	// qty's domain steals the built-in bigint's typname but is REALLY
+	// text; qty2's domain is honestly over bigint. Only explicit
+	// qualification reaches the shadow domain (pg_catalog is implicitly
+	// first for unqualified type names).
+	for _, ddl := range []string{
+		fmt.Sprintf(`CREATE DOMAIN %q."int8" AS text`, sch),
+		fmt.Sprintf(`CREATE DOMAIN %q.round10_money AS bigint`, sch),
+		fmt.Sprintf(`CREATE TABLE round10_domain_aggs (id bigserial PRIMARY KEY, rid varchar(24) NOT NULL, version bigint NOT NULL DEFAULT 1, created_at timestamptz, updated_at timestamptz, qty %q."int8" NOT NULL, qty2 %q.round10_money NOT NULL)`, sch, sch),
+		`INSERT INTO round10_domain_aggs (rid, qty, qty2) VALUES ('r10d_row_seed_00001', '2', 2), ('r10d_row_seed_00002', '10', 10)`,
+	} {
+		if err := gdb.Unsafe(ctx).Exec(ddl).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := New[round10DomainAgg](gdb, log.Empty(), WithQueryFields("id", "qty", "qty2"))
+	// The shadow domain must gate as its base type text and fail closed —
+	// by bare typname it passed as an integer and MIN came back
+	// lexicographic (10 beats 2), silently.
+	if _, _, err := Min[int64](ctx, s, "qty"); err == nil || !strings.Contains(err.Error(), `"text"`) {
+		t.Fatalf("Min over a text-based domain named int8 = %v; want the fail-closed catalog error naming text", err)
+	}
+	// Round-8 semantics kept: a domain honestly over bigint aggregates
+	// (udt_name resolved domains to their base before round-9 too).
+	total, ok, err := Sum[int64](ctx, s, "qty2")
+	if err != nil || !ok || total != 12 {
+		t.Fatalf("Sum over a bigint-based domain = %d ok=%v err=%v; want 12 true <nil>", total, ok, err)
+	}
+}
+
+type round10SPCacheAgg struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (round10SPCacheAgg) RIDPrefix() string { return "r10c" }
+func (round10SPCacheAgg) TableName() string { return "round10_sp_cache_aggs" }
+
+func TestAggregate_Round10PGDynamicSearchPathCache(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("SET LOCAL search_path is a PostgreSQL shape")
+	}
+	gdb := dbtest.Open(t)
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d_%d", os.Getpid(), time.Now().UnixNano())
+	numSch, textSch := "round10_num_"+suffix, "round10_text_"+suffix
+	for _, sch := range []string{numSch, textSch} {
+		if err := gdb.Unsafe(ctx).Exec(fmt.Sprintf("CREATE SCHEMA %q", sch)).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, sch := range []string{numSch, textSch} {
+			_ = gdb.Unsafe(context.Background()).Exec(fmt.Sprintf("DROP SCHEMA %q CASCADE", sch)).Error
+		}
+	})
+	// Same table name in both schemas — qty bigint in one, text in the
+	// other; values chosen so a lexicographic MIN differs from the
+	// numeric one.
+	for _, ddl := range []string{
+		fmt.Sprintf(`CREATE TABLE %q.round10_sp_cache_aggs (id bigserial PRIMARY KEY, rid varchar(24) NOT NULL, version bigint NOT NULL DEFAULT 1, created_at timestamptz, updated_at timestamptz, qty bigint NOT NULL)`, numSch),
+		fmt.Sprintf(`INSERT INTO %q.round10_sp_cache_aggs (rid, qty) VALUES ('r10c_num_seed_00001', 2), ('r10c_num_seed_00002', 10)`, numSch),
+		fmt.Sprintf(`CREATE TABLE %q.round10_sp_cache_aggs (id bigserial PRIMARY KEY, rid varchar(24) NOT NULL, version bigint NOT NULL DEFAULT 1, created_at timestamptz, updated_at timestamptz, qty text NOT NULL)`, textSch),
+		fmt.Sprintf(`INSERT INTO %q.round10_sp_cache_aggs (rid, qty) VALUES ('r10c_txt_seed_00001', '2'), ('r10c_txt_seed_00002', '10')`, textSch),
+	} {
+		if err := gdb.Unsafe(ctx).Exec(ddl).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := New[round10SPCacheAgg](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	minOn := func(sch string) (int64, error) {
+		var v int64
+		err := db.RunInTx(ctx, gdb, func(txCtx context.Context) error {
+			if err := gdb.Unsafe(txCtx).Exec(fmt.Sprintf("SET LOCAL search_path = %q", sch)).Error; err != nil {
+				return err
+			}
+			got, ok, err := Min[int64](txCtx, s, "qty")
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("Min reported no rows")
+			}
+			v = got
+			return nil
+		})
+		return v, err
+	}
+	// tx1 resolves the bigint relation and caches ITS column types.
+	if v, err := minOn(numSch); err != nil || v != 2 {
+		t.Fatalf("Min over the bigint relation = %d err=%v; want 2 <nil>", v, err)
+	}
+	// tx2 resolves the TEXT relation: the gate must re-resolve for this
+	// relation and fail closed — reusing the bigint entry let the query
+	// run and return the lexicographic MIN (10 beats 2), silently.
+	if v, err := minOn(textSch); err == nil || !strings.Contains(err.Error(), `"text"`) {
+		t.Fatalf("Min over the text relation = %d err=%v; want the fail-closed catalog error naming text", v, err)
+	}
+	// tx3 returns to the bigint relation: its entry is still cached and
+	// still correct.
+	if v, err := minOn(numSch); err != nil || v != 2 {
+		t.Fatalf("Min back on the bigint relation = %d err=%v; want 2 <nil>", v, err)
 	}
 }
 

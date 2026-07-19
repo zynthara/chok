@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -622,18 +623,31 @@ type aggColumnCatalog struct {
 	types   map[string]string // DB column name → catalog base type, lowercased
 }
 
-// aggCatalogCache holds the lazily-resolved catalog types for one Store,
-// shared across its transaction clones by pointer (Store is copied by
-// value in txClone; a mutex or atomic embedded by value would be copied
-// and flagged, so the cache lives behind this pointer).
+// aggCatalogCache holds the lazily-resolved catalog types for one
+// Store, keyed by RESOLVED RELATION: on PostgreSQL the to_regclass OID
+// (an unqualified table can resolve to a different relation per
+// transaction under SET LOCAL search_path — round-10 review #2),
+// on SQLite/MySQL a single entry under the empty key (unqualified
+// resolution there is fixed by connection configuration; the blessed
+// stack never ATTACHes databases or switches with USE). The cache is
+// shared across the Store's transaction clones by pointer (Store is
+// copied by value in txClone; a mutex or atomic embedded by value would
+// be copied and flagged, so it lives behind this pointer). Entries are
+// added copy-on-write under the mutex; readers ride the atomic pointer.
+// Growth is bounded by the distinct relations the table name can
+// resolve to (per-tenant schemas); a relation swapped by DDL mid-life
+// keeps its stale entry — schema changes require a restart, the
+// documented framework-wide contract.
 type aggCatalogCache struct {
 	mu     sync.Mutex
-	loaded atomic.Pointer[map[string]string]
+	loaded atomic.Pointer[map[string]map[string]string]
 }
 
-// resolveAggCatalog returns the REAL database column types, read once
-// from pure catalog metadata (readCatalogColumnTypes) and cached. This
-// is deliberately lazy, not resolved at construction, for two reasons:
+// resolveAggCatalog returns the REAL database column types for the
+// relation the model table CURRENTLY resolves to, read from pure
+// catalog metadata (readCatalogColumnTypes) and cached per relation.
+// This is deliberately lazy, not resolved at construction, for two
+// reasons:
 //
 //   - Correctness. FullDataTypeOf only renders the DDL a column WOULD get
 //     from the model; under migrate:versioned/off the actual column can
@@ -645,37 +659,86 @@ type aggCatalogCache struct {
 //   - Safety. The reader issues metadata-only queries: it never touches
 //     the data table (round-8 review) and mutates no shared schema state
 //     the way FullDataTypeOf did (the round-4 race), so running it off
-//     the request path is safe. It runs once under the mutex; every
-//     later call takes the atomic fast path.
+//     the request path is safe. Each relation resolves once under the
+//     mutex; later calls take the atomic fast path.
+//
+// On PostgreSQL every call re-probes the relation OID first
+// (pgResolveRelation) and consults the cache under it: one Store can
+// legitimately serve DIFFERENT relations across transactions
+// (schema-per-tenant SET LOCAL search_path), and reusing another
+// relation's column types would let, say, a bigint gate pass over a
+// text column — lexicographic MIN with no error (round-10 review #2).
+// The probe, the column read and the aggregate ride one connection
+// inside a transaction, which is the only coherent shape for a dynamic
+// search_path anyway (a non-LOCAL SET on one pooled connection already
+// makes the data queries themselves nondeterministic).
 func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, error) {
 	dialect := s.dialectName(ctx)
+	var relOID int64
+	cacheKey := ""
+	if dialect == "postgres" {
+		oid, err := s.pgResolveRelation(ctx)
+		if err != nil {
+			// Not cached — a transient failure (table not migrated yet, a
+			// permissions gap) must not poison every future aggregate.
+			return aggColumnCatalog{}, fmt.Errorf("store: aggregate: reading catalog column types for %s: %w", s.modelSchema.Table, err)
+		}
+		relOID = oid
+		cacheKey = strconv.FormatInt(oid, 10)
+	}
 	if m := s.aggCatalog.loaded.Load(); m != nil {
-		return aggColumnCatalog{dialect: dialect, types: *m}, nil
+		if types, ok := (*m)[cacheKey]; ok {
+			return aggColumnCatalog{dialect: dialect, types: types}, nil
+		}
 	}
 	s.aggCatalog.mu.Lock()
 	defer s.aggCatalog.mu.Unlock()
 	if m := s.aggCatalog.loaded.Load(); m != nil {
-		return aggColumnCatalog{dialect: dialect, types: *m}, nil
+		if types, ok := (*m)[cacheKey]; ok {
+			return aggColumnCatalog{dialect: dialect, types: types}, nil
+		}
 	}
-	cols, err := s.readCatalogColumnTypes(ctx, dialect)
+	cols, err := s.readCatalogColumnTypes(ctx, dialect, relOID)
 	if err != nil {
-		// Not cached — a transient failure (table not migrated yet, a
-		// permissions gap) must not poison every future aggregate.
+		// Not cached, same rationale as the probe above.
 		return aggColumnCatalog{}, fmt.Errorf("store: aggregate: reading catalog column types for %s: %w", s.modelSchema.Table, err)
 	}
-	m := make(map[string]string, len(cols))
+	types := make(map[string]string, len(cols))
 	for _, c := range cols {
 		// The KEY (column name) is folded per dialect — SQLite/MySQL
 		// identifiers are case-insensitive, so a versioned/off migration
 		// declaring QTY must still match a model field mapped to qty (see
 		// aggCatalogKey). The VALUE reduces to the lowercased bare base
 		// type: pragma_table_info reports the declared spelling verbatim —
-		// case ("TEXT") AND length ("char(8)") included — while udt_name
-		// and data_type are already bare.
-		m[aggCatalogKey(dialect, c.name)] = aggBaseType(c.typ)
+		// case ("TEXT") AND length ("char(8)") included — while the
+		// PostgreSQL and MySQL readers report bare names.
+		types[aggCatalogKey(dialect, c.name)] = aggBaseType(c.typ)
 	}
-	s.aggCatalog.loaded.Store(&m)
-	return aggColumnCatalog{dialect: dialect, types: m}, nil
+	var next map[string]map[string]string
+	if m := s.aggCatalog.loaded.Load(); m != nil {
+		next = maps.Clone(*m)
+	} else {
+		next = make(map[string]map[string]string, 1)
+	}
+	next[cacheKey] = types
+	s.aggCatalog.loaded.Store(&next)
+	return aggColumnCatalog{dialect: dialect, types: types}, nil
+}
+
+// pgResolveRelation resolves the model table to its relation OID on the
+// current connection — to_regclass under the transaction's search_path,
+// i.e. exactly the relation the aggregate's own FROM clause is about to
+// hit. OID 0 (InvalidOid, via COALESCE over to_regclass' NULL) means
+// nothing resolves: surfaced as the not-migrated error, never cached.
+func (s *Store[T]) pgResolveRelation(ctx context.Context) (int64, error) {
+	var oid int64
+	if err := s.effectiveDB(ctx).Raw("SELECT COALESCE(to_regclass(?)::oid::int8, 0)", pgRegclassText(s.modelSchema.Table)).Scan(&oid).Error; err != nil {
+		return 0, err
+	}
+	if oid == 0 {
+		return 0, fmt.Errorf("table %q does not resolve to a relation — not migrated yet?", s.modelSchema.Table)
+	}
+	return oid, nil
 }
 
 // aggCatalogColumn is one catalog row: a column name and its base type.
@@ -713,16 +776,19 @@ func aggBaseType(typ string) string {
 // bare name — the same split GORM's quoter applies when it renders the
 // aggregate's own FROM clause — instead of being matched wholesale
 // against bare catalog table names, which reported an existing table as
-// having zero columns. Unqualified PostgreSQL names resolve through
-// to_regclass, which walks the WHOLE search_path exactly like an
-// unqualified SELECT; the previous table_schema = current_schema()
-// filter consulted only the path's head, so a table living deeper in
-// the path aggregated as "not migrated" while data queries found it.
+// having zero columns. On PostgreSQL the caller pre-resolves the
+// relation OID (pgResolveRelation: to_regclass walks the WHOLE
+// search_path exactly like an unqualified SELECT — the earlier
+// table_schema = current_schema() filter consulted only the path's
+// head) and passes it as pgRelOID, which is also the cache key: one
+// resolution feeds both, so the columns read here belong to exactly the
+// relation the cache entry is stored under. pgRelOID is meaningless on
+// the other dialects.
 //
 // Zero columns is an ERROR, not an empty result: these metadata queries
 // do not fail on a missing table, and caching an empty map would poison
 // every future aggregate on a store built before its migration ran.
-func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string) ([]aggCatalogColumn, error) {
+func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string, pgRelOID int64) ([]aggCatalogColumn, error) {
 	gdb := s.effectiveDB(ctx)
 	table := s.modelSchema.Table
 	var rows []struct {
@@ -740,13 +806,26 @@ func (s *Store[T]) readCatalogColumnTypes(ctx context.Context, dialect string) (
 			err = gdb.Raw("SELECT name, type AS typ FROM pragma_table_info(?)", table).Scan(&rows).Error
 		}
 	case "postgres":
-		// typname is the base type PostgreSQL actually stores under (int8,
-		// varchar, timestamptz, ... — the same identifiers
-		// information_schema exposes as udt_name). to_regclass parses its
-		// argument the way the SQL parser parses a FROM clause: a qualified
-		// name resolves to its schema, an unqualified one through the whole
-		// search_path. A missing table yields NULL and therefore zero rows.
-		err = gdb.Raw("SELECT a.attname AS name, t.typname AS typ FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid = a.atttypid WHERE a.attrelid = to_regclass(?) AND a.attnum > 0 AND NOT a.attisdropped", pgRegclassText(table)).Scan(&rows).Error
+		// Each column's type resolves to its FINAL base type: domains
+		// (typtype d) recurse through typbasetype until a non-domain type,
+		// and only pg_catalog built-ins keep their bare typname — anything
+		// user-defined renders schema-qualified, which no whitelist entry
+		// can match. The bare typname alone is NOT trustworthy: CREATE
+		// DOMAIN app."int8" AS text passes an integer gate by name while
+		// the database computes over text — lexicographic MIN, silently
+		// (round-10 review #1). Resolving domains to their base is also
+		// what information_schema's udt_name did before round-9, so a
+		// domain honestly over bigint keeps aggregating. The whitelisted
+		// spellings (int8, varchar, timestamptz, ...) are exactly these
+		// pg_catalog typnames.
+		err = gdb.Raw(
+			"WITH RECURSIVE cols AS ("+
+				"SELECT a.attname, a.atttypid AS typeoid FROM pg_catalog.pg_attribute a WHERE a.attrelid = ?::oid AND a.attnum > 0 AND NOT a.attisdropped"+
+				" UNION ALL "+
+				"SELECT c.attname, t.typbasetype FROM cols c JOIN pg_catalog.pg_type t ON t.oid = c.typeoid WHERE t.typtype = 'd'"+
+				") SELECT c.attname AS name, CASE WHEN n.nspname = 'pg_catalog' THEN t.typname ELSE n.nspname || '.' || t.typname END AS typ"+
+				" FROM cols c JOIN pg_catalog.pg_type t ON t.oid = c.typeoid JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype <> 'd'",
+			pgRelOID).Scan(&rows).Error
 	case "mysql":
 		if qualifier, bare, qualified := strings.Cut(table, "."); qualified {
 			err = gdb.Raw("SELECT column_name AS name, data_type AS typ FROM information_schema.columns WHERE table_schema = ? AND table_name = ?", qualifier, bare).Scan(&rows).Error
@@ -843,8 +922,10 @@ func aggJSONColumnType(field *schema.Field, catalogType string) (string, bool) {
 // type decides whether the database operation is legal. It is an EXACT
 // per-dialect allowlist of the catalog base types (what the dialect
 // reader in readCatalogColumnTypes reports — SQLite's declared pragma
-// type, PostgreSQL's pg_type.typname, MySQL's DATA_TYPE — reduced to
-// lowercase base names by aggBaseType) each wire kind may aggregate over —
+// type, PostgreSQL's final non-domain pg_catalog typname (user-defined
+// types render schema-qualified and so never match), MySQL's DATA_TYPE
+// — reduced to lowercase base names by aggBaseType) each wire kind may
+// aggregate over —
 // deliberately not substring matching, which silently swept in
 // PostgreSQL's exotic neighbours: "interval"/"int4range"/"integer[]"
 // all contain "int", "daterange" starts with "date", "time"/"timetz"

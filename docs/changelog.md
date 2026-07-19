@@ -200,6 +200,24 @@
 > `Migrator.ColumnTypes` 实现的内部注释（resolveAggCatalog / 白名单 /
 > aggScopedBase 及孤儿 aggBase 段落），db.md/design.md 同步真实机制。
 >
+> **round-10 复审修正**（2H，均红→绿）：① round-9 取 `pg_type.typname`
+> 作列型——但 typname 可被用户 domain 冒充：`CREATE DOMAIN app."int8"
+> AS text` 的列按裸名过整数门禁，`Min[int64]` 对 '2'/'10' 静默返回
+> 字典序 10（information_schema 的 udt_name 本会解到底层 text，
+> round-9 换源时丢了该语义）。改为递归 CTE 沿 `typbasetype` 解 domain
+> 至最终非 domain 类型，且仅 `pg_catalog` 命名空间保留裸名——用户类型
+> 渲染为 `schema.name`，永不匹配白名单；诚实的 domain-over-bigint
+> 照常聚合（round-8 语义保留）。② catalog cache 原为每 Store 单值，
+> round-9 又允许未限定表随事务 search_path 解析——schema-per-tenant
+> 下同一 Store 两个事务命中不同表，门禁复用首个表的列型（bigint 缓存
+> 罩住 text 表，字典序 MIN 静默错）。改为**按 relation OID 分键**：
+> 每次聚合先 `to_regclass` 探针（COALESCE→0 视为未迁移，错误不缓存），
+> 列读改以该 OID 为参——探针、列读、聚合同连接同解析，缓存键与列读
+> 天然一致；SQLite/MySQL 仍单条目（blessed 栈无 ATTACH/USE，连接级
+> 解析固定）。回归：shadow domain（含 domain-over-bigint 正例）+
+> 双 schema 同名异型表三事务往返（换 relation 各自 fail-closed/正确，
+> 回到首个 relation 缓存仍有效）。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

@@ -495,7 +495,13 @@ gorm 的 `ColumnTypes` 会跑无 scope 的 `SELECT * ... LIMIT 1`，刻意
 标识符大小写）。catalog 读按**数据查询同款规则**解析表名：点限定
 `TableName`（`main.t`/`schema.t`/`db.t`）拆限定符后查 catalog（与
 GORM quoter 的按点拆分一致），PG 未限定名经 `to_regclass` 沿**整条**
-`search_path` 解析，不只 `current_schema()` 表头。属主/自定义 scope
+`search_path` 解析，不只 `current_schema()` 表头。PG 列型沿
+`typbasetype` 递归解 domain 至**最终基类型**、且仅认 `pg_catalog`
+命名空间的内建名——用户 domain/enum 渲染为 schema 限定名，永不入
+白名单（裸 `typname` 可被 `CREATE DOMAIN` 冒充内建名）；catalog
+缓存按解析出的 **relation OID** 分键，`SET LOCAL search_path` 的
+schema-per-tenant 形态下同一 Store 命中不同表时各持各的列型（动态
+search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
 **先于** catalog 读执行：未认证
 请求在纯内存的 fail-closed 阶段即被拒（401），根本不碰数据库：
 
