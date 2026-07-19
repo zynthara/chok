@@ -569,7 +569,7 @@ func (s *Store[T]) aggFieldSpec(fnName, field string, cat aggColumnCatalog) (str
 	if fieldSchema == nil {
 		return "", cursorFieldSpec{}, fmt.Errorf("store: %s: field %q resolves to column %q, which is missing from the model schema", fnName, field, col)
 	}
-	catalogType := cat.types[fieldSchema.DBName]
+	catalogType := cat.types[aggCatalogKey(cat.dialect, fieldSchema.DBName)]
 	// The wire kind alone is not enough: a Go string field can be backed
 	// by a database JSON column, and JSON documents are not comparable
 	// scalars on every dialect (PostgreSQL json, unlike jsonb, has no
@@ -646,14 +646,32 @@ func (s *Store[T]) resolveAggCatalog(ctx context.Context) (aggColumnCatalog, err
 	}
 	m := make(map[string]string, len(cols))
 	for _, c := range cols {
+		// The KEY (column name) is folded per dialect — SQLite/MySQL
+		// identifiers are case-insensitive, so a versioned/off migration
+		// declaring QTY must still match a model field mapped to qty (see
+		// aggCatalogKey). The VALUE (type name) is lowercased outright:
 		// DatabaseTypeName preserves the declared case on SQLite (a raw
-		// "TEXT" migration reports "TEXT"); normalise so the whitelist can
-		// match. It also omits length/precision, so "varchar(24)" arrives
-		// as "varchar" — but it KEEPS "[]" for arrays, which we reject.
-		m[c.Name()] = strings.ToLower(c.DatabaseTypeName())
+		// "TEXT" migration reports "TEXT") but type keywords are
+		// case-insensitive. It also omits length/precision, so
+		// "varchar(24)" arrives as "varchar" — but it KEEPS "[]" for
+		// arrays, which we reject.
+		m[aggCatalogKey(dialect, c.Name())] = strings.ToLower(c.DatabaseTypeName())
 	}
 	s.aggCatalog.loaded.Store(&m)
 	return aggColumnCatalog{dialect: dialect, types: m}, nil
+}
+
+// aggCatalogKey normalises a column name for catalog lookup. SQLite and
+// MySQL identifiers are case-insensitive, so an out-of-band (versioned
+// /off) migration may have declared QTY while the model maps qty — both
+// must resolve to one key. PostgreSQL folds UNQUOTED identifiers to
+// lowercase but keeps quoted ones case-sensitive, so its names (already
+// what GORM emitted for the model) are matched verbatim.
+func aggCatalogKey(dialect, name string) string {
+	if dialect == "postgres" {
+		return name
+	}
+	return strings.ToLower(name)
 }
 
 // aggJSONColumnType reports whether a field's database column is
@@ -695,7 +713,7 @@ var aggCatalogWhitelist = map[string]map[string]map[string]struct{}{
 		cursorKindUint:   aggTypeSet("integer", "int", "int2", "int8", "bigint", "smallint", "mediumint", "tinyint"),
 		cursorKindFloat:  aggTypeSet("real", "double", "float", "numeric", "decimal"),
 		cursorKindTime:   aggTypeSet("datetime", "timestamp", "date"),
-		cursorKindString: aggTypeSet("text", "clob", "varchar", "character", "nvarchar", "uuid"),
+		cursorKindString: aggTypeSet("text", "clob", "varchar", "char", "nchar", "character", "nvarchar", "uuid"),
 		cursorKindBool:   aggTypeSet("numeric", "boolean", "bool"),
 	},
 	"postgres": {
@@ -711,7 +729,7 @@ var aggCatalogWhitelist = map[string]map[string]map[string]struct{}{
 		cursorKindUint:   aggTypeSet("tinyint", "smallint", "mediumint", "int", "bigint"),
 		cursorKindFloat:  aggTypeSet("float", "double", "decimal", "numeric"),
 		cursorKindTime:   aggTypeSet("datetime", "timestamp", "date"),
-		cursorKindString: aggTypeSet("varchar", "char", "text", "tinytext", "mediumtext", "longtext"),
+		cursorKindString: aggTypeSet("varchar", "char", "nchar", "text", "tinytext", "mediumtext", "longtext", "enum"),
 		cursorKindBool:   aggTypeSet("tinyint", "bool", "boolean"),
 	},
 }

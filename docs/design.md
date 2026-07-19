@@ -383,7 +383,9 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   catalog（json/jsonb，GormDBDataType 不漏）。懒解析（而非构造期）
   因构造可能先于迁移，且 catalog 只在迁移后才反映真相；`ColumnTypes`
   查 catalog 不改共享 schema（无 round-4 的 FullDataTypeOf 原地写
-  Precision 竞态），一次解析、互斥缓存。类型收敛是显式契约：
+  Precision 竞态），一次解析、互斥缓存。catalog 列名在 SQLite/MySQL
+  按大小写不敏感匹配（`versioned/off` 建的大写列照认）、PG 保留
+  quoted 语义；字符串族含 char/nchar/enum。类型收敛是显式契约：
   `Sum[int64]` 精确、越 int64 值域响亮报错；`Avg` 恒 float64；SQL NULL
   （零行/全 NULL）→ comma-ok 的 `ok=false`，GroupBy 值走
   `AggValue.IsNull`，NULL group key 报错不折叠。`GroupBy` 恒按 group

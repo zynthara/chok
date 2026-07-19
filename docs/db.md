@@ -486,7 +486,9 @@ for _, g := range groups {
 `time`/`timetz` 当瞬间、`integer[]` 数组当整数）。`int64` 字段配
 真实 `TEXT` 列这类错配在入口 fail-closed（否则 SQLite 按文本字典序
 算 MIN、PG 运行期报错），range / interval / 数组 / 纯时刻(time)等
-不认识的列型同样拒绝并指向 Unsafe：
+不认识的列型同样拒绝并指向 Unsafe（catalog 列名在 SQLite/MySQL 按
+大小写不敏感匹配——`versioned/off` 建的 `QTY` 列照样认；PG 保留
+quoted 标识符大小写）：
 
 | 函数 | 接受的列 | Go 侧类型 |
 |---|---|---|

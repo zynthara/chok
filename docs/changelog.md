@@ -136,6 +136,20 @@
 > 的方言歧义——不在名单的 interval/range/array/time-of-day/json 一律
 > fail-closed。PG lane 加真 interval/time/int4range 列的端到端拒收回归。
 >
+> **round-6 复审修正**（两条，均红→绿）：① catalog 列名此前按原样
+> （`c.Name()`）作 map key，而 lookup 用模型的小写 `DBName`——
+> SQLite/MySQL 标识符大小写不敏感，`versioned/off` 建的 `QTY INTEGER`
+> 列 catalog key 是 "QTY"、查 "qty" 落空，合法表被误拒（查询本身因大小写
+> 不敏感能跑，只是门禁自己漏配）。改为 `aggCatalogKey`：SQLite/MySQL 建
+> map 与 lookup 都折小写、PG 保留（quoted 标识符大小写敏感，且 GORM 发的
+> 就是模型名）。② 精确白名单漏了 round-4 明确承诺的字符串族成员——SQLite
+> 的 `char`/`nchar`（此前只有 `character`/`nvarchar`，CHAR 是 TEXT
+> affinity 完全可分组）、MySQL 的 `enum`（INFORMATION_SCHEMA 基础类型名
+> "enum"，本质是有界字符串）。补齐后 SQLite CHAR、MySQL ENUM 的
+> GroupBy/CountDistinct 各加真库回归（后者进 make test-mysql 正则）。
+> 探针实测确认 catalog 名：SQLite `type:char(8)`→"char"、MySQL
+> `type:enum(...)`→"enum"、MySQL `nchar`→"char"（已被 char 覆盖）。
+>
 > **刻意不做**（v1 边界，均已写进 db.md/design.md）：HAVING（聚合结果上
 > 的表达式谓词，与表达式 ORDER BY 同类，无法白名单化——小结果集在内存
 > 过滤）；按聚合值 ORDER BY + LIMIT 的 top-N 下推（组基数=白名单列的

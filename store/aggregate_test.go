@@ -858,6 +858,10 @@ func TestAggregate_Round5CatalogWhitelistRejectsExotics(t *testing.T) {
 		{"sqlite", cursorKindInt, "integer"}, {"sqlite", cursorKindFloat, "real"},
 		{"sqlite", cursorKindTime, "datetime"}, {"sqlite", cursorKindString, "text"},
 		{"sqlite", cursorKindBool, "numeric"},
+		// round-6 review #2: char/nchar (SQLite) and enum (MySQL) are
+		// legitimate string types the whitelist must admit.
+		{"sqlite", cursorKindString, "char"}, {"sqlite", cursorKindString, "nchar"},
+		{"mysql", cursorKindString, "enum"}, {"mysql", cursorKindString, "char"},
 	}
 	for _, g := range good {
 		if !aggCatalogAllows(g.dialect, g.kind, g.typ) {
@@ -960,6 +964,87 @@ func TestAggregate_Round5PGExoticColumnsRejected(t *testing.T) {
 	}
 	if _, err := GroupBy[int64](ctx, s, "rng", []Aggregate{CountRows()}); err == nil {
 		t.Fatal("grouping by a PG `int4range` column must fail closed")
+	}
+}
+
+// r6UpperCol reproduces round-6 review #1: a Go int64 field mapping to
+// column qty, over a table whose real column was declared QTY (uppercase)
+// by an out-of-band migration. SQLite identifiers are case-insensitive,
+// so the query works — but the catalog gate keyed the type map by the
+// raw catalog name.
+type r6UpperCol struct {
+	db.Model
+	Qty int64 `json:"qty"`
+}
+
+func (r6UpperCol) RIDPrefix() string { return "r6u" }
+
+// TestAggregate_Round6CaseInsensitiveColumnName is the round-6 review #1
+// regression: the catalog key was the raw column name while the lookup
+// used the lowercase model DBName, so a case-insensitive dialect's
+// upper/mixed-case column resolved to an empty type and was falsely
+// rejected. Catalog keys and lookups now fold case on SQLite/MySQL.
+func TestAggregate_Round6CaseInsensitiveColumnName(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("the raw uppercase-column shape is scripted for SQLite")
+	}
+	gdb := setupDB(t)
+	ctx := context.Background()
+	raw := gdb.Unsafe(ctx)
+	if err := raw.Exec(`CREATE TABLE r6_upper_cols (id integer PRIMARY KEY AUTOINCREMENT, rid text, version integer, created_at datetime, updated_at datetime, QTY INTEGER)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := New[r6UpperCol](gdb, log.Empty(), WithQueryFields("id", "qty"))
+	if err := raw.Exec(`INSERT INTO r6_upper_cols (rid, version, QTY) VALUES ('r6u_a', 1, 2), ('r6u_b', 1, 10)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	// The column really is INTEGER — the aggregate must compute correctly,
+	// not fail closed on a case-mismatched catalog key.
+	lo, ok, err := Min[int64](ctx, s, "qty")
+	if err != nil || !ok || lo != 2 {
+		t.Fatalf("Min over an uppercase-named INTEGER column = %d, %v, %v; want 2 (case-insensitive catalog match)", lo, ok, err)
+	}
+	sum, ok, err := Sum[int64](ctx, s, "qty")
+	if err != nil || !ok || sum != 12 {
+		t.Fatalf("Sum over an uppercase-named INTEGER column = %d, %v, %v; want 12", sum, ok, err)
+	}
+}
+
+// r6CharModel exercises round-6 review #2: a string column whose real
+// catalog type is CHAR — a TEXT-affinity type the exact whitelist must
+// admit for GroupBy / CountDistinct.
+type r6CharModel struct {
+	db.Model
+	Code string `json:"code" gorm:"type:char(8)"`
+}
+
+func (r6CharModel) RIDPrefix() string { return "r6h" }
+
+// TestAggregate_Round6SQLiteCharColumn is the round-6 review #2
+// regression: the SQLite string whitelist dropped char/nchar (it had
+// character/nvarchar), so a CHAR column — plain TEXT affinity, perfectly
+// groupable — was falsely rejected.
+func TestAggregate_Round6SQLiteCharColumn(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("CHAR affinity behaviour is pinned on the SQLite lane")
+	}
+	gdb := setupDB(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&r6CharModel{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[r6CharModel](gdb, log.Empty(), WithQueryFields("id", "code"))
+	for _, code := range []string{"a", "a", "b"} {
+		if err := s.Create(ctx, &r6CharModel{Code: code}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := CountDistinct(ctx, s, "code"); err != nil || n != 2 {
+		t.Fatalf("CountDistinct over a CHAR column = %d, %v; want 2", n, err)
+	}
+	groups, err := GroupBy[string](ctx, s, "code", []Aggregate{CountRows()})
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("GroupBy over a CHAR column = %v, %v; want 2 groups", groups, err)
 	}
 }
 
@@ -1082,6 +1167,41 @@ func TestAggregate_MySQLTypeMapping(t *testing.T) {
 	}
 	if n, err := CountDistinct(ctx, s, "at", where.WithFilter("status", "zoned")); err != nil || n != 1 {
 		t.Fatalf("MySQL: one instant in two zones counts %d distinct, %v; want 1", n, err)
+	}
+}
+
+// r6EnumModel exercises round-6 review #2 on MySQL: an ENUM column, whose
+// INFORMATION_SCHEMA base type is "enum" — a string type the whitelist
+// must admit.
+type r6EnumModel struct {
+	db.Model
+	Tier string `json:"tier" gorm:"type:enum('free','pro')"`
+}
+
+func (r6EnumModel) RIDPrefix() string { return "r6e" }
+
+// TestAggregate_Round6MySQLEnumColumn is the round-6 review #2 regression
+// on a real MySQL server (make test-mysql lane): the MySQL string
+// whitelist dropped "enum", so grouping or distinct-counting an ENUM
+// column — a bounded string type — was falsely rejected.
+func TestAggregate_Round6MySQLEnumColumn(t *testing.T) {
+	gdb := dbtest.OpenMySQL(t)
+	ctx := context.Background()
+	if err := gdb.Migrate(ctx, db.Table(&r6EnumModel{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[r6EnumModel](gdb, log.Empty(), WithQueryFields("id", "tier"))
+	for _, tier := range []string{"free", "free", "pro"} {
+		if err := s.Create(ctx, &r6EnumModel{Tier: tier}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := CountDistinct(ctx, s, "tier"); err != nil || n != 2 {
+		t.Fatalf("CountDistinct over an ENUM column = %d, %v; want 2", n, err)
+	}
+	groups, err := GroupBy[string](ctx, s, "tier", []Aggregate{CountRows()})
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("GroupBy over an ENUM column = %v, %v; want 2 groups", groups, err)
 	}
 }
 
