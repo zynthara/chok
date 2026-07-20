@@ -346,11 +346,14 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 				continue
 			}
 
-			// An unnamed struct embed promotes its fields; a named embed
-			// (json:"meta") or a non-struct embed is treated as a normal
-			// field per encoding/json.
-			if sf.Anonymous && et.Kind() == reflect.Struct && !explicit {
-				if !onPath(fr.path, et) {
+			// A struct embed promotes its fields only when it has no explicit
+			// json name. A NAMED struct embed (json:"meta") is a nested
+			// object per encoding/json, not a flat patch field — whether it
+			// is a value or a pointer, it does not participate. A non-struct
+			// anonymous field falls through to participate as a normal field
+			// (under its json name or Go type name).
+			if sf.Anonymous && et.Kind() == reflect.Struct {
+				if !explicit && !onPath(fr.path, et) {
 					next := append(append([]reflect.Type(nil), fr.path...), et)
 					queue = append(queue, frame{t: et, prefix: idx, depth: fr.depth + 1, path: next})
 				}
@@ -358,8 +361,7 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 			}
 
 			// Treated as a field. An anonymous field reaching here that is
-			// unexported (a named unexported struct embed) is not a visible
-			// value field.
+			// unexported is not a visible value field.
 			if !isExported {
 				continue
 			}
@@ -370,6 +372,11 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 				field: patchField{index: idx, public: public, elemType: sf.Type.Elem()},
 				depth: fr.depth,
 			}
+			// Shallower wins; equal depth is ambiguous; deeper is shadowed
+			// (the default no-op). The shallower-than branch is unreachable
+			// under BFS — a shallower same-name field is always visited
+			// first — but is kept so conflict resolution stays correct for
+			// any traversal order rather than silently depending on BFS.
 			switch existing, ok := chosen[public]; {
 			case !ok:
 				chosen[public] = cand

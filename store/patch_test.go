@@ -736,3 +736,36 @@ func TestPatch_MultiLevelPointerPanics(t *testing.T) {
 	outer := &inner
 	_ = Patch(outer)
 }
+
+// r3 Low#1 — a named struct embed (json:"meta"), whether value or POINTER, is
+// a nested object per encoding/json and must not participate as a flat patch
+// field. The value case already skipped via the non-pointer check; the
+// pointer case used to slip through and resolve to public "meta".
+func TestPatch_NamedPointerEmbedNotPromoted(t *testing.T) {
+	ctx := context.Background()
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	type Meta struct {
+		Title *string `json:"title"`
+	}
+	type req struct {
+		*Meta `json:"meta"` // named pointer embed → nested object, not a field
+		Body  *string       `json:"body"`
+	}
+	// If *Meta participated as public "meta", build would 500 (no such
+	// column); it must be ignored, leaving only Body to update.
+	if err := s.Update(ctx, RID(p.RID),
+		Patch(&req{Meta: &Meta{Title: ptr("nested")}, Body: ptr("b")}).Onto(p)); err != nil {
+		t.Fatalf("named pointer embed must not participate, got %v", err)
+	}
+	got, err := s.Get(ctx, RID(p.RID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "orig" {
+		t.Errorf("Title = %q, want orig", got.Title)
+	}
+	if got.Body == nil || *got.Body != "b" {
+		t.Errorf("Body = %v, want b", got.Body)
+	}
+}
