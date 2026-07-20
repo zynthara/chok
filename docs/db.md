@@ -826,10 +826,12 @@ err = posts.Update(ctx, store.RID(rid), store.Patch(req), store.WithVersion(req.
   参与（与白名单 key 不匹配就响亮 `ErrUnknownUpdateField` → 500，提示补
   JSON tag）。DTO 字段可用 `store:"-"` 显式退出（放控制类指针字段，如
   `Force *bool`）。
-- 每次调用校验 **DTO 的完整形状**（含本次为 nil 的字段）：字段名不在
-  update 白名单、解析到托管列、类型不匹配都在**首个请求**即 500，而不是
-  等客户端第一次发那个字段才炸。类型规则=严格 assignable（可空列 `*E`
-  收 `E`），不做隐式转换（`int`→`string` 这类是陷阱不是 patch）。
+- 每次 build 校验 **DTO 的完整形状**（含本次为 nil 的字段）：字段名不在
+  update 白名单、解析到托管列、类型不匹配都在**首个到达 `Update` 的请求**
+  即 500，而不是等客户端第一次发那个字段才炸。（`IsEmpty()` 早退的全 nil
+  请求不触发 build，所以坏 DTO 的 500 在首个真正构建的请求上报出。）类型
+  规则=严格 assignable（可空列 `*E` 收 `E`），不做隐式转换（`int`→`string`
+  这类是陷阱不是 patch）。
 - `.Onto(&obj)` 把值应用到已加载模型并复用 `Fields` 的隐式乐观锁与版本
   回写；失败后 obj 持有已应用值但 Version 未推进，**丢弃或重读**。裸
   `Patch`（无 Onto）无隐式锁，配 `WithVersion`，语义同 `Set`。

@@ -42,27 +42,41 @@ import (
 //     excludes the field; a field with no json tag participates under its
 //     Go field name (so a DTO relying on default naming is not silently
 //     dropped — a mismatch surfaces loudly as ErrUnknownUpdateField).
-//   - A DTO field may opt out with `store:"-"`. Any other store tag value
-//     on a request DTO is a construction-time error (the model-side
-//     query/update tag vocabulary does not apply to DTOs).
-//   - Embedded structs promote their fields per json rules (shallower
-//     shadows deeper); two fields promoted to the same public name at the
-//     same depth are a construction-time error.
+//   - A DTO field may opt out with `store:"-"` (anonymous embeds included,
+//     so an embedded control container is not promoted). Any other store
+//     tag value on a request DTO is a construction-time error (the
+//     model-side query/update tag vocabulary does not apply to DTOs).
+//   - Embedded structs promote their fields per json rules: an embed with
+//     no json name promotes its fields (shallower shadows deeper), while a
+//     named embed (json:"meta") is a normal nested field, not promoted.
+//     Two fields resolving to the same public name at the same depth are
+//     ambiguous and rejected (stricter than encoding/json's tag-dominance
+//     tie-break — a DTO name clash is a build-time error, not a silent
+//     pick).
 //
 // Values are validated against the Store's update whitelist and model
 // schema on every build (the FULL declared shape, even fields nil this
 // call), so a DTO that names an unknown, protected or type-incompatible
-// column fails on the first request rather than lying in wait until a
-// client first sends that field. Whitelist/protected/type failures are
-// programming errors → 500; an all-nil call is ErrEmptyPatch → 400.
+// column fails on the first request that reaches Update rather than lying
+// in wait until a client first sends that field. (IsEmpty short-circuits a
+// no-op PATCH before build, so an all-nil first request does not trip that
+// validation — the guarantee is "the first request that builds".)
+// Whitelist/protected/type failures are programming errors → 500; an
+// all-nil call is ErrEmptyPatch → 400.
 //
-// Patch panics if req is not a struct or pointer-to-struct — a wiring
-// error caught at the call site, like WithRowsAffected(nil).
+// Patch panics if req is not a struct or a non-nil pointer-to-struct — a
+// wiring error caught at the call site, like WithRowsAffected(nil).
 func Patch(req any) *PatchChanges {
-	rt := reflect.TypeOf(req)
-	if rt == nil {
+	rv := reflect.ValueOf(req)
+	if !rv.IsValid() {
 		panic("store: Patch requires a struct or pointer-to-struct request, got nil")
 	}
+	// Reject a typed nil pointer at construction rather than panicking deep
+	// in reflection at build time.
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
+		panic(fmt.Sprintf("store: Patch requires a non-nil request, got nil %T", req))
+	}
+	rt := rv.Type()
 	for rt.Kind() == reflect.Pointer {
 		rt = rt.Elem()
 	}
@@ -75,9 +89,10 @@ func Patch(req any) *PatchChanges {
 // PatchChanges is the concrete return of Patch so that Onto / NoLock /
 // IsEmpty remain available. It satisfies the Changes interface.
 type PatchChanges struct {
-	req    any
-	onto   any  // optional *T model to apply the patch onto
-	noLock bool // set by NoLock; only meaningful together with Onto
+	req     any
+	onto    any  // the model passed to Onto (may be a nil interface)
+	ontoSet bool // whether Onto was called at all — distinct from onto == nil
+	noLock  bool // set by NoLock; only meaningful together with Onto
 }
 
 var _ Changes = (*PatchChanges)(nil)
@@ -89,10 +104,13 @@ var _ Changes = (*PatchChanges)(nil)
 // advances. On error, obj holds the applied values with an un-advanced
 // Version: discard or reload it rather than treating it as the truth.
 //
-// Without Onto, Patch is a bare change set (no implicit lock, obj not
-// updated) — pair with WithVersion when locking matters, mirroring Set.
+// Calling Onto with a nil model is an error surfaced at build (a mistyped
+// intent, not a silent downgrade to a bare write). Without Onto at all,
+// Patch is a bare change set (no implicit lock, obj not updated) — pair
+// with WithVersion when locking matters, mirroring Set.
 func (p *PatchChanges) Onto(obj any) *PatchChanges {
 	p.onto = obj
+	p.ontoSet = true
 	return p
 }
 
@@ -145,7 +163,7 @@ func (p *PatchChanges) build(ctx context.Context, fm map[string]string, modelSch
 
 	// Validate the full declared shape first, including fields nil this
 	// call: name in whitelist, not a protected column, type assignable to
-	// the model field. A bad DTO fails on the first request.
+	// the model field. A bad DTO fails on the first request that builds.
 	for _, f := range plan.fields {
 		col, ok := fm[f.public]
 		if !ok {
@@ -163,67 +181,57 @@ func (p *PatchChanges) build(ctx context.Context, fm map[string]string, modelSch
 		}
 	}
 
-	// Collect this call's active (non-nil) fields, in sorted public order
-	// (plan.fields is already sorted; the nil filter preserves it).
-	reqVal := derefStruct(reflect.ValueOf(p.req))
-	type activeField struct {
-		public string
-		col    string
-		elem   reflect.Value
+	// Resolve the model instance the values are applied onto: the caller's
+	// object (Onto) or a throwaway of the Store's model type (bare Patch).
+	// Both then delegate to Fields, so payload building, value coercion (a
+	// driver.Valuer implemented on *E, serializers, GORM's zero handling),
+	// the event snapshot and — for Onto — the optimistic lock and version
+	// write-back all run through exactly one code path. Building the bare
+	// payload by hand instead would skip that coercion and, for a nullable
+	// *E column, persist a differently-encoded value than Onto.
+	var target reflect.Value
+	if p.ontoSet {
+		ov := reflect.ValueOf(p.onto)
+		if ov.Kind() != reflect.Pointer || ov.IsNil() || ov.Elem().Type() != modelSchema.ModelType {
+			return builtChanges{}, fmt.Errorf("store: Patch.Onto object type %T does not match Store model %s", p.onto, modelSchema.ModelType)
+		}
+		target = ov
+	} else {
+		target = reflect.New(modelSchema.ModelType)
 	}
-	var actives []activeField
+
+	reqVal := derefStruct(reflect.ValueOf(p.req))
+	names := make([]string, 0, len(plan.fields))
 	for _, f := range plan.fields {
 		fv, ok := fieldByIndexSafe(reqVal, f.index)
 		if !ok || fv.IsNil() {
 			continue
 		}
-		actives = append(actives, activeField{public: f.public, col: fm[f.public], elem: fv.Elem()})
+		dst := modelSchema.LookUpField(fm[f.public]).ReflectValueOf(ctx, target)
+		if err := patchApply(dst, fv.Elem()); err != nil {
+			return builtChanges{}, fmt.Errorf("store: Patch: field %q: %w", f.public, err)
+		}
+		names = append(names, f.public)
 	}
-	if len(actives) == 0 {
+	if len(names) == 0 {
 		return builtChanges{}, ErrEmptyPatch
 	}
 
-	// With Onto: apply the values onto the model, then delegate to Fields
-	// so the built payload, event snapshot, optimistic-lock version and
-	// version write-back are produced by exactly the same code path as a
-	// hand-written Fields(&obj, cols...) update.
-	if p.onto != nil {
-		ov := reflect.ValueOf(p.onto)
-		if ov.Kind() != reflect.Pointer || ov.IsNil() || ov.Elem().Type() != modelSchema.ModelType {
-			return builtChanges{}, fmt.Errorf("store: Patch.Onto object type %T does not match Store model %s", p.onto, modelSchema.ModelType)
-		}
-		names := make([]string, 0, len(actives))
-		for _, a := range actives {
-			dst := modelSchema.LookUpField(a.col).ReflectValueOf(ctx, ov)
-			if err := patchApply(dst, a.elem); err != nil {
-				return builtChanges{}, fmt.Errorf("store: Patch: field %q: %w", a.public, err)
-			}
-			names = append(names, a.public)
-		}
-		fc := Fields(p.onto, names...)
-		if p.noLock {
-			fc.NoLock()
-		}
-		return fc.build(ctx, fm, modelSchema)
+	fc := Fields(target.Interface(), names...)
+	if !p.ontoSet || p.noLock {
+		fc.NoLock()
 	}
-
-	// Bare Patch: no model to apply onto, no implicit lock — same shape as
-	// Set(map). Pair with WithVersion when locking matters.
-	payload := make(map[string]any, len(actives))
-	eventValues := make(map[string]any, len(actives))
-	cols := make([]string, 0, len(actives))
-	for _, a := range actives {
-		v := a.elem.Interface()
-		payload[a.col] = v
-		eventValues[a.public] = v
-		cols = append(cols, a.col)
+	built, err := fc.build(ctx, fm, modelSchema)
+	if err != nil {
+		return builtChanges{}, err
 	}
-	sort.Strings(cols)
-	return builtChanges{
-		columns: cols,
-		payload: payload,
-		event:   newChangeSnapshot(eventValues),
-	}, nil
+	if !p.ontoSet {
+		// Throwaway instance: never write a version back onto it, and carry
+		// no implicit lock (a bare Patch locks only via WithVersion).
+		built.model = nil
+		built.implicitVersion = 0
+	}
+	return built, nil
 }
 
 // patchField is one participating pointer field of a request DTO, resolved
@@ -260,7 +268,10 @@ func patchPlanFor(rt reflect.Type) *patchPlan {
 // buildPatchPlan analyses a DTO struct type. It walks the struct breadth-
 // first so shallower embeds shadow deeper ones (Go/json promotion rules);
 // two participating fields resolving to the same public name at the same
-// depth are ambiguous and rejected.
+// depth are ambiguous and rejected. Cycle detection is path-based (a type
+// already on the current embed path is not re-entered), so a genuine
+// diamond — the same field reachable by two equal-depth paths — is reported
+// as ambiguous rather than silently deduplicated to the first path.
 func buildPatchPlan(rt reflect.Type) *patchPlan {
 	type candidate struct {
 		field patchField
@@ -273,9 +284,18 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 		t      reflect.Type
 		prefix []int
 		depth  int
+		path   []reflect.Type // types from root to here, for cycle detection
 	}
-	seen := map[reflect.Type]bool{rt: true}
-	queue := []frame{{t: rt, depth: 0}}
+	queue := []frame{{t: rt, depth: 0, path: []reflect.Type{rt}}}
+
+	onPath := func(path []reflect.Type, t reflect.Type) bool {
+		for _, p := range path {
+			if p == t {
+				return true
+			}
+		}
+		return false
+	}
 
 	for len(queue) > 0 {
 		fr := queue[0]
@@ -286,26 +306,44 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 			idx = append(idx, fr.prefix...)
 			idx = append(idx, i)
 
-			if sf.Anonymous {
-				et := sf.Type
-				for et.Kind() == reflect.Pointer {
-					et = et.Elem()
-				}
-				if et.Kind() == reflect.Struct && !seen[et] {
-					seen[et] = true
-					queue = append(queue, frame{t: et, prefix: idx, depth: fr.depth + 1})
-				}
+			// Unexported non-anonymous fields never participate. An
+			// unexported ANONYMOUS field can still promote its exported
+			// fields (Go/encoding/json rule), so it is not skipped here.
+			if !sf.Anonymous && !sf.IsExported() {
 				continue
 			}
-			if !sf.IsExported() {
-				continue
-			}
+
+			// store:"-" opt-out and illegal store tags apply to every field
+			// — anonymous containers included, checked BEFORE the embed is
+			// walked so a tagged-out container is not promoted.
 			if stag, ok := sf.Tag.Lookup("store"); ok {
 				if strings.TrimSpace(stag) == "-" {
 					continue
 				}
 				return &patchPlan{err: fmt.Errorf("store: Patch: field %q of %s has store tag %q; only %q is allowed on a request DTO", sf.Name, rt, stag, "-")}
 			}
+
+			if sf.Anonymous {
+				// json:"-" excludes the whole embed.
+				if isJSONExcluded(sf) {
+					continue
+				}
+				et := sf.Type
+				for et.Kind() == reflect.Pointer {
+					et = et.Elem()
+				}
+				// A struct embed with no explicit json name promotes its
+				// fields. A named embed (json:"meta") or a non-struct embed
+				// falls through to be treated as a normal field.
+				if _, named := explicitJSONName(sf); et.Kind() == reflect.Struct && !named {
+					if !onPath(fr.path, et) {
+						next := append(append([]reflect.Type(nil), fr.path...), et)
+						queue = append(queue, frame{t: et, prefix: idx, depth: fr.depth + 1, path: next})
+					}
+					continue
+				}
+			}
+
 			if sf.Type.Kind() != reflect.Pointer {
 				continue
 			}
@@ -344,6 +382,32 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 	}
 	sort.Slice(fields, func(i, j int) bool { return fields[i].public < fields[j].public })
 	return &patchPlan{fields: fields}
+}
+
+// explicitJSONName returns the json tag's first segment when it names the
+// field (non-empty, not "-"). json:",omitempty" and json:"-" both return
+// ("", false): the former keeps the Go name, the latter is handled as an
+// exclusion by the caller.
+func explicitJSONName(sf reflect.StructField) (string, bool) {
+	tag, ok := sf.Tag.Lookup("json")
+	if !ok {
+		return "", false
+	}
+	first := tag
+	if c := strings.IndexByte(tag, ','); c >= 0 {
+		first = tag[:c]
+	}
+	if first == "" || first == "-" {
+		return "", false
+	}
+	return first, true
+}
+
+// isJSONExcluded reports whether the field is excluded by json:"-" (the
+// exact tag "-"; json:"-," is the literal name "-", not an exclusion).
+func isJSONExcluded(sf reflect.StructField) bool {
+	tag, ok := sf.Tag.Lookup("json")
+	return ok && tag == "-"
 }
 
 // patchPublicName resolves a struct field's public name the way

@@ -282,9 +282,10 @@ func (s *Store[T]) getInternal(ctx context.Context, by Locator, opts []QueryOpti
 }
 
 // Update modifies the record(s) matched by the locator using the described
-// changes. Optimistic locking is automatic when Changes is Fields(&obj) and
-// obj embeds db.Model; use WithVersion for explicit locking with Set(map),
-// or .NoLock() on Fields to skip the lock.
+// changes (Set, Fields or Patch). Optimistic locking is automatic when
+// Changes is Fields(&obj) or Patch(req).Onto(&obj) and obj embeds db.Model;
+// use WithVersion for explicit locking with Set(map) or a bare Patch(req),
+// or .NoLock() to skip the lock.
 //
 // The Changes are built — update whitelist and protected-column validation
 // included — before any before-update hook runs, so static validation
@@ -297,9 +298,12 @@ func (s *Store[T]) getInternal(ctx context.Context, by Locator, opts []QueryOpti
 //   - ErrStaleVersion    when the lock version is stale (row exists but
 //     version mismatch)
 //   - ErrUnknownUpdateField / ErrMissingColumns  for invalid Changes
+//   - ErrEmptyPatch (client 400) when a Patch carried no field this call;
+//     ErrNoPatchableFields (500) when its type declares no patchable field
 //
-// Zero values in Fields(&obj) ARE persisted — the Store uses Select() to
-// bypass GORM's default "skip zero values" behaviour.
+// Zero values in Fields(&obj) and Patch (non-nil pointer fields) ARE
+// persisted — the Store uses Select() to bypass GORM's default "skip zero
+// values" behaviour.
 func (s *Store[T]) Update(ctx context.Context, by Locator, changes Changes, opts ...UpdateOption) error {
 	if err := s.rejectWrite("Update"); err != nil {
 		return err

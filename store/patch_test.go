@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -485,4 +487,170 @@ func TestPatch_PlanCacheConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// --- review-round-1 regression fixtures & tests ----------------------------
+
+// patchEnc implements driver.Valuer/sql.Scanner on its POINTER, so the
+// value form does not satisfy driver.Valuer — the exact shape that made the
+// bare Patch path (which used to store a dereferenced value) lose the
+// encoding relative to Onto.
+type patchEnc struct{ raw string }
+
+func (e *patchEnc) Value() (driver.Value, error) { return "enc:" + e.raw, nil }
+func (e *patchEnc) Scan(src any) error {
+	switch s := src.(type) {
+	case string:
+		e.raw = strings.TrimPrefix(s, "enc:")
+	case []byte:
+		e.raw = strings.TrimPrefix(string(s), "enc:")
+	}
+	return nil
+}
+
+type ValuerModel struct {
+	db.Model
+	Enc *patchEnc `json:"enc" store:"update" gorm:"type:text"`
+}
+
+func (ValuerModel) RIDPrefix() string { return "vm" }
+
+// #1 Critical — bare Patch must run the *E Valuer, matching Onto.
+func TestPatch_BareValuerColumnRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	gdb := setupDB(t)
+	if err := gdb.Migrate(ctx, db.Table(&ValuerModel{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[ValuerModel](gdb, log.Empty())
+	m := &ValuerModel{Enc: &patchEnc{raw: "seed"}}
+	if err := s.Create(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+
+	type encReq struct {
+		Enc *patchEnc `json:"enc"`
+	}
+	// BARE patch (no Onto): payload must reach gorm as *patchEnc so Value()
+	// runs; before the fix the bare path passed a patchEnc value and skipped it.
+	if err := s.Update(ctx, RID(m.RID), Patch(&encReq{Enc: &patchEnc{raw: "bare"}})); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := raw.Raw("SELECT enc FROM valuer_models WHERE rid = ?", m.RID).Scan(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored != "enc:bare" {
+		t.Errorf("stored = %q, want enc:bare (bare path must encode like Onto)", stored)
+	}
+	got, err := s.Get(ctx, RID(m.RID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Enc == nil || got.Enc.raw != "bare" {
+		t.Errorf("round-trip = %+v, want raw=bare", got.Enc)
+	}
+}
+
+// #2 Critical — store:"-" on an anonymous embed must exclude it.
+func TestPatch_AnonymousStoreDashOptOut(t *testing.T) {
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	type ctrl struct {
+		Force *bool `json:"force"`
+	}
+	type req struct {
+		ctrl  `store:"-"` // anonymous opt-out: Force must NOT be promoted
+		Title *string     `json:"title"`
+	}
+	// Force targets no column; promotion despite store:"-" would make build
+	// reject "force" as an unknown update field (500).
+	err := s.Update(context.Background(), RID(p.RID),
+		Patch(&req{ctrl: ctrl{Force: ptr(true)}, Title: ptr("t")}).Onto(p))
+	if err != nil {
+		t.Fatalf(`store:"-" on an anonymous embed must exclude it, got %v`, err)
+	}
+	if p.Title != "t" {
+		t.Errorf("Title = %q, want t", p.Title)
+	}
+}
+
+// #2 Critical — a named embed (json:"meta") is not promoted.
+func TestPatch_NamedEmbedNotPromoted(t *testing.T) {
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	type inner struct {
+		X *string `json:"x"`
+	}
+	type req struct {
+		inner `json:"meta"` // named embed → not promoted; X must not participate
+		Title *string       `json:"title"`
+	}
+	err := s.Update(context.Background(), RID(p.RID),
+		Patch(&req{inner: inner{X: ptr("nope")}, Title: ptr("t")}).Onto(p))
+	if err != nil {
+		t.Fatalf("named embed must not promote its fields, got %v", err)
+	}
+	if p.Title != "t" {
+		t.Errorf("Title = %q, want t", p.Title)
+	}
+}
+
+// #3 High — Onto with a nil model errors instead of silently downgrading.
+func TestPatch_OntoNilRejected(t *testing.T) {
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	if err := s.Update(context.Background(), RID(p.RID),
+		Patch(&patchReq{Title: ptr("x")}).Onto(nil)); err == nil {
+		t.Error("Onto(nil) must error, not silently downgrade to an unlocked bare write")
+	}
+	var np *Patchable
+	if err := s.Update(context.Background(), RID(p.RID),
+		Patch(&patchReq{Title: ptr("x")}).Onto(np)); err == nil {
+		t.Error("Onto(typed nil) must error")
+	}
+}
+
+// #4 Medium — a genuine diamond (same field, two equal-depth paths) is
+// ambiguous, not silently deduplicated to the first path.
+func TestPatch_DiamondSameDepthAmbiguous(t *testing.T) {
+	type leaf struct {
+		X *string // no json tag → vet's structtag check stays quiet
+	}
+	type midA struct{ leaf }
+	type midB struct{ leaf }
+	type diamond struct {
+		midA
+		midB
+	}
+	plan := buildPatchPlan(reflect.TypeOf(diamond{}))
+	if plan.err == nil {
+		t.Fatal("same-depth diamond promotion must be ambiguous (path-based cycle guard, not global dedup)")
+	}
+}
+
+// #5 Medium — a typed nil DTO is rejected at construction, not at build.
+func TestPatch_TypedNilPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("Patch(typed nil pointer) should panic at construction")
+		}
+	}()
+	var req *patchReq
+	_ = Patch(req)
+}
+
+// #6 Low — IsEmpty has no schema: an all-nil DTO reports empty even when it
+// names an unknown column (the shape check is Update's job; documented).
+func TestPatch_IsEmptyDoesNotValidateShape(t *testing.T) {
+	type badButEmpty struct {
+		Bogus *string `json:"bogus"`
+	}
+	if !Patch(&badButEmpty{}).IsEmpty() {
+		t.Error("all-nil DTO should report empty regardless of field validity")
+	}
 }

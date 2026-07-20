@@ -13,13 +13,18 @@ import (
 // Changes describes what to update on matched rows. It is the "what" axis of
 // the CRUD matrix, orthogonal to Locator ("who") and UpdateOption ("how").
 //
-// Two constructors cover all common cases:
+// Three constructors cover all common cases:
 //
 //   - Set(map) — explicit map of public field names to values. No implicit
 //     optimistic lock; use WithVersion to enable.
 //   - Fields(obj, fields...) — struct-backed update. Automatically extracts
 //     the optimistic-lock version from obj.Version unless .NoLock() is called.
 //     Omitting fields updates every field in the Store's update whitelist.
+//   - Patch(req) — derive the change set from a request DTO's non-nil
+//     pointer fields (the cast/patch write path). Patch(req).Onto(&obj)
+//     reuses Fields' implicit lock; bare Patch(req) pairs with WithVersion
+//     like Set. All-nil is ErrEmptyPatch; see Patch for the participation
+//     rules and IsEmpty.
 type Changes interface {
 	build(ctx context.Context, updateFieldMap map[string]string, modelSchema *schema.Schema) (builtChanges, error)
 }
