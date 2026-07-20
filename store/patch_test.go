@@ -769,3 +769,35 @@ func TestPatch_NamedPointerEmbedNotPromoted(t *testing.T) {
 		t.Errorf("Body = %v, want b", got.Body)
 	}
 }
+
+// r4 Medium — a non-pointer field must take part in JSON name/depth
+// shadowing as a blocker: a top-level non-pointer field shadows a deeper
+// same-name pointer, which is then invisible and must NOT enter the plan.
+// Before the fix the deeper pointer leaked in and failed shape validation,
+// blocking an otherwise-valid update.
+func TestPatch_NonPointerWinnerShadowsDeepPointer(t *testing.T) {
+	ctx := context.Background()
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	type Deep struct {
+		Title *int `json:"Title"` // deep, same public name "Title"
+	}
+	type req struct {
+		Deep
+		Title string  // top-level non-pointer (Go name "Title") shadows Deep.Title
+		Body  *string `json:"body"`
+	}
+	// encoding/json: the top-level Title shadows Deep.Title, so the deep *int
+	// is invisible; only Body is patchable.
+	if err := s.Update(ctx, RID(p.RID),
+		Patch(&req{Deep: Deep{Title: ptr(7)}, Title: "ignored", Body: ptr("b")}).Onto(p)); err != nil {
+		t.Fatalf("non-pointer winner must shadow the deep pointer (only Body patches), got %v", err)
+	}
+	got, err := s.Get(ctx, RID(p.RID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Body == nil || *got.Body != "b" {
+		t.Errorf("Body = %v, want b", got.Body)
+	}
+}

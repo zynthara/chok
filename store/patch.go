@@ -280,6 +280,7 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 	type candidate struct {
 		field patchField
 		depth int
+		isPtr bool // pointer fields are patchable; non-pointer winners only shadow
 	}
 	chosen := map[string]*candidate{}
 	ambiguous := map[string]struct{}{}
@@ -365,12 +366,22 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 			if !isExported {
 				continue
 			}
-			if sf.Type.Kind() != reflect.Pointer {
-				continue
+			// Both pointer and non-pointer fields register for name/depth
+			// dominance. encoding/json resolves field visibility across ALL
+			// fields first and only then does the winner's kind matter, so a
+			// non-pointer top-level field must still shadow a deeper same-name
+			// pointer (which then becomes invisible and must not enter the
+			// plan). Non-pointer winners are dropped after dominance — they
+			// carry no absent-vs-present bit and are not patchable.
+			isPtr := sf.Type.Kind() == reflect.Pointer
+			var elemType reflect.Type
+			if isPtr {
+				elemType = sf.Type.Elem()
 			}
 			cand := &candidate{
-				field: patchField{index: idx, public: public, elemType: sf.Type.Elem()},
+				field: patchField{index: idx, public: public, elemType: elemType},
 				depth: fr.depth,
+				isPtr: isPtr,
 			}
 			// Shallower wins; equal depth is ambiguous; deeper is shadowed
 			// (the default no-op). The shallower-than branch is unreachable
@@ -400,6 +411,11 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 
 	fields := make([]patchField, 0, len(chosen))
 	for _, c := range chosen {
+		if !c.isPtr {
+			// The visibility winner is a non-pointer field: it shadowed any
+			// deeper same-name field but is not itself patchable.
+			continue
+		}
 		fields = append(fields, c.field)
 	}
 	sort.Slice(fields, func(i, j int) bool { return fields[i].public < fields[j].public })
