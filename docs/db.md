@@ -281,7 +281,9 @@ err = posts.Update(ctx, store.RID(rid), store.Fields(p, PostFields.Title))
   必须**沿途每层 wrapper 都真的展开**才算数：wrapper 自己是 Valuer
   （整个变成一列）、被 `gorm:"-"`/全关权限惰性化、或字段名未导出时，
   内部基座永远到不了模型 schema——Go 层仍满足 `db.Modeler` 但运行时没有
-  rid，这些都直接报错；wrapper 的展开性无法静态判定（方法集含不可见的
+  rid，这些都直接报错。导出性闸门在 GORM 读 tag **之前**执行：未导出
+  字段连 `gorm:"embedded"` 都救不回，藏在导出 wrapper 更深处的未导出层
+  同样被查出；wrapper 的展开性无法静态判定（方法集含不可见的
   跨包成员）而又携带基座时，同样报错拒猜。另有一个启用基座时以启用者
   为准。复合泛型实参（`Inner[[]T]`）按闭包语义携带外层绑定，
   `Outer[string]` 提升出的 `Data []string` 照样被查出。无法静态判定列性时（陌生跨包类型、方法集含扫不到的嵌入）同样

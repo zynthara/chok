@@ -483,6 +483,15 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 						name, exprString(f.Type))
 				}
 			}
+			// GORM's exportedness gate runs BEFORE any tag is read
+			// (schema.go ast.IsExported): an unexported anonymous field
+			// is skipped entirely — gorm:"embedded" included — so any
+			// base it carries is lost (review round-11, latched).
+			fieldName := embedFieldName(typ)
+			if fieldName != "" && !ast.IsExported(fieldName) {
+				baseLost()
+				continue
+			}
 			if gormIgnored(gormSettings) {
 				baseLost()
 				continue
@@ -543,16 +552,10 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 					continue
 				}
 			}
-			// The embedded field's name is the type's base name; an
-			// unexported one is an unexported field GORM skips
-			// (verified against the runtime).
-			fieldName := embedFieldName(typ)
+			// The embedded field's name is the type's base name; the
+			// unexported case was dispatched before tag handling above.
 			if fieldName == "" {
 				modelWarns = append(modelWarns, opaqueEmbedWarn(name, f.Type))
-				continue
-			}
-			if !ast.IsExported(fieldName) {
-				baseLost() // GORM skips the unexported field, base and all
 				continue
 			}
 			// Classification sees the ORIGINAL expression — generic
@@ -593,7 +596,7 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 					case baseDisabled:
 						if baseFatal == nil {
 							baseFatal = fmt.Errorf(
-								"fieldgen: %s: the chok base embedded through %s is disabled by a gorm tag — GORM will not expand it, the promoted base fields (rid, id, timestamps) will not exist and store.New fails; remove the tag",
+								"fieldgen: %s: the chok base embedded through %s never reaches this model's schema — a gorm tag disables it or an unexported field skips it, so rid/id will not exist and store.New fails; restructure the embed chain",
 								name, exprString(f.Type))
 						}
 					case baseUnsure:
@@ -1530,8 +1533,18 @@ func (sc *scanner) baseThroughEmbeds(name string, seen map[string]bool) baseStat
 			continue
 		}
 		ident, ok := typ.(*ast.Ident)
-		if !ok || !ast.IsExported(ident.Name) {
-			continue // cross-package or unexported: invisible / skipped by GORM
+		if !ok {
+			continue // cross-package: carries no local base the scan could see
+		}
+		if !ast.IsExported(ident.Name) {
+			// GORM skips the unexported field before reading any tag —
+			// a base inside it is definitely lost (review round-11; the
+			// walker's non-none invariant makes this a proof, not a
+			// guess).
+			if sc.baseThroughEmbeds(ident.Name, seen) != baseNone {
+				merge(baseDisabled)
+			}
+			continue
 		}
 		inner := sc.baseThroughEmbeds(ident.Name, seen)
 		if inner == baseNone {

@@ -3115,7 +3115,7 @@ type Post struct {
 	Name string `+"`json:\"name\" store:\"query\"`"+`
 }
 `)
-	if _, err := Scan(wrapped); err == nil || !strings.Contains(err.Error(), "disabled by a gorm tag") {
+	if _, err := Scan(wrapped); err == nil || !strings.Contains(err.Error(), "never reaches this model's schema") {
 		t.Fatalf("a wrapper-disabled base leaves no rid at runtime and must fail loud, got %v", err)
 	}
 
@@ -3518,5 +3518,72 @@ type Post struct {
 `)
 	if _, err := Scan(rescued); err != nil {
 		t.Fatalf("a direct base settles the trio's existence — only the opaque warning remains, got %v", err)
+	}
+}
+
+// round-11 runtime-latch types: GORM's exportedness gate runs BEFORE
+// tag parsing (schema.go ast.IsExported), so an unexported anonymous
+// field is skipped entirely — an explicit gorm:"embedded" does not
+// rescue it, and a base nested behind one exported hop is equally
+// lost.
+type r11Hidden struct{ db.Model }
+
+type r11EmbHost struct {
+	r11Hidden `gorm:"embedded"`
+	Name      string
+}
+
+type R11Wrap struct{ r11Hidden }
+
+type r11NestedHost struct {
+	R11Wrap
+	Name string
+}
+
+// TestScan_Round11UnexportedWrapperBases is review round-11: both
+// paths where an unexported wrapper swallowed a chok base without the
+// scan noticing — an EMBEDDED-tagged unexported embed (the tag branch
+// ran before the exportedness check) and an unexported carrier nested
+// inside an exported wrapper (the walker skipped it as baseNone). Both
+// parse fine at runtime with no rid (latched), so the scan must fail
+// loud instead of minting the base trio.
+func TestScan_Round11UnexportedWrapperBases(t *testing.T) {
+	if s, err := schema.Parse(&r11EmbHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("rid") != nil {
+		t.Fatalf("latch: gorm:\"embedded\" cannot rescue an unexported field (skipped before tags), got err=%v", err)
+	}
+	if s, err := schema.Parse(&r11NestedHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("rid") != nil {
+		t.Fatalf("latch: a base behind an unexported hop never expands, got err=%v", err)
+	}
+
+	for label, src := range map[string]string{
+		"embedded-tagged": "type hidden struct{ db.Model }\n\ntype Post struct {\n\thidden `gorm:\"embedded\"`\n\tName string `store:\"query\"`\n}",
+		"nested":          "type hidden struct{ db.Model }\n\ntype Wrapper struct{ hidden }\n\ntype Post struct {\n\tWrapper\n\tName string `store:\"query\"`\n}",
+		"deep":            "type hidden struct{ db.Model }\n\ntype Mid struct{ hidden }\n\ntype Wrapper struct{ Mid }\n\ntype Post struct {\n\tWrapper\n\tName string `store:\"query\"`\n}",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", "package m\n\nimport \"github.com/zynthara/chok/v2/db\"\n\n"+src+"\n")
+		if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "never reaches this model's schema") {
+			t.Errorf("%s: the swallowed base must fail loud, got %v", label, err)
+		}
+	}
+
+	// An unexported wrapper with NO base inside stays a silent skip —
+	// exactly what it was before the exportedness gate moved.
+	baseless := t.TempDir()
+	writeGo(t, baseless, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type note struct{ N string }
+
+type Post struct {
+	db.Model
+	note
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(baseless)
+	if err != nil || len(pkg.Warnings) != 0 {
+		t.Fatalf("a baseless unexported embed is GORM-skipped and stays silent, got err=%v warnings=%q", err, pkg.Warnings)
 	}
 }
