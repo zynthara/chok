@@ -253,20 +253,31 @@ err = posts.Update(ctx, store.RID(rid), store.Fields(p, PostFields.Title))
   }` 是列）。本地定义类型沿底层形状递归（`type Code string` 含匿名嵌入形态
   是列、`type Children []Child` 是 has-many 关系、`type Stamp time.Time`
   经可转换性仍是列），**泛型按实例化实参替换**（`type Bytes[T any] []T` 的
-  `Bytes[byte]` 是 bytes 列、`Bytes[string]` 是关系）；显式
+  `Bytes[byte]` 是 bytes 列，`Bytes[string]` 即 `[]string`——见下）；显式
   `gorm:"type:..."`、serializer tag 或其简写 `gorm:"json"` 对任何**具名**
-  字段都是列性证明。**关系形状上的 `store` tag 跳过并 warn**——运行时同样
-  忽略它（DBName 为空，两侧一致）；无法静态判定列性时（陌生跨包类型、方法
-  集含扫不到的嵌入）**直接报错**：用 type / serializer tag 自证，或去掉
-  tag。构建约束按生成时平台生效（`//go:build`、平台后缀、`_` 前缀文件遵循
-  go/build 规则）。
-- ⚠️ **匿名 struct 形态另有一套嵌入规则**（与 GORM 一致）：匿名嵌入的
-  结构体只有**真 driver.Valuer**、time 可转换形态、或 `GormDataType()`
-  **字面量返回 "time"/"bytes"**（GORM 嵌入条件豁免的两个值）才是列；其余
-  `GormDataType` 返回值、serializer、`gorm:"type:"` 都**不能**阻止它展开
-  成嵌入——嵌入行上的 `store` tag 是死的，生成器跳过并 warn；
-  `GormDataType` 返回值无法静态读出（非单一字面量 return）时**报错拒猜**。
-  同一个 `GormDataType` 结构体作**具名**字段则总是列。
+  字段都是列性证明。**struct 形状的关系**（含 `[]Child` 这类 struct 元素
+  容器）上的 `store` tag **跳过并 warn**——运行时 DBName 为空，两侧一致；
+  而 GORM **根本建不出 schema 的形状**——标量元素容器（`[]string`、
+  `[]Defined`）、map / chan / func / interface、uintptr / complex、
+  `GormDataType()` 返回空串——会在运行时 **abort 整个模型**（unsupported
+  data type，对照钉死版本 GORM 实测），生成器在运行时模型上对它们**直接
+  报错**，具名/匿名、带不带 tag 一致；只有 `gorm:"-"` 族或全关权限
+  （`gorm:"->:false;<-:false"`；注意 `->:false` 单独出现即全关）能让字段
+  惰性存在。无法静态判定列性时（陌生跨包类型、方法集含扫不到的嵌入）同样
+  **报错拒猜**：用 type / serializer tag 自证，或去掉 tag。构建约束按生成
+  时平台生效（`//go:build`、平台后缀、`_` 前缀文件遵循 go/build 规则）。
+- ⚠️ **匿名字段另有一套嵌入规则**（与 GORM 一致，实测钉死）：匿名嵌入只有
+  **真 driver.Valuer**、time 可转换形态、或 `GormDataType()` **字面量返回
+  "time"/"bytes"**（GORM 嵌入条件豁免的两个值）不进嵌入分支；进了分支后
+  按 kind 定生死——struct 展开（嵌入行上的 `store` tag 是死的，生成器跳过
+  并 warn）、标量落穿分支仍是普通列、**其余 kind 一律 abort**（invalid
+  embedded struct）：serializer、`gorm:"type:"`、非豁免的 `GormDataType`
+  返回值都救不了匿名容器，生成器直接报错。显式 `gorm:"embedded"` 更狠：
+  **无视权限 tag、连 `[]byte` 都炸**，目标必须是 struct（标量目标是
+  no-op，tag 照常生效）。`GormDataType` 返回值无法静态读出（非单一字面量
+  return）时**报错拒猜**。同一个 `GormDataType` 类型作**具名**字段：字面量
+  非空才是列，**空串会抹掉 DataType 反而炸模型**，struct 形态则降级为普通
+  关系。
 - ⚠️ **提升（promotion）是语法级扫描的已知边界**：匿名内嵌的**用户**结构体
   （或 `gorm:"embedded"` 字段）内部的 `store` tag，GORM 运行时会提升、生成
   器不展开。本包内可验证的形态会打 warn——包括「全部 tag 都来自嵌入」的

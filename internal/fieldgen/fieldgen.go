@@ -13,13 +13,17 @@
 // instead of by go/types: builtins, exact driver.Valuer / GormDataType
 // implementers and a known set of cross-package column types are
 // generated, with local defined types resolved through their underlying
-// shape (a defined scalar is a column, a defined slice is a has-many);
-// relation-shaped NAMED fields (DBName empty at runtime) are skipped
-// with a warning, while an ANONYMOUS non-struct shape on a model is a
-// hard error — GORM's embedded parse aborts on it rather than skipping
-// it; a cross-package type the scan cannot classify is a hard
-// error pointing at `gorm:"type:..."` / serializer tags as the static
-// proof, or at removing the store tag.
+// shape (a defined scalar is a column, a defined slice of structs is a
+// has-many). Struct-shaped relations (DBName empty at runtime) are
+// skipped with a warning; shapes GORM cannot schema-parse AT ALL —
+// containers of non-struct elements, maps, chans, funcs, interfaces,
+// uintptr/complex, an empty GormDataType — abort the runtime model
+// build (verified against the pinned GORM), so on a runtime model they
+// are hard errors whether named or anonymous, tagged or not; only the
+// gorm:"-" family or fully closed permissions (`->:false;<-:false`)
+// keep such a field inert. A cross-package type the scan cannot
+// classify is a hard error pointing at `gorm:"type:..."` / serializer
+// tags as the static proof, or at removing the store tag.
 //
 // The remaining blind spot is promotion: GORM lifts `store` tags out of
 // anonymously embedded (exported) user structs and `gorm:"embedded"`
@@ -121,6 +125,17 @@ var builtinScalars = map[string]bool{
 	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
 	"byte": true, "rune": true,
 	"float32": true, "float64": true,
+}
+
+// fatalScalars are predeclared types GORM's kind switch has no mapping
+// for (verified against v1.31.2): their DataType stays empty, the
+// relation gate picks the field up and getOrParse aborts the whole
+// model with ErrUnsupportedDataType — named or anonymous alike. The
+// predeclared interface types land on the same fate through the
+// interface kind.
+var fatalScalars = map[string]bool{
+	"uintptr": true, "complex64": true, "complex128": true,
+	"any": true, "error": true,
 }
 
 // datatypesStorage is the explicit storage-type whitelist for
@@ -354,12 +369,17 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 		fieldWarns []string
 		modelWarns []string
 		promoWarns []string
-		// embedFatal records the first anonymous embed GORM cannot
-		// expand (colHardNo): schema parsing aborts at runtime, so if
-		// the struct turns out to be a runtime model the scan must fail
-		// with it rather than warn (review round-6). A plain DTO never
-		// meets a schema parse, so there it stays silent.
-		embedFatal error
+		// anonFatal records the first anonymous (or gorm-embedded) shape
+		// GORM cannot expand: the EMBEDDED branch aborts on it wherever
+		// the struct is parsed — directly or inside another embed — so
+		// any generated-or-based struct must fail the scan rather than
+		// warn (review rounds 6-7). namedFatal records the first NAMED
+		// DataType-less shape the relation gate would abort on; embedded
+		// sub-schemas skip relation parsing, so this one only fires for
+		// base-carrying structs (runtime models by contract). Plain DTOs
+		// never meet a schema parse and stay silent either way.
+		anonFatal  error
+		namedFatal error
 		hasDBBase  bool
 		queryCol   = map[string]string{}
 		updCol     = map[string]string{}
@@ -413,9 +433,32 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 			if gormIgnored(gormSettings) {
 				continue
 			}
+			closed := permsAllClosed(gormSettings)
 			if _, embedded := gormSettings["EMBEDDED"]; embedded {
-				promoWarns = append(promoWarns, sc.promotionWarn(name, exprString(f.Type), typ, true)...)
-				continue
+				// The EMBEDDED tag forces GORM's embedded branch whatever
+				// the permission tags say (the tag arm has no perms gate;
+				// review round-7 finding 2): a struct target expands, a
+				// scalar target is a no-op (the field stays a plain
+				// column — classify it below), and container or fatal
+				// kinds abort schema parsing — even a byte slice.
+				switch sc.shapeKindOf(f.Type, imports, nil, map[string]bool{}, false) {
+				case shapeContainer, shapeFatal:
+					err := fmt.Errorf(
+						"fieldgen: %s.%s: `gorm:\"embedded\"` on %s — not a struct, so GORM aborts schema parsing (invalid embedded struct); drop the embedded tag or restructure the field",
+						name, embedFieldName(typ), exprString(f.Type))
+					if hasStoreTag {
+						return nil, nil, err
+					}
+					if anonFatal == nil {
+						anonFatal = err
+					}
+					continue
+				case shapeScalar:
+					// inert tag: classify like any anonymous scalar below
+				default:
+					promoWarns = append(promoWarns, sc.promotionWarn(name, exprString(f.Type), typ, true)...)
+					continue
+				}
 			}
 			// The embedded field's name is the type's base name; an
 			// unexported one is an unexported field GORM skips
@@ -432,7 +475,7 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 			// arguments intact (review round-5: an embedded Bytes[byte]
 			// IS a bytes column); the unwrapped form serves only the
 			// name/base/promotion duties above.
-			verdict, why := sc.classifyAnonymous(f.Type, gormSettings, imports)
+			verdict, why := sc.classifyAnonymous(f.Type, imports)
 			switch verdict {
 			case colYes:
 				// Column-shaped embed: a field under the type's name.
@@ -449,21 +492,36 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 					fieldWarns = append(fieldWarns, fmt.Sprintf(
 						"%s.%s: `store` tag ignored — %s is %s, not a database column (the runtime skips it too); remove the tag", name, fieldName, exprString(f.Type), why))
 				}
-				promoWarns = append(promoWarns, sc.promotionWarn(name, exprString(f.Type), typ, true)...)
+				if !closed {
+					// Fully closed permissions keep the embed branch
+					// shut: nothing expands, nothing promotes (round-7).
+					promoWarns = append(promoWarns, sc.promotionWarn(name, exprString(f.Type), typ, true)...)
+				}
 			case colHardNo:
-				// The runtime does NOT skip this shape: GORM's embedded
-				// branch schema-parses it and model building fails
-				// (unsupported data type). A store tag declares model
-				// intent — fail now; untagged, fail only if the struct
-				// proves to be a runtime model after the walk.
+				if closed {
+					// Both fatal paths are perms-gated for plain
+					// anonymous fields: fully closed means inert at
+					// runtime, so the shape aborts nothing — the store
+					// tag is dead at most (review round-7 finding 5).
+					if hasStoreTag {
+						fieldWarns = append(fieldWarns, fmt.Sprintf(
+							"%s.%s: `store` tag ignored — %s has fully closed permissions and no column at runtime; remove the tag", name, fieldName, exprString(f.Type)))
+					}
+					continue
+				}
+				// The runtime does NOT skip this shape: the embedded
+				// branch (or, DataType-less, the relation gate) aborts
+				// model building. A store tag declares model intent —
+				// fail now; untagged, fail only if the struct proves to
+				// be a runtime model after the walk.
 				err := fmt.Errorf(
-					"fieldgen: %s.%s: anonymous embed %s is %s — GORM cannot expand it and schema parsing fails at runtime (unsupported data type); name the field, prove a column with a serializer or `gorm:\"type:...\"` tag, or remove the embed",
+					"fieldgen: %s.%s: anonymous embed %s is %s — GORM aborts schema parsing on it (invalid embedded struct / unsupported data type), the model cannot be built; name the field and prove a column with a serializer, exclude it (`gorm:\"-\"`), or close its permissions (`gorm:\"->:false;<-:false\"`)",
 					name, fieldName, exprString(f.Type), why)
 				if hasStoreTag {
 					return nil, nil, err
 				}
-				if embedFatal == nil {
-					embedFatal = err
+				if anonFatal == nil {
+					anonFatal = err
 				}
 			default:
 				if hasStoreTag {
@@ -479,34 +537,64 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 			continue
 		}
 
-		// Named fields. gorm:"embedded" wrappers promote their inner
-		// tags at runtime whether or not the wrapper itself is tagged.
+		// Named fields. gorm:"embedded" wrappers force GORM's embedded
+		// branch whatever the target kind and whatever the permission
+		// tags say (review round-7 finding 2): struct targets promote
+		// their inner tags, a scalar target makes the tag a no-op (the
+		// field stays a plain column and classifies below), and
+		// container or fatal kinds abort schema parsing.
 		if _, embedded := gormSettings["EMBEDDED"]; embedded && !gormIgnored(gormSettings) {
-			for _, ident := range f.Names {
-				if !ident.IsExported() {
-					continue
+			if kind := sc.shapeKindOf(f.Type, imports, nil, map[string]bool{}, false); kind != shapeScalar {
+				for _, ident := range f.Names {
+					if !ident.IsExported() {
+						continue
+					}
+					switch kind {
+					case shapeContainer, shapeFatal:
+						err := fmt.Errorf(
+							"fieldgen: %s.%s: `gorm:\"embedded\"` on %s — not a struct, so GORM aborts schema parsing (invalid embedded struct); drop the embedded tag or use a serializer instead",
+							name, ident.Name, exprString(f.Type))
+						if hasStoreTag {
+							return nil, nil, err
+						}
+						if anonFatal == nil {
+							anonFatal = err
+						}
+					default: // struct or opaque: promotes inner tags
+						promoWarns = append(promoWarns, sc.promotionWarn(name, ident.Name, unwrapType(f.Type), false)...)
+						if hasStoreTag {
+							fieldWarns = append(fieldWarns, fmt.Sprintf(
+								"%s.%s: `store` tag on a gorm-embedded field is ignored at runtime — tag the embedded struct's own fields at top level instead", name, ident.Name))
+						}
+					}
 				}
-				promoWarns = append(promoWarns, sc.promotionWarn(name, ident.Name, unwrapType(f.Type), false)...)
-				if hasStoreTag {
-					fieldWarns = append(fieldWarns, fmt.Sprintf(
-						"%s.%s: `store` tag on a gorm-embedded field is ignored at runtime — tag the embedded struct's own fields at top level instead", name, ident.Name))
-				}
+				continue
 			}
-			continue
-		}
-		if !hasStoreTag {
-			continue
 		}
 		if gormIgnored(gormSettings) {
 			// No column at runtime (DBName stays empty), so
 			// tagDeclaredFields never sees this tag either.
 			continue
 		}
+		closed := permsAllClosed(gormSettings)
 		for _, ident := range f.Names {
 			if !ident.IsExported() {
 				continue // GORM never maps unexported fields; the tag is dead
 			}
 			verdict, why := sc.classifyColumn(f.Type, gormSettings, imports)
+			if !hasStoreTag {
+				// Untagged exported fields still abort the whole model
+				// when their shape has no schema mapping: the relation
+				// gate feeds every DataType-less field to getOrParse
+				// (review round-7). Only the permission algebra keeps
+				// such a field inert.
+				if verdict == colHardNo && !closed && namedFatal == nil {
+					namedFatal = fmt.Errorf(
+						"fieldgen: %s.%s: %s is %s — GORM aborts schema parsing on it (unsupported data type) and the model cannot be built; prove a column with a serializer or `gorm:\"type:...\"` tag, or exclude the field (`gorm:\"-\"` or `gorm:\"->:false;<-:false\"`)",
+						name, ident.Name, exprString(f.Type), why)
+				}
+				continue
+			}
 			switch verdict {
 			case colYes:
 				if err := addField(ident.Name, tag, gormSettings); err != nil {
@@ -515,6 +603,17 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 			case colNo:
 				fieldWarns = append(fieldWarns, fmt.Sprintf(
 					"%s.%s: `store` tag ignored — %s is %s, not a database column (the runtime skips it too); remove the tag", name, ident.Name, exprString(f.Type), why))
+			case colHardNo:
+				if closed {
+					// Inert at runtime: no relation gate, no column —
+					// the tag is dead, not fatal (round-7 finding 5).
+					fieldWarns = append(fieldWarns, fmt.Sprintf(
+						"%s.%s: `store` tag ignored — %s has fully closed permissions and no column at runtime; remove the tag", name, ident.Name, exprString(f.Type)))
+					continue
+				}
+				return nil, nil, fmt.Errorf(
+					"fieldgen: %s.%s: %s is %s — GORM aborts schema parsing on it (unsupported data type) and the model cannot be built; prove a column with a serializer or `gorm:\"type:...\"` tag, or exclude the field (`gorm:\"-\"` or `gorm:\"->:false;<-:false\"`)",
+					name, ident.Name, exprString(f.Type), why)
 			case colUnknown:
 				return nil, nil, fmt.Errorf(
 					"fieldgen: %s.%s: cannot statically decide whether %s is a database column — prove it with `gorm:\"type:...\"` or a serializer tag, or remove the `store` tag if it is a relation",
@@ -523,12 +622,21 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 		}
 	}
 
-	if embedFatal != nil && (hasDBBase || len(fields) > 0) {
-		// The struct IS a runtime model — a chok base embed or a
-		// generated surface — and schema parsing will abort on the
-		// fatal embed. Generating (or warning) here would whitelist
-		// fields of a model that cannot be built (review round-6).
-		return nil, nil, embedFatal
+	if anonFatal != nil && (hasDBBase || len(fields) > 0) {
+		// The struct IS a runtime model or an embeddable with a
+		// generated surface, and GORM's embedded branch aborts on the
+		// fatal shape wherever the struct gets parsed — directly or as
+		// an embed. Generating (or warning) here would whitelist fields
+		// of a model that cannot be built (review rounds 6-7).
+		return nil, nil, anonFatal
+	}
+	if namedFatal != nil && hasDBBase {
+		// Named DataType-less shapes only meet the relation gate on a
+		// DIRECT parse — embedded sub-schemas skip relation parsing —
+		// so this fires for base-carrying structs only: those are
+		// runtime models by contract (store.New requires the base), and
+		// their schema parse WILL abort (review round-7, latched).
+		return nil, nil, namedFatal
 	}
 
 	if len(fields) == 0 {
@@ -693,11 +801,14 @@ const (
 	colYes colVerdict = iota
 	colNo
 	colUnknown
-	// colHardNo is issued for anonymous fields only: the embed is
-	// neither column-shaped nor expandable, so GORM's embedded branch
-	// schema-parses it and model building FAILS at runtime
-	// (unsupported data type) — it is not a skipped relation (review
-	// round-6).
+	// colHardNo: the shape has no schema mapping at all, so model
+	// building FAILS at runtime — it is not a skipped relation. Two
+	// runtime paths produce this (review rounds 6-7, latched against
+	// gorm v1.31.2): anonymous fields of non-struct kind hit the
+	// EMBEDDED branch's "invalid embedded struct" switch, and any
+	// DataType-less field whose terminal type is not a struct hits the
+	// relation gate, whose getOrParse aborts with ErrUnsupportedDataType
+	// — named or anonymous alike.
 	colHardNo
 )
 
@@ -722,15 +833,33 @@ func (sc *scanner) classifyColumn(typ ast.Expr, gormSettings map[string]string, 
 // classifyType decides column-ness for a named field's type: first by
 // method set (exact driver.Valuer or GormDataType under Go's real
 // selector rules — see resolveColumnMethod), then by underlying shape.
+// GormDataType's RETURN VALUE is the DataType, unguarded (review
+// round-7): a provable non-empty literal is a column, a provably EMPTY
+// literal erases the DataType — the field re-enters the relation gate,
+// which only struct shapes survive — and a dynamic body could be
+// either, so it stays unknowable.
 func (sc *scanner) classifyType(typ ast.Expr, imports map[string]string) (colVerdict, string) {
 	if name, isLocal := localBaseName(sc, typ); isLocal {
 		valuer, _ := sc.resolveColumnMethod(name, "Value")
-		dataTyper, _ := sc.resolveColumnMethod(name, "GormDataType")
-		if valuer == methodYes || dataTyper == methodYes {
+		if valuer == methodYes {
 			return colYes, ""
 		}
+		dataTyper, dtState := sc.resolveColumnMethod(name, "GormDataType")
 		if valuer == methodUnsure || dataTyper == methodUnsure {
 			return colUnknown, ""
+		}
+		if dataTyper == methodYes {
+			switch {
+			case dtState.dynamic:
+				return colUnknown, "" // empty aborts, non-empty is a column — unprovable
+			case dtState.literal == "":
+				if sc.underlyingStruct(name, map[string]bool{}) != nil {
+					return colNo, reasonPlainStruct // DataType-less struct: a relation
+				}
+				return colHardNo, "a type whose GormDataType returns the empty string (DataType-less at runtime)"
+			default:
+				return colYes, ""
+			}
 		}
 	}
 	return sc.classifyShape(typ, imports, nil, map[string]bool{}, false)
@@ -797,6 +926,9 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 		if builtinScalars[t.Name] {
 			return colYes, ""
 		}
+		if fatalScalars[t.Name] {
+			return colHardNo, t.Name + " (GORM has no mapping for it and schema parsing aborts)"
+		}
 		return colUnknown, ""
 	case *ast.IndexExpr, *ast.IndexListExpr:
 		base, args := instantiation(t)
@@ -845,15 +977,26 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 		// predeclared byte type — reflect matches uint8 by type identity
 		// (schema/field.go ByteReflectType), which generic substitution
 		// and local alias chains preserve (review round-5) and a defined
-		// byte type does not.
+		// byte type does not. Any other container is DataType-less: the
+		// relation gate hands it to getOrParse, which strips containers
+		// and pointers to the terminal type — a struct parses as a
+		// relation (skipped, DBName empty), everything else aborts the
+		// whole model (review round-7, latched against v1.31.2).
 		if sc.isByteIdent(t.Elt, env) {
 			return colYes, ""
 		}
-		return colNo, "a slice or array (a relation, or unsupported without a serializer)"
+		switch sc.shapeKindOf(t.Elt, imports, env, map[string]bool{}, true) {
+		case shapeStruct:
+			return colNo, "a container of structs (a GORM relation, not a column)"
+		case shapeScalar, shapeFatal:
+			return colHardNo, "a container of non-struct elements (no schema shape without a serializer)"
+		default:
+			return colNo, "a slice or array (a relation, or unsupported without a serializer)"
+		}
 	case *ast.StructType:
 		return colNo, reasonPlainStruct
 	case *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType:
-		return colNo, "not a scalar type (no column without a serializer)"
+		return colHardNo, "not a scalar type (no schema shape without a serializer)"
 	default:
 		return colUnknown, ""
 	}
@@ -919,6 +1062,114 @@ func (sc *scanner) isByteIdent(elem ast.Expr, env map[string]binding) bool {
 	}
 }
 
+// shapeKind buckets a type expression by the reflect kind GORM's two
+// fatal switches key on (verified against gorm v1.31.2: field.go's
+// EMBEDDED branch and the relation gate feeding getOrParse).
+type shapeKind int
+
+const (
+	shapeOpaque    shapeKind = iota // not statically resolvable
+	shapeStruct                     // struct kind: embeds expand, named fields parse as relations
+	shapeScalar                     // bool/int*/uint*/float*/string kinds: plain columns everywhere
+	shapeContainer                  // slice or array, reported only when containers are not stripped
+	shapeFatal                      // map/chan/func/interface/uintptr/complex: no schema shape at all
+)
+
+// shapeKindOf resolves a type expression to its shapeKind, seeing
+// through pointers, parens, local defined/alias chains and generic
+// instantiations — the underlying KIND survives every one of them, so
+// unlike column classification this walk follows defined generic types
+// too. With stripContainers set it descends through slice/array
+// elements the way schema.getOrParse does (the relation path); without
+// it a container reports shapeContainer (the embed switch's view, where
+// even a byte slice is fatal). Cross-package names resolve only for
+// time.Time and the known-struct Valuers (sql.Null*, gorm.DeletedAt);
+// gorm.io/datatypes is deliberately NOT here — its storage types mix
+// kinds (JSON is a byte slice, JSONMap a map) — so it stays opaque.
+// Package-scope targets reset the instantiation environment.
+func (sc *scanner) shapeKindOf(typ ast.Expr, imports map[string]string, env map[string]binding, seen map[string]bool, stripContainers bool) shapeKind {
+	for {
+		if star, ok := typ.(*ast.StarExpr); ok {
+			typ = star.X // reflect.Indirect / getOrParse dereference pointers
+			continue
+		}
+		if paren, ok := typ.(*ast.ParenExpr); ok {
+			typ = paren.X
+			continue
+		}
+		break
+	}
+	switch t := typ.(type) {
+	case *ast.StructType:
+		return shapeStruct
+	case *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType:
+		return shapeFatal
+	case *ast.ArrayType:
+		if !stripContainers {
+			return shapeContainer
+		}
+		return sc.shapeKindOf(t.Elt, imports, env, seen, true)
+	case *ast.Ident:
+		if b, ok := env[t.Name]; ok {
+			return sc.shapeKindOf(b.expr, b.imports, nil, seen, stripContainers)
+		}
+		if info, local := sc.types[t.Name]; local {
+			if seen[t.Name] || len(info.typeParams) > 0 {
+				return shapeOpaque // cycle or bare generic name: broken code
+			}
+			seen[t.Name] = true
+			return sc.shapeKindOf(info.decl, info.imports, nil, seen, stripContainers)
+		}
+		if builtinScalars[t.Name] {
+			return shapeScalar
+		}
+		if fatalScalars[t.Name] {
+			return shapeFatal
+		}
+		return shapeOpaque
+	case *ast.IndexExpr, *ast.IndexListExpr:
+		base, args := instantiation(t)
+		ident, ok := ast.Unparen(base).(*ast.Ident)
+		if !ok {
+			return shapeOpaque
+		}
+		info, local := sc.types[ident.Name]
+		if !local || len(info.typeParams) != len(args) || seen[ident.Name] {
+			return shapeOpaque
+		}
+		seen[ident.Name] = true
+		newEnv := make(map[string]binding, len(args))
+		for i, param := range info.typeParams {
+			arg, argImports := args[i], imports
+			if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
+				if b, bound := env[argIdent.Name]; bound {
+					arg, argImports = b.expr, b.imports
+				}
+			}
+			newEnv[param] = binding{expr: arg, imports: argImports}
+		}
+		return sc.shapeKindOf(info.decl, info.imports, newEnv, seen, stripContainers)
+	case *ast.SelectorExpr:
+		if isTimeTime(t, imports) {
+			return shapeStruct
+		}
+		if x, ok := t.X.(*ast.Ident); ok {
+			switch imports[x.Name] {
+			case "database/sql":
+				if strings.HasPrefix(t.Sel.Name, "Null") {
+					return shapeStruct
+				}
+			case "gorm.io/gorm":
+				if t.Sel.Name == "DeletedAt" {
+					return shapeStruct
+				}
+			}
+		}
+		return shapeOpaque
+	}
+	return shapeOpaque
+}
+
 // instantiation splits a generic instantiation into its base expression
 // and argument list.
 func instantiation(typ ast.Expr) (ast.Expr, []ast.Expr) {
@@ -931,50 +1182,68 @@ func instantiation(typ ast.Expr) (ast.Expr, []ast.Expr) {
 	return typ, nil
 }
 
-// classifyAnonymous mirrors GORM's embed rule for anonymous fields
-// (gorm/schema/field.go: the EMBEDDED branch): a struct-shaped embed
-// stays a column only as a driver.Valuer, or when its GormDataType is
-// literally "time" or "bytes" — the two GORMDataType values the embed
-// condition exempts (review round-4). Serializer and `gorm:"type:..."`
-// tags never prevent expansion (the GORMDataType snapshot the condition
-// reads predates the TYPE override). A GormDataType whose return value
-// the scan cannot read statically is undecidable and must fail loud
-// rather than guess. Non-struct shapes classify like named fields,
-// quick proofs included — but where a NAMED relation-shaped field is
-// merely skipped at runtime, an anonymous one still enters the embed
-// branch, whose schema parse aborts on anything that is not a struct
-// (unsupported data type) — colHardNo, not a warning (review round-6).
-func (sc *scanner) classifyAnonymous(typ ast.Expr, gormSettings map[string]string, imports map[string]string) (colVerdict, string) {
+// classifyAnonymous mirrors GORM's treatment of anonymous fields
+// (gorm/schema/field.go, verified against v1.31.2): unless the value is
+// a driver.Valuer or its pre-TYPE DataType snapshot is exactly "time"
+// or "bytes", the field enters the EMBEDDED branch — a struct kind
+// expands, scalar kinds fall through the switch and stay plain columns,
+// and every other kind aborts schema parsing ("invalid embedded
+// struct"). Serializer / `gorm:"type:..."` / json tags never rescue an
+// anonymous field: they only set the DataType, and the branch fires
+// regardless of it (review round-7 finding 1) — so unlike
+// classifyColumn, NO tag proof applies here. A GormDataType the scan
+// cannot read stays undecidable and fails loud; a provably EMPTY one
+// erases the DataType, which turns even a scalar kind fatal (the
+// relation gate picks it up).
+func (sc *scanner) classifyAnonymous(typ ast.Expr, imports map[string]string) (colVerdict, string) {
 	if name, isLocal := localBaseName(sc, typ); isLocal {
 		valuer, _ := sc.resolveColumnMethod(name, "Value")
 		if valuer == methodYes {
-			return colYes, ""
+			return colYes, "" // driver.Valuer is exempt from the embed branch
 		}
 		dataTyper, dtState := sc.resolveColumnMethod(name, "GormDataType")
 		if valuer == methodUnsure || dataTyper == methodUnsure {
 			return colUnknown, ""
 		}
-		if sc.underlyingStruct(name, map[string]bool{}) != nil {
-			if dataTyper == methodYes {
-				switch {
-				case dtState.dynamic:
-					return colUnknown, "" // "time"/"bytes" would be a column — unprovable
-				case dtState.literal == "time" || dtState.literal == "bytes":
-					return colYes, "" // exempt from the embed rule, stays a column
-				}
+		gdtEmpty := false
+		if dataTyper == methodYes {
+			switch {
+			case dtState.dynamic:
+				return colUnknown, "" // "time"/"bytes" would be a column — unprovable
+			case dtState.literal == "time" || dtState.literal == "bytes":
+				return colYes, "" // the two snapshot values the embed condition exempts
+			case dtState.literal == "":
+				gdtEmpty = true // erases the DataType: column shapes turn fatal below
 			}
-			return colNo, "an embedded struct (only a driver.Valuer or a GormDataType of \"time\"/\"bytes\" stays a column)"
 		}
-		verdict, why := sc.classifyColumn(typ, gormSettings, imports)
-		if verdict == colNo && why != reasonPlainStruct {
-			// A struct shape reached only through generic substitution
-			// still expands like any embed; every other non-column
-			// shape (slice, array, map, ...) aborts the runtime parse.
+		verdict, why := sc.classifyShape(typ, imports, nil, map[string]bool{}, false)
+		switch verdict {
+		case colYes:
+			// Scalar, bytes or time shapes. Bytes/time snapshots are
+			// exempt from the embed branch and scalar kinds fall through
+			// its switch — columns either way, unless an empty
+			// GormDataType left the field DataType-less for the relation
+			// gate to abort on.
+			if gdtEmpty {
+				return colHardNo, "a type whose GormDataType returns the empty string (DataType-less at runtime)"
+			}
+			return colYes, why
+		case colNo:
+			if why == reasonPlainStruct {
+				return colNo, "an embedded struct (only a driver.Valuer or a GormDataType of \"time\"/\"bytes\" stays a column)"
+			}
+			// Container shapes that would be relations as NAMED fields
+			// (a slice of structs) are still non-struct KINDS: the embed
+			// switch aborts on them before any relation parse.
 			return colHardNo, why
+		default:
+			return verdict, why // colHardNo and colUnknown pass through
 		}
-		return verdict, why
 	}
-	return sc.classifyColumn(typ, gormSettings, imports)
+	// Cross-package or unresolvable: the known Valuers and time.Time are
+	// exempt columns; everything else stays opaque — never provably a
+	// struct, so never silently called an embed.
+	return sc.classifyType(typ, imports)
 }
 
 // methodVerdict is the three-valued outcome of selector resolution:
@@ -1265,6 +1534,32 @@ func parseGormSettings(tag string) map[string]string {
 		}
 	}
 	return settings
+}
+
+// permsAllClosed reports the `->` / `<-` tag algebra closing every
+// permission, mirroring gorm/schema/field.go's permission block —
+// applied in ITS fixed order, not tag order: `->` always clears create
+// and update and sets read from its value, then `<-` re-opens
+// create/update and narrows by substring. With all three false the
+// field never enters the anonymous-embed or relation branches and is
+// inert at runtime (review round-7 finding 5) — note `->:false` ALONE
+// closes everything. Value matching mirrors gorm exactly: `->`
+// compares lowercased, `<-` matches "create"/"update" case-sensitively.
+// The gorm:"-" family is gormIgnored's business, not modeled here.
+func permsAllClosed(settings map[string]string) bool {
+	creatable, updatable, readable := true, true, true
+	if v, ok := settings["->"]; ok {
+		creatable, updatable = false, false
+		readable = strings.ToLower(v) != "false"
+	}
+	if v, ok := settings["<-"]; ok {
+		creatable, updatable = true, true
+		if v != "<-" {
+			creatable = strings.Contains(v, "create")
+			updatable = strings.Contains(v, "update")
+		}
+	}
+	return !creatable && !updatable && !readable
 }
 
 // gormIgnored mirrors the runtime `-` handling: `gorm:"-"` and

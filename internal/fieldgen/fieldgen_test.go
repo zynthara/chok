@@ -517,7 +517,6 @@ type Post struct {
 	Profile  Profile        `+"`json:\"profile\" store:\"query\"`"+`
 	Twin     Sibling        `+"`json:\"twin\" store:\"query\"`"+`
 	Children Children       `+"`json:\"children\" store:\"query\"`"+`
-	Tags     []string       `+"`json:\"tags\" store:\"query\"`"+`
 	Badge    Badge          `+"`json:\"badge\" store:\"query\"`"+`
 	Price    Money          `+"`json:\"price\" store:\"query\"`"+`
 	Flags    Flags          `+"`json:\"flags\" store:\"query\"`"+`
@@ -549,12 +548,12 @@ type Post struct {
 			t.Errorf("%s must be classified as a column, got %v", want, got)
 		}
 	}
-	for _, absent := range []string{"Profile", "Twin", "Children", "Tags", "Badge"} {
+	for _, absent := range []string{"Profile", "Twin", "Children", "Badge"} {
 		if got[absent] {
 			t.Errorf("%s is not a column at runtime and must be skipped, got %v", absent, got)
 		}
 	}
-	for _, wantWarn := range []string{"Post.Profile", "Post.Twin", "Post.Children", "Post.Tags", "Post.Badge"} {
+	for _, wantWarn := range []string{"Post.Profile", "Post.Twin", "Post.Children", "Post.Badge"} {
 		var warned bool
 		for _, w := range pkg.Warnings {
 			warned = warned || strings.Contains(w, wantWarn)
@@ -720,14 +719,11 @@ import "github.com/zynthara/chok/v2/db"
 
 type Token [16]byte
 
-type DefinedByte byte
-
 type Post struct {
 	db.Model
 	Token   Token          `+"`json:\"token\" store:\"query\"`"+`
 	Direct  [8]byte        `+"`json:\"direct\" store:\"query\"`"+`
 	Meta    map[string]any `+"`json:\"meta\" store:\"query\" gorm:\"json\"`"+`
-	Odd     [4]DefinedByte `+"`json:\"odd\" store:\"query\"`"+`
 }
 `)
 	pkg, err := Scan(dir)
@@ -745,10 +741,24 @@ type Post struct {
 			t.Errorf("%s must be a column, got %v", want, got)
 		}
 	}
+
 	// GORM compares the element type identity: a defined byte type is
-	// not the predeclared byte, so the array is not a bytes column.
-	if got["Odd"] {
-		t.Errorf("[4]DefinedByte must not be blessed as bytes, got %v", got)
+	// not the predeclared byte, so the array is no bytes column — and a
+	// non-column container aborts the model outright (review round-7).
+	odd := t.TempDir()
+	writeGo(t, odd, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type DefinedByte byte
+
+type Post struct {
+	db.Model
+	Odd [4]DefinedByte `+"`json:\"odd\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(odd); err == nil || !strings.Contains(err.Error(), "Post.Odd") {
+		t.Fatalf("[4]DefinedByte has no schema shape and must fail loud, got %v", err)
 	}
 }
 
@@ -1064,7 +1074,6 @@ type Post struct {
 	db.Model
 	Payload Bytes[byte]        `+"`json:\"payload\" store:\"query\"`"+`
 	Chained Wrap[byte]         `+"`json:\"chained\" store:\"query\"`"+`
-	Names   Bytes[string]      `+"`json:\"names\" store:\"query\"`"+`
 	Lookup  Pair[string, int]  `+"`json:\"lookup\" store:\"query\" gorm:\"serializer:json\"`"+`
 }
 `)
@@ -1084,15 +1093,24 @@ type Post struct {
 	if !got["Lookup"] {
 		t.Errorf("serializer proof applies to generic types too, got %v", got)
 	}
-	if got["Names"] {
-		t.Errorf("Bytes[string] is []string — not a column, got %v", got)
-	}
-	var warned bool
-	for _, w := range pkg.Warnings {
-		warned = warned || strings.Contains(w, "Post.Names")
-	}
-	if !warned {
-		t.Fatalf("the non-byte instantiation must warn like any relation shape, got %q", pkg.Warnings)
+
+	// Bytes[string] IS []string: no schema shape, so on a model the
+	// substituted instantiation fails loud like the written-out slice
+	// (review round-7).
+	names := t.TempDir()
+	writeGo(t, names, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Bytes[T any] []T
+
+type Post struct {
+	db.Model
+	Names Bytes[string] `+"`json:\"names\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(names); err == nil || !strings.Contains(err.Error(), "Post.Names") {
+		t.Fatalf("the non-byte instantiation is a scalar container and must fail loud, got %v", err)
 	}
 }
 
@@ -1315,17 +1333,13 @@ type Post struct {
 			names = append(names, f.GoName)
 		}
 	}
-	if len(names) != 1 || names[0] != "Kept" {
-		t.Fatalf("gorm:\"-\"/-:all/embedded must be skipped (runtime never maps them), kept = %v", names)
+	if strings.Join(names, ",") != "Kept,Wrapped" {
+		t.Fatalf("gorm:\"-\"/-:all are erased; -:migration is kept; embedded on a SCALAR is a no-op and the field stays a column (review round-7, latched), kept = %v", names)
 	}
-	var warned bool
 	for _, w := range pkg.Warnings {
 		if strings.Contains(w, "Wrapped") {
-			warned = true
+			t.Fatalf("embedded on a scalar kind is inert — the store tag works and must not warn, got %q", pkg.Warnings)
 		}
-	}
-	if !warned {
-		t.Fatalf("store tag on a gorm-embedded field must warn, got %q", pkg.Warnings)
 	}
 }
 
@@ -1637,7 +1651,8 @@ type Post struct {
 // the element type against uint8 by REFLECT IDENTITY, which local alias
 // chains and generic substitution preserve — []Byte, [4]Chain and
 // Bytes[Byte] are bytes columns. Defined byte types and pointer
-// aliases stay rejected.
+// aliases stay rejected — and since round-7 a rejected scalar container
+// is a hard error on a model (the runtime aborts on it), not a warning.
 func TestScan_Round5ByteIdentity(t *testing.T) {
 	dir := t.TempDir()
 	writeGo(t, dir, "m.go", `package m
@@ -1652,19 +1667,12 @@ type Token []Byte
 
 type Bytes[T any] []T
 
-type Defined byte
-
-type PB = *byte
-
 type Blob struct {
 	db.Model
-	Token  Token          `+"`json:\"token\" store:\"query\"`"+`
-	Raw    []Byte         `+"`json:\"raw\" store:\"query\"`"+`
-	Arr    [4]Chain       `+"`json:\"arr\" store:\"query\"`"+`
-	Packed Bytes[Byte]    `+"`json:\"packed\" store:\"query\"`"+`
-	Bad    []Defined      `+"`json:\"bad\" store:\"query\"`"+`
-	Worse  Bytes[Defined] `+"`json:\"worse\" store:\"query\"`"+`
-	Ptr    []PB           `+"`json:\"ptr\" store:\"query\"`"+`
+	Token  Token       `+"`json:\"token\" store:\"query\"`"+`
+	Raw    []Byte      `+"`json:\"raw\" store:\"query\"`"+`
+	Arr    [4]Chain    `+"`json:\"arr\" store:\"query\"`"+`
+	Packed Bytes[Byte] `+"`json:\"packed\" store:\"query\"`"+`
 }
 `)
 	pkg, err := Scan(dir)
@@ -1687,18 +1695,16 @@ type Blob struct {
 			t.Errorf("%s rides alias chains to the predeclared byte — a bytes column, got %v", want, got)
 		}
 	}
-	for _, absent := range []string{"Bad", "Worse", "Ptr"} {
-		if got[absent] {
-			t.Errorf("%s must stay rejected — its element is not identical to uint8, got %v", absent, got)
-		}
-	}
-	for _, wantWarn := range []string{"Blob.Bad:", "Blob.Worse:", "Blob.Ptr:"} {
-		var warned bool
-		for _, w := range pkg.Warnings {
-			warned = warned || strings.Contains(w, wantWarn)
-		}
-		if !warned {
-			t.Errorf("the rejected element shape %s must warn, got %q", wantWarn, pkg.Warnings)
+
+	for field, src := range map[string]string{
+		"Bad":   "type Defined byte\n\ntype Blob struct {\n\tdb.Model\n\tBad []Defined `store:\"query\"`\n}",
+		"Worse": "type Defined byte\n\ntype Bytes[T any] []T\n\ntype Blob struct {\n\tdb.Model\n\tWorse Bytes[Defined] `store:\"query\"`\n}",
+		"Ptr":   "type PB = *byte\n\ntype Blob struct {\n\tdb.Model\n\tPtr []PB `store:\"query\"`\n}",
+	} {
+		bad := t.TempDir()
+		writeGo(t, bad, "m.go", "package m\n\nimport \"github.com/zynthara/chok/v2/db\"\n\n"+src+"\n")
+		if _, err := Scan(bad); err == nil || !strings.Contains(err.Error(), "Blob."+field) {
+			t.Errorf("%s: the element is not identical to uint8 — a scalar container, which aborts the model and must fail loud, got %v", field, err)
 		}
 	}
 }
@@ -1860,24 +1866,12 @@ type Boxed struct{ S string }
 
 func (b Boxed) Value() (Pick[driver.Value], error) { return b.S, nil }
 
-type Defined[T any] byte
-
-type Bad []Defined[int]
-
-type T int8
-
-type Alias = T
-
-type Sly[T any] []Alias
-
 type Post struct {
 	db.Model
 	Token  Token             `+"`json:\"token\" store:\"query\"`"+`
 	Chunk  [4]ByteOf[string] `+"`json:\"chunk\" store:\"query\"`"+`
 	Sealed Sealed            `+"`json:\"sealed\" store:\"query\"`"+`
 	Boxed  Boxed             `+"`json:\"boxed\" store:\"query\"`"+`
-	Bad    Bad               `+"`json:\"bad\" store:\"query\"`"+`
-	Sly    Sly[byte]         `+"`json:\"sly\" store:\"query\"`"+`
 }
 `)
 	pkg, err := Scan(dir)
@@ -1900,43 +1894,55 @@ type Post struct {
 			t.Errorf("%s rides a generic alias instantiation to the denoted type — a column, got %v", want, got)
 		}
 	}
-	for _, absent := range []string{"Bad", "Sly"} {
-		if got[absent] {
-			t.Errorf("%s must stay rejected — a defined generic type (or a package-scope alias target) is not the argument's identity, got %v", absent, got)
-		}
-	}
-	for _, wantWarn := range []string{"Post.Bad:", "Post.Sly:"} {
-		var warned bool
-		for _, w := range pkg.Warnings {
-			warned = warned || strings.Contains(w, wantWarn)
-		}
-		if !warned {
-			t.Errorf("the rejected shape %s must warn as a skipped relation, got %q", wantWarn, pkg.Warnings)
+
+	// The rejected identities are scalar containers, which abort the
+	// model at runtime — hard errors since round-7. Bad instantiates a
+	// DEFINED generic byte type (its own identity, not byte); Sly's
+	// []Alias lands on the package-level defined type T, NOT on the
+	// argument bound to the parameter of the same name.
+	for field, src := range map[string]string{
+		"Bad": "type Defined[T any] byte\n\ntype Bad []Defined[int]\n\ntype Post struct {\n\tdb.Model\n\tBad Bad `store:\"query\"`\n}",
+		"Sly": "type T int8\n\ntype Alias = T\n\ntype Sly[T any] []Alias\n\ntype Post struct {\n\tdb.Model\n\tSly Sly[byte] `store:\"query\"`\n}",
+	} {
+		bad := t.TempDir()
+		writeGo(t, bad, "m.go", "package m\n\nimport \"github.com/zynthara/chok/v2/db\"\n\n"+src+"\n")
+		if _, err := Scan(bad); err == nil || !strings.Contains(err.Error(), "Post."+field) {
+			t.Errorf("%s: not the argument's identity — a scalar container that aborts the model, must fail loud, got %v", field, err)
 		}
 	}
 }
 
 // Round6Names/round6Host feed the runtime latch in
-// TestScan_Round6AnonymousContainerFailsLoud: GORM's embedded branch
-// must actually ABORT on an anonymous non-struct shape — the behavior
-// the scan's colHardNo verdict mirrors.
+// TestScan_Round6AnonymousContainerFailsLoud: GORM must actually ABORT
+// on an anonymous non-struct shape — the behavior the scan's colHardNo
+// verdict mirrors. round6Serialized pins round-7 finding 1 on top: a
+// serializer tag does NOT rescue the anonymous embed (the EMBEDDED
+// branch fires on the kind regardless of the DataType it sets).
 type Round6Names []string
 
 type round6Host struct{ Round6Names }
 
+type round6Serialized struct {
+	Round6Names `gorm:"serializer:json"`
+}
+
 // TestScan_Round6AnonymousContainerFailsLoud is review round-6 finding
 // 3: an anonymous local slice/array/map embed is NOT a skipped relation
-// — GORM's embedded branch schema-parses it and model building fails
-// (unsupported data type). On a runtime model (a store tag, or a chok
-// base embed) the scan must fail the same way instead of warning that
-// the runtime skips it; a plain DTO never meets a schema parse and
-// stays silent, and a serializer proof still makes the embed a column.
+// — GORM aborts schema parsing on it (unsupported data type / invalid
+// embedded struct). On a runtime model (a store tag, or a chok base
+// embed) the scan must fail the same way instead of warning that the
+// runtime skips it; a plain DTO never meets a schema parse and stays
+// silent. A serializer tag does NOT rescue the embed — round-7 finding
+// 1 corrected round-6's expectation here, see the latch below.
 func TestScan_Round6AnonymousContainerFailsLoud(t *testing.T) {
 	quiet := logger.Default
 	logger.Default = logger.Discard // the latch's expected parse failure logs through the global logger
 	t.Cleanup(func() { logger.Default = quiet })
 	if _, err := schema.Parse(&round6Host{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
 		t.Fatalf("latch: GORM must abort on the anonymous slice embed with the error the scan mirrors, got %v", err)
+	}
+	if _, err := schema.Parse(&round6Serialized{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "invalid embedded struct") {
+		t.Fatalf("latch: the serializer tag must not rescue the anonymous embed (round-7), got %v", err)
 	}
 
 	tagged := t.TempDir()
@@ -1993,11 +1999,6 @@ type Post2 struct {
 	Meta
 	Name string `+"`json:\"name\" store:\"query\"`"+`
 }
-
-type Post3 struct {
-	db.Model
-	Names `+"`json:\"names\" store:\"query\" gorm:\"serializer:json\"`"+`
-}
 `)
 	pkg, err := Scan(mixed)
 	if err != nil {
@@ -2018,10 +2019,475 @@ type Post3 struct {
 	if fields["Post2"]["Name"] != "name" {
 		t.Errorf("the struct embed keeps expanding as before, got %v", fields["Post2"])
 	}
-	if fields["Post3"]["Names"] != "names" {
-		t.Errorf("the serializer proof still makes the anonymous embed a column, got %v", fields["Post3"])
-	}
 	if _, ok := fields["DTO"]; ok {
 		t.Errorf("the DTO must not become a model, got %v", fields["DTO"])
+	}
+
+	// Round-7 finding 1: the serializer tag does NOT rescue an anonymous
+	// embed — GORM's embedded branch fires on the KIND (see the
+	// round6Serialized latch above), so the scan fails loud too.
+	serialized := t.TempDir()
+	writeGo(t, serialized, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Names []string
+
+type Post3 struct {
+	db.Model
+	Names `+"`json:\"names\" store:\"query\" gorm:\"serializer:json\"`"+`
+}
+`)
+	if _, err := Scan(serialized); err == nil || !strings.Contains(err.Error(), "Post3.Names") {
+		t.Fatalf("the serializer-tagged anonymous container must fail loud (round-7), got %v", err)
+	}
+}
+
+// round-7 runtime-latch types: each pins one verified GORM v1.31.2
+// behavior the round-7 scan changes mirror.
+type Round7JList []string
+
+// GormDataType implements the GORM data-type hook with a non-exempt
+// literal — the anonymous embed branch still fires on the slice kind.
+func (Round7JList) GormDataType() string { return "json" }
+
+type round7JSONHost struct{ Round7JList }
+
+// Round7Code is a scalar type whose GormDataType returns the EMPTY
+// string: GORM overwrites the string DataType with it, the relation
+// gate picks the field up and getOrParse aborts.
+type Round7Code string
+
+// GormDataType implements the GORM data-type hook, destructively.
+func (Round7Code) GormDataType() string { return "" }
+
+type round7GDTHost struct{ Code Round7Code }
+
+type round7NamedHost struct{ Tags []string }
+
+type round7EmbeddedHost struct {
+	N Round6Names `gorm:"embedded;->:false;<-:false"`
+}
+
+type round7ClosedHost struct {
+	Round6Names `gorm:"->:false"`
+}
+
+// TestScan_Round7AnonymousProofsNeverRescue is review round-7 finding
+// 1: serializer / `gorm:"type:..."` / json tag proofs apply to NAMED
+// fields only — an anonymous field enters GORM's embedded branch on its
+// KIND, whatever DataType those tags set, and a non-exempt GormDataType
+// literal ("json") does not help either. Only real Valuers and the
+// literal "time"/"bytes" snapshots stay columns; scalar kinds fall
+// through the branch and stay columns too.
+func TestScan_Round7AnonymousProofsNeverRescue(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&round7JSONHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "invalid embedded struct") {
+		t.Fatalf("latch: a non-exempt GormDataType must not rescue the anonymous slice, got %v", err)
+	}
+
+	typed := t.TempDir()
+	writeGo(t, typed, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Names []string
+
+type Post struct {
+	db.Model
+	Names `+"`json:\"names\" store:\"query\" gorm:\"type:json\"`"+`
+}
+`)
+	if _, err := Scan(typed); err == nil || !strings.Contains(err.Error(), "Post.Names") {
+		t.Fatalf("gorm:\"type:...\" must not rescue an anonymous container, got %v", err)
+	}
+
+	gdt := t.TempDir()
+	writeGo(t, gdt, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type JList []string
+
+func (JList) GormDataType() string { return "json" }
+
+type JLevel int
+
+func (JLevel) GormDataType() string { return "json" }
+
+type Post struct {
+	db.Model
+	JLevel `+"`json:\"j_level\" store:\"query\"`"+`
+	Name   string `+"`json:\"name\" store:\"query\"`"+`
+}
+
+type Broken struct {
+	db.Model
+	JList `+"`json:\"j_list\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(gdt); err == nil || !strings.Contains(err.Error(), "Broken.JList") {
+		t.Fatalf("a non-exempt GormDataType literal on an anonymous slice must fail loud, got %v", err)
+	}
+
+	scalar := t.TempDir()
+	writeGo(t, scalar, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type JLevel int
+
+func (JLevel) GormDataType() string { return "json" }
+
+type Post struct {
+	db.Model
+	JLevel `+"`json:\"j_level\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(scalar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkg.Models) != 1 || len(pkg.Warnings) != 0 {
+		t.Fatalf("an anonymous SCALAR with a GormDataType literal falls through the embed switch and stays a column, got models=%d warnings=%q", len(pkg.Models), pkg.Warnings)
+	}
+	var jlevel bool
+	for _, f := range pkg.Models[0].Fields {
+		jlevel = jlevel || f.GoName == "JLevel"
+	}
+	if !jlevel {
+		t.Fatalf("JLevel must generate as a column, got %+v", pkg.Models[0].Fields)
+	}
+}
+
+// TestScan_Round7EmbeddedTagKinds is review round-7 finding 2: the
+// `gorm:"embedded"` tag forces GORM's embedded branch unconditionally —
+// no permission gate, no bytes exemption. Struct targets promote,
+// scalar targets make the tag a NO-OP (the field stays a plain column
+// and its store tag works — latched), and every other kind aborts
+// schema parsing, named or anonymous.
+func TestScan_Round7EmbeddedTagKinds(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&round7EmbeddedHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "invalid embedded struct") {
+		t.Fatalf("latch: closed permissions must not rescue an EMBEDDED-tagged container, got %v", err)
+	}
+
+	for field, src := range map[string]string{
+		"N2": "type Names []string\n\ntype Post struct {\n\tdb.Model\n\tN2 Names `store:\"query\" gorm:\"embedded\"`\n}",
+		"N3": "type Names []string\n\ntype Post struct {\n\tdb.Model\n\tN3 Names `store:\"query\" gorm:\"embedded;->:false;<-:false\"`\n}",
+		"U8": "type Bin []byte\n\ntype Post struct {\n\tdb.Model\n\tU8 Bin `store:\"query\" gorm:\"embedded\"`\n}",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", "package m\n\nimport \"github.com/zynthara/chok/v2/db\"\n\n"+src+"\n")
+		if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "Post."+field) || !strings.Contains(err.Error(), "not a struct") {
+			t.Errorf("%s: embedded on a non-struct kind must fail loud (even byte slices, even with closed perms), got %v", field, err)
+		}
+	}
+
+	anon := t.TempDir()
+	writeGo(t, anon, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Names []string
+
+type Post struct {
+	db.Model
+	Names `+"`gorm:\"embedded\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(anon); err == nil || !strings.Contains(err.Error(), "Post.Names") {
+		t.Fatalf("an untagged EMBEDDED container on a runtime model must still fail the scan, got %v", err)
+	}
+
+	scalar := t.TempDir()
+	writeGo(t, scalar, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Level int
+
+type Post struct {
+	db.Model
+	L2 Level `+"`json:\"l2\" store:\"query\" gorm:\"embedded\"`"+`
+}
+`)
+	pkg, err := Scan(scalar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkg.Warnings) != 0 {
+		t.Fatalf("embedded on a scalar is a no-op — the store tag works, no warning, got %q", pkg.Warnings)
+	}
+	var l2 bool
+	for _, f := range pkg.Models[0].Fields {
+		l2 = l2 || f.GoName == "L2"
+	}
+	if !l2 {
+		t.Fatalf("L2 must generate — the runtime keeps it a plain column (latched), got %+v", pkg.Models[0].Fields)
+	}
+}
+
+// TestScan_Round7GormDataTypeStates is review round-7 finding 3: the
+// GormDataType RETURN VALUE is the DataType, unguarded. A provably
+// non-empty literal proves a column (even on a slice type — latched); a
+// provably EMPTY literal erases the DataType, which aborts the model on
+// every non-struct shape and downgrades a struct to a plain relation;
+// a dynamic body could be either and must stay unknowable.
+func TestScan_Round7GormDataTypeStates(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&round7GDTHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("latch: an empty GormDataType must abort the model, got %v", err)
+	}
+
+	tagged := t.TempDir()
+	writeGo(t, tagged, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Code string
+
+func (Code) GormDataType() string { return "" }
+
+type Post struct {
+	db.Model
+	Code Code `+"`json:\"code\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(tagged); err == nil || !strings.Contains(err.Error(), "Post.Code") || !strings.Contains(err.Error(), "empty string") {
+		t.Fatalf("a tagged empty-literal GormDataType scalar must fail loud, got %v", err)
+	}
+
+	untagged := t.TempDir()
+	writeGo(t, untagged, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Code string
+
+func (Code) GormDataType() string { return "" }
+
+type Post struct {
+	db.Model
+	Code Code
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(untagged); err == nil || !strings.Contains(err.Error(), "Post.Code") {
+		t.Fatalf("an untagged empty-literal GormDataType field still aborts the model, got %v", err)
+	}
+
+	dynamic := t.TempDir()
+	writeGo(t, dynamic, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Code string
+
+func (c Code) GormDataType() string {
+	if c == "" {
+		return ""
+	}
+	return "text"
+}
+
+type Post struct {
+	db.Model
+	Code Code `+"`json:\"code\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(dynamic); err == nil || !strings.Contains(err.Error(), "cannot statically decide") {
+		t.Fatalf("a dynamic GormDataType could be empty (fatal) or not (column) — must stay unknowable, got %v", err)
+	}
+
+	column := t.TempDir()
+	writeGo(t, column, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type JList []string
+
+func (JList) GormDataType() string { return "json" }
+
+type SCode struct{ S string }
+
+func (SCode) GormDataType() string { return "" }
+
+type Post struct {
+	db.Model
+	J  JList `+"`json:\"j\" store:\"query\"`"+`
+	SC SCode `+"`json:\"sc\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(column)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	if !got["J"] {
+		t.Errorf("a NAMED field with a non-empty GormDataType literal is a column even on a slice type (latched), got %v", got)
+	}
+	if got["SC"] {
+		t.Errorf("an empty GormDataType on a STRUCT downgrades it to a relation — no column, got %v", got)
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		warned = warned || strings.Contains(w, "Post.SC")
+	}
+	if !warned {
+		t.Fatalf("the struct relation must warn as a skipped tag, got %q", pkg.Warnings)
+	}
+}
+
+// TestScan_Round7NamedFatalShapes is the round-7 same-class sweep of
+// finding 4: EVERY DataType-less field whose terminal shape is not a
+// struct — named or anonymous, tagged or not — feeds GORM's relation
+// gate into getOrParse, which aborts the model (latched). uintptr and
+// complex kinds (finding 4's exact case) are fatal the same way. A
+// struct without a chok base never meets a direct schema parse through
+// the store contract, so an embeddable's named containers stay quiet.
+func TestScan_Round7NamedFatalShapes(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&round7NamedHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("latch: a NAMED scalar container must abort the model at runtime, got %v", err)
+	}
+
+	for field, src := range map[string]string{
+		"Tags": "type Post struct {\n\tdb.Model\n\tTags []string\n\tName string `store:\"query\"`\n}",
+		"M":    "type Tags map[string]string\n\ntype Post struct {\n\tdb.Model\n\tM Tags\n\tName string `store:\"query\"`\n}",
+		"AnyF": "type Post struct {\n\tdb.Model\n\tAnyF any\n\tName string `store:\"query\"`\n}",
+		"X":    "type Post struct {\n\tdb.Model\n\tX complex64 `store:\"query\"`\n}",
+		"Word": "type Word uintptr\n\ntype Post struct {\n\tdb.Model\n\tWord\n\tName string `store:\"query\"`\n}",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", "package m\n\nimport \"github.com/zynthara/chok/v2/db\"\n\n"+src+"\n")
+		if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "Post."+field) {
+			t.Errorf("%s: a shape GORM cannot schema-parse must fail the scan on a runtime model, got %v", field, err)
+		}
+	}
+
+	embeddable := t.TempDir()
+	writeGo(t, embeddable, "m.go", `package m
+
+type Meta struct {
+	Tags  []string
+	Actor string `+"`json:\"actor\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(embeddable)
+	if err != nil {
+		t.Fatalf("a base-less tagged struct may live inside embeds, where the relation gate never runs — must scan clean, got %v", err)
+	}
+	if len(pkg.Models) != 1 || pkg.Models[0].Name != "Meta" {
+		t.Fatalf("Meta still generates its declared surface, got %+v", pkg.Models)
+	}
+}
+
+// TestScan_Round7ClosedPermissions is review round-7 finding 5: the
+// `->` / `<-` permission algebra can close every permission — then the
+// field never enters the anonymous-embed or relation branches and the
+// model parses fine (latched), so the scan must not reject it. Note
+// `->:false` ALONE clears create and update too. A closed struct embed
+// also stops expanding, so nothing promotes; and a field that stays
+// READABLE keeps its fatal shape fatal.
+func TestScan_Round7ClosedPermissions(t *testing.T) {
+	if _, err := schema.Parse(&round7ClosedHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil {
+		t.Fatalf("latch: a fully closed anonymous container must parse cleanly, got %v", err)
+	}
+
+	for label, src := range map[string]string{
+		"anon-closed-pair":  "type Names []string\n\ntype Post struct {\n\tdb.Model\n\tNames `gorm:\"->:false;<-:false\"`\n\tName string `store:\"query\"`\n}",
+		"anon-closed-read":  "type Names []string\n\ntype Post struct {\n\tdb.Model\n\tNames `gorm:\"->:false\"`\n\tName string `store:\"query\"`\n}",
+		"named-closed-pair": "type Post struct {\n\tdb.Model\n\tTags []string `gorm:\"->:false;<-:false\"`\n\tName string `store:\"query\"`\n}",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", "package m\n\nimport \"github.com/zynthara/chok/v2/db\"\n\n"+src+"\n")
+		pkg, err := Scan(dir)
+		if err != nil {
+			t.Errorf("%s: fully closed permissions keep the field inert — the model is legal and must scan, got %v", label, err)
+			continue
+		}
+		if len(pkg.Warnings) != 0 {
+			t.Errorf("%s: untagged closed fields warrant no warning, got %q", label, pkg.Warnings)
+		}
+	}
+
+	tagged := t.TempDir()
+	writeGo(t, tagged, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Names []string
+
+type Post struct {
+	db.Model
+	Names `+"`json:\"names\" store:\"query\" gorm:\"->:false;<-:false\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(tagged)
+	if err != nil {
+		t.Fatalf("the closed embed is inert — a dead tag, not a fatal shape, got %v", err)
+	}
+	var deadWarn bool
+	for _, w := range pkg.Warnings {
+		deadWarn = deadWarn || strings.Contains(w, "Post.Names") && strings.Contains(w, "closed permissions")
+	}
+	if !deadWarn {
+		t.Fatalf("the dead store tag on the closed embed must warn, got %q", pkg.Warnings)
+	}
+
+	promo := t.TempDir()
+	writeGo(t, promo, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Inner struct {
+	X string `+"`json:\"x\" store:\"query\"`"+`
+}
+
+type Post struct {
+	db.Model
+	Inner `+"`gorm:\"->:false;<-:false\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	pkg, err = Scan(promo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range pkg.Warnings {
+		if strings.Contains(w, "Inner") {
+			t.Fatalf("a fully closed struct embed never expands, so nothing promotes — no warning, got %q", pkg.Warnings)
+		}
+	}
+
+	readable := t.TempDir()
+	writeGo(t, readable, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Names []string
+
+type Post struct {
+	db.Model
+	Names `+"`gorm:\"<-:false\"`"+`
+	Name string `+"`store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(readable); err == nil || !strings.Contains(err.Error(), "Post.Names") {
+		t.Fatalf("`<-:false` alone keeps the field READABLE — the fatal shape stays fatal, got %v", err)
 	}
 }
