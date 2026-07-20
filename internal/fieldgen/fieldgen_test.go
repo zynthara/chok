@@ -5,7 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"gorm.io/gorm/logger"
+	"gorm.io/gorm/schema"
 )
 
 // writeGo drops one source file into dir for tempdir-based scan cases.
@@ -1757,5 +1761,267 @@ type Doc2 struct {
 	}
 	if !warned {
 		t.Fatalf("the dead tag on the expanding struct embed must warn, got %q", pkg.Warnings)
+	}
+}
+
+// TestScan_Round6ParenTypes is review round-6 finding 1: grouping
+// parentheses are legal, gofmt-preserved and PURE SYNTAX — `(string)`
+// is string, `type Byte = (byte)` keeps the predeclared identity, and
+// `type PV = (driver.Value)` denotes the interface itself. Every
+// classification path must see straight through them.
+func TestScan_Round6ParenTypes(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type PV = (driver.Value)
+
+type Sealed struct{ S string }
+
+func (s Sealed) Value() (PV, error) { return s.S, nil }
+
+type Byte = (byte)
+
+type Token []Byte
+
+type Direct [](byte)
+
+type Post struct {
+	db.Model
+	Scalar (string)  `+"`json:\"scalar\" store:\"query\"`"+`
+	Direct Direct    `+"`json:\"direct\" store:\"query\"`"+`
+	Token  Token     `+"`json:\"token\" store:\"query\"`"+`
+	Sealed Sealed    `+"`json:\"sealed\" store:\"query\"`"+`
+	Ptr    (*string) `+"`json:\"ptr\" store:\"query,update\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkg.Warnings) != 0 {
+		t.Fatalf("parenthesized column types must classify clean, got %q", pkg.Warnings)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Post" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	for _, want := range []string{"Scalar", "Direct", "Token", "Sealed", "Ptr"} {
+		if !got[want] {
+			t.Errorf("%s must be a column — parens never change what a type denotes, got %v", want, got)
+		}
+	}
+}
+
+// TestScan_Round6GenericAliasInstantiation is review round-6 finding 2:
+// a generic ALIAS instantiation (`type ByteOf[T any] = byte`) denotes
+// its right-hand side with the arguments substituted — full identity,
+// exactly like a plain alias — so byte-element resolution and signature
+// resolution must expand it. A DEFINED generic type's instantiation
+// stays its own identity, and a package-scope alias target must NOT see
+// the instantiation environment (Sly below: its []Alias lands on the
+// package-level defined type T, not on the argument bound to the
+// parameter of the same name).
+func TestScan_Round6GenericAliasInstantiation(t *testing.T) {
+	dir := t.TempDir()
+	writeGo(t, dir, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type ByteOf[T any] = byte
+
+type Token []ByteOf[int]
+
+type ValueOf[T any] = driver.Value
+
+type Sealed struct{ S string }
+
+func (s Sealed) Value() (ValueOf[int], error) { return s.S, nil }
+
+type Pick[T any] = T
+
+type Boxed struct{ S string }
+
+func (b Boxed) Value() (Pick[driver.Value], error) { return b.S, nil }
+
+type Defined[T any] byte
+
+type Bad []Defined[int]
+
+type T int8
+
+type Alias = T
+
+type Sly[T any] []Alias
+
+type Post struct {
+	db.Model
+	Token  Token             `+"`json:\"token\" store:\"query\"`"+`
+	Chunk  [4]ByteOf[string] `+"`json:\"chunk\" store:\"query\"`"+`
+	Sealed Sealed            `+"`json:\"sealed\" store:\"query\"`"+`
+	Boxed  Boxed             `+"`json:\"boxed\" store:\"query\"`"+`
+	Bad    Bad               `+"`json:\"bad\" store:\"query\"`"+`
+	Sly    Sly[byte]         `+"`json:\"sly\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range pkg.Models {
+		if m.Name != "Post" {
+			continue
+		}
+		for _, f := range m.Fields {
+			if !f.Base {
+				got[f.GoName] = true
+			}
+		}
+	}
+	for _, want := range []string{"Token", "Chunk", "Sealed", "Boxed"} {
+		if !got[want] {
+			t.Errorf("%s rides a generic alias instantiation to the denoted type — a column, got %v", want, got)
+		}
+	}
+	for _, absent := range []string{"Bad", "Sly"} {
+		if got[absent] {
+			t.Errorf("%s must stay rejected — a defined generic type (or a package-scope alias target) is not the argument's identity, got %v", absent, got)
+		}
+	}
+	for _, wantWarn := range []string{"Post.Bad:", "Post.Sly:"} {
+		var warned bool
+		for _, w := range pkg.Warnings {
+			warned = warned || strings.Contains(w, wantWarn)
+		}
+		if !warned {
+			t.Errorf("the rejected shape %s must warn as a skipped relation, got %q", wantWarn, pkg.Warnings)
+		}
+	}
+}
+
+// Round6Names/round6Host feed the runtime latch in
+// TestScan_Round6AnonymousContainerFailsLoud: GORM's embedded branch
+// must actually ABORT on an anonymous non-struct shape — the behavior
+// the scan's colHardNo verdict mirrors.
+type Round6Names []string
+
+type round6Host struct{ Round6Names }
+
+// TestScan_Round6AnonymousContainerFailsLoud is review round-6 finding
+// 3: an anonymous local slice/array/map embed is NOT a skipped relation
+// — GORM's embedded branch schema-parses it and model building fails
+// (unsupported data type). On a runtime model (a store tag, or a chok
+// base embed) the scan must fail the same way instead of warning that
+// the runtime skips it; a plain DTO never meets a schema parse and
+// stays silent, and a serializer proof still makes the embed a column.
+func TestScan_Round6AnonymousContainerFailsLoud(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard // the latch's expected parse failure logs through the global logger
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&round6Host{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("latch: GORM must abort on the anonymous slice embed with the error the scan mirrors, got %v", err)
+	}
+
+	tagged := t.TempDir()
+	writeGo(t, tagged, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Names []string
+
+type Doc struct {
+	db.Model
+	Names `+"`json:\"names\" store:\"query\"`"+`
+}
+`)
+	_, err := Scan(tagged)
+	if err == nil || !strings.Contains(err.Error(), "Doc.Names") || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("the tagged anonymous slice embed must fail loud with the runtime's diagnosis, got %v", err)
+	}
+
+	untagged := t.TempDir()
+	writeGo(t, untagged, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Tags map[string]string
+
+type Post struct {
+	db.Model
+	Tags
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	_, err = Scan(untagged)
+	if err == nil || !strings.Contains(err.Error(), "Post.Tags") {
+		t.Fatalf("the untagged fatal embed on a runtime model must still fail the scan, got %v", err)
+	}
+
+	mixed := t.TempDir()
+	writeGo(t, mixed, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Names []string
+
+type Meta struct{ A string }
+
+type DTO struct {
+	Names
+	Other string
+}
+
+type Post2 struct {
+	db.Model
+	Meta
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+
+type Post3 struct {
+	db.Model
+	Names `+"`json:\"names\" store:\"query\" gorm:\"serializer:json\"`"+`
+}
+`)
+	pkg, err := Scan(mixed)
+	if err != nil {
+		t.Fatalf("a DTO's fatal embed never meets a schema parse — the scan must pass, got %v", err)
+	}
+	if len(pkg.Warnings) != 0 {
+		t.Fatalf("nothing here warrants a warning, got %q", pkg.Warnings)
+	}
+	fields := map[string]map[string]string{}
+	for _, m := range pkg.Models {
+		fields[m.Name] = map[string]string{}
+		for _, f := range m.Fields {
+			if !f.Base {
+				fields[m.Name][f.GoName] = f.Value
+			}
+		}
+	}
+	if fields["Post2"]["Name"] != "name" {
+		t.Errorf("the struct embed keeps expanding as before, got %v", fields["Post2"])
+	}
+	if fields["Post3"]["Names"] != "names" {
+		t.Errorf("the serializer proof still makes the anonymous embed a column, got %v", fields["Post3"])
+	}
+	if _, ok := fields["DTO"]; ok {
+		t.Errorf("the DTO must not become a model, got %v", fields["DTO"])
 	}
 }

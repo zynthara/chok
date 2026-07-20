@@ -14,8 +14,10 @@
 // implementers and a known set of cross-package column types are
 // generated, with local defined types resolved through their underlying
 // shape (a defined scalar is a column, a defined slice is a has-many);
-// relation-shaped fields (DBName empty at runtime) are skipped with a
-// warning; a cross-package type the scan cannot classify is a hard
+// relation-shaped NAMED fields (DBName empty at runtime) are skipped
+// with a warning, while an ANONYMOUS non-struct shape on a model is a
+// hard error — GORM's embedded parse aborts on it rather than skipping
+// it; a cross-package type the scan cannot classify is a hard
 // error pointing at `gorm:"type:..."` / serializer tags as the static
 // proof, or at removing the store tag.
 //
@@ -352,6 +354,12 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 		fieldWarns []string
 		modelWarns []string
 		promoWarns []string
+		// embedFatal records the first anonymous embed GORM cannot
+		// expand (colHardNo): schema parsing aborts at runtime, so if
+		// the struct turns out to be a runtime model the scan must fail
+		// with it rather than warn (review round-6). A plain DTO never
+		// meets a schema parse, so there it stays silent.
+		embedFatal error
 		hasDBBase  bool
 		queryCol   = map[string]string{}
 		updCol     = map[string]string{}
@@ -442,6 +450,21 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 						"%s.%s: `store` tag ignored — %s is %s, not a database column (the runtime skips it too); remove the tag", name, fieldName, exprString(f.Type), why))
 				}
 				promoWarns = append(promoWarns, sc.promotionWarn(name, exprString(f.Type), typ, true)...)
+			case colHardNo:
+				// The runtime does NOT skip this shape: GORM's embedded
+				// branch schema-parses it and model building fails
+				// (unsupported data type). A store tag declares model
+				// intent — fail now; untagged, fail only if the struct
+				// proves to be a runtime model after the walk.
+				err := fmt.Errorf(
+					"fieldgen: %s.%s: anonymous embed %s is %s — GORM cannot expand it and schema parsing fails at runtime (unsupported data type); name the field, prove a column with a serializer or `gorm:\"type:...\"` tag, or remove the embed",
+					name, fieldName, exprString(f.Type), why)
+				if hasStoreTag {
+					return nil, nil, err
+				}
+				if embedFatal == nil {
+					embedFatal = err
+				}
 			default:
 				if hasStoreTag {
 					// Tagged but undecidable (a dynamic GormDataType, an
@@ -498,6 +521,14 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 					name, ident.Name, exprString(f.Type))
 			}
 		}
+	}
+
+	if embedFatal != nil && (hasDBBase || len(fields) > 0) {
+		// The struct IS a runtime model — a chok base embed or a
+		// generated surface — and schema parsing will abort on the
+		// fatal embed. Generating (or warning) here would whitelist
+		// fields of a model that cannot be built (review round-6).
+		return nil, nil, embedFatal
 	}
 
 	if len(fields) == 0 {
@@ -662,7 +693,18 @@ const (
 	colYes colVerdict = iota
 	colNo
 	colUnknown
+	// colHardNo is issued for anonymous fields only: the embed is
+	// neither column-shaped nor expandable, so GORM's embedded branch
+	// schema-parses it and model building FAILS at runtime
+	// (unsupported data type) — it is not a skipped relation (review
+	// round-6).
+	colHardNo
 )
+
+// reasonPlainStruct is the colNo reason classifyShape gives a struct
+// shape. classifyAnonymous keys on it: a struct-shaped embed expands at
+// runtime, while every other non-column shape aborts schema parsing.
+const reasonPlainStruct = "a plain struct (a GORM relation)"
 
 // classifyColumn is the syntactic mirror of "does GORM give this NAMED
 // field a DBName": explicit gorm type/serializer settings (including
@@ -725,11 +767,15 @@ type binding struct {
 // which any underlying-preserving chain keeps.
 func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env map[string]binding, seen map[string]bool, identityLost bool) (colVerdict, string) {
 	for {
-		star, ok := typ.(*ast.StarExpr)
-		if !ok {
-			break
+		if star, ok := typ.(*ast.StarExpr); ok {
+			typ = star.X // GORM classifies through pointers
+			continue
 		}
-		typ = star.X
+		if paren, ok := typ.(*ast.ParenExpr); ok {
+			typ = paren.X // grouping parens are pure syntax (review round-6)
+			continue
+		}
+		break
 	}
 	switch t := typ.(type) {
 	case *ast.Ident:
@@ -754,6 +800,7 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 		return colUnknown, ""
 	case *ast.IndexExpr, *ast.IndexListExpr:
 		base, args := instantiation(t)
+		base = ast.Unparen(base)
 		if sel, ok := base.(*ast.SelectorExpr); ok {
 			if !identityLost && selectorIsKnownColumn(sel, imports) {
 				return colYes, "" // e.g. datatypes.JSONType[T]
@@ -776,7 +823,7 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 		for i, param := range info.typeParams {
 			arg := args[i]
 			argImports := imports
-			if argIdent, ok := arg.(*ast.Ident); ok {
+			if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
 				if b, bound := env[argIdent.Name]; bound {
 					arg, argImports = b.expr, b.imports
 				}
@@ -804,7 +851,7 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 		}
 		return colNo, "a slice or array (a relation, or unsupported without a serializer)"
 	case *ast.StructType:
-		return colNo, "a plain struct (a GORM relation)"
+		return colNo, reasonPlainStruct
 	case *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType:
 		return colNo, "not a scalar type (no column without a serializer)"
 	default:
@@ -814,13 +861,41 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 
 // isByteIdent reports whether an element expression denotes the
 // predeclared byte/uint8 type IDENTICALLY: spelled directly, through
-// the generic environment, or through local alias chains — the three
-// constructs reflect sees straight through. A defined byte type is a
-// different type and stays rejected, as does a local declaration
-// shadowing the predeclared names.
+// the generic environment, through local alias chains — parenthesized
+// or not — or through generic ALIAS instantiations (`type B[T any] =
+// byte`, review round-6): the constructs reflect sees straight
+// through. A defined byte type is a different type and stays rejected,
+// as does a local declaration shadowing the predeclared names.
+// Package-scope alias targets cannot see the instantiation
+// environment, so following one resets it — a generic parameter and a
+// package-level type may share a name.
 func (sc *scanner) isByteIdent(elem ast.Expr, env map[string]binding) bool {
 	seen := map[string]bool{}
 	for {
+		elem = ast.Unparen(elem)
+		if base, args := instantiation(elem); args != nil {
+			ident, ok := ast.Unparen(base).(*ast.Ident)
+			if !ok {
+				return false
+			}
+			info, local := sc.types[ident.Name]
+			if !local || !info.isAlias || len(info.typeParams) != len(args) || seen[ident.Name] {
+				return false // instantiating anything but a local generic alias mints a new identity
+			}
+			seen[ident.Name] = true
+			newEnv := make(map[string]binding, len(args))
+			for i, param := range info.typeParams {
+				arg := args[i]
+				if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
+					if b, bound := env[argIdent.Name]; bound {
+						arg = b.expr
+					}
+				}
+				newEnv[param] = binding{expr: arg}
+			}
+			elem, env = info.decl, newEnv
+			continue
+		}
 		ident, ok := elem.(*ast.Ident)
 		if !ok {
 			return false
@@ -837,7 +912,7 @@ func (sc *scanner) isByteIdent(elem ast.Expr, env map[string]binding) bool {
 			if !info.isAlias || len(info.typeParams) > 0 {
 				return false // a defined type never keeps the predeclared identity
 			}
-			elem = info.decl
+			elem, env = info.decl, nil // package-scope RHS: the instantiation env no longer applies
 			continue
 		}
 		return ident.Name == "byte" || ident.Name == "uint8"
@@ -864,8 +939,11 @@ func instantiation(typ ast.Expr) (ast.Expr, []ast.Expr) {
 // tags never prevent expansion (the GORMDataType snapshot the condition
 // reads predates the TYPE override). A GormDataType whose return value
 // the scan cannot read statically is undecidable and must fail loud
-// rather than guess. Non-struct shapes never expand and classify like
-// named fields, quick proofs included.
+// rather than guess. Non-struct shapes classify like named fields,
+// quick proofs included — but where a NAMED relation-shaped field is
+// merely skipped at runtime, an anonymous one still enters the embed
+// branch, whose schema parse aborts on anything that is not a struct
+// (unsupported data type) — colHardNo, not a warning (review round-6).
 func (sc *scanner) classifyAnonymous(typ ast.Expr, gormSettings map[string]string, imports map[string]string) (colVerdict, string) {
 	if name, isLocal := localBaseName(sc, typ); isLocal {
 		valuer, _ := sc.resolveColumnMethod(name, "Value")
@@ -887,6 +965,14 @@ func (sc *scanner) classifyAnonymous(typ ast.Expr, gormSettings map[string]strin
 			}
 			return colNo, "an embedded struct (only a driver.Valuer or a GormDataType of \"time\"/\"bytes\" stays a column)"
 		}
+		verdict, why := sc.classifyColumn(typ, gormSettings, imports)
+		if verdict == colNo && why != reasonPlainStruct {
+			// A struct shape reached only through generic substitution
+			// still expands like any embed; every other non-column
+			// shape (slice, array, map, ...) aborts the runtime parse.
+			return colHardNo, why
+		}
+		return verdict, why
 	}
 	return sc.classifyColumn(typ, gormSettings, imports)
 }
@@ -1261,12 +1347,14 @@ func selectorIsKnownColumn(sel *ast.SelectorExpr, imports map[string]string) boo
 	return isKnownColumnType(imports[x.Name], sel.Sel.Name)
 }
 
-// unwrapType strips pointers and generic instantiations down to the
-// named type expression.
+// unwrapType strips pointers, grouping parens and generic
+// instantiations down to the named type expression.
 func unwrapType(expr ast.Expr) ast.Expr {
 	for {
 		switch t := expr.(type) {
 		case *ast.StarExpr:
+			expr = t.X
+		case *ast.ParenExpr:
 			expr = t.X
 		case *ast.IndexExpr:
 			expr = t.X
@@ -1320,22 +1408,54 @@ func resultTypes(ft *ast.FuncType) []ast.Expr {
 // resolveAliasedType follows local ALIAS chains only — the one Go
 // construct that preserves type identity — so signature types written
 // through aliases (review round-4: `type DV = driver.Value`) resolve to
-// what they denote. Defined types stop the chase: `type DV
-// driver.Value` is a different type and must not match. The denoted
-// expression is kept WHOLE — an alias to *driver.Value or to a generic
-// instantiation is that constructed type, not its base, and stripping
-// the constructor minted false Valuers (review round-5).
-func (sc *scanner) resolveAliasedType(typ ast.Expr, imports map[string]string, seen map[string]bool) (ast.Expr, map[string]string) {
-	ident, ok := typ.(*ast.Ident)
-	if !ok {
-		return typ, imports
+// what they denote. Grouping parens are stripped (`type PV =
+// (driver.Value)` denotes driver.Value itself) and a generic alias
+// INSTANTIATION resolves through its right-hand side with the
+// arguments substituted (`type VO[T any] = driver.Value`, both review
+// round-6); package-scope targets reset the environment, which they
+// cannot see. Defined types stop the chase: `type DV driver.Value` is
+// a different type and must not match, and so is a defined generic
+// type's instantiation. The denoted expression is otherwise kept WHOLE
+// — an alias to *driver.Value or to a defined type's instantiation is
+// that constructed type, not its base, and stripping the constructor
+// minted false Valuers (review round-5).
+func (sc *scanner) resolveAliasedType(typ ast.Expr, imports map[string]string, env map[string]binding, seen map[string]bool) (ast.Expr, map[string]string) {
+	typ = ast.Unparen(typ)
+	switch t := typ.(type) {
+	case *ast.Ident:
+		if b, bound := env[t.Name]; bound {
+			return sc.resolveAliasedType(b.expr, b.imports, nil, seen)
+		}
+		info, local := sc.types[t.Name]
+		if !local || !info.isAlias || len(info.typeParams) > 0 || seen[t.Name] {
+			return typ, imports
+		}
+		seen[t.Name] = true
+		return sc.resolveAliasedType(info.decl, info.imports, nil, seen)
+	case *ast.IndexExpr, *ast.IndexListExpr:
+		base, args := instantiation(t)
+		ident, ok := ast.Unparen(base).(*ast.Ident)
+		if !ok {
+			return typ, imports
+		}
+		info, local := sc.types[ident.Name]
+		if !local || !info.isAlias || len(info.typeParams) != len(args) || seen[ident.Name] {
+			return typ, imports
+		}
+		seen[ident.Name] = true
+		newEnv := make(map[string]binding, len(args))
+		for i, param := range info.typeParams {
+			arg, argImports := args[i], imports
+			if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
+				if b, bound := env[argIdent.Name]; bound {
+					arg, argImports = b.expr, b.imports
+				}
+			}
+			newEnv[param] = binding{expr: arg, imports: argImports}
+		}
+		return sc.resolveAliasedType(info.decl, info.imports, newEnv, seen)
 	}
-	info, local := sc.types[ident.Name]
-	if !local || !info.isAlias || seen[ident.Name] {
-		return typ, imports
-	}
-	seen[ident.Name] = true
-	return sc.resolveAliasedType(info.decl, info.imports, seen)
+	return typ, imports
 }
 
 // isValuerMethod matches driver.Valuer exactly: `func (T) Value()
@@ -1351,7 +1471,7 @@ func (sc *scanner) isValuerMethod(d *ast.FuncDecl, imports map[string]string) bo
 	if len(results) != 2 {
 		return false
 	}
-	first, firstImports := sc.resolveAliasedType(results[0], imports, map[string]bool{})
+	first, firstImports := sc.resolveAliasedType(results[0], imports, nil, map[string]bool{})
 	sel, ok := first.(*ast.SelectorExpr)
 	if !ok {
 		return false
@@ -1360,7 +1480,7 @@ func (sc *scanner) isValuerMethod(d *ast.FuncDecl, imports map[string]string) bo
 	if !ok || firstImports[x.Name] != "database/sql/driver" || sel.Sel.Name != "Value" {
 		return false
 	}
-	second, _ := sc.resolveAliasedType(results[1], imports, map[string]bool{})
+	second, _ := sc.resolveAliasedType(results[1], imports, nil, map[string]bool{})
 	err, ok := second.(*ast.Ident)
 	return ok && err.Name == "error" && !sc.shadowedPredeclared("error")
 }
@@ -1377,7 +1497,7 @@ func (sc *scanner) isGormDataTypeMethod(d *ast.FuncDecl, imports map[string]stri
 	if len(results) != 1 {
 		return false
 	}
-	first, _ := sc.resolveAliasedType(results[0], imports, map[string]bool{})
+	first, _ := sc.resolveAliasedType(results[0], imports, nil, map[string]bool{})
 	ident, ok := first.(*ast.Ident)
 	return ok && ident.Name == "string" && !sc.shadowedPredeclared("string")
 }
@@ -1448,7 +1568,11 @@ func exprString(expr ast.Expr) string {
 		return exprString(e.X) + "." + e.Sel.Name
 	case *ast.StarExpr:
 		return "*" + exprString(e.X)
+	case *ast.ParenExpr:
+		return "(" + exprString(e.X) + ")"
 	case *ast.IndexExpr:
+		return exprString(e.X) + "[...]"
+	case *ast.IndexListExpr:
 		return exprString(e.X) + "[...]"
 	case *ast.ArrayType:
 		return "[]" + exprString(e.Elt)
