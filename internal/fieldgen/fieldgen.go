@@ -461,7 +461,30 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 				hasDBBase = true
 				continue
 			}
+			// Any local wrapper might carry a chok base; whether the
+			// base reaches THIS model depends on the wrapper actually
+			// expanding, so every non-expanding exit below must account
+			// for a swallowed base (review round-10).
+			var wrapBase baseState
+			if ident, ok := typ.(*ast.Ident); ok {
+				wrapBase = sc.baseThroughEmbeds(ident.Name, map[string]bool{})
+			}
+			baseLost := func() {
+				if wrapBase != baseNone && baseFatal == nil {
+					baseFatal = fmt.Errorf(
+						"fieldgen: %s: the chok base inside the embedded %s never reaches this model's schema — %s does not expand at runtime, so rid/id will not exist and store.New fails; embed the base directly or restructure",
+						name, exprString(f.Type), exprString(f.Type))
+				}
+			}
+			baseUndecidable := func() {
+				if wrapBase != baseNone && baseFatal == nil {
+					baseFatal = fmt.Errorf(
+						"fieldgen: %s: cannot statically decide whether the embedded %s expands — it carries a chok base, so the base fields' existence is undecidable; embed the base directly or restructure",
+						name, exprString(f.Type))
+				}
+			}
 			if gormIgnored(gormSettings) {
+				baseLost()
 				continue
 			}
 			closed := permsAllClosed(gormSettings)
@@ -486,8 +509,17 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 					continue
 				case shapeScalar:
 					// inert tag: classify like any anonymous scalar below
+					baseLost() // a scalar-kind wrapper never expands whatever it carries
 				case shapeStruct:
 					promoWarns = append(promoWarns, sc.promotionWarn(name, exprString(f.Type), typ, true)...)
+					switch wrapBase {
+					case baseEnabled:
+						carriedBase = true // the EMBEDDED arm expands unconditionally
+					case baseDisabled:
+						baseLost()
+					case baseUnsure:
+						baseUndecidable()
+					}
 					ae, ne := sc.promotedFatal(f.Type, imports, nil, map[string]bool{})
 					if anonFatal == nil {
 						anonFatal = ae
@@ -506,6 +538,7 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 							"fieldgen: %s.%s: cannot statically decide what `gorm:\"embedded\"` does to %s (its underlying kind is not visible) — remove the store tag, or restructure the field",
 							name, embedFieldName(typ), exprString(f.Type))
 					}
+					baseUndecidable()
 					promoWarns = append(promoWarns, sc.promotionWarn(name, exprString(f.Type), typ, true)...)
 					continue
 				}
@@ -519,6 +552,7 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 				continue
 			}
 			if !ast.IsExported(fieldName) {
+				baseLost() // GORM skips the unexported field, base and all
 				continue
 			}
 			// Classification sees the ORIGINAL expression — generic
@@ -529,7 +563,10 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 			switch verdict {
 			case colYes:
 				// Column-shaped embed: a field under the type's name.
-				// Untagged it is just a private column — silent.
+				// Untagged it is just a private column — silent. A base
+				// inside it never expands (a Valuer wrapper IS a column,
+				// not an embed — review round-10, latched).
+				baseLost()
 				if hasStoreTag {
 					if err := addField(fieldName, tag, gormSettings); err != nil {
 						return nil, nil, err
@@ -550,25 +587,30 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 					// model, and any fatal shape inside aborts it exactly
 					// like a direct field (review round-8).
 					promoWarns = append(promoWarns, sc.promotionWarn(name, exprString(f.Type), typ, true)...)
-					if ident, ok := typ.(*ast.Ident); ok {
-						switch sc.baseThroughEmbeds(ident.Name, map[string]bool{}) {
-						case baseEnabled:
-							carriedBase = true
-						case baseDisabled:
-							if baseFatal == nil {
-								baseFatal = fmt.Errorf(
-									"fieldgen: %s: the chok base embedded through %s is disabled by a gorm tag — GORM will not expand it, the promoted base fields (rid, id, timestamps) will not exist and store.New fails; remove the tag",
-									name, exprString(f.Type))
-							}
+					switch wrapBase {
+					case baseEnabled:
+						carriedBase = true
+					case baseDisabled:
+						if baseFatal == nil {
+							baseFatal = fmt.Errorf(
+								"fieldgen: %s: the chok base embedded through %s is disabled by a gorm tag — GORM will not expand it, the promoted base fields (rid, id, timestamps) will not exist and store.New fails; remove the tag",
+								name, exprString(f.Type))
 						}
-						ae, ne := sc.promotedFatal(f.Type, imports, nil, map[string]bool{})
-						if anonFatal == nil {
-							anonFatal = ae
-						}
-						if namedFatal == nil {
-							namedFatal = ne
-						}
+					case baseUnsure:
+						baseUndecidable()
 					}
+					ae, ne := sc.promotedFatal(f.Type, imports, nil, map[string]bool{})
+					if anonFatal == nil {
+						anonFatal = ae
+					}
+					if namedFatal == nil {
+						namedFatal = ne
+					}
+				} else {
+					// Non-expanding: fully closed, or a Valuer whose
+					// erased GormDataType made it a plain relation —
+					// either way anything inside stays unpromoted.
+					baseLost()
 				}
 			case colHardNo:
 				if closed {
@@ -605,6 +647,10 @@ func (sc *scanner) scanStruct(name string, st *ast.StructType, imports map[strin
 						"fieldgen: %s.%s: cannot statically decide whether the embedded %s is a database column — remove the `store` tag, or restructure the embed",
 						name, fieldName, exprString(f.Type))
 				}
+				// An unclassifiable wrapper that carries a chok base
+				// decides whether rid/id exist — a warning cannot cover
+				// that (review round-10 finding 3).
+				baseUndecidable()
 				modelWarns = append(modelWarns, opaqueEmbedWarn(name, f.Type))
 			}
 			continue
@@ -964,7 +1010,7 @@ func (sc *scanner) classifyColumnFinal(typ ast.Expr, gormSettings map[string]str
 	// own import context (pointers are transparent — GORM dereferences).
 	if ident, ok := unwrapType(typ).(*ast.Ident); ok {
 		if b, bound := env[ident.Name]; bound {
-			return sc.classifyColumn(b.expr, gormSettings, b.imports, nil)
+			return sc.classifyColumn(b.expr, gormSettings, b.imports, b.env)
 		}
 	}
 	if name, isLocal := localBaseName(sc, typ); isLocal {
@@ -1022,12 +1068,15 @@ func localBaseName(sc *scanner, typ ast.Expr) (string, bool) {
 	return ident.Name, local
 }
 
-// binding is one generic type argument: the expression plus the import
-// context it was written in (the instantiation site's file, or a
-// previous binding's).
+// binding is one generic type argument: the expression, the import
+// context it was written in, and the bindings for any type parameters
+// the expression itself mentions — a closure over the instantiation
+// site (review round-10: `Outer[string]` binding Inner's U to []T must
+// keep T=string resolvable).
 type binding struct {
 	expr    ast.Expr
 	imports map[string]string
+	env     map[string]binding
 }
 
 // classifyShape resolves a type expression to its underlying shape,
@@ -1055,8 +1104,9 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 	case *ast.Ident:
 		if b, ok := env[t.Name]; ok {
 			// A generic parameter: substitute the instantiation's
-			// argument in its own import context.
-			return sc.classifyShape(b.expr, b.imports, nil, seen, identityLost)
+			// argument in its own import context — with the argument's
+			// own captured bindings (round-10).
+			return sc.classifyShape(b.expr, b.imports, b.env, seen, identityLost)
 		}
 		if info, local := sc.types[t.Name]; local {
 			if seen[t.Name] {
@@ -1098,14 +1148,10 @@ func (sc *scanner) classifyShape(typ ast.Expr, imports map[string]string, env ma
 		seen[ident.Name] = true
 		newEnv := make(map[string]binding, len(args))
 		for i, param := range info.typeParams {
-			arg := args[i]
-			argImports := imports
-			if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
-				if b, bound := env[argIdent.Name]; bound {
-					arg, argImports = b.expr, b.imports
-				}
-			}
-			newEnv[param] = binding{expr: arg, imports: argImports}
+			// The argument is written at the instantiation site: capture
+			// the CURRENT environment so parameters inside composite
+			// arguments (`Inner[[]T]`) stay resolvable (round-10).
+			newEnv[param] = binding{expr: args[i], imports: imports, env: env}
 		}
 		return sc.classifyShape(info.decl, info.imports, newEnv, seen, identityLost || !info.isAlias)
 	case *ast.SelectorExpr:
@@ -1184,13 +1230,7 @@ func (sc *scanner) isByteIdent(elem ast.Expr, env map[string]binding) bool {
 			seen[ident.Name] = true
 			newEnv := make(map[string]binding, len(args))
 			for i, param := range info.typeParams {
-				arg := args[i]
-				if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
-					if b, bound := env[argIdent.Name]; bound {
-						arg = b.expr
-					}
-				}
-				newEnv[param] = binding{expr: arg}
+				newEnv[param] = binding{expr: args[i], env: env}
 			}
 			elem, env = info.decl, newEnv
 			continue
@@ -1200,7 +1240,7 @@ func (sc *scanner) isByteIdent(elem ast.Expr, env map[string]binding) bool {
 			return false
 		}
 		if b, bound := env[ident.Name]; bound {
-			elem, env = b.expr, nil // the argument was written at the instantiation site
+			elem, env = b.expr, b.env // the argument was written at the instantiation site
 			continue
 		}
 		if seen[ident.Name] {
@@ -1267,7 +1307,7 @@ func (sc *scanner) shapeKindOf(typ ast.Expr, imports map[string]string, env map[
 		return sc.shapeKindOf(t.Elt, imports, env, seen, true)
 	case *ast.Ident:
 		if b, ok := env[t.Name]; ok {
-			return sc.shapeKindOf(b.expr, b.imports, nil, seen, stripContainers)
+			return sc.shapeKindOf(b.expr, b.imports, b.env, seen, stripContainers)
 		}
 		if info, local := sc.types[t.Name]; local {
 			if seen[t.Name] || len(info.typeParams) > 0 {
@@ -1296,13 +1336,7 @@ func (sc *scanner) shapeKindOf(typ ast.Expr, imports map[string]string, env map[
 		seen[ident.Name] = true
 		newEnv := make(map[string]binding, len(args))
 		for i, param := range info.typeParams {
-			arg, argImports := args[i], imports
-			if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
-				if b, bound := env[argIdent.Name]; bound {
-					arg, argImports = b.expr, b.imports
-				}
-			}
-			newEnv[param] = binding{expr: arg, imports: argImports}
+			newEnv[param] = binding{expr: args[i], imports: imports, env: env}
 		}
 		return sc.shapeKindOf(info.decl, info.imports, newEnv, seen, stripContainers)
 	case *ast.SelectorExpr:
@@ -1440,26 +1474,30 @@ func (sc *scanner) classifyAnonymousFinal(typ ast.Expr, gormSettings map[string]
 }
 
 // baseState is what a walk of a local embed chain found about chok
-// bases: none at all, an ENABLED one (GORM expands it — the embedder
-// is a runtime store model), or only DISABLED ones (the base exists in
-// the Go type, satisfying db.Modeler, but GORM never expands it — no
-// rid at runtime, store.New fails). Review rounds 8-9.
+// bases: none at all; an ENABLED one that actually reaches the model
+// (every wrapper on the path expands); only DISABLED/UNREACHABLE ones
+// (the Go type satisfies db.Modeler, but GORM never promotes the base
+// — no rid at runtime, store.New fails); or UNSURE — a wrapper on the
+// path cannot be classified, so whether the base fields exist is
+// undecidable (review round-10). Enabled beats unsure beats disabled.
 type baseState int
 
 const (
 	baseNone baseState = iota
-	baseEnabled
 	baseDisabled
+	baseUnsure
+	baseEnabled
 )
 
 // baseThroughEmbeds walks a local struct type's exported anonymous
-// embeds for chok bases, mirroring GORM's enablement rules: an
-// explicit EMBEDDED tag expands unconditionally (no permission gate),
-// the gorm:"-" family and fully closed permissions disable the embed,
-// everything else expands. Non-base embeds recurse under the same
-// rules. An enabled base anywhere wins; otherwise a disabled sighting
-// is reported so the caller can fail loud instead of minting dead base
-// references (review round-9).
+// embeds for chok bases, mirroring both GORM's enablement rules AND
+// its expansion rules (review round-10): a base only reaches the model
+// if every wrapper on the path actually EXPANDS. An explicit EMBEDDED
+// tag expands unconditionally; the gorm:"-" family and fully closed
+// permissions disable the embed; and a wrapper that classifies as a
+// COLUMN (a Valuer, an exempt GormDataType, ...) or as anything else
+// non-expanding swallows every base inside it. A wrapper the scan
+// cannot classify makes any base it carries undecidable.
 func (sc *scanner) baseThroughEmbeds(name string, seen map[string]bool) baseState {
 	if seen[name] {
 		return baseNone
@@ -1471,6 +1509,11 @@ func (sc *scanner) baseThroughEmbeds(name string, seen map[string]bool) baseStat
 	}
 	dbImport := chokDBIdent(stImports)
 	state := baseNone
+	merge := func(next baseState) {
+		if next > state {
+			state = next
+		}
+	}
 	for _, f := range st.Fields.List {
 		if len(f.Names) != 0 {
 			continue
@@ -1483,21 +1526,38 @@ func (sc *scanner) baseThroughEmbeds(name string, seen map[string]bool) baseStat
 			if embedded || !disabled {
 				return baseEnabled
 			}
-			state = baseDisabled
+			merge(baseDisabled)
 			continue
-		}
-		if !embedded && disabled {
-			continue // the embed never expands: it carries nothing
 		}
 		ident, ok := typ.(*ast.Ident)
 		if !ok || !ast.IsExported(ident.Name) {
-			continue // unexported embedded field: GORM skips it
+			continue // cross-package or unexported: invisible / skipped by GORM
 		}
-		switch sc.baseThroughEmbeds(ident.Name, seen) {
-		case baseEnabled:
-			return baseEnabled
-		case baseDisabled:
-			state = baseDisabled
+		inner := sc.baseThroughEmbeds(ident.Name, seen)
+		if inner == baseNone {
+			continue
+		}
+		if !embedded && disabled {
+			merge(baseDisabled) // the wrapper never expands: its base is lost
+			continue
+		}
+		if embedded {
+			// The EMBEDDED arm expands struct kinds unconditionally.
+			if sc.shapeKindOf(f.Type, stImports, nil, map[string]bool{}, false) == shapeStruct {
+				merge(inner)
+			} else {
+				merge(baseDisabled)
+			}
+			continue
+		}
+		verdict, why := sc.classifyAnonymous(f.Type, settings, stImports, nil)
+		switch {
+		case verdict == colNo && why == reasonEmbeddedStruct:
+			merge(inner) // the wrapper expands: the inner state carries through
+		case verdict == colUnknown:
+			merge(baseUnsure) // cannot tell whether the wrapper expands
+		default:
+			merge(baseDisabled) // a column / relation / fatal shape: the base never promotes
 		}
 	}
 	return state
@@ -1546,13 +1606,7 @@ func (sc *scanner) promotedFatal(typ ast.Expr, imports map[string]string, env ma
 		}
 		newEnv = make(map[string]binding, len(args))
 		for i, param := range info.typeParams {
-			arg, argImports := args[i], imports
-			if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
-				if b, bound := env[argIdent.Name]; bound {
-					arg, argImports = b.expr, b.imports
-				}
-			}
-			newEnv[param] = binding{expr: arg, imports: argImports}
+			newEnv[param] = binding{expr: args[i], imports: imports, env: env}
 		}
 	} else if len(info.typeParams) > 0 {
 		return nil, nil // bare generic name: broken code
@@ -2133,7 +2187,7 @@ func (sc *scanner) resolveAliasedType(typ ast.Expr, imports map[string]string, e
 	switch t := typ.(type) {
 	case *ast.Ident:
 		if b, bound := env[t.Name]; bound {
-			return sc.resolveAliasedType(b.expr, b.imports, nil, seen)
+			return sc.resolveAliasedType(b.expr, b.imports, b.env, seen)
 		}
 		info, local := sc.types[t.Name]
 		if !local || !info.isAlias || len(info.typeParams) > 0 || seen[t.Name] {
@@ -2154,13 +2208,7 @@ func (sc *scanner) resolveAliasedType(typ ast.Expr, imports map[string]string, e
 		seen[ident.Name] = true
 		newEnv := make(map[string]binding, len(args))
 		for i, param := range info.typeParams {
-			arg, argImports := args[i], imports
-			if argIdent, ok := ast.Unparen(arg).(*ast.Ident); ok {
-				if b, bound := env[argIdent.Name]; bound {
-					arg, argImports = b.expr, b.imports
-				}
-			}
-			newEnv[param] = binding{expr: arg, imports: argImports}
+			newEnv[param] = binding{expr: args[i], imports: imports, env: env}
 		}
 		return sc.resolveAliasedType(info.decl, info.imports, newEnv, seen)
 	}

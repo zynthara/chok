@@ -277,9 +277,14 @@ err = posts.Update(ctx, store.RID(rid), store.Fields(p, PostFields.Title))
   嵌入按**实例化实参**展开传播（`Box[string]` 提升出的 `Data []string`
   炸模型，`Box[byte]` 的 `Data []byte` 是合法 bytes 列）。基座嵌入自己被
   `gorm:"-"` 或全关权限禁用时整个模型报错（运行时没有 rid，store.New
-  必失败）——显式 `gorm:"embedded"` 无视权限、基座照常展开可用；禁用的
-  基座藏在本地 wrapper 里同样被查出并报错，另有一个启用基座时以启用者
-  为准。无法静态判定列性时（陌生跨包类型、方法集含扫不到的嵌入）同样
+  必失败）——显式 `gorm:"embedded"` 无视权限、基座照常展开可用。基座
+  必须**沿途每层 wrapper 都真的展开**才算数：wrapper 自己是 Valuer
+  （整个变成一列）、被 `gorm:"-"`/全关权限惰性化、或字段名未导出时，
+  内部基座永远到不了模型 schema——Go 层仍满足 `db.Modeler` 但运行时没有
+  rid，这些都直接报错；wrapper 的展开性无法静态判定（方法集含不可见的
+  跨包成员）而又携带基座时，同样报错拒猜。另有一个启用基座时以启用者
+  为准。复合泛型实参（`Inner[[]T]`）按闭包语义携带外层绑定，
+  `Outer[string]` 提升出的 `Data []string` 照样被查出。无法静态判定列性时（陌生跨包类型、方法集含扫不到的嵌入）同样
   **报错拒猜**：用 type / serializer tag 自证，或去掉 tag。构建约束按生成
   时平台生效（`//go:build`、平台后缀、`_` 前缀文件遵循 go/build 规则）。
 - ⚠️ **匿名字段另有一套嵌入规则**（与 GORM 一致，实测钉死）：匿名嵌入只有

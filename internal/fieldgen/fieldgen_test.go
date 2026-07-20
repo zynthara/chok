@@ -2,6 +2,7 @@ package fieldgen
 
 import (
 	"bytes"
+	"database/sql/driver"
 	"os"
 	"path/filepath"
 	"strings"
@@ -3330,5 +3331,192 @@ type Post struct {
 `)
 	if _, err := Scan(fatal); err == nil || !strings.Contains(err.Error(), "Post.Tags") {
 		t.Fatalf("an empty TYPE cannot rescue a fatal shape, got %v", err)
+	}
+}
+
+// round-10 runtime-latch types: each pins one verified GORM v1.31.2
+// behavior the round-10 scan changes mirror.
+type R10Inner[U any] struct{ Data U }
+
+type R10Outer[T any] struct{ R10Inner[[]T] }
+
+type r10CompositeHost struct {
+	R10Outer[string]
+	Name string
+}
+
+// R10VW is a Valuer that CONTAINS a chok base: as an anonymous embed
+// it classifies as a column, so the base inside never expands.
+type R10VW struct {
+	db.Model
+	S string
+}
+
+// Value implements driver.Valuer.
+func (v R10VW) Value() (driver.Value, error) { return v.S, nil }
+
+type r10ValuerWrapHost struct {
+	R10VW
+	Name string
+}
+
+type R10W struct{ db.Model }
+
+type r10IgnoredWrapHost struct {
+	R10W `gorm:"-"`
+	Name string
+}
+
+// TestScan_Round10CompositeGenericArgs is review round-10 finding 1:
+// bindings are CLOSURES — a composite argument (`Inner[[]T]`) keeps the
+// outer environment, so T=string resolves inside it. Outer[string]
+// promotes Data []string (fatal, latched); pointer arguments stay legal
+// columns.
+func TestScan_Round10CompositeGenericArgs(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&r10CompositeHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("latch: the composite argument must resolve to []string and abort, got %v", err)
+	}
+
+	for label, src := range map[string]string{
+		"slice-arg": "type Inner[U any] struct{ Data U }\n\ntype Outer[T any] struct{ Inner[[]T] }\n\ntype Post struct {\n\tdb.Model\n\tOuter[string]\n\tName string `store:\"query\"`\n}",
+		"map-arg":   "type Inner[U any] struct{ Data U }\n\ntype Outer[T any] struct{ Inner[map[string]T] }\n\ntype Post struct {\n\tdb.Model\n\tOuter[string]\n\tName string `store:\"query\"`\n}",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", "package m\n\nimport \"github.com/zynthara/chok/v2/db\"\n\n"+src+"\n")
+		if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "Inner.Data") {
+			t.Errorf("%s: the composite argument must keep the outer environment, got %v", label, err)
+		}
+	}
+
+	positive := t.TempDir()
+	writeGo(t, positive, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Inner[U any] struct{ Data U }
+
+type Outer[T any] struct{ Inner[*T] }
+
+type Post struct {
+	db.Model
+	Outer[string]
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(positive); err != nil {
+		t.Fatalf("Data *string is a plain scalar column (latched) — the model is legal, got %v", err)
+	}
+}
+
+// TestScan_Round10NonExpandingBaseWrappers is review round-10 finding
+// 2: a chok base only reaches the model when its wrapper actually
+// EXPANDS. A Valuer wrapper is a COLUMN (latched: vw column, no rid), a
+// gorm:"-"/fully-closed wrapper is inert (latched: no rid), and an
+// unexported wrapper is skipped — in all of them Go still satisfies
+// db.Modeler while store.New has no RID, so the scan fails loud
+// instead of minting the base trio.
+func TestScan_Round10NonExpandingBaseWrappers(t *testing.T) {
+	if s, err := schema.Parse(&r10ValuerWrapHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("rid") != nil {
+		t.Fatalf("latch: a Valuer wrapper is a column — the base inside never expands, got err=%v", err)
+	}
+	if s, err := schema.Parse(&r10IgnoredWrapHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("rid") != nil {
+		t.Fatalf("latch: an ignored wrapper never expands, got err=%v", err)
+	}
+
+	for label, src := range map[string]string{
+		"valuer":     "import (\n\t\"database/sql/driver\"\n\n\t\"github.com/zynthara/chok/v2/db\"\n)\n\ntype VW struct {\n\tdb.Model\n\tS string\n}\n\nfunc (v VW) Value() (driver.Value, error) { return v.S, nil }\n\ntype Post struct {\n\tVW\n\tName string `store:\"query\"`\n}",
+		"ignored":    "import \"github.com/zynthara/chok/v2/db\"\n\ntype W struct{ db.Model }\n\ntype Post struct {\n\tW `gorm:\"-\"`\n\tName string `store:\"query\"`\n}",
+		"closed":     "import \"github.com/zynthara/chok/v2/db\"\n\ntype W struct{ db.Model }\n\ntype Post struct {\n\tW `gorm:\"->:false;<-:false\"`\n\tName string `store:\"query\"`\n}",
+		"unexported": "import \"github.com/zynthara/chok/v2/db\"\n\ntype hidden struct{ db.Model }\n\ntype Post struct {\n\thidden\n\tName string `store:\"query\"`\n}",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", "package m\n\n"+src+"\n")
+		if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "never reaches this model's schema") {
+			t.Errorf("%s: a swallowed base must fail loud instead of minting the trio, got %v", label, err)
+		}
+	}
+
+	rescued := t.TempDir()
+	writeGo(t, rescued, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type VW struct {
+	db.Model
+	S string
+}
+
+func (v VW) Value() (driver.Value, error) { return v.S, nil }
+
+type Post struct {
+	db.Model
+	VW
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(rescued); err != nil {
+		t.Fatalf("a direct ENABLED base makes the model work regardless of the column wrapper, got %v", err)
+	}
+}
+
+// TestScan_Round10UndecidableBaseWrapper is review round-10 finding 3:
+// when a wrapper's classification is UNKNOWABLE (an invisible
+// cross-package member could make it a Valuer column or an expanding
+// embed) and it carries a chok base, the base trio's existence is
+// undecidable — an opaque warning cannot cover that, so the scan fails
+// loud even when the embed line itself carries no store tag.
+func TestScan_Round10UndecidableBaseWrapper(t *testing.T) {
+	unsure := t.TempDir()
+	writeGo(t, unsure, "m.go", `package m
+
+import (
+	"example.com/external"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Wrapper struct {
+	db.Model
+	external.Thing
+}
+
+type Post struct {
+	Wrapper
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(unsure); err == nil || !strings.Contains(err.Error(), "undecidable") {
+		t.Fatalf("an unclassifiable wrapper carrying a base must fail loud, got %v", err)
+	}
+
+	rescued := t.TempDir()
+	writeGo(t, rescued, "m.go", `package m
+
+import (
+	"example.com/external"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Wrapper struct {
+	db.Model
+	external.Thing
+}
+
+type Post struct {
+	db.Model
+	Wrapper
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(rescued); err != nil {
+		t.Fatalf("a direct base settles the trio's existence — only the opaque warning remains, got %v", err)
 	}
 }
