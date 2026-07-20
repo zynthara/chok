@@ -258,12 +258,19 @@ err = posts.Update(ctx, store.RID(rid), store.Fields(p, PostFields.Title))
   字段都是列性证明。**struct 形状的关系**（含 `[]Child` 这类 struct 元素
   容器）上的 `store` tag **跳过并 warn**——运行时 DBName 为空，两侧一致；
   而 GORM **根本建不出 schema 的形状**——标量元素容器（`[]string`、
-  `[]Defined`）、map / chan / func / interface、uintptr / complex、
-  `GormDataType()` 返回空串——会在运行时 **abort 整个模型**（unsupported
-  data type，对照钉死版本 GORM 实测），生成器在运行时模型上对它们**直接
-  报错**，具名/匿名、带不带 tag 一致；只有 `gorm:"-"` 族或全关权限
-  （`gorm:"->:false;<-:false"`；注意 `->:false` 单独出现即全关）能让字段
-  惰性存在。无法静态判定列性时（陌生跨包类型、方法集含扫不到的嵌入）同样
+  `[]Defined`）、**任意定长数组**（relation switch 只收 Struct/Slice
+  kind，`[2]Child` 一样炸）、map / chan / func / interface、uintptr /
+  complex、`GormDataType()` 返回空串——会在运行时 **abort 整个模型**
+  （unsupported data type，对照钉死版本 GORM 实测），生成器在运行时模型上
+  对它们**直接报错**，具名/匿名、带不带 tag 一致；致命性还**沿嵌入图传播**
+  ：经本地 struct 链间接内嵌 chok 基座同样算模型，展开嵌入所提升的字段会
+  重新进入外层 relation gate，嵌入体内的致命形状照样炸外层模型。只有
+  `gorm:"-"` 族或全关权限（`gorm:"->:false;<-:false"`；注意 `->:false`
+  单独出现即全关）能让字段惰性存在——注意 `gorm:"type:..."` 在
+  GormDataType 覆盖**之后**执行，能救回被空返回值抹掉的 DataType（具名与
+  匿名标量都适用），而 serializer 在覆盖**之前**、救不回；基座嵌入自己被
+  `gorm:"-"` 或全关权限禁用时整个模型报错（运行时没有 rid，store.New
+  必失败）。无法静态判定列性时（陌生跨包类型、方法集含扫不到的嵌入）同样
   **报错拒猜**：用 type / serializer tag 自证，或去掉 tag。构建约束按生成
   时平台生效（`//go:build`、平台后缀、`_` 前缀文件遵循 go/build 规则）。
 - ⚠️ **匿名字段另有一套嵌入规则**（与 GORM 一致，实测钉死）：匿名嵌入只有

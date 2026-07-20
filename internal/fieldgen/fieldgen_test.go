@@ -7,9 +7,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
+
+	"github.com/zynthara/chok/v2/db"
 )
 
 // writeGo drops one source file into dir for tempdir-based scan cases.
@@ -2489,5 +2492,461 @@ type Post struct {
 `)
 	if _, err := Scan(readable); err == nil || !strings.Contains(err.Error(), "Post.Names") {
 		t.Fatalf("`<-:false` alone keeps the field READABLE — the fatal shape stays fatal, got %v", err)
+	}
+}
+
+// round-8 runtime-latch types: each pins one verified GORM v1.31.2
+// behavior the round-8 scan changes mirror.
+type R8Meta struct{ Tags []string }
+
+type r8PromotedHost struct {
+	R8Meta
+	Name string
+}
+
+type R8MetaAnon struct{ Round6Names }
+
+type r8NestedAnonHost struct {
+	R8MetaAnon
+	Name string
+}
+
+type R8Child struct{ ID uint }
+
+type r8ArrayHost struct{ Children [2]R8Child }
+
+// R8SerCode pairs a serializer tag with an empty GormDataType: the
+// overwrite erases the serializer's DataType, so the field is fatal.
+type R8SerCode string
+
+// GormDataType implements the GORM data-type hook, destructively.
+func (R8SerCode) GormDataType() string { return "" }
+
+type r8SerHost struct {
+	Code R8SerCode `gorm:"serializer:json"`
+}
+
+// r8TypeHost proves the opposite: gorm:"type:..." runs AFTER the
+// GormDataType overwrite and refills the DataType — a legal column.
+type r8TypeHost struct {
+	Code R8SerCode `gorm:"type:text"`
+}
+
+type r8DurSliceHost struct{ Ds []time.Duration }
+
+type r8DisabledBaseHost struct {
+	db.Model `gorm:"->:false"`
+	Name     string
+}
+
+// TestScan_Round8PromotedFatalPropagates is review round-8 finding 1:
+// model-fatality travels the embed graph. A chok base carried through a
+// local struct embed still makes the embedder a runtime model, and an
+// expanding embed's promoted fields re-enter the OUTER relation gate —
+// so a fatal shape inside an embedded struct aborts the embedding
+// model, named (promoted) and anonymous (sub-parse) alike. Fully
+// closed inner fields stay inert.
+func TestScan_Round8PromotedFatalPropagates(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&r8PromotedHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("latch: promoted named containers must abort the OUTER parse, got %v", err)
+	}
+	if _, err := schema.Parse(&r8NestedAnonHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil {
+		t.Fatal("latch: a nested anonymous container must abort through the sub-parse")
+	}
+
+	for wantErr, src := range map[string]string{
+		"Post.Tags":   "type Base struct{ db.Model }\n\ntype Post struct {\n\tBase\n\tTags []string\n\tName string `store:\"query\"`\n}",
+		"Meta.Tags":   "type Meta struct{ Tags []string }\n\ntype Post struct {\n\tdb.Model\n\tMeta\n\tName string `store:\"query\"`\n}",
+		"Inner.Names": "type Names []string\n\ntype Inner struct{ Names }\n\ntype Post struct {\n\tdb.Model\n\tInner\n\tName string `store:\"query\"`\n}",
+		"B.Tags":      "type B struct{ Tags []string }\n\ntype A struct{ B }\n\ntype Post struct {\n\tdb.Model\n\tA\n\tName string `store:\"query\"`\n}",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", "package m\n\nimport \"github.com/zynthara/chok/v2/db\"\n\n"+src+"\n")
+		if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Errorf("%s: the fatal shape rides the embed graph and must fail the scan, got %v", wantErr, err)
+		}
+	}
+
+	closed := t.TempDir()
+	writeGo(t, closed, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Meta struct {
+	Tags []string `+"`gorm:\"->:false;<-:false\"`"+`
+}
+
+type Post struct {
+	db.Model
+	Meta
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(closed); err != nil {
+		t.Fatalf("a fully closed inner field is inert — the model is legal, got %v", err)
+	}
+}
+
+// TestScan_Round8ArrayKinds is review round-8 finding 2: the relation
+// switch accepts only the Struct and Slice kinds — a FIXED ARRAY aborts
+// whatever its element resolves to (latched), while a slice keeps
+// classifying by its terminal.
+func TestScan_Round8ArrayKinds(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&r8ArrayHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("latch: a fixed array of structs must abort the model, got %v", err)
+	}
+
+	tagged := t.TempDir()
+	writeGo(t, tagged, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Child struct{ ID uint }
+
+type Post struct {
+	db.Model
+	Children [2]Child `+"`json:\"children\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(tagged); err == nil || !strings.Contains(err.Error(), "Post.Children") {
+		t.Fatalf("a tagged struct array must fail loud, got %v", err)
+	}
+
+	untagged := t.TempDir()
+	writeGo(t, untagged, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Child struct{ ID uint }
+
+type Post struct {
+	db.Model
+	Children [2]Child
+	Name     string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(untagged); err == nil || !strings.Contains(err.Error(), "Post.Children") {
+		t.Fatalf("an untagged struct array still aborts the runtime model, got %v", err)
+	}
+
+	sliceOf := t.TempDir()
+	writeGo(t, sliceOf, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Child struct {
+	ID     uint
+	PostID uint
+}
+
+type Post struct {
+	db.Model
+	Grid [][2]Child `+"`json:\"grid\" store:\"query\"`"+`
+	Raw  [8]byte    `+"`json:\"raw\" store:\"query\"`"+`
+	Name string     `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(sliceOf)
+	if err != nil {
+		t.Fatalf("a SLICE of struct arrays parses as a relation (outermost kind Slice) — legal, got %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	if got["Grid"] || !got["Raw"] || !got["Name"] {
+		t.Errorf("Grid is a relation (skipped), Raw stays a bytes column, got %v", got)
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		warned = warned || strings.Contains(w, "Post.Grid")
+	}
+	if !warned {
+		t.Fatalf("the dead tag on the slice relation must warn, got %q", pkg.Warnings)
+	}
+
+	opaque := t.TempDir()
+	writeGo(t, opaque, "m.go", `package m
+
+import (
+	"example.com/other"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Post struct {
+	db.Model
+	Arr [2]other.Thing `+"`json:\"arr\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(opaque); err == nil || !strings.Contains(err.Error(), "cannot statically decide") {
+		t.Fatalf("an opaque array element could be a cross-package byte alias — must stay unknowable, got %v", err)
+	}
+}
+
+// TestScan_Round8DataTypePipeline is review round-8 finding 3: the
+// DataType pipeline order is serializer → kind → GormDataType
+// (unconditional overwrite) → snapshot → TYPE. So an exact GormDataType
+// beats serializer proofs AND the Valuer-derived kind, while
+// gorm:"type:..." — running last — rescues everything (latched both
+// ways).
+func TestScan_Round8DataTypePipeline(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&r8SerHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("latch: the GormDataType overwrite must erase the serializer's DataType, got %v", err)
+	}
+	if s, err := schema.Parse(&r8TypeHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("code") == nil {
+		t.Fatalf("latch: gorm:\"type:...\" runs last and refills the DataType, got %v", err)
+	}
+
+	serializer := t.TempDir()
+	writeGo(t, serializer, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Code string
+
+func (Code) GormDataType() string { return "" }
+
+type Post struct {
+	db.Model
+	Code Code `+"`json:\"code\" store:\"query\" gorm:\"serializer:json\"`"+`
+}
+`)
+	if _, err := Scan(serializer); err == nil || !strings.Contains(err.Error(), "Post.Code") || !strings.Contains(err.Error(), "empty string") {
+		t.Fatalf("the serializer proof does not survive the GormDataType overwrite, got %v", err)
+	}
+
+	valuer := t.TempDir()
+	writeGo(t, valuer, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type V struct{ S string }
+
+func (v V) Value() (driver.Value, error) { return v.S, nil }
+
+func (V) GormDataType() string { return "" }
+
+type M int64
+
+func (m M) Value() (driver.Value, error) { return int64(m), nil }
+
+func (M) GormDataType() string { return "" }
+
+type Post struct {
+	db.Model
+	V    V      `+"`json:\"v\" store:\"query\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+
+type Broken struct {
+	db.Model
+	M M `+"`json:\"m\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(valuer); err == nil || !strings.Contains(err.Error(), "Broken.M") {
+		t.Fatalf("a Valuer with a scalar shape and an empty GormDataType is fatal, got %v", err)
+	}
+
+	valuerStruct := t.TempDir()
+	writeGo(t, valuerStruct, "m.go", `package m
+
+import (
+	"database/sql/driver"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type V struct{ S string }
+
+func (v V) Value() (driver.Value, error) { return v.S, nil }
+
+func (V) GormDataType() string { return "" }
+
+type Post struct {
+	db.Model
+	V    V      `+"`json:\"v\" store:\"query\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(valuerStruct)
+	if err != nil {
+		t.Fatalf("a Valuer STRUCT with an empty GormDataType downgrades to a relation (DataType-less struct), got %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	if got["V"] || !got["Name"] {
+		t.Errorf("V is a relation at runtime, not a column, got %v", got)
+	}
+
+	rescued := t.TempDir()
+	writeGo(t, rescued, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Code string
+
+func (Code) GormDataType() string { return "" }
+
+type CodeI int
+
+func (CodeI) GormDataType() string { return "" }
+
+type Dyn string
+
+func (d Dyn) GormDataType() string {
+	if d == "" {
+		return ""
+	}
+	return "text"
+}
+
+type Post struct {
+	db.Model
+	Code  Code `+"`json:\"code\" store:\"query\" gorm:\"type:text\"`"+`
+	CodeI `+"`json:\"code_i\" store:\"query\" gorm:\"type:bigint\"`"+`
+	Dyn   Dyn  `+"`json:\"dyn\" store:\"query\" gorm:\"type:text\"`"+`
+}
+`)
+	pkg, err = Scan(rescued)
+	if err != nil {
+		t.Fatalf("gorm:\"type:...\" runs after the overwrite and rescues named AND anonymous scalars (latched), got %v", err)
+	}
+	got = map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	for _, want := range []string{"Code", "CodeI", "Dyn"} {
+		if !got[want] {
+			t.Errorf("%s must generate — TYPE refills the DataType deterministically, got %v", want, got)
+		}
+	}
+}
+
+// TestScan_Round8OpaqueFailsLoud is review round-8 finding 4: an
+// unresolvable underlying kind must not be guessed. A tagged
+// gorm-embedded cross-package type could promote, keep its column or
+// abort; a tagged container with an opaque terminal could be a relation
+// or an abort ([]time.Duration is one, latched) — both fail loud now.
+func TestScan_Round8OpaqueFailsLoud(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&r8DurSliceHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "time.Duration") {
+		t.Fatalf("latch: a scalar-kind cross-package terminal aborts the model, got %v", err)
+	}
+
+	for label, src := range map[string]string{
+		"embedded-datatypes": "import (\n\t\"github.com/zynthara/chok/v2/db\"\n\t\"gorm.io/datatypes\"\n)\n\ntype Post struct {\n\tdb.Model\n\tJ datatypes.JSON `store:\"query\" gorm:\"embedded\"`\n}",
+		"embedded-duration":  "import (\n\t\"time\"\n\n\t\"github.com/zynthara/chok/v2/db\"\n)\n\ntype Post struct {\n\tdb.Model\n\tD time.Duration `store:\"query\" gorm:\"embedded\"`\n}",
+		"slice-duration":     "import (\n\t\"time\"\n\n\t\"github.com/zynthara/chok/v2/db\"\n)\n\ntype Post struct {\n\tdb.Model\n\tDs []time.Duration `store:\"query\"`\n}",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", "package m\n\n"+src+"\n")
+		if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "cannot statically decide") {
+			t.Errorf("%s: an opaque kind must fail loud under a store tag, got %v", label, err)
+		}
+	}
+
+	untagged := t.TempDir()
+	writeGo(t, untagged, "m.go", `package m
+
+import (
+	"time"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Post struct {
+	db.Model
+	Ds   []time.Duration
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(untagged); err != nil {
+		t.Fatalf("an UNTAGGED opaque terminal stays silent — it could be a legal cross-package struct relation (documented residual), got %v", err)
+	}
+}
+
+// TestScan_Round8DisabledBase is review round-8 finding 5: a chok base
+// embed whose own gorm tag disables the expansion (`-` family or fully
+// closed permissions) leaves the model without rid/id at runtime
+// (latched) — store.New fails, so generating the base trio would mint
+// dead references. `-:migration` keeps the field usable and stays a
+// working base.
+func TestScan_Round8DisabledBase(t *testing.T) {
+	if s, err := schema.Parse(&r8DisabledBaseHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("rid") != nil || s.LookUpField("id") != nil {
+		t.Fatalf("latch: a perms-closed base embed must not expand (no rid/id), got err=%v", err)
+	}
+
+	for label, tag := range map[string]string{
+		"closed":  "`gorm:\"->:false\"`",
+		"ignored": "`gorm:\"-\"`",
+	} {
+		dir := t.TempDir()
+		writeGo(t, dir, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Post struct {
+	db.Model `+tag+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+		if _, err := Scan(dir); err == nil || !strings.Contains(err.Error(), "disabled by its gorm tag") {
+			t.Errorf("%s: a disabled base on a generated model must fail loud, got %v", label, err)
+		}
+	}
+
+	migration := t.TempDir()
+	writeGo(t, migration, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Post struct {
+	db.Model `+"`gorm:\"-:migration\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(migration)
+	if err != nil {
+		t.Fatalf("-:migration keeps the base usable, got %v", err)
+	}
+	var id bool
+	for _, f := range pkg.Models[0].Fields {
+		id = id || f.GoName == "ID"
+	}
+	if !id {
+		t.Fatal("the base trio still generates for a working base")
+	}
+
+	tagless := t.TempDir()
+	writeGo(t, tagless, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Ghost struct {
+	db.Model `+"`gorm:\"->:false\"`"+`
+	Name     string
+}
+`)
+	pkg, err = Scan(tagless)
+	if err != nil || len(pkg.Models) != 0 {
+		t.Fatalf("a tagless struct generates nothing — no dead refs to guard, got err=%v models=%d", err, len(pkg.Models))
 	}
 }
