@@ -10,6 +10,39 @@
 
 ---
 
+## Unreleased — cast/patch 写路径：`Patch(req)`（arch-backlog #5）
+
+> store 架构复审的第二块 DX 架构债：写路径缺 Ecto changeset 的 **cast**
+> 一环——`Set(map)`（终点）与 `Fields(obj)`（终点，且刻意拒收 DTO）都有，
+> 唯独没有"外部部分输入 → 合法变更集"的起点，于是每个 update handler 把
+> `if req.X != nil { obj.X = *req.X; cols = append(cols, ...) }` 重抄一遍。
+> `Patch(req)` 补上这个起点：从请求 DTO 的非 nil 指针字段推导变更集，作第
+> 三个 `Changes` 构造器与任意 Locator/选项组合。`Fields` 拒收 DTO 的禁令
+> （值与锁元数据须同源于 GORM schema）正是给 Patch 留的正门——Patch 是
+> DTO 正门，`Fields` 保持模型专用。
+>
+> **参与规则镜像 encoding/json**：仅指针字段参与（nil=缺席、零值照写），
+> 公开名取 JSON tag（无 tag 回退 Go 字段名，不匹配就响亮 500），`store:"-"`
+> 豁免。两个失败模式的取舍是设计核心：忘写 `*`="该字段不更新"（开发期
+> 可见）优于"非指针恒写入"的 zero-clobber（没发的字段被静默清零、毁数据）；
+> DTO 完整形状每次 build 校验（nil 字段的名字/托管/类型错也在首个请求即
+> 500）优于"只校验非 nil 字段"埋下的生产地雷；类型规则=严格 assignable
+> （可空列 `*E` 收 `E`），不做隐式转换。`.Onto(&obj)` 复用 `Fields` 的隐式
+> 乐观锁与成功回写；全 nil = `ErrEmptyPatch`（400），无可 patch 字段 =
+> `ErrNoPatchableFields`（500），`IsEmpty()` 给 no-op PATCH 免触库早退。
+>
+> **刻意否决**：`Optional[T]`（区分 JSON null 与未发送，需 binder/validator/
+> openapi 全链改造，独立立项）、handler 层泛型 `HandleUpdate`（update
+> handler 形状不统一，HandleList 的前提不成立）、map 输入（那是 `Set` 的
+> 地盘，DTO 类型即编译期 cast 白名单）、create-cast 与 BatchPatch（无重复
+> 样板/无需求先例）、值校验进 store（validate 半件已在 handler
+> `binding`+`Validated`+before-update hook 成体系，constraints 半件在
+> `MapError`+`WithConstraintFields`）。写内核／接口／白名单机制**零改动**，
+> 新增面全 additive（`Patch`/`PatchChanges` 三方法 + 两个哨兵 + `MapError`
+> 一行），apidiff 仅见新增不触破坏。
+
+---
+
 ## Unreleased — 字段引用生成：`chok gen fields`（arch-backlog #4）
 
 > store 架构复审把「字符串字段引用」定性为全层系统性弱点：白名单挡得住

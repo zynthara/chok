@@ -27,6 +27,8 @@ func MapError(err error) *apierr.Error {
 		return apierr.ErrConflict.WithMessage("resource version conflict")
 	case errors.Is(err, ErrDegenerateConditions):
 		return apierr.ErrInvalidArgument.WithMessage("filter matches nothing; at least one filter value is required")
+	case errors.Is(err, ErrEmptyPatch):
+		return apierr.ErrInvalidArgument.WithMessage("patch carried no updatable fields")
 	case errors.Is(err, ErrDuplicate):
 		// Surface only the constraint name, not the full driver error:
 		// the raw message typically contains the offending value

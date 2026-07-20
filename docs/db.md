@@ -32,6 +32,7 @@
 | 按 ID 取一行 / 列表过滤分页 / 只要数量 | [§5 读取数据](#5-读取数据) |
 | 仪表盘统计：求和 / 均值 / 极值 / 分组计数 | [§5.7 聚合与分组统计](#57-聚合与分组统计sum--avg--min--max--groupby) |
 | 增、改（乐观锁）、删、恢复、批量、Upsert | [§6 写入数据](#6-写入数据) |
+| 从请求 DTO 部分更新（PATCH，去 `if != nil` 舞蹈） | [§6.2 `Update`](#62-updatefields--set--patch-怎么选) |
 | 跨 Store 同一事务 / 订阅数据变更 | [§7 事务与事件](#7-事务与事件) |
 | 建表、版本化迁移、修 dirty、追溯 repair | [§8 迁移](#8-迁移) |
 | 接只读副本 / 分析库 | [§9 多实例与只读](#9-多实例与只读) |
@@ -759,7 +760,7 @@ err := posts.BatchCreate(ctx, []*Post{p1, p2, p3})   // 整批一个事务，中
 > 包默认 `["admin"]` 解析，**构造期定格、读写两侧共用同一份**：跳过属主过滤
 > 的角色和可显式指定 `OwnerID` 的角色永远一致（见 §11.1）。
 
-### 6.2 `Update`：`Fields` 与 `Set` 怎么选
+### 6.2 `Update`：`Fields` / `Set` / `Patch` 怎么选
 
 先记住一条不变量：**`version` 是行修订号，每次成功的普通 `Update`（以及软删
 / 恢复）都在同一条 SQL 中把它 +1**，与你是否要乐观锁无关。乐观锁只是"更新
@@ -795,6 +796,46 @@ err := posts.Update(ctx, store.RID(rid), store.Fields(p, PostFields.Status).NoLo
 - 需要知道命中几行（尤其 `Where` 批量更新）时挂 `store.WithRowsAffected(&n)`。
 - 版本冲突时**不能**重读重试（必须赢）的序列 → 事务内悲观锁
   `GetForUpdate`，见 [§7.1](#71-一个事务串起多次写)。
+
+**部分更新走 `Patch(req)`**——从请求 DTO 的非 nil 指针字段推导变更集，
+消灭 handler 里每字段一遍的 `if req.X != nil` 舞蹈（Ecto changeset 的 cast
+对应物；`Fields` 拒收 DTO 正是给 Patch 留的正门）。它是第三个 `Changes`
+构造器，与任意 Locator、任意选项自由组合，写内核零改动：
+
+```go
+// req 是 *updatePostRequest{ Title, Content, Status *string }
+p, _ := posts.Get(ctx, store.RID(rid))
+pc := store.Patch(req).Onto(p)   // 非 nil 指针 → 变更集；Onto 带上 p.Version 做乐观锁
+if pc.IsEmpty() {                 // 客户端没发任何可更新字段 → 无事可做
+    return p, nil
+}
+err := posts.Update(ctx, store.RID(rid), pc)
+// 成功后 p 已含新值与推进后的 Version；给模型加一个可更新字段，handler 零改动
+
+// 纯写流（免读回程）：裸 Patch + 显式版本
+err = posts.Update(ctx, store.RID(rid), store.Patch(req), store.WithVersion(req.Version))
+```
+
+参与规则（镜像 encoding/json 的字段可见性）：
+
+- **只有指针字段参与**：nil = 客户端未发送（跳过），非 nil = 写入（**零值
+  照写**，`*""` 是"清空该列"）。非指针字段（uri 参数、`Version int` 等）
+  一律不参与——它们表达不了"缺席"；忘写 `*` 只是"该字段永不更新"（开发期
+  即可见），而"非指针恒写入"会把没发的字段静默清零（毁数据）。
+- 公开名取 JSON tag 首段；`json:"-"` 排除；**无 JSON tag 用 Go 字段名**
+  参与（与白名单 key 不匹配就响亮 `ErrUnknownUpdateField` → 500，提示补
+  JSON tag）。DTO 字段可用 `store:"-"` 显式退出（放控制类指针字段，如
+  `Force *bool`）。
+- 每次调用校验 **DTO 的完整形状**（含本次为 nil 的字段）：字段名不在
+  update 白名单、解析到托管列、类型不匹配都在**首个请求**即 500，而不是
+  等客户端第一次发那个字段才炸。类型规则=严格 assignable（可空列 `*E`
+  收 `E`），不做隐式转换（`int`→`string` 这类是陷阱不是 patch）。
+- `.Onto(&obj)` 把值应用到已加载模型并复用 `Fields` 的隐式乐观锁与版本
+  回写；失败后 obj 持有已应用值但 Version 未推进，**丢弃或重读**。裸
+  `Patch`（无 Onto）无隐式锁，配 `WithVersion`，语义同 `Set`。
+- 全 nil = `store.ErrEmptyPatch`（映射 400）；用 `pc.IsEmpty()` 让 no-op
+  PATCH 直接返回当前对象（不触库、不需 schema）。类型无任何可 patch 指针
+  字段 = `ErrNoPatchableFields`（500，类型用错了地方）。
 
 ### 6.3 每行不同值：`BatchUpdate`
 
@@ -1278,7 +1319,8 @@ gdb := h.Unsafe(ctx)           // 句柄级：无 scope，自己负责
 bug）；`ListFromQuery` 链（字段名来自 URL）内部预映射 400 的 apierr，对**那条
 链**的返回值不要再 `errors.Is` 它。值错误 `where.ErrInvalidParam` 则在所有入口
 都预映射 400。② 并非每个返回
-错误都有稳定哨兵（如 `Fields` 传 DTO、对硬删模型 `Restore`，都是普通包装错误）。
+错误都有稳定哨兵（如 `Fields`/`Patch` 传形状不符的 DTO、对硬删模型
+`Restore`，都是普通包装错误）。
 
 ```go
 chok.New("app",
@@ -1295,6 +1337,8 @@ chok.New("app",
 | `store.ErrDuplicateBatchConflict` | BatchUpsert 批内冲突键重复 | 500（编程错误） |
 | `store.ErrMissingConditions` | 无条件写操作被拦 | 500（编程错误） |
 | `store.ErrDegenerateConditions` | 退化过滤（`WithFilter(x,nil)` / 空 `WithFilterIn`）用作 `Where` Locator | 400 |
+| `store.ErrEmptyPatch` | `Patch` 的 DTO 本次全字段为 nil（客户端没发可更新字段） | 400 |
+| `store.ErrNoPatchableFields` | `Patch` 的类型无任何可 patch 指针字段（类型用错了地方） | 500（编程错误） |
 | `store.ErrUpsertScoped` | 对 scoped / Owned 模型调 Upsert | 500（编程错误） |
 | `store.ErrProtectedUpdateField` | 运行期试图更新框架托管列（显式列表 / alias 重开是**构造期 panic**，不走这里） | 500（编程错误） |
 | `store.ErrLockRequiresTx` | `GetForUpdate` 不在本句柄事务内 | 500（编程错误） |
@@ -1381,6 +1425,7 @@ Store[T]（写）
 定位 / 变更 / 选项
   store.RID(s)  store.ID(n)  store.Where(opts...)
   store.Fields(obj, cols...)[.NoLock()]   store.Set(map)   store.WithVersion(v)
+  store.Patch(req)[.Onto(&obj)][.NoLock()]   // DTO 部分更新；pc.IsEmpty() 判空
   store.WithRowsAffected(&n)   store.WithPreload(rel)
   store.WithTrashed()   store.WithOnlyTrashed()
 

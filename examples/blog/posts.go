@@ -63,27 +63,16 @@ func (h *postHandlers) update(ctx context.Context, req *updatePostRequest) (*Pos
 	if err != nil {
 		return nil, err
 	}
-	// Field names are the generated references (chok_fields_gen.go), so a
-	// typo'd column is a compile error rather than a runtime 500.
-	var cols []string
-	if req.Title != nil {
-		p.Title = *req.Title
-		cols = append(cols, PostFields.Title)
-	}
-	if req.Content != nil {
-		p.Content = *req.Content
-		cols = append(cols, PostFields.Content)
-	}
-	if req.Status != nil {
-		p.Status = *req.Status
-		cols = append(cols, PostFields.Status)
-	}
-	if len(cols) == 0 {
+	// store.Patch derives the change set from the request's non-nil pointer
+	// fields — no per-field `if req.X != nil` dance, and adding an updatable
+	// field needs no handler change. Onto(p) applies the values to p and
+	// carries p.Version as the optimistic lock, so a concurrent editor gets
+	// 409 instead of a silent overwrite.
+	pc := store.Patch(req).Onto(p)
+	if pc.IsEmpty() { // client sent no updatable field → nothing to do
 		return p, nil
 	}
-	// Fields carries p.Version → optimistic lock: a concurrent editor
-	// gets 409 instead of silently overwriting.
-	if err := h.posts.Update(ctx, store.RID(p.RID), store.Fields(p, cols...)); err != nil {
+	if err := h.posts.Update(ctx, store.RID(p.RID), pc); err != nil {
 		return nil, err
 	}
 	return p, nil

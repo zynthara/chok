@@ -56,6 +56,17 @@ var (
 	// This is a programming error (Store misconfigured), not client input.
 	ErrUpdateFieldsNotConfigured = errors.New("store: update fields not configured")
 
+	// ErrEmptyPatch indicates a Patch's request DTO had a valid patchable
+	// shape but every patch field was nil on this call — the client sent
+	// no updatable field. This is client input, mapped to 400 by MapError.
+	ErrEmptyPatch = errors.New("store: patch carried no fields")
+
+	// ErrNoPatchableFields indicates a Patch request type declares no
+	// patchable field at all (no eligible pointer field). This is a
+	// programming error (a type with no optional fields was passed to
+	// Patch), not client input, so it is NOT mapped by MapError → 500.
+	ErrNoPatchableFields = errors.New("store: patch type declares no patchable fields")
+
 	// ErrUpsertScoped indicates Upsert or BatchUpsert was called on a Store that has
 	// scopes registered. SQL INSERT ... ON CONFLICT DO UPDATE does not
 	// honour WHERE-based scope conditions on the conflict update path,
