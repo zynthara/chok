@@ -2950,3 +2950,385 @@ type Ghost struct {
 		t.Fatalf("a tagless struct generates nothing — no dead refs to guard, got err=%v models=%d", err, len(pkg.Models))
 	}
 }
+
+// round-9 runtime-latch types: each pins one verified GORM v1.31.2
+// behavior the round-9 scan changes mirror.
+type R9Box[T any] struct{ Data []T }
+
+type r9GenericHost struct {
+	R9Box[string]
+	Name string
+}
+
+type r9EmbBaseHost struct {
+	db.Model `gorm:"embedded;->:false"`
+	Name     string
+}
+
+type R9DisabledBase struct {
+	db.Model `gorm:"-"`
+}
+
+type r9WrapHost struct {
+	R9DisabledBase
+	Name string
+}
+
+type r9EmptyTypeHost struct {
+	Code string `gorm:"type:"`
+	Name string
+}
+
+// TestScan_Round9GenericEmbedPropagation is review round-9 finding 1:
+// an embedded generic INSTANTIATION promotes its fields with the
+// ARGUMENTS substituted — Box[string] carries Data []string (fatal,
+// latched) while Box[byte] carries Data []byte (a bytes column) — so
+// promotedFatal threads the instantiation environment instead of
+// walking the bare generic name.
+func TestScan_Round9GenericEmbedPropagation(t *testing.T) {
+	quiet := logger.Default
+	logger.Default = logger.Discard
+	t.Cleanup(func() { logger.Default = quiet })
+	if _, err := schema.Parse(&r9GenericHost{}, &sync.Map{}, schema.NamingStrategy{}); err == nil || !strings.Contains(err.Error(), "unsupported data type") {
+		t.Fatalf("latch: the promoted Data []string must abort the model, got %v", err)
+	}
+
+	fatal := t.TempDir()
+	writeGo(t, fatal, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Box[T any] struct{ Data []T }
+
+type Post struct {
+	db.Model
+	Box[string]
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(fatal); err == nil || !strings.Contains(err.Error(), "Box.Data") {
+		t.Fatalf("the promoted generic field must classify under the instantiation's arguments, got %v", err)
+	}
+
+	nested := t.TempDir()
+	writeGo(t, nested, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Inner[T any] struct{ Data []T }
+
+type Outer[T any] struct{ Inner[T] }
+
+type Post struct {
+	db.Model
+	Outer[string]
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(nested); err == nil || !strings.Contains(err.Error(), "Inner.Data") {
+		t.Fatalf("arguments must ride through nested generic embeds, got %v", err)
+	}
+
+	wrapper := t.TempDir()
+	writeGo(t, wrapper, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Box[T any] struct{ Data []T }
+
+type Post struct {
+	db.Model
+	W    Box[string] `+"`gorm:\"embedded\"`"+`
+	Name string      `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(wrapper); err == nil || !strings.Contains(err.Error(), "Box.Data") {
+		t.Fatalf("gorm-embedded generic wrappers promote with arguments too, got %v", err)
+	}
+
+	positive := t.TempDir()
+	writeGo(t, positive, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Box[T any] struct{ Data []T }
+
+type Post struct {
+	db.Model
+	Box[byte]
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(positive); err != nil {
+		t.Fatalf("Box[byte] promotes Data []byte — a bytes column, the model is legal, got %v", err)
+	}
+}
+
+// TestScan_Round9BaseEnablement is review round-9 finding 2: base
+// enablement follows GORM's EMBEDDED priority (the tag arm has no
+// permission gate, so `gorm:"embedded;->:false"` still expands the
+// base — latched with rid present), and a DISABLED base hidden inside
+// a local wrapper must propagate as fatal — the Go type satisfies
+// db.Modeler but the schema has no rid (latched), so store.New fails.
+func TestScan_Round9BaseEnablement(t *testing.T) {
+	if s, err := schema.Parse(&r9EmbBaseHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("rid") == nil {
+		t.Fatalf("latch: the EMBEDDED tag expands the base regardless of permissions, got err=%v", err)
+	}
+	if s, err := schema.Parse(&r9WrapHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("rid") != nil {
+		t.Fatalf("latch: a wrapper-disabled base never expands (no rid), got err=%v", err)
+	}
+
+	embedded := t.TempDir()
+	writeGo(t, embedded, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Post struct {
+	db.Model `+"`gorm:\"embedded;->:false\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	pkg, err := Scan(embedded)
+	if err != nil {
+		t.Fatalf("an EMBEDDED-tagged base expands regardless of permissions — a working base, got %v", err)
+	}
+	var id bool
+	for _, f := range pkg.Models[0].Fields {
+		id = id || f.GoName == "ID"
+	}
+	if !id {
+		t.Fatal("the base trio still generates for an EMBEDDED-tagged base")
+	}
+
+	wrapped := t.TempDir()
+	writeGo(t, wrapped, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Base struct {
+	db.Model `+"`gorm:\"-\"`"+`
+}
+
+type Post struct {
+	Base
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(wrapped); err == nil || !strings.Contains(err.Error(), "disabled by a gorm tag") {
+		t.Fatalf("a wrapper-disabled base leaves no rid at runtime and must fail loud, got %v", err)
+	}
+
+	rescued := t.TempDir()
+	writeGo(t, rescued, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Base struct {
+	db.Model `+"`gorm:\"-\"`"+`
+}
+
+type Post struct {
+	db.Model
+	Base
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+`)
+	if _, err := Scan(rescued); err != nil {
+		t.Fatalf("another ENABLED base wins — the model works, got %v", err)
+	}
+}
+
+// TestScan_Round9SerializerNotTerminal is review round-9 finding 3: on
+// a cross-package NAMED type the method set is invisible — an unseen
+// GormDataType returning the empty string would erase the serializer's
+// DataType after it runs — so serializer alone proves nothing there;
+// only the later-running non-empty gorm:"type:..." is terminal.
+// Literal shapes have no method set to hide anything in, so serializer
+// keeps proving those.
+func TestScan_Round9SerializerNotTerminal(t *testing.T) {
+	opaque := t.TempDir()
+	writeGo(t, opaque, "m.go", `package m
+
+import (
+	"example.com/external"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Post struct {
+	db.Model
+	Code external.Code `+"`json:\"code\" store:\"query\" gorm:\"serializer:json\"`"+`
+}
+`)
+	if _, err := Scan(opaque); err == nil || !strings.Contains(err.Error(), "cannot statically decide") {
+		t.Fatalf("serializer on an opaque cross-package type is not terminal — an invisible GormDataType could erase it, got %v", err)
+	}
+
+	typed := t.TempDir()
+	writeGo(t, typed, "m.go", `package m
+
+import (
+	"example.com/external"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Post struct {
+	db.Model
+	Code external.Code `+"`json:\"code\" store:\"query\" gorm:\"type:text\"`"+`
+}
+`)
+	pkg, err := Scan(typed)
+	if err != nil {
+		t.Fatalf("a non-empty gorm:\"type:...\" runs last — terminal on any type, got %v", err)
+	}
+	var code bool
+	for _, f := range pkg.Models[0].Fields {
+		code = code || f.GoName == "Code"
+	}
+	if !code {
+		t.Fatalf("Code must generate under the TYPE proof, got %+v", pkg.Models[0].Fields)
+	}
+
+	literals := t.TempDir()
+	writeGo(t, literals, "m.go", `package m
+
+import (
+	"example.com/external"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Post struct {
+	db.Model
+	Tags  []string         `+"`json:\"tags\" store:\"query\" gorm:\"serializer:json\"`"+`
+	Items []external.Thing `+"`json:\"items\" store:\"query\" gorm:\"serializer:json\"`"+`
+}
+`)
+	pkg, err = Scan(literals)
+	if err != nil {
+		t.Fatalf("literal shapes cannot hide a GormDataType — serializer stays a proof, got %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	if !got["Tags"] || !got["Items"] {
+		t.Errorf("serializer proves literal-rooted shapes, cross-package elements included, got %v", got)
+	}
+}
+
+// TestScan_Round9TypeIsTerminal is review round-9 finding 4: the
+// non-empty TYPE proof precedes method resolution, so it wins even
+// over methodUnsure — an alias to an opaque cross-package type (or a
+// struct with an unverifiable embed) with gorm:"type:..." is a column,
+// exactly like the direct spelling.
+func TestScan_Round9TypeIsTerminal(t *testing.T) {
+	alias := t.TempDir()
+	writeGo(t, alias, "m.go", `package m
+
+import (
+	"example.com/external"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Code = external.Code
+
+type Crate struct{ Code }
+
+type Post struct {
+	db.Model
+	Code  Code  `+"`json:\"code\" store:\"query\" gorm:\"type:text\"`"+`
+	Crate Crate `+"`json:\"crate\" store:\"query\" gorm:\"type:jsonb\"`"+`
+}
+`)
+	pkg, err := Scan(alias)
+	if err != nil {
+		t.Fatalf("TYPE is terminal ahead of method resolution — alias spelling included, got %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	if !got["Code"] || !got["Crate"] {
+		t.Errorf("both TYPE-proven fields must generate, got %v", got)
+	}
+
+	serializer := t.TempDir()
+	writeGo(t, serializer, "m.go", `package m
+
+import (
+	"example.com/external"
+
+	"github.com/zynthara/chok/v2/db"
+)
+
+type Code = external.Code
+
+type Post struct {
+	db.Model
+	Code Code `+"`json:\"code\" store:\"query\" gorm:\"serializer:json\"`"+`
+}
+`)
+	if _, err := Scan(serializer); err == nil || !strings.Contains(err.Error(), "cannot statically decide") {
+		t.Fatalf("the alias spelling classifies like the direct one — serializer stays non-terminal, got %v", err)
+	}
+}
+
+// TestScan_Round9EmptyTypeTag is review round-9 finding 5: GORM keys
+// the TYPE override on the KEY's presence — `gorm:"type:"` with an
+// empty value erases the final DataType, so a would-be column loses
+// its DBName (latched) and the store tag is dead; shapes that were
+// fatal stay fatal (the erased DataType re-arms the relation gate).
+func TestScan_Round9EmptyTypeTag(t *testing.T) {
+	if s, err := schema.Parse(&r9EmptyTypeHost{}, &sync.Map{}, schema.NamingStrategy{}); err != nil || s.LookUpField("code") != nil {
+		t.Fatalf("latch: an empty TYPE value erases the DataType (no DBName), got err=%v", err)
+	}
+
+	dead := t.TempDir()
+	writeGo(t, dead, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Post struct {
+	db.Model
+	Code Code   `+"`json:\"code\" store:\"query\" gorm:\"type:\"`"+`
+	Name string `+"`json:\"name\" store:\"query\"`"+`
+}
+
+type Code string
+`)
+	pkg, err := Scan(dead)
+	if err != nil {
+		t.Fatalf("an empty TYPE on a scalar is a dead field, not a fatal one, got %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Models[0].Fields {
+		got[f.GoName] = true
+	}
+	if got["Code"] || !got["Name"] {
+		t.Errorf("the erased column must not generate, got %v", got)
+	}
+	var warned bool
+	for _, w := range pkg.Warnings {
+		warned = warned || strings.Contains(w, "Post.Code") && strings.Contains(w, "empty gorm type tag")
+	}
+	if !warned {
+		t.Fatalf("the dead store tag must warn, got %q", pkg.Warnings)
+	}
+
+	fatal := t.TempDir()
+	writeGo(t, fatal, "m.go", `package m
+
+import "github.com/zynthara/chok/v2/db"
+
+type Post struct {
+	db.Model
+	Tags []string `+"`json:\"tags\" store:\"query\" gorm:\"type:\"`"+`
+}
+`)
+	if _, err := Scan(fatal); err == nil || !strings.Contains(err.Error(), "Post.Tags") {
+		t.Fatalf("an empty TYPE cannot rescue a fatal shape, got %v", err)
+	}
+}

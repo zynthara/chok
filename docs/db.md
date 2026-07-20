@@ -266,11 +266,20 @@ err = posts.Update(ctx, store.RID(rid), store.Fields(p, PostFields.Title))
   ：经本地 struct 链间接内嵌 chok 基座同样算模型，展开嵌入所提升的字段会
   重新进入外层 relation gate，嵌入体内的致命形状照样炸外层模型。只有
   `gorm:"-"` 族或全关权限（`gorm:"->:false;<-:false"`；注意 `->:false`
-  单独出现即全关）能让字段惰性存在——注意 `gorm:"type:..."` 在
-  GormDataType 覆盖**之后**执行，能救回被空返回值抹掉的 DataType（具名与
-  匿名标量都适用），而 serializer 在覆盖**之前**、救不回；基座嵌入自己被
+  单独出现即全关）能让字段惰性存在。证明的优先级完全按 GORM 管线：
+  **非空 `gorm:"type:..."` 最后执行、是唯一终局证明**——对任何拼写（含
+  别名、方法集不可见的跨包类型）都直接成列；serializer 在 GormDataType
+  覆盖**之前**执行，本地类型上方法集全可见所以照常是证明，但**跨包具名
+  类型上不可见的空 GormDataType 能事后抹掉它**，所以那里 serializer 只算
+  未知、需 type: 自证（字面量形状如 `[]string` 无处藏方法，serializer
+  照常有效）；`gorm:"type:"` **空值**反向抹掉最终 DataType——本可成列的
+  字段变成无 DBName 的死字段（tag 死了会 warn），致命形状照旧致命。泛型
+  嵌入按**实例化实参**展开传播（`Box[string]` 提升出的 `Data []string`
+  炸模型，`Box[byte]` 的 `Data []byte` 是合法 bytes 列）。基座嵌入自己被
   `gorm:"-"` 或全关权限禁用时整个模型报错（运行时没有 rid，store.New
-  必失败）。无法静态判定列性时（陌生跨包类型、方法集含扫不到的嵌入）同样
+  必失败）——显式 `gorm:"embedded"` 无视权限、基座照常展开可用；禁用的
+  基座藏在本地 wrapper 里同样被查出并报错，另有一个启用基座时以启用者
+  为准。无法静态判定列性时（陌生跨包类型、方法集含扫不到的嵌入）同样
   **报错拒猜**：用 type / serializer tag 自证，或去掉 tag。构建约束按生成
   时平台生效（`//go:build`、平台后缀、`_` 前缀文件遵循 go/build 规则）。
 - ⚠️ **匿名字段另有一套嵌入规则**（与 GORM 一致，实测钉死）：匿名嵌入只有
