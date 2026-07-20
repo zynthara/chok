@@ -654,3 +654,85 @@ func TestPatch_IsEmptyDoesNotValidateShape(t *testing.T) {
 		t.Error("all-nil DTO should report empty regardless of field validity")
 	}
 }
+
+// --- review-round-2 regressions --------------------------------------------
+
+// r2 #1 — parseJSONTag mirrors encoding/json: an invalid tag name falls back
+// to the Go field name, json:"-,opts" is the literal explicit name "-", and
+// json:"-" excludes. (Unit test on the resolver so the cases don't have to
+// be written as source struct tags that go vet's structtag check would flag.)
+func TestPatch_ParseJSONTagMirrorsEncodingJSON(t *testing.T) {
+	sf := reflect.StructField{Name: "Extra", Tag: reflect.StructTag(`json:"a\"b"`)}
+	if name, excl, exp := parseJSONTag(sf); name != "Extra" || excl || exp {
+		t.Errorf("invalid tag → (%q,%v,%v), want (Extra,false,false)", name, excl, exp)
+	}
+	sf2 := reflect.StructField{Name: "X", Tag: reflect.StructTag(`json:"-,omitempty"`)}
+	if name, excl, exp := parseJSONTag(sf2); name != "-" || excl || !exp {
+		t.Errorf(`json:"-,omitempty" → (%q,%v,%v), want ("-",false,true)`, name, excl, exp)
+	}
+	sf3 := reflect.StructField{Name: "Y", Tag: reflect.StructTag(`json:"-"`)}
+	if _, excl, _ := parseJSONTag(sf3); !excl {
+		t.Error(`json:"-" should be excluded`)
+	}
+}
+
+// r2 #1 — an embed with the literal json name "-" (json:"-,omitempty") is a
+// named embed, NOT an unnamed one, so its fields are not promoted.
+func TestPatch_AnonymousDashNameNotPromoted(t *testing.T) {
+	ctx := context.Background()
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	type Meta struct {
+		Title *string `json:"title"`
+	}
+	type req struct {
+		Meta `json:"-,omitempty"` // literal name "-" → named embed, not promoted
+		Body *string              `json:"body"`
+	}
+	if err := s.Update(ctx, RID(p.RID),
+		Patch(&req{Meta: Meta{Title: ptr("nested")}, Body: ptr("b")}).Onto(p)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, RID(p.RID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "orig" {
+		t.Errorf(`Title = %q, want orig (embed named "-" must not promote)`, got.Title)
+	}
+	if got.Body == nil || *got.Body != "b" {
+		t.Errorf("Body = %v, want b", got.Body)
+	}
+}
+
+// r2 #1 — an unexported anonymous non-struct pointer is invisible to
+// encoding/json and must not enter the plan (or it would fail the build).
+func TestPatch_UnexportedAnonScalarPtrIgnored(t *testing.T) {
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	type myScalar int
+	type req struct {
+		*myScalar         // unexported anonymous non-struct pointer: JSON-invisible
+		Title     *string `json:"title"`
+	}
+	if err := s.Update(context.Background(), RID(p.RID),
+		Patch(&req{Title: ptr("t")}).Onto(p)); err != nil {
+		t.Fatalf("unexported anonymous scalar pointer must be ignored, got %v", err)
+	}
+	if p.Title != "t" {
+		t.Errorf("Title = %q, want t", p.Title)
+	}
+}
+
+// r2 #2 — a multi-level pointer (**Req) is rejected at construction, not left
+// to panic in reflection at build.
+func TestPatch_MultiLevelPointerPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("Patch(**Req) should panic at construction")
+		}
+	}()
+	var inner *patchReq
+	outer := &inner
+	_ = Patch(outer)
+}

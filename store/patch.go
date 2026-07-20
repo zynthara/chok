@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	"gorm.io/gorm/schema"
 )
@@ -71,13 +72,16 @@ func Patch(req any) *PatchChanges {
 	if !rv.IsValid() {
 		panic("store: Patch requires a struct or pointer-to-struct request, got nil")
 	}
-	// Reject a typed nil pointer at construction rather than panicking deep
-	// in reflection at build time.
-	if rv.Kind() == reflect.Pointer && rv.IsNil() {
-		panic(fmt.Sprintf("store: Patch requires a non-nil request, got nil %T", req))
-	}
+	// Accept a struct or a SINGLE-level pointer-to-struct. The pointer is
+	// unwrapped exactly once: a nil pointer is rejected here rather than
+	// panicking deep in reflection at build time, and a multi-level pointer
+	// like **Req (whose inner nil would also panic later) is rejected as not
+	// a struct/*struct.
 	rt := rv.Type()
-	for rt.Kind() == reflect.Pointer {
+	if rt.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			panic(fmt.Sprintf("store: Patch requires a non-nil request, got nil %T", req))
+		}
 		rt = rt.Elem()
 	}
 	if rt.Kind() != reflect.Struct {
@@ -306,16 +310,30 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 			idx = append(idx, fr.prefix...)
 			idx = append(idx, i)
 
-			// Unexported non-anonymous fields never participate. An
-			// unexported ANONYMOUS field can still promote its exported
-			// fields (Go/encoding/json rule), so it is not skipped here.
-			if !sf.Anonymous && !sf.IsExported() {
+			isExported := sf.IsExported()
+			// Unexported non-anonymous fields are never visible.
+			if !sf.Anonymous && !isExported {
 				continue
+			}
+			// An unexported anonymous non-struct field is invisible to
+			// encoding/json — only an unexported anonymous STRUCT promotes
+			// its exported fields. Leaving it in the plan would add a
+			// JSON-unfillable field and fail the whole DTO's build.
+			var et reflect.Type
+			if sf.Anonymous {
+				et = sf.Type
+				for et.Kind() == reflect.Pointer {
+					et = et.Elem()
+				}
+				if !isExported && et.Kind() != reflect.Struct {
+					continue
+				}
 			}
 
 			// store:"-" opt-out and illegal store tags apply to every field
-			// — anonymous containers included, checked BEFORE the embed is
-			// walked so a tagged-out container is not promoted.
+			// we might consider — anonymous containers included, checked
+			// BEFORE the embed is walked so a tagged-out container is not
+			// promoted.
 			if stag, ok := sf.Tag.Lookup("store"); ok {
 				if strings.TrimSpace(stag) == "-" {
 					continue
@@ -323,32 +341,29 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 				return &patchPlan{err: fmt.Errorf("store: Patch: field %q of %s has store tag %q; only %q is allowed on a request DTO", sf.Name, rt, stag, "-")}
 			}
 
-			if sf.Anonymous {
-				// json:"-" excludes the whole embed.
-				if isJSONExcluded(sf) {
-					continue
-				}
-				et := sf.Type
-				for et.Kind() == reflect.Pointer {
-					et = et.Elem()
-				}
-				// A struct embed with no explicit json name promotes its
-				// fields. A named embed (json:"meta") or a non-struct embed
-				// falls through to be treated as a normal field.
-				if _, named := explicitJSONName(sf); et.Kind() == reflect.Struct && !named {
-					if !onPath(fr.path, et) {
-						next := append(append([]reflect.Type(nil), fr.path...), et)
-						queue = append(queue, frame{t: et, prefix: idx, depth: fr.depth + 1, path: next})
-					}
-					continue
-				}
-			}
-
-			if sf.Type.Kind() != reflect.Pointer {
+			public, excluded, explicit := parseJSONTag(sf)
+			if excluded { // json:"-"
 				continue
 			}
-			public, skip := patchPublicName(sf)
-			if skip {
+
+			// An unnamed struct embed promotes its fields; a named embed
+			// (json:"meta") or a non-struct embed is treated as a normal
+			// field per encoding/json.
+			if sf.Anonymous && et.Kind() == reflect.Struct && !explicit {
+				if !onPath(fr.path, et) {
+					next := append(append([]reflect.Type(nil), fr.path...), et)
+					queue = append(queue, frame{t: et, prefix: idx, depth: fr.depth + 1, path: next})
+				}
+				continue
+			}
+
+			// Treated as a field. An anonymous field reaching here that is
+			// unexported (a named unexported struct embed) is not a visible
+			// value field.
+			if !isExported {
+				continue
+			}
+			if sf.Type.Kind() != reflect.Pointer {
 				continue
 			}
 			cand := &candidate{
@@ -384,53 +399,50 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 	return &patchPlan{fields: fields}
 }
 
-// explicitJSONName returns the json tag's first segment when it names the
-// field (non-empty, not "-"). json:",omitempty" and json:"-" both return
-// ("", false): the former keeps the Go name, the latter is handled as an
-// exclusion by the caller.
-func explicitJSONName(sf reflect.StructField) (string, bool) {
+// parseJSONTag resolves a struct field's public name the way encoding/json
+// determines its JSON key, and reports whether the field is excluded
+// (json:"-") and whether it carries an explicit name (which decides embed
+// promotion). Mirroring encoding/json exactly:
+//
+//   - no json tag, or json:",opts" (empty name), or an INVALID tag name →
+//     the Go field name, not explicit (so a mismatch surfaces as
+//     ErrUnknownUpdateField instead of silently diverging from the JSON the
+//     DTO actually accepts);
+//   - json:"-" → excluded;
+//   - json:"-,opts" → the literal explicit name "-" (NOT an exclusion);
+//   - json:"name..." → that explicit name.
+func parseJSONTag(sf reflect.StructField) (name string, excluded, explicit bool) {
 	tag, ok := sf.Tag.Lookup("json")
 	if !ok {
-		return "", false
+		return sf.Name, false, false
+	}
+	if tag == "-" {
+		return "", true, false
 	}
 	first := tag
 	if c := strings.IndexByte(tag, ','); c >= 0 {
 		first = tag[:c]
 	}
-	if first == "" || first == "-" {
-		return "", false
+	if first == "" || !isValidJSONTag(first) {
+		return sf.Name, false, false
 	}
-	return first, true
+	return first, false, true
 }
 
-// isJSONExcluded reports whether the field is excluded by json:"-" (the
-// exact tag "-"; json:"-," is the literal name "-", not an exclusion).
-func isJSONExcluded(sf reflect.StructField) bool {
-	tag, ok := sf.Tag.Lookup("json")
-	return ok && tag == "-"
-}
-
-// patchPublicName resolves a struct field's public name the way
-// encoding/json would. skip is true when the field is excluded (json:"-").
-func patchPublicName(sf reflect.StructField) (name string, skip bool) {
-	tag, ok := sf.Tag.Lookup("json")
-	if !ok {
-		return sf.Name, false
+// isValidJSONTag mirrors encoding/json's tag-name validity check: every rune
+// must be a letter, a digit, or one of a fixed set of punctuation
+// characters (quote and backslash are reserved and excluded). An invalid
+// name makes encoding/json fall back to the Go field name.
+func isValidJSONTag(s string) bool {
+	for _, c := range s {
+		switch {
+		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
+			// allowed punctuation
+		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
+			return false
+		}
 	}
-	first := tag
-	if comma := strings.IndexByte(tag, ','); comma >= 0 {
-		first = tag[:comma]
-	}
-	switch {
-	case tag == "-":
-		return "", true // json:"-" excludes
-	case first == "-":
-		return "-", false // json:"-,..." is the literal name "-"
-	case first == "":
-		return sf.Name, false // json:",omitempty" keeps the Go field name
-	default:
-		return first, false
-	}
+	return true
 }
 
 // patchAssignable reports whether a DTO pointer element of type f can drive
