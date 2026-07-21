@@ -1911,6 +1911,10 @@ func openMySQLLocWriter(t *testing.T, s *Store[AggSale], loc *time.Location) *sq
 	cfg.DBName = mysqlCurrentDatabase(t, s)
 	cfg.ParseTime = true
 	cfg.Loc = loc
+	// The foreign-writer premise is an UNPINNED session: drop whatever
+	// params the operator's DSN carries (a stray time_zone would re-pin
+	// the session this connection is supposed to lack).
+	cfg.Params = nil
 	// NewConnector keeps the *time.Location as an object: a DSN round
 	// trip would serialise a FixedZone by name and fail LoadLocation.
 	connector, err := gomysql.NewConnector(cfg)
@@ -1965,6 +1969,18 @@ func TestAggregate_Round2MySQLDatetimeStoresWallClocks(t *testing.T) {
 	}
 	if want := "2026-07-04 06:00:00"; stored != want {
 		t.Fatalf("stored wall clock = %q, want the UTC wall clock %q", stored, want)
+	}
+	// On a host whose own zone IS UTC the stored-text assertion cannot
+	// tell Loc=UTC from Loc=time.Local — the location identity of the
+	// parsed value still can (the driver reconstructs times with the
+	// exact *Location it was configured with, and time.Local is never
+	// the time.UTC singleton).
+	got, err := s.Get(ctx, Where(where.WithFilter("status", "w1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.At.Location() != time.UTC {
+		t.Fatalf("read back in %v, want the driver to parse DATETIME in time.UTC", got.At.Location())
 	}
 
 	// A foreign writer three hours east of UTC rewrites the second row

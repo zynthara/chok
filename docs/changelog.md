@@ -19,8 +19,8 @@
 > 即发生、存量不可修复），跨实例时区不一致静默裂值，且软删的
 > `deleted_at = CURRENT_TIMESTAMP` 按**服务器**时区求值——进程与服务器
 > 时区不一致时同一张表骑两条基准。这与「config-driven / 外部简单」公理
-> 正面冲突：什么都不配的容器（TZ 未设=UTC）反而正确，认真配了本地时区
-> 的反而埋雷。
+> 正面冲突：什么都不配的极简容器（TZ 未设且无 /etc/localtime → UTC）
+> 反而正确，认真配了本地时区的反而埋雷。
 >
 > 决策=**双钉 UTC**：驱动 `Loc=time.UTC`（DATETIME 读写基准）+ 每连接
 > `SET time_zone='+00:00'`（`CURRENT_TIMESTAMP`/`NOW()`/TIMESTAMP 列的

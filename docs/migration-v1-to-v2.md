@@ -354,7 +354,9 @@ v1 与 v2（≤ beta.6）的 MySQL 驱动 `Loc=time.Local`：DATETIME 列存
 **进程时区**的墙钟。此后 v2 双钉 UTC——驱动 `Loc=time.UTC` +
 每连接 `SET time_zone='+00:00'`（后者同时统一
 `CURRENT_TIMESTAMP`/`NOW()` 与 TIMESTAMP 列的 SQL 侧求值基准）。
-**旧进程时区是 UTC 的部署（容器未设 `TZ` 即是）零动作**；非 UTC
+**旧进程时区是 UTC 的部署零动作**（Go 的解析顺序：`TZ` →
+`/etc/localtime` → UTC；两者皆无的极简镜像是 UTC，烘了
+`/etc/localtime` 的镜像不是——动手前核实真实进程时区）；非 UTC
 进程写成的存量库需一次性重基：备份、停写后逐 DATETIME 列
 `CONVERT_TZ(col, '<旧进程时区偏移>', '+00:00')`（TIMESTAMP 列内部
 存 UTC 瞬间，无需处理）。完整配方与 DST 存量注意事项见根目录

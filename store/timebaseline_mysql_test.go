@@ -58,6 +58,13 @@ func TestMySQLUTCBaseline_RoundTripAnyZone(t *testing.T) {
 		if !got.At.Equal(inst) {
 			t.Fatalf("zone %s: read back %v, want the instant %v", name, got.At, inst)
 		}
+		// Location identity, not offset: on a UTC host every wall-clock
+		// assertion above degrades to no-signal under a Loc revert
+		// (Local and UTC coincide there), and this is then the ONE
+		// check that still goes red — the driver reconstructs times
+		// with the exact *Location it was configured with, and
+		// time.Local is never the time.UTC singleton. Do not soften it
+		// to an offset comparison.
 		if got.At.Location() != time.UTC {
 			t.Fatalf("zone %s: read back in %v, want time.UTC", name, got.At.Location())
 		}
@@ -83,6 +90,12 @@ func TestMySQLUTCBaseline_SoftDeleteSharesDriverBaseline(t *testing.T) {
 	if err := gdb.Raw("SELECT @@session.time_zone").Row().Scan(&sessionTZ); err != nil {
 		t.Fatal(err)
 	}
+	// Load-bearing for the dropped-param regression on a UTC host:
+	// stock MySQL reports the literal SYSTEM when no session zone was
+	// set (never a resolved offset), so the comparison fires wherever
+	// the pin is missing. Known blind spot, accepted: a server booted
+	// with default_time_zone=+00:00 would report the pinned value with
+	// no pin in place — stock images default to SYSTEM.
 	if sessionTZ != "+00:00" {
 		t.Fatalf("@@session.time_zone = %q, want the pinned +00:00 (the params SET must reach every pooled connection)", sessionTZ)
 	}

@@ -168,6 +168,14 @@ type SQLiteOptions struct {
 // modes; a non-empty CACert takes precedence and builds a verifying
 // per-host tls.Config against that CA (managed databases presenting a
 // private-CA certificate — DigitalOcean, RDS — need exactly this).
+//
+// Time values ride a fixed UTC baseline, not the process zone: the
+// driver Loc is time.UTC (DATETIME columns store and parse UTC wall
+// clocks) and every connection pins its session time_zone to +00:00
+// (SQL-evaluated timestamps share that baseline). Non-chok writers to
+// the same database must write UTC wall clocks too; see the MySQL
+// notes in docs/db.md and the CHANGELOG migration entry for databases
+// written by pre-UTC-baseline versions.
 type MySQLOptions struct {
 	Host     string `mapstructure:"host"     default:"127.0.0.1"`
 	Port     int    `mapstructure:"port"     default:"3306"`

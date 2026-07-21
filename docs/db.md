@@ -692,7 +692,11 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   单进程内就会发生）。残余约束只剩一条**外部写入方须知**：DATETIME
   不带时区，框架管不到别人的连接——同库的非 chok 写入方必须同样按
   UTC 墙钟写入，否则同一瞬间两种墙钟、读取侧无法修复。这条约束同样
-  覆盖排序 / 范围过滤 / 游标，不只聚合。PG（timestamptz）写入即归一
+  覆盖排序 / 范围过滤 / 游标，不只聚合。运维注记：`time_zone` 经
+  每连接 SET 下发（与 charset、只读句柄的 transaction_read_only 同
+  通道）——若中间隔着会话复用型代理（ProxySQL 一类），须确认其保持
+  session 变量与后端连接的绑定，否则 SQL 侧求值会退回服务器时区
+  （驱动侧 DATETIME 读写不受影响）。PG（timestamptz）写入即归一
   UTC，无此题。**存量迁移**：v2.0.0-beta.6 及更早版本按进程时区墙钟
   写入的库，若旧进程时区不是 UTC，升级后需一次性重基——逐 DATETIME
   列 `CONVERT_TZ(col, '<旧进程时区偏移>', '+00:00')`（TIMESTAMP 列
