@@ -271,9 +271,10 @@ owner 强制覆盖）、`Fields` 乐观锁 + 零值强制落库、scope 化 stor
 禁 Upsert、RID 双 ID 模型（外部 `pst_xxx`，数字主键不出进程）。
 `Fields` 只接受 Store 的具体模型类型（`T` / `*T`），不把形状兼容 DTO
 交给 GORM 猜测字段与锁元数据。请求 DTO 的部分更新走 `Patch(req)`
-（cast/patch 写路径，2026-07-20）：从非 nil 指针字段推导变更集，参与规则
-镜像 encoding/json（指针即可选、命名取 JSON 名/回退 Go 字段名、`store:"-"`
-豁免、零值照写），`.Onto(&obj)` 复用 `Fields` 的隐式乐观锁与版本回写——
+（cast/patch 写路径，2026-07-20）：从非 nil 指针字段推导变更集，参与规则是
+encoding/json 可见性的**受限子集**（命名/提升以 encoding/json 为基线，再叠加
+pointer-only / `store:"-"` 退出 / 命名嵌入排除；被排除的浅层字段仍遮蔽同名
+深层字段，同深度可 patch 同名 fail-loud），`.Onto(&obj)` 复用 `Fields` 的隐式乐观锁与版本回写——
 DTO 是 Patch 的正门、`Fields` 保持模型专用，分工明确。全 nil = `ErrEmptyPatch`
 （400），未知/托管/类型不符字段在首个请求即 500，无可 patch 字段
 = `ErrNoPatchableFields`（500）。它只是第三个 `Changes` 构造器，写内核与

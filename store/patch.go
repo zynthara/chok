@@ -31,7 +31,9 @@ import (
 //	}
 //	err := posts.Update(ctx, store.RID(rid), pc)
 //
-// Participation rules (mirroring encoding/json field visibility):
+// Participation rules (a restricted subset of encoding/json field visibility
+// — naming/exportedness/promotion follow encoding/json, then Patch applies
+// pointer-only / opt-out / nested-exclusion filters):
 //
 //   - Only pointer fields participate. Non-pointer fields (uri params,
 //     an int version, control flags) are silently ignored — they cannot
@@ -49,11 +51,14 @@ import (
 //     model-side query/update tag vocabulary does not apply to DTOs).
 //   - Embedded structs promote their fields per json rules: an embed with
 //     no json name promotes its fields (shallower shadows deeper), while a
-//     named embed (json:"meta") is a normal nested field, not promoted.
-//     Two fields resolving to the same public name at the same depth are
-//     ambiguous and rejected (stricter than encoding/json's tag-dominance
-//     tie-break — a DTO name clash is a build-time error, not a silent
-//     pick).
+//     named embed (json:"meta") is a nested object, not promoted. A shallower
+//     field that is itself excluded from patching (non-pointer, named embed,
+//     store:"-") still SHADOWS a deeper same-name field exactly as
+//     encoding/json does — the deeper field does not reappear under a name
+//     the wire routes elsewhere. Two PATCHABLE fields resolving to the same
+//     public name at the same depth are ambiguous and rejected (stricter than
+//     encoding/json's tag-dominance tie-break — a DTO patch-name clash is a
+//     build-time error, not a silent pick). Keep PATCH DTOs flat.
 //
 // Values are validated against the Store's update whitelist and model
 // schema on every build (the FULL declared shape, even fields nil this
@@ -270,26 +275,50 @@ func patchPlanFor(rt reflect.Type) *patchPlan {
 }
 
 // buildPatchPlan analyses a DTO struct type. It walks the struct breadth-
-// first so shallower embeds shadow deeper ones (Go/json promotion rules);
-// two participating fields resolving to the same public name at the same
-// depth are ambiguous and rejected. Cycle detection is path-based (a type
-// already on the current embed path is not re-entered), so a genuine
-// diamond — the same field reachable by two equal-depth paths — is reported
-// as ambiguous rather than silently deduplicated to the first path.
+// first (Go/json promotion rules: shallower embeds shadow deeper ones) and
+// resolves visibility and patchability in two phases so that a field excluded
+// from patching still shadows a deeper same-name field exactly as
+// encoding/json would (the round-4 fix for non-pointer winners, generalised).
+//
+// Phase 1 — visibility: EVERY field encoding/json can see enters name/depth
+// dominance, each carrying a patchable flag. A candidate is patchable only
+// when it is a pointer leaf that is neither store:"-", nor a named embed (a
+// nested object), nor inside a store:"-" container. Non-pointer fields, named
+// embeds and opted-out fields are non-patchable candidates: they still occupy
+// their public name and shadow deeper same-name fields, but never patch. This
+// is why a store:"-" leaf, a named embed, or a store:"-" container's promoted
+// field correctly hides a deeper same-name pointer rather than letting it leak
+// in under a name the wire actually routes elsewhere.
+//
+// Phase 2 — selection: per public name the shallowest depth wins. If exactly
+// one patchable field sits at that depth it is emitted; if none do the name is
+// simply not patchable (its json-visible winner is a non-pointer, a nested
+// object, or opted out); if two or more patchable fields tie at that depth the
+// DTO is rejected — a genuine ambiguity about which field to patch, reported
+// loud at build (stricter than encoding/json's tag-dominance tie-break). A tie
+// among purely non-patchable candidates drops the name silently, mirroring
+// encoding/json.
+//
+// Cycle detection is path-based (a type already on the current embed path is
+// not re-entered), so a genuine diamond — the same field reachable by two
+// equal-depth paths — is reported as ambiguous rather than silently
+// deduplicated to the first path.
 func buildPatchPlan(rt reflect.Type) *patchPlan {
 	type candidate struct {
-		field patchField
-		depth int
-		isPtr bool // pointer fields are patchable; non-pointer winners only shadow
+		field     patchField
+		depth     int
+		patchable bool // pointer leaf, not opted out / named embed / tainted
 	}
-	chosen := map[string]*candidate{}
-	ambiguous := map[string]struct{}{}
+	// All json-visible candidates keyed by public name; the resolution pass
+	// below picks the winner per name and decides patchability.
+	candidates := map[string][]candidate{}
 
 	type frame struct {
-		t      reflect.Type
-		prefix []int
-		depth  int
-		path   []reflect.Type // types from root to here, for cycle detection
+		t       reflect.Type
+		prefix  []int
+		depth   int
+		path    []reflect.Type // types from root to here, for cycle detection
+		tainted bool           // inside a store:"-" container: descendants only shadow
 	}
 	queue := []frame{{t: rt, depth: 0, path: []reflect.Type{rt}}}
 
@@ -318,8 +347,7 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 			}
 			// An unexported anonymous non-struct field is invisible to
 			// encoding/json — only an unexported anonymous STRUCT promotes
-			// its exported fields. Leaving it in the plan would add a
-			// JSON-unfillable field and fail the whole DTO's build.
+			// its exported fields.
 			var et reflect.Type
 			if sf.Anonymous {
 				et = sf.Type
@@ -331,32 +359,50 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 				}
 			}
 
-			// store:"-" opt-out and illegal store tags apply to every field
-			// we might consider — anonymous containers included, checked
-			// BEFORE the embed is walked so a tagged-out container is not
-			// promoted.
-			if stag, ok := sf.Tag.Lookup("store"); ok {
-				if strings.TrimSpace(stag) == "-" {
-					continue
+			// store tag → patchability, not visibility. store:"-" opts the
+			// field (or container) out of patching but leaves it visible to
+			// encoding/json, so it still shadows deeper same-name fields. A
+			// store tag encountered inside a store:"-" container (tainted) is
+			// irrelevant — the whole subtree is already non-patchable — so it
+			// is neither honoured nor rejected there; this keeps an embedded
+			// model (whose fields carry query/update tags) opt-out-able as a
+			// whole via a single store:"-" on the embed.
+			optedOut := false
+			if !fr.tainted {
+				if stag, ok := sf.Tag.Lookup("store"); ok {
+					if strings.TrimSpace(stag) == "-" {
+						optedOut = true
+					} else {
+						return &patchPlan{err: fmt.Errorf("store: Patch: field %q of %s has store tag %q; only %q is allowed on a request DTO", sf.Name, rt, stag, "-")}
+					}
 				}
-				return &patchPlan{err: fmt.Errorf("store: Patch: field %q of %s has store tag %q; only %q is allowed on a request DTO", sf.Name, rt, stag, "-")}
 			}
+			nonPatchable := fr.tainted || optedOut
 
 			public, excluded, explicit := parseJSONTag(sf)
-			if excluded { // json:"-"
+			if excluded { // json:"-": invisible to encoding/json, not even a shadow
 				continue
 			}
 
 			// A struct embed promotes its fields only when it has no explicit
-			// json name. A NAMED struct embed (json:"meta") is a nested
-			// object per encoding/json, not a flat patch field — whether it
-			// is a value or a pointer, it does not participate. A non-struct
-			// anonymous field falls through to participate as a normal field
-			// (under its json name or Go type name).
+			// json name. A NAMED struct embed (json:"meta") is a nested object
+			// per encoding/json: a non-patchable candidate under that name
+			// which shadows a deeper same-name field but never patches (value
+			// or pointer alike). An unnamed embed is walked; a store:"-"
+			// unnamed embed is walked TAINTED so its promoted fields shadow
+			// without patching. A non-struct anonymous field falls through to
+			// a normal field (patchable when it is a pointer).
 			if sf.Anonymous && et.Kind() == reflect.Struct {
-				if !explicit && !onPath(fr.path, et) {
+				if explicit {
+					candidates[public] = append(candidates[public], candidate{
+						field: patchField{index: idx, public: public},
+						depth: fr.depth,
+					})
+					continue
+				}
+				if !onPath(fr.path, et) {
 					next := append(append([]reflect.Type(nil), fr.path...), et)
-					queue = append(queue, frame{t: et, prefix: idx, depth: fr.depth + 1, path: next})
+					queue = append(queue, frame{t: et, prefix: idx, depth: fr.depth + 1, path: next, tainted: nonPatchable})
 				}
 				continue
 			}
@@ -366,58 +412,53 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 			if !isExported {
 				continue
 			}
-			// Both pointer and non-pointer fields register for name/depth
-			// dominance. encoding/json resolves field visibility across ALL
-			// fields first and only then does the winner's kind matter, so a
-			// non-pointer top-level field must still shadow a deeper same-name
-			// pointer (which then becomes invisible and must not enter the
-			// plan). Non-pointer winners are dropped after dominance — they
-			// carry no absent-vs-present bit and are not patchable.
 			isPtr := sf.Type.Kind() == reflect.Pointer
 			var elemType reflect.Type
 			if isPtr {
 				elemType = sf.Type.Elem()
 			}
-			cand := &candidate{
-				field: patchField{index: idx, public: public, elemType: elemType},
-				depth: fr.depth,
-				isPtr: isPtr,
+			candidates[public] = append(candidates[public], candidate{
+				field:     patchField{index: idx, public: public, elemType: elemType},
+				depth:     fr.depth,
+				patchable: isPtr && !nonPatchable,
+			})
+		}
+	}
+
+	// Resolve each public name: shallowest depth wins; among patchable fields
+	// at that depth, exactly one is emitted, two or more is a build-time
+	// ambiguity, none leaves the name un-patchable.
+	var ambiguous []string
+	fields := make([]patchField, 0, len(candidates))
+	for name, cs := range candidates {
+		minDepth := cs[0].depth
+		for _, c := range cs[1:] {
+			if c.depth < minDepth {
+				minDepth = c.depth
 			}
-			// Shallower wins; equal depth is ambiguous; deeper is shadowed
-			// (the default no-op). The shallower-than branch is unreachable
-			// under BFS — a shallower same-name field is always visited
-			// first — but is kept so conflict resolution stays correct for
-			// any traversal order rather than silently depending on BFS.
-			switch existing, ok := chosen[public]; {
-			case !ok:
-				chosen[public] = cand
-			case fr.depth < existing.depth:
-				chosen[public] = cand
-				delete(ambiguous, public)
-			case fr.depth == existing.depth:
-				ambiguous[public] = struct{}{}
+		}
+		var patchAtMin []patchField
+		for _, c := range cs {
+			if c.depth == minDepth && c.patchable {
+				patchAtMin = append(patchAtMin, c.field)
 			}
+		}
+		switch len(patchAtMin) {
+		case 0:
+			// Winner at the shallowest depth is non-patchable (non-pointer,
+			// named embed, or opted out): the name is not a patch field.
+		case 1:
+			fields = append(fields, patchAtMin[0])
+		default:
+			ambiguous = append(ambiguous, name)
 		}
 	}
 
 	if len(ambiguous) > 0 {
-		names := make([]string, 0, len(ambiguous))
-		for n := range ambiguous {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		return &patchPlan{err: fmt.Errorf("store: Patch: %s promotes multiple fields to the same public name %q at the same depth", rt, names[0])}
+		sort.Strings(ambiguous)
+		return &patchPlan{err: fmt.Errorf("store: Patch: %s promotes multiple patchable fields to the same public name %q at the same depth", rt, ambiguous[0])}
 	}
 
-	fields := make([]patchField, 0, len(chosen))
-	for _, c := range chosen {
-		if !c.isPtr {
-			// The visibility winner is a non-pointer field: it shadowed any
-			// deeper same-name field but is not itself patchable.
-			continue
-		}
-		fields = append(fields, c.field)
-	}
 	sort.Slice(fields, func(i, j int) bool { return fields[i].public < fields[j].public })
 	return &patchPlan{fields: fields}
 }

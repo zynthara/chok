@@ -816,7 +816,9 @@ err := posts.Update(ctx, store.RID(rid), pc)
 err = posts.Update(ctx, store.RID(rid), store.Patch(req), store.WithVersion(req.Version))
 ```
 
-参与规则（镜像 encoding/json 的字段可见性）：
+参与规则（**encoding/json 可见性的受限子集**——字段命名/导出性/提升以
+encoding/json 为基线，Patch 再叠加 pointer-only / `store:"-"` 退出 / 命名
+嵌入排除三重过滤）：
 
 - **只有指针字段参与**：nil = 客户端未发送（跳过），非 nil = 写入（**零值
   照写**，`*""` 是"清空该列"）。非指针字段（uri 参数、`Version int` 等）
@@ -826,6 +828,13 @@ err = posts.Update(ctx, store.RID(rid), store.Patch(req), store.WithVersion(req.
   参与（与白名单 key 不匹配就响亮 `ErrUnknownUpdateField` → 500，提示补
   JSON tag）。DTO 字段可用 `store:"-"` 显式退出（放控制类指针字段，如
   `Force *bool`）。
+- **嵌入按 encoding/json 提升**：无 JSON 名的匿名 struct 提升其字段（浅层
+  遮蔽深层）；命名嵌入（`json:"meta"`，值或指针）是嵌套对象、**不参与**。
+  被排除的浅层字段（非指针、命名嵌入、`store:"-"`）仍会**遮蔽**同名深层
+  字段——与 encoding/json 一致，深层字段不会从被路由到别处的名字下"冒出来"。
+  同深度两个**可 patch** 字段同名 = 构造期 500（比 encoding/json 的
+  tag-dominance tie-break 更严，响亮而非静默）。**建议 PATCH DTO 保持扁平**，
+  勿跨深度复用公开名。
 - 每次 build 校验 **DTO 的完整形状**（含本次为 nil 的字段）：字段名不在
   update 白名单、解析到托管列、类型不匹配都在**首个到达 `Update` 的请求**
   即 500，而不是等客户端第一次发那个字段才炸。（`IsEmpty()` 早退的全 nil

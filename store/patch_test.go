@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -799,5 +800,173 @@ func TestPatch_NonPointerWinnerShadowsDeepPointer(t *testing.T) {
 	}
 	if got.Body == nil || *got.Body != "b" {
 		t.Errorf("Body = %v, want b", got.Body)
+	}
+}
+
+// --- review-round-5 regressions --------------------------------------------
+//
+// r5 defect family: a shallow field that is excluded from patching but still
+// visible to encoding/json (store:"-" leaf, store:"-" container, named embed)
+// must SHADOW a deeper same-name field the way encoding/json does. Before the
+// fix these were filtered out BEFORE dominance, so the deeper field leaked
+// into the plan under a public name the wire actually routes elsewhere —
+// turning a valid update into a 500 (or a silent no-op). Generalises the r4
+// non-pointer blocker to the two remaining exclusion mechanisms.
+
+func patchPlanPublicNames(t *testing.T, v any) []string {
+	t.Helper()
+	plan := buildPatchPlan(reflect.TypeOf(v))
+	if plan.err != nil {
+		t.Fatalf("unexpected plan error: %v", plan.err)
+	}
+	names := make([]string, 0, len(plan.fields))
+	for _, f := range plan.fields {
+		names = append(names, f.public)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// r5 #1 (Medium) — a named embed must shadow a deeper same-name promoted field.
+// encoding/json routes the wire key to the named nested object; the deeper
+// scalar is invisible and must NOT enter the plan. End-to-end: the deep name
+// is not an update column, so before the fix even a valid body-only PATCH
+// tripped ErrUnknownUpdateField (500).
+func TestPatch_Round5_NamedEmbedShadowsDeepSameName(t *testing.T) {
+	ctx := context.Background()
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	type deep struct {
+		Meta *string `json:"meta"` // "meta" is NOT an update column
+	}
+	type nested struct {
+		X *string `json:"x"`
+	}
+	type req struct {
+		deep
+		nested `json:"meta"` // named embed shadows deep.Meta at "meta"
+		Body   *string       `json:"body"`
+	}
+	r := &req{nested: nested{X: ptr("ignored")}, Body: ptr("newbody")}
+	// "meta" must be shadowed by the named embed → not in the plan → a
+	// body-only update must not fail shape validation.
+	if got := patchPlanPublicNames(t, *r); len(got) != 1 || got[0] != "body" {
+		t.Fatalf("plan = %v, want [body] (named embed must shadow deep 'meta')", got)
+	}
+	if err := s.Update(ctx, RID(p.RID), Patch(r).Onto(p)); err != nil {
+		t.Fatalf("valid body update must succeed once the deep 'meta' is shadowed, got %v", err)
+	}
+	if p.Body == nil || *p.Body != "newbody" {
+		t.Errorf("Body = %v, want newbody", p.Body)
+	}
+}
+
+// r5 #1 (Medium) — a store:"-" leaf must shadow a deeper same-name field. The
+// wire routes the name to the opted-out shallow field; the deeper pointer is
+// invisible and must not reappear in the plan.
+func TestPatch_Round5_StoreDashLeafShadowsDeepSameName(t *testing.T) {
+	type deep struct {
+		Name *string `json:"name"`
+	}
+	type req struct {
+		deep
+		Name *string `json:"name" store:"-"` // opted out, shadows deep.Name
+		Body *string `json:"body"`
+	}
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "body" {
+		t.Fatalf(`plan = %v, want [body] (store:"-" leaf must shadow deep "name")`, got)
+	}
+}
+
+// r5 #1 (Medium) — a store:"-" anonymous container's promoted field must
+// shadow a deeper same-name field: the whole subtree is walked (still visible
+// to encoding/json) but marked non-patchable, so it shadows without patching.
+func TestPatch_Round5_StoreDashContainerShadowsDeepSameName(t *testing.T) {
+	type deep struct {
+		Name *string `json:"name"`
+	}
+	type box struct{ deep } // promotes Name one level deeper
+	type shallow struct {
+		Name *string `json:"name"`
+	}
+	type req struct {
+		box
+		shallow `store:"-"` // opted-out container; its Name shadows box.deep.Name
+		Body    *string     `json:"body"`
+	}
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "body" {
+		t.Fatalf(`plan = %v, want [body] (store:"-" container must shadow deeper "name")`, got)
+	}
+}
+
+// r5 no-regression — a store:"-" embed opts out its whole subtree WITHOUT
+// tripping the illegal-store-tag guard on inner fields, so an embedded model
+// (whose fields carry query/update tags) can be opted out as a unit.
+func TestPatch_Round5_StoreDashContainerIgnoresInnerStoreTags(t *testing.T) {
+	type modelish struct {
+		Secret *string `json:"secret" store:"update"` // inner model-side tag
+	}
+	type req struct {
+		modelish `store:"-"`
+		Title    *string `json:"title"`
+	}
+	plan := buildPatchPlan(reflect.TypeOf(req{}))
+	if plan.err != nil {
+		t.Fatalf(`store:"-" container must ignore inner store tags, got %v`, plan.err)
+	}
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "title" {
+		t.Errorf("plan = %v, want [title] (secret opted out)", got)
+	}
+}
+
+// r5 no-regression — a public name shared by two opted-out containers is a
+// clash among purely non-patchable candidates: encoding/json drops it, so
+// Patch drops it silently too (no fail-loud 500 that would kill the whole DTO).
+func TestPatch_Round5_TwoOptedOutContainersSameNameNoError(t *testing.T) {
+	// Both containers promote a field under its Go name "Flag" (no json tag, so
+	// go vet's structtag check stays quiet while the same-name clash is real).
+	type ctrlA struct {
+		Flag *string
+	}
+	type ctrlB struct {
+		Flag *string
+	}
+	type req struct {
+		ctrlA `store:"-"`
+		ctrlB `store:"-"`
+		Title *string `json:"title"`
+	}
+	plan := buildPatchPlan(reflect.TypeOf(req{}))
+	if plan.err != nil {
+		t.Fatalf("a name shared only by opted-out containers must drop silently, not error: %v", plan.err)
+	}
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "title" {
+		t.Errorf("plan = %v, want [title]", got)
+	}
+}
+
+// r5 semantics — same-depth fail-loud is scoped to PATCHABLE fields: a single
+// patchable field wins over an opted-out same-name sibling at the same depth
+// (no ambiguity about what to patch). Only two or more patchable fields at one
+// depth are the build-time clash.
+func TestPatch_Round5_PatchableWinsOverSameDepthOptOut(t *testing.T) {
+	// Both fields resolve to the Go name "X" (no json tag → go vet quiet); one
+	// is patchable, the other opted out with a bare store tag.
+	type a struct {
+		X *string
+	}
+	type b struct {
+		X *string `store:"-"`
+	}
+	type req struct {
+		a
+		b
+	}
+	plan := buildPatchPlan(reflect.TypeOf(req{}))
+	if plan.err != nil {
+		t.Fatalf("one patchable + one opted-out at same depth is not ambiguous, got %v", plan.err)
+	}
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "X" {
+		t.Errorf("plan = %v, want [X] (a.X patchable wins)", got)
 	}
 }
