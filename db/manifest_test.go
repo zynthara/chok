@@ -235,6 +235,20 @@ func TestSequenceManifest_ReadAPIsWorkOnReadOnlyHandle(t *testing.T) {
 	if err != nil || !snapshot.Exists || snapshot.Frontier != 1 || snapshot.Dirty != 0 {
 		t.Fatalf("read-only ledger snapshot=%+v err=%v", snapshot, err)
 	}
+	// Status is part of the documented pre-rebase stop-writers window
+	// (the UTC-baseline migration recipe: status stays safe inside the
+	// window while up/repair count as the first boot). A handle that
+	// cannot write is the machine form of that claim — both status
+	// entry points must succeed here, proving they never apply, adopt
+	// or refresh.
+	if st, err := SequenceStatus(t.Context(), readOnly, seq); err != nil || st == nil {
+		t.Fatalf("read-only sequence status=%+v err=%v", st, err)
+	}
+	if st, err := MigrationsStatus(t.Context(), readOnly, fstest.MapFS{
+		"0001_probe.sql": &fstest.MapFile{Data: []byte("CREATE TABLE ro_probe (id BIGINT PRIMARY KEY);")},
+	}); err != nil || st == nil {
+		t.Fatalf("read-only migrations status=%+v err=%v", st, err)
+	}
 }
 
 func TestSequenceManifest_AdoptionPersistsBeforePendingMigration(t *testing.T) {

@@ -716,9 +716,11 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   正确）fail-safe。**全部重基须在新版首次启动之前、停写窗口内完成**——
   停的是**旧版本全部实例**（窗口内禁止滚动升级：旧实例事后再写
   留下未转换行、新实例提前启动触发兜底），且用**新**二进制跑
-  `chok migrate up`/`repair` 本身就算首启（会应用 pending 迁移、
-  刷新 manifest）：首启的新写入带着同样的标与列、事后重基会把
-  正确的新值反向搬歪。beta.4 直跳的库连这些列都没有——语句响亮
+  `chok migrate` 的**写命令**本身就算首启——裸 `up` 以新基准写
+  应用账本、`up --all-owned`/`--component` 还会刷新 manifest、
+  `repair mark-applied` 重写账本行 applied_at；`status` 纯读、
+  窗口内可跑：首启的新写入带着同样的标与列、事后重基会把正确的
+  新值反向搬歪。beta.4 直跳的库连这些列都没有——语句响亮
   失败即是信号：纯 beta.4 账本全为 DEFAULT 写入、本就无需重基，
   跳过即可；若已先启动，账本语句加版本边界（AND version <=
   升级前最高版本）、manifest 只转**升级前已存在 kind** 的
