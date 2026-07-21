@@ -259,7 +259,7 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 		t.Fatalf("correct-instant TIMESTAMP reads %v from now on the new baseline; want the true instant", d)
 	}
 	if diff := newRead.Sub(oldRead); diff != 3*time.Hour {
-		t.Fatalf("old read %v vs new read %v: difference %v, want the documented 3h correction (session minus process)", oldRead, newRead, diff)
+		t.Fatalf("old read %v vs new read %v: difference %v, want the 3h correction that undoes the documented (session - process) skew", oldRead, newRead, diff)
 	}
 
 	// The recipe (CHANGELOG Breaking entry): driver-written DATETIME by

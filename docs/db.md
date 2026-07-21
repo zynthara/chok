@@ -711,8 +711,10 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   正确、无需处理——但这个免迁/须迁之分是**按行**不是按列：混合来源
   的列只转参数写入的行（整列盲转会把正确行搬错同样的差值；chok
   账本恰有此混合——≤beta.4 的 applied_at 走 DEFAULT、beta.5 起参数
-  写入，DEFAULT 时代的行带 `provenance IN ('legacy','checksum-tofu')`
-  标记可排除）。免迁的 DEFAULT 值另有一条**读侧披露**：旧读取原本
+  写入，账本只转 `provenance IN ('applied','baseline')` 的行——正向
+  谓词对收养前的空串行 fail-safe，且账本重基须在新版**首次启动之后**
+  执行：收养打标发生在启动时，beta.4 直跳的库启动前连这些列都不存在，
+  过早执行会响亮失败而非转错）。免迁的 DEFAULT 值另有一条**读侧披露**：旧读取原本
   把它们偏斜 (旧 session−旧进程) 返回，升级后 API 可见瞬间被校正
   这个差值（数据不动、可见值移动）。**DATE 列**存量不动（历日无时区可重基），但写入
   契约随基准改变：存的是**瞬间的 UTC 历日**——date-only 值请以 UTC
