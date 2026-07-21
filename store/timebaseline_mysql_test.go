@@ -183,10 +183,20 @@ func (legacyRebaseRow) TableName() string { return "legacy_rebase_rows" }
 // skewed by exactly the difference between the two — the old driver
 // formatted the +08 wall clock and the old session interpreted it at
 // +05, storing an internal instant 3h late, which the old asymmetric
-// read canceled and the new symmetric UTC read exposes. A recipe that
-// rebased every column by the process zone alone (the pre-round-3
-// wording) leaves deleted_at and the TIMESTAMP 3h wrong and fails
-// here.
+// read canceled and the new symmetric UTC read exposes.
+//
+// One TIMESTAMP column deliberately holds BOTH provenances (row x
+// parameter-written and skewed; row d SQL-evaluated the way DEFAULT
+// CURRENT_TIMESTAMP fills it — internal instant already correct, the
+// mix chok's own ledger acquired between beta.4's DEFAULT-filled
+// applied_at and beta.5's parameter writes), so the recipe's TIMESTAMP
+// conversion must select rows by provenance: a blanket per-column
+// UPDATE (the pre-round-4 wording) corrupts row d by the same 3h it
+// repairs row x with, and fails here. Row d also pins the read-side
+// disclosure for correct-instant TIMESTAMP values: the OLD asymmetric
+// read showed them skewed by (session - process), so the upgrade
+// CORRECTS what the API returns for them by that difference — no data
+// migration, visible values move.
 func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	h := dbtest.OpenMySQL(t)
 	ctx := context.Background()
@@ -200,23 +210,37 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	}
 
 	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
-	if err := s.Create(ctx, &legacyRebaseRow{Status: "x", At: inst}); err != nil {
-		t.Fatal(err)
+	for _, status := range []string{"x", "d"} {
+		if err := s.Create(ctx, &legacyRebaseRow{Status: status, At: inst}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var dbName string
 	if err := gdb.Raw("SELECT DATABASE()").Row().Scan(&dbName); err != nil {
 		t.Fatal(err)
 	}
 	legacy := openMySQLLegacyWriter(t, dbName, time.FixedZone("proc8", 8*3600), "+05:00")
+	// Row x: every value the legacy process wrote through parameters,
+	// plus the session-evaluated soft delete. Row d: the TIMESTAMP is
+	// SQL-evaluated (the DEFAULT CURRENT_TIMESTAMP class) — its
+	// internal instant is correct from day one.
 	if _, err := legacy.Exec("UPDATE legacy_rebase_rows SET at = ?, ts = ? WHERE status = 'x'", inst, inst); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := legacy.Exec("UPDATE legacy_rebase_rows SET deleted_at = CURRENT_TIMESTAMP WHERE status = 'x'"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := legacy.Exec("UPDATE legacy_rebase_rows SET at = ?, ts = CURRENT_TIMESTAMP WHERE status = 'd'", inst); err != nil {
+		t.Fatal(err)
+	}
 
-	// Pre-recipe pin of the skew itself: the TIMESTAMP's internal
-	// instant sits 3h late (process offset minus session offset).
+	// Pre-recipe pins. Row x: the parameter-written TIMESTAMP's
+	// internal instant sits 3h late (process offset minus session
+	// offset). Row d: the internal instant is correct — the NEW read
+	// returns it, while the OLD asymmetric read (legacy connection)
+	// shows it 3h early: session renders the +05 wall clock, Loc
+	// parses it at +08. That difference is the API-visible correction
+	// the upgrade applies to DEFAULT-written TIMESTAMP values.
 	var preTs time.Time
 	if err := gdb.Raw("SELECT ts FROM legacy_rebase_rows WHERE status = 'x'").Row().Scan(&preTs); err != nil {
 		t.Fatal(err)
@@ -224,15 +248,30 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	if want := inst.Add(3 * time.Hour); !preTs.Equal(want) {
 		t.Fatalf("legacy TIMESTAMP = %v, want the documented %v skew (Loc-formatted wall clock interpreted by a different session zone)", preTs, want)
 	}
+	var newRead, oldRead time.Time
+	if err := gdb.Raw("SELECT ts FROM legacy_rebase_rows WHERE status = 'd'").Row().Scan(&newRead); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.QueryRow("SELECT ts FROM legacy_rebase_rows WHERE status = 'd'").Scan(&oldRead); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(newRead); d < -5*time.Minute || d > 5*time.Minute {
+		t.Fatalf("correct-instant TIMESTAMP reads %v from now on the new baseline; want the true instant", d)
+	}
+	if diff := newRead.Sub(oldRead); diff != 3*time.Hour {
+		t.Fatalf("old read %v vs new read %v: difference %v, want the documented 3h correction (session minus process)", oldRead, newRead, diff)
+	}
 
-	// The recipe, one conversion per provenance (CHANGELOG Breaking
-	// entry): driver-written DATETIME by the old process zone,
-	// SQL-evaluated DATETIME by the old session zone, parameter-written
-	// TIMESTAMP by the difference between the two.
+	// The recipe (CHANGELOG Breaking entry): driver-written DATETIME by
+	// the old process zone; SQL-evaluated DATETIME by the old session
+	// zone; parameter-written TIMESTAMP by the difference between the
+	// two — selected BY ROW where the column mixes provenances (the
+	// status predicate here stands in for the ledger's provenance
+	// marker). Converting row d too would move its correct instant 3h.
 	for _, stmt := range []string{
 		"UPDATE legacy_rebase_rows SET at = CONVERT_TZ(at, '+08:00', '+00:00') WHERE at IS NOT NULL",
 		"UPDATE legacy_rebase_rows SET deleted_at = CONVERT_TZ(deleted_at, '+05:00', '+00:00') WHERE deleted_at IS NOT NULL",
-		"UPDATE legacy_rebase_rows SET ts = CONVERT_TZ(ts, '+08:00', '+05:00') WHERE ts IS NOT NULL",
+		"UPDATE legacy_rebase_rows SET ts = CONVERT_TZ(ts, '+08:00', '+05:00') WHERE ts IS NOT NULL AND status = 'x'",
 	} {
 		if err := gdb.Exec(stmt).Error; err != nil {
 			t.Fatalf("%s: %v", stmt, err)
@@ -251,6 +290,17 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	}
 	if d := time.Since(deletedAt); d < -5*time.Minute || d > 5*time.Minute {
 		t.Fatalf("rebased deleted_at %v is %v from now — the session-zone half of the recipe missed", deletedAt, d)
+	}
+	// Row d survived the recipe untouched: still the correct instant.
+	var dAt, dTs time.Time
+	if err := gdb.Raw("SELECT at, ts FROM legacy_rebase_rows WHERE status = 'd'").Row().Scan(&dAt, &dTs); err != nil {
+		t.Fatal(err)
+	}
+	if !dAt.Equal(inst) {
+		t.Fatalf("row d DATETIME = %v, want %v", dAt, inst)
+	}
+	if d := time.Since(dTs); d < -5*time.Minute || d > 5*time.Minute {
+		t.Fatalf("row d TIMESTAMP is %v from now after the recipe — the per-row provenance selection failed and corrupted a correct instant", d)
 	}
 }
 

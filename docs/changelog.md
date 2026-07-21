@@ -32,11 +32,24 @@
 > 现状+启动 warn 护栏（三个根因一个不修，把债滚到 GA 后）、config 开关
 > （给 per-deployment 基准差异发身份证，local 模式的缺陷成为永久支持
 > 义务；真需求出现时加固定偏移白名单字段是纯加法，门没焊死）。
-> **Breaking**：非 UTC 进程写成的存量库需 `CONVERT_TZ` 一次性重基
-> （固定偏移精确无损；TIMESTAMP 列免迁），配方在根目录 CHANGELOG；
-> beta 是此变更唯一的低成本窗口。真驱动 pin 测试同步翻转：round-2/3
-> 测试改为断言 chok 侧恒 UTC 墙钟、不折叠，异 Loc 外部连接仍裂值/折叠
-> （物理边界的证词保留）。
+> **Breaking**：存量库需 `CONVERT_TZ` 一次性重基（固定偏移精确
+> 无损），配方在根目录 CHANGELOG；beta 是此变更唯一的低成本窗口。
+> 真驱动 pin 测试同步翻转：round-2/3 测试改为断言 chok 侧恒 UTC
+> 墙钟、不折叠，异 Loc 外部连接仍裂值/折叠（物理边界的证词保留）。
+>
+> **round-3/4 复审修正**（存量矩阵，实现不变）：旧基准实为**两个**
+> 时区（驱动写入列=旧进程时区；SQL 求值列 deleted_at/NOW()=旧
+> session 时区），重基须按来源逐列——初版配方全按进程时区会把
+> deleted_at 转错；「TIMESTAMP 免迁」只对 `DEFAULT CURRENT_TIMESTAMP`
+> 生成值成立，**参数写入**的 TIMESTAMP（含框架账本 beta.5+ 的
+> applied_at——beta.4 走 DEFAULT，同列混合，须按 `provenance NOT IN
+> ('legacy','checksum-tofu')` 行级甄别）在双旧时区分裂时内部瞬间
+> 偏斜两者之差、须消偏；免迁的 DEFAULT 值升级后 API 可见瞬间被校正
+> (旧 session−旧进程)（旧读取原本偏斜返回）；Loc=UTC 连带钦定
+> **DATE 列 civil-date 契约**（存瞬间的 UTC 历日，date-only 值以
+> UTC 午夜构造，存量历日不动）。端到端回归
+> `TestMySQLUTCBaseline_LegacyRebaseRecipe`（分裂双旧时区 + 混合
+> 来源列 + 读侧校正）与 `_DateColumnCivilContract`。
 
 ## Unreleased — cast/patch 写路径：`Patch(req)`（arch-backlog #5）
 

@@ -363,7 +363,11 @@ DATETIME 按旧进程时区、SQL 求值的 DATETIME（软删 `deleted_at`）按
 旧 session 时区 `CONVERT_TZ` 到 +00:00；参数写入的 TIMESTAMP 列
 （含框架迁移账本）在两个旧时区不同时按
 `CONVERT_TZ(col, '<旧进程>', '<旧 session>')` 消偏斜，纯
-`DEFAULT CURRENT_TIMESTAMP` 生成的值无需处理。**DATE 列**存量
+`DEFAULT CURRENT_TIMESTAMP` 生成的值无需处理——该区分**按行**：
+混合来源的列只转参数写入的行（chok 账本 ≤beta.4 的 DEFAULT 行带
+`provenance IN ('legacy','checksum-tofu')` 标记可排除）。免迁的
+DEFAULT 值升级后 API 可见瞬间会被校正 (旧 session−旧进程) 的差
+（旧读取原本偏斜返回；数据不动、可见值移动）。**DATE 列**存量
 不动，但写入契约改为「存瞬间的 UTC 历日」——date-only 值以 UTC
 午夜构造，东偏时区的本地午夜此后落到前一 UTC 日。完整配方与 DST
 存量注意事项见根目录 CHANGELOG 对应 Breaking 条目。同库的非 chok

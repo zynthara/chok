@@ -708,7 +708,13 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   时区时内部瞬间偏斜两者之差（旧读取的反向抵消掩盖了它，UTC 对称
   读取会暴露），按 `CONVERT_TZ(col, '<旧进程>', '<旧 session>')`
   重基；纯 `DEFAULT CURRENT_TIMESTAMP` 生成的 TIMESTAMP 值瞬间本就
-  正确、无需处理。**DATE 列**存量不动（历日无时区可重基），但写入
+  正确、无需处理——但这个免迁/须迁之分是**按行**不是按列：混合来源
+  的列只转参数写入的行（整列盲转会把正确行搬错同样的差值；chok
+  账本恰有此混合——≤beta.4 的 applied_at 走 DEFAULT、beta.5 起参数
+  写入，DEFAULT 时代的行带 `provenance IN ('legacy','checksum-tofu')`
+  标记可排除）。免迁的 DEFAULT 值另有一条**读侧披露**：旧读取原本
+  把它们偏斜 (旧 session−旧进程) 返回，升级后 API 可见瞬间被校正
+  这个差值（数据不动、可见值移动）。**DATE 列**存量不动（历日无时区可重基），但写入
   契约随基准改变：存的是**瞬间的 UTC 历日**——date-only 值请以 UTC
   午夜构造（`time.Date(y, m, d, 0, 0, 0, 0, time.UTC)`），东偏时区
   的本地午夜此后落到前一 UTC 日，读回为存量历日的 UTC 午夜。完整
