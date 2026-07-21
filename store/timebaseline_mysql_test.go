@@ -246,6 +246,17 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	if err := gdb.Exec("UPDATE legacy_rebase_rows SET ts = ? WHERE status = 'n'", inst).Error; err != nil {
 		t.Fatal(err)
 	}
+	// Row d's DATETIME is then REWRITTEN post-boot on the new baseline
+	// — an UPDATE to a pre-upgrade row, the shape of every refreshable
+	// column (autoUpdateTime's updated_at, a late soft-delete's
+	// deleted_at, a login's last_used_at). Its id/status did not
+	// change, so no insert-frontier bound can exclude it: the recipe
+	// below must leave the whole row-d DATETIME out, which is why the
+	// docs route refreshable columns touched by post-boot traffic to
+	// the restore-backup path instead of an id bound.
+	if err := gdb.Exec("UPDATE legacy_rebase_rows SET at = ? WHERE status = 'd'", inst).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	// Pre-recipe pins. Row x: the parameter-written TIMESTAMP's
 	// internal instant sits 3h late (process offset minus session
@@ -278,14 +289,15 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	// The recipe (CHANGELOG Breaking entry): driver-written DATETIME by
 	// the old process zone; SQL-evaluated DATETIME by the old session
 	// zone; parameter-written TIMESTAMP by the difference between the
-	// two — selected BY ROW where the column mixes provenances (the
-	// status predicates stand in for the ledger's provenance marker
-	// and, for row n, for the pre-upgrade version bound the recipe
-	// prescribes when the new version booted first). Converting row d
-	// moves its correct instant 3h; converting row n drags a
-	// new-baseline value off UTC the same way.
+	// two — selected BY ROW where a column mixes provenances or was
+	// touched after the switch (the status predicates stand in for the
+	// ledger's provenance marker, the insert frontier that excludes
+	// row n, and the no-marker-exists reality of row d's rewritten
+	// DATETIME). Converting row d's TIMESTAMP moves its correct
+	// instant 3h; converting row n, or row d's rewritten DATETIME,
+	// drags a new-baseline value off UTC the same way.
 	for _, stmt := range []string{
-		"UPDATE legacy_rebase_rows SET at = CONVERT_TZ(at, '+08:00', '+00:00') WHERE at IS NOT NULL AND status IN ('x', 'd')",
+		"UPDATE legacy_rebase_rows SET at = CONVERT_TZ(at, '+08:00', '+00:00') WHERE at IS NOT NULL AND status = 'x'",
 		"UPDATE legacy_rebase_rows SET deleted_at = CONVERT_TZ(deleted_at, '+05:00', '+00:00') WHERE deleted_at IS NOT NULL",
 		"UPDATE legacy_rebase_rows SET ts = CONVERT_TZ(ts, '+08:00', '+05:00') WHERE ts IS NOT NULL AND status = 'x'",
 	} {
@@ -307,13 +319,16 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	if d := time.Since(deletedAt); d < -5*time.Minute || d > 5*time.Minute {
 		t.Fatalf("rebased deleted_at %v is %v from now — the session-zone half of the recipe missed", deletedAt, d)
 	}
-	// Row d survived the recipe untouched: still the correct instant.
+	// Row d survived the recipe untouched: the SQL-evaluated TIMESTAMP
+	// kept its correct instant, and the post-boot REWRITTEN DATETIME —
+	// which no insert-frontier bound could have excluded — kept its
+	// new-baseline value.
 	var dAt, dTs time.Time
 	if err := gdb.Raw("SELECT at, ts FROM legacy_rebase_rows WHERE status = 'd'").Row().Scan(&dAt, &dTs); err != nil {
 		t.Fatal(err)
 	}
 	if !dAt.Equal(inst) {
-		t.Fatalf("row d DATETIME = %v, want %v", dAt, inst)
+		t.Fatalf("row d rewritten DATETIME = %v, want %v — the recipe converted a value the new version had already corrected", dAt, inst)
 	}
 	if d := time.Since(dTs); d < -5*time.Minute || d > 5*time.Minute {
 		t.Fatalf("row d TIMESTAMP is %v from now after the recipe — the per-row provenance selection failed and corrupted a correct instant", d)
