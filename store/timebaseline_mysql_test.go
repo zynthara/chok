@@ -185,18 +185,24 @@ func (legacyRebaseRow) TableName() string { return "legacy_rebase_rows" }
 // +05, storing an internal instant 3h late, which the old asymmetric
 // read canceled and the new symmetric UTC read exposes.
 //
-// One TIMESTAMP column deliberately holds BOTH provenances (row x
-// parameter-written and skewed; row d SQL-evaluated the way DEFAULT
-// CURRENT_TIMESTAMP fills it — internal instant already correct, the
-// mix chok's own ledger acquired between beta.4's DEFAULT-filled
-// applied_at and beta.5's parameter writes), so the recipe's TIMESTAMP
-// conversion must select rows by provenance: a blanket per-column
-// UPDATE (the pre-round-4 wording) corrupts row d by the same 3h it
-// repairs row x with, and fails here. Row d also pins the read-side
-// disclosure for correct-instant TIMESTAMP values: the OLD asymmetric
-// read showed them skewed by (session - process), so the upgrade
-// CORRECTS what the API returns for them by that difference — no data
-// migration, visible values move.
+// One TIMESTAMP column deliberately holds THREE provenances: row x
+// parameter-written by the legacy process and skewed; row d
+// SQL-evaluated the way DEFAULT CURRENT_TIMESTAMP fills it — internal
+// instant already correct (the mix chok's own ledger acquired between
+// beta.4's DEFAULT-filled applied_at and beta.5's parameter writes);
+// and row n parameter-written on the NEW UTC baseline, standing in for
+// everything the upgraded version writes once it boots (applied
+// migration rows, the manifest updated_at refresh). The recipe's
+// TIMESTAMP conversion must select exactly the legacy parameter rows:
+// a blanket per-column UPDATE (the pre-round-4 wording) corrupts row d
+// by the same 3h it repairs row x with, and a conversion that runs
+// after the new version started writing (the pre-round-7 boot-first
+// ordering) drags row n off baseline the same way — both fail here.
+// Row d also pins the read-side disclosure for correct-instant
+// TIMESTAMP values: the OLD asymmetric read showed them skewed by
+// (session - process), so the upgrade CORRECTS what the API returns
+// for them by that difference — no data migration, visible values
+// move.
 func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	h := dbtest.OpenMySQL(t)
 	ctx := context.Background()
@@ -210,7 +216,7 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	}
 
 	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
-	for _, status := range []string{"x", "d"} {
+	for _, status := range []string{"x", "d", "n"} {
 		if err := s.Create(ctx, &legacyRebaseRow{Status: status, At: inst}); err != nil {
 			t.Fatal(err)
 		}
@@ -231,6 +237,13 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := legacy.Exec("UPDATE legacy_rebase_rows SET at = ?, ts = CURRENT_TIMESTAMP WHERE status = 'd'", inst); err != nil {
+		t.Fatal(err)
+	}
+	// Row n is written through the chok handle AFTER the baseline
+	// switch — a UTC-driver parameter write with the pinned session,
+	// exactly what the first boot of the upgraded version produces.
+	// Its internal instant is correct and must survive the recipe.
+	if err := gdb.Exec("UPDATE legacy_rebase_rows SET ts = ? WHERE status = 'n'", inst).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,10 +279,13 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	// the old process zone; SQL-evaluated DATETIME by the old session
 	// zone; parameter-written TIMESTAMP by the difference between the
 	// two — selected BY ROW where the column mixes provenances (the
-	// status predicate here stands in for the ledger's provenance
-	// marker). Converting row d too would move its correct instant 3h.
+	// status predicates stand in for the ledger's provenance marker
+	// and, for row n, for the pre-upgrade version bound the recipe
+	// prescribes when the new version booted first). Converting row d
+	// moves its correct instant 3h; converting row n drags a
+	// new-baseline value off UTC the same way.
 	for _, stmt := range []string{
-		"UPDATE legacy_rebase_rows SET at = CONVERT_TZ(at, '+08:00', '+00:00') WHERE at IS NOT NULL",
+		"UPDATE legacy_rebase_rows SET at = CONVERT_TZ(at, '+08:00', '+00:00') WHERE at IS NOT NULL AND status IN ('x', 'd')",
 		"UPDATE legacy_rebase_rows SET deleted_at = CONVERT_TZ(deleted_at, '+05:00', '+00:00') WHERE deleted_at IS NOT NULL",
 		"UPDATE legacy_rebase_rows SET ts = CONVERT_TZ(ts, '+08:00', '+05:00') WHERE ts IS NOT NULL AND status = 'x'",
 	} {
@@ -301,6 +317,19 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	}
 	if d := time.Since(dTs); d < -5*time.Minute || d > 5*time.Minute {
 		t.Fatalf("row d TIMESTAMP is %v from now after the recipe — the per-row provenance selection failed and corrupted a correct instant", d)
+	}
+	// Row n — the new-baseline writes — survived both statements: a
+	// recipe run after the new version started writing must bound its
+	// conversions to pre-upgrade rows or it un-corrects them.
+	var nAt, nTs time.Time
+	if err := gdb.Raw("SELECT at, ts FROM legacy_rebase_rows WHERE status = 'n'").Row().Scan(&nAt, &nTs); err != nil {
+		t.Fatal(err)
+	}
+	if !nAt.Equal(inst) {
+		t.Fatalf("row n DATETIME = %v, want %v — the recipe converted a new-baseline value", nAt, inst)
+	}
+	if !nTs.Equal(inst) {
+		t.Fatalf("row n TIMESTAMP = %v, want %v — the recipe converted a new-baseline value", nTs, inst)
 	}
 }
 

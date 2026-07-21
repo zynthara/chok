@@ -43,9 +43,10 @@
 > deleted_at 转错；「TIMESTAMP 免迁」只对 `DEFAULT CURRENT_TIMESTAMP`
 > 生成值成立，**参数写入**的 TIMESTAMP（含框架账本 beta.5+ 的
 > applied_at——beta.4 走 DEFAULT，同列混合，须行级甄别：账本正向
-> 谓词 `provenance IN ('applied','baseline')`，且在新版首次启动
-> （收养打标）之后执行）在双旧时区分裂时内部瞬间偏斜两者之差、
-> 须消偏；免迁的 DEFAULT 值升级后 API 可见瞬间被校正
+> 谓词 `provenance IN ('applied','baseline')`（旧引擎写入时即打标），
+> 全部重基在新版首启**之前**、停写窗口内完成——首启会以新基准写入
+> 同标记账本行并刷新 manifest updated_at，事后重基会把正确新值
+> 搬歪）在双旧时区分裂时内部瞬间偏斜两者之差、须消偏；免迁的 DEFAULT 值升级后 API 可见瞬间被校正
 > (旧 session−旧进程)（旧读取原本偏斜返回）；Loc=UTC 连带钦定
 > **DATE 列 civil-date 契约**（存瞬间的 UTC 历日，date-only 值以
 > UTC 午夜构造，存量历日不动）。端到端回归

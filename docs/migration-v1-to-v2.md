@@ -365,9 +365,12 @@ DATETIME 按旧进程时区、SQL 求值的 DATETIME（软删 `deleted_at`）按
 `CONVERT_TZ(col, '<旧进程>', '<旧 session>')` 消偏斜，纯
 `DEFAULT CURRENT_TIMESTAMP` 生成的值无需处理——该区分**按行**：
 混合来源的列只转参数写入的行（chok 账本只转
-`provenance IN ('applied','baseline')` 的行——收养打标在新版首次
-启动时发生，账本重基须在首次启动**之后**执行；beta.4 直跳的库
-启动前连列都没有，语句响亮失败即是先启动的信号）。免迁的
+`provenance IN ('applied','baseline')` 的行——旧引擎写入时即打标；
+**全部重基在新版首次启动之前、停写窗口内完成**：首启会以新基准
+写入同标记的账本行并刷新 manifest 的 updated_at，事后重基会把
+正确的新值搬歪；beta.4 直跳的库无这些列、语句响亮失败即「纯
+DEFAULT 账本无需重基」的信号；已先启动则账本语句加
+`AND version <= 升级前最高版本`、manifest 只转 claimed_at）。免迁的
 DEFAULT 值升级后 API 可见瞬间会被校正 (旧 session−旧进程) 的差
 （旧读取原本偏斜返回；数据不动、可见值移动）。**DATE 列**存量
 不动，但写入契约改为「存瞬间的 UTC 历日」——date-only 值以 UTC
