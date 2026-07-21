@@ -680,14 +680,24 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   差异折叠），返回 UTC 值；数值存量按 **Unix 秒**读取（typeof 分支，
   不用 SQLite 的 'auto' 启发——它会把 1970 年头 63 天的 Unix 秒误读成
   Julian day；Julian REAL 刻意不支持）。这只影响聚合，存储值、filter
-  与排序不动。② **MySQL 的时间列是 DATETIME，存的是写入进程时区的
-  墙钟、不做 UTC 转换**（chok 固定驱动 Loc=time.Local）。**部署不变量：
-  同一库的所有写入方必须使用同一个「固定偏移、无 DST」的时区——推荐
-  直接 TZ=UTC**。同时区是必要非充分：带 DST 的时区在每年秋季回拨时把
-  两个不同瞬间折成同一墙钟（America/New_York 的 11 月切换日 05:30Z 与
-  06:30Z 都是 01:30），**单进程也躲不开**；折叠或混合时区写成的存量
-  墙钟不带时区、读取侧无法修复。这条不变量同样约束排序 / 范围过滤 /
-  游标，不只聚合。PG（timestamptz）写入即归一 UTC，无此约束。
+  与排序不动。② **MySQL 的时间列是 DATETIME，存裸墙钟；chok 把写入
+  基准双钉在 UTC**（驱动 `Loc=time.UTC` 管 DATETIME 读写；每连接
+  `SET time_zone='+00:00'` 管 SQL 侧求值——软删写 `deleted_at` 的
+  `CURRENT_TIMESTAMP`、用户 SQL 的 `NOW()`、TIMESTAMP 列转换，否则
+  这半边悬在服务器时区上，与驱动侧分叉成第二条基准）。chok 写入方
+  因此**结构性正确**：进程 TZ 任意、跨实例任意混合、Go 值带什么时区
+  都无所谓——UTC 无 DST 转换，瞬间→墙钟是单射，不存在秋季回拨把两个
+  瞬间折成同一墙钟的折叠（America/New_York 的 11 月切换日 05:30Z 与
+  06:30Z 都是 01:30——v2.0.0-beta.6 及更早的 `Loc=time.Local` 下这在
+  单进程内就会发生）。残余约束只剩一条**外部写入方须知**：DATETIME
+  不带时区，框架管不到别人的连接——同库的非 chok 写入方必须同样按
+  UTC 墙钟写入，否则同一瞬间两种墙钟、读取侧无法修复。这条约束同样
+  覆盖排序 / 范围过滤 / 游标，不只聚合。PG（timestamptz）写入即归一
+  UTC，无此题。**存量迁移**：v2.0.0-beta.6 及更早版本按进程时区墙钟
+  写入的库，若旧进程时区不是 UTC，升级后需一次性重基——逐 DATETIME
+  列 `CONVERT_TZ(col, '<旧进程时区偏移>', '+00:00')`（TIMESTAMP 列
+  内部存 UTC 瞬间，无需迁移），完整配方见根目录 CHANGELOG 的
+  Breaking 条目。
 - 🚫 **字段名 typo 是服务端 bug**：原样返回 `where.ErrUnknownField`
   （→ 500），provenance 划界与 `Pluck`/`List` 一致（§11.2 例外①）。
 - 字符串/布尔列不可聚合（文本 MIN/MAX 的序由方言 collation 定义，跨

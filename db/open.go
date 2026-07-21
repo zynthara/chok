@@ -294,7 +294,17 @@ func openMySQL(o *MySQLOptions, readOnly bool) (*gorm.DB, error) {
 }
 
 func mysqlDriverConfig(o *MySQLOptions, tlsName string, readOnly bool) *gomysql.Config {
-	params := map[string]string{"charset": "utf8mb4"}
+	params := map[string]string{
+		"charset": "utf8mb4",
+		// UTC write baseline, server half. Session time_zone governs what
+		// the driver's Loc cannot reach: SQL-evaluated timestamps
+		// (CURRENT_TIMESTAMP / NOW(), which write the soft-delete
+		// deleted_at) and TIMESTAMP-column conversion. Left unset it
+		// inherits the server's global zone, forking those values onto a
+		// second baseline whenever the server zone differs from the
+		// process zone. The numeric offset needs no server tz tables.
+		"time_zone": "'+00:00'",
+	}
 	if readOnly {
 		// go-sql-driver applies arbitrary Params as SET statements whenever a
 		// connection is established. This is a session-level backstop; server
@@ -302,14 +312,22 @@ func mysqlDriverConfig(o *MySQLOptions, tlsName string, readOnly bool) *gomysql.
 		params["transaction_read_only"] = "1"
 	}
 	return &gomysql.Config{
-		User:                 o.Username,
-		Passwd:               o.Password,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", o.Host, o.Port),
-		DBName:               o.Database,
-		Params:               params,
-		ParseTime:            true,
-		Loc:                  time.Local,
+		User:      o.Username,
+		Passwd:    o.Password,
+		Net:       "tcp",
+		Addr:      fmt.Sprintf("%s:%d", o.Host, o.Port),
+		DBName:    o.Database,
+		Params:    params,
+		ParseTime: true,
+		// UTC write baseline, driver half (arch-backlog #17). DATETIME
+		// stores a naked wall clock; Loc decides WHICH wall clock the
+		// driver writes and how it parses one back. UTC makes instant →
+		// wall clock injective (no DST fold) and identical across
+		// processes, so ordering / range filters / cursors / aggregates
+		// compare instants regardless of any machine's TZ. time.Local
+		// (the v1 heritage) tied that correctness to the deployment
+		// environment; go-sql-driver's own default is UTC.
+		Loc:                  time.UTC,
 		AllowNativePasswords: true,
 		TLSConfig:            tlsName,
 	}

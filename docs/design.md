@@ -381,11 +381,16 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   聚合读取处经框架自产 strftime 表达式归一 UTC/毫秒（混合偏移不再
   选错极值/裂组；数值存量按 Unix 秒读，不用会误读 1970 年初的
   'auto'；仅聚合，存储与 filter/排序/游标不动）；MySQL DATETIME 存
-  进程时区墙钟、不转 UTC——部署不变量：**同库所有写入方同一「固定
-  无 DST」时区，推荐 TZ=UTC**（同时区必要非充分：DST 回拨把两个瞬间
-  折成同一墙钟，单进程也发生；约束排序/过滤/游标全部时间比较面，
-  聚合只是继承），折叠/跨时区存量读取侧不可修复；PG timestamptz 无
-  此约束。能力矩阵两半：wire kind 管 Go 收敛，**数据库真实列型**管
+  裸墙钟，chok 把写入基准**双钉 UTC**（驱动 Loc=time.UTC 管 DATETIME
+  读写；每连接 SET time_zone='+00:00' 管 SQL 侧求值——软删 deleted_at
+  的 CURRENT_TIMESTAMP、用户 SQL 的 NOW()、TIMESTAMP 列转换，与驱动
+  写入同基准，不再悬在服务器时区上）：chok 写入方结构性免疫 DST
+  折叠与跨实例时区漂移，进程 TZ 不再参与正确性；残余约束=同库
+  **非 chok 写入方**须同按 UTC 墙钟写（DATETIME 不带时区，外人写歪
+  的存量读取侧无法修复；约束排序/过滤/游标全部时间比较面，聚合只是
+  继承）；旧版（≤beta.6，Loc=time.Local）非 UTC 进程写入的存量需
+  CONVERT_TZ 一次性重基（CHANGELOG Breaking 条目携配方）；PG
+  timestamptz 无此题。能力矩阵两半：wire kind 管 Go 收敛，**数据库真实列型**管
   操作合法性——真实列型读自 catalog **纯元数据**（pragma_table_info /
   PG pg_catalog / MySQL information_schema，首次聚合懒解析+缓存；不用
   gorm `ColumnTypes`——

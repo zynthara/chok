@@ -10,6 +10,34 @@
 
 ---
 
+## Unreleased — MySQL 时间写入基准 → UTC 双钉（arch-backlog #17）
+
+> #7 聚合复审 round-2/3 立项的决策项收口。旧状 `Loc=time.Local`（v1
+> 沿袭、gorm 快速上手流派，主动覆盖了 go-sql-driver 的 UTC 默认）把
+> DATETIME 写成**进程时区**的墙钟，正确性悬在框架看不见的 `TZ` 环境
+> 变量上：带 DST 的进程时区在秋季回拨把两个瞬间折成同一墙钟（单进程
+> 即发生、存量不可修复），跨实例时区不一致静默裂值，且软删的
+> `deleted_at = CURRENT_TIMESTAMP` 按**服务器**时区求值——进程与服务器
+> 时区不一致时同一张表骑两条基准。这与「config-driven / 外部简单」公理
+> 正面冲突：什么都不配的容器（TZ 未设=UTC）反而正确，认真配了本地时区
+> 的反而埋雷。
+>
+> 决策=**双钉 UTC**：驱动 `Loc=time.UTC`（DATETIME 读写基准）+ 每连接
+> `SET time_zone='+00:00'`（`CURRENT_TIMESTAMP`/`NOW()`/TIMESTAMP 列的
+> SQL 侧求值基准，与驱动侧合流）。UTC 无转换 ⇒ 瞬间→墙钟单射：chok
+> 写入方**结构性**免疫折叠与跨实例漂移，部署不变量「同库所有写入方
+> 同一固定无 DST 时区」对 chok 自身作废，降格为**外部写入方须知**
+> （DATETIME 不带时区是物理边界：非 chok 连接仍须按 UTC 墙钟写）。
+> 考虑并否决：只改 Loc 半件（deleted_at 双基准保留，代价相同收益减半）、
+> 现状+启动 warn 护栏（三个根因一个不修，把债滚到 GA 后）、config 开关
+> （给 per-deployment 基准差异发身份证，local 模式的缺陷成为永久支持
+> 义务；真需求出现时加固定偏移白名单字段是纯加法，门没焊死）。
+> **Breaking**：非 UTC 进程写成的存量库需 `CONVERT_TZ` 一次性重基
+> （固定偏移精确无损；TIMESTAMP 列免迁），配方在根目录 CHANGELOG；
+> beta 是此变更唯一的低成本窗口。真驱动 pin 测试同步翻转：round-2/3
+> 测试改为断言 chok 侧恒 UTC 墙钟、不折叠，异 Loc 外部连接仍裂值/折叠
+> （物理边界的证词保留）。
+
 ## Unreleased — cast/patch 写路径：`Patch(req)`（arch-backlog #5）
 
 > store 架构复审的第二块 DX 架构债：写路径缺 Ecto changeset 的 **cast**

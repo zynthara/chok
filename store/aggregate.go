@@ -53,19 +53,24 @@ import (
 // DATETIME(3) applies at write time; sub-ms distinctions collapse) and
 // returned in UTC. This normalisation is aggregate-only — stored values,
 // filters and ordering are untouched. MySQL time columns are DATETIME,
-// which stores the WALL CLOCK of the writing process's zone (db.Open
-// pins the driver Loc to time.Local) and performs no UTC conversion, so
-// instants only compare correctly under chok's standing deployment
-// invariant: every writer of one MySQL database runs in the same FIXED
-// (transition-free) zone — TZ=UTC is the recommendation. Sharing a zone
-// is necessary but not sufficient: a zone with DST transitions folds
-// distinct instants into one wall clock at every fall-back (in
-// America/New_York, 05:30Z and 06:30Z on the November switch are both
-// 01:30), even within a single process. A fold or a mixed-TZ write
-// history stores no zone to repair from at read time; the same bound
-// applies to ordering, range filters and cursors, not just aggregates.
-// PostgreSQL timestamptz normalises on write and has no such
-// constraint.
+// which stores a naked wall clock; since arch-backlog #17 chok pins the
+// write baseline to UTC on both halves (db.Open sets the driver Loc to
+// time.UTC for DATETIME reads and writes, and pins the session
+// time_zone to +00:00 so SQL-evaluated timestamps — the
+// CURRENT_TIMESTAMP soft delete writes, NOW() in user SQL,
+// TIMESTAMP-column conversion — share that baseline instead of riding
+// the server's zone). UTC is transition-free, so the instant → wall
+// clock conversion is injective: no DST fall-back can fold two instants
+// into one stored value (under the pre-#17 time.Local baseline that
+// happened within a single process — in America/New_York, 05:30Z and
+// 06:30Z on the November switch are both 01:30), and any mix of process
+// TZs across chok instances stays coherent. What remains is a
+// foreign-writer obligation, not a deployment invariant: DATETIME
+// stores no zone, so a non-chok connection writing another zone's wall
+// clocks into the same database splits instants in a way no read-side
+// expression can repair; the same bound covers ordering, range filters
+// and cursors, not just aggregates. PostgreSQL timestamptz normalises
+// on write and has no such concern.
 //
 // Result typing is a deliberate three-dialect convergence. SUM of an
 // integer column returns bigint on PostgreSQL, DECIMAL on MySQL and a

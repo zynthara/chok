@@ -348,6 +348,20 @@ mysql/sqlite 的 `(cols..., delete_token)` 复合唯一在可观测行为上
 gin 与 badger 自 go.mod 消失（含 sonic / quic-go / ristretto 等
 传递树）。若你的应用间接依赖它们，需自行显式引入。
 
+### MySQL 时间写入基准 → UTC【行为变更，beta.6 之后】
+
+v1 与 v2（≤ beta.6）的 MySQL 驱动 `Loc=time.Local`：DATETIME 列存
+**进程时区**的墙钟。此后 v2 双钉 UTC——驱动 `Loc=time.UTC` +
+每连接 `SET time_zone='+00:00'`（后者同时统一
+`CURRENT_TIMESTAMP`/`NOW()` 与 TIMESTAMP 列的 SQL 侧求值基准）。
+**旧进程时区是 UTC 的部署（容器未设 `TZ` 即是）零动作**；非 UTC
+进程写成的存量库需一次性重基：备份、停写后逐 DATETIME 列
+`CONVERT_TZ(col, '<旧进程时区偏移>', '+00:00')`（TIMESTAMP 列内部
+存 UTC 瞬间，无需处理）。完整配方与 DST 存量注意事项见根目录
+CHANGELOG 对应 Breaking 条目。同库的非 chok 写入方此后须同样按
+UTC 墙钟写入 DATETIME。API 响应里 MySQL 后端的时间戳渲染从进程
+时区偏移变为 `Z` 后缀（同一瞬间）。
+
 ---
 
 ## 五、观测与电池行为

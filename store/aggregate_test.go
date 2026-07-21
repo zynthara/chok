@@ -1881,11 +1881,12 @@ func TestAggregate_Round6MySQLEnumColumn(t *testing.T) {
 
 // openMySQLLocWriter opens a second, raw go-sql-driver connection to
 // the SAME per-test database the store handle uses, with the driver Loc
-// pinned to loc — a faithful stand-in for another chok process running
-// in that zone (db.Open pins Loc to the process's time.Local). Writing
-// time.Time values through it exercises the driver's real wall-clock
-// conversion, so these tests pin driver and column-mapping behaviour,
-// not a hand-formatted string.
+// pinned to loc — a faithful stand-in for a connection chok does NOT
+// own (a foreign service, or a pre-#17 chok build whose Loc was
+// time.Local): since arch-backlog #17, db.Open itself pins Loc to
+// time.UTC. Writing time.Time values through it exercises the driver's
+// real wall-clock conversion, so these tests pin driver and
+// column-mapping behaviour, not a hand-formatted string.
 // mysqlCurrentDatabase reports the per-test database a store handle is
 // connected to, so further connections can target the same schema.
 func mysqlCurrentDatabase(t *testing.T, s *Store[AggSale]) string {
@@ -1921,55 +1922,77 @@ func openMySQLLocWriter(t *testing.T, s *Store[AggSale], loc *time.Location) *sq
 	return conn
 }
 
-// TestAggregate_Round2MySQLDatetimeStoresWallClocks pins the mechanical
-// basis of the MySQL deployment invariant (round-2 review #1): time
-// columns are DATETIME(3), which stores the wall clock of the writing
-// connection's Loc and — per the MySQL manual, unlike TIMESTAMP —
-// performs no UTC conversion. Two writers in different zones therefore
-// store one instant as two values, and no read-side expression can
-// repair it (the stored wall clock carries no zone). The second writer
-// here is a real driver connection with a different Loc (round-3
-// hardening: the driver's own conversion is what gets pinned) — if a
-// future driver or column-mapping change makes this converge, the
-// invariant documentation must be revisited along with this test.
+// TestAggregate_Round2MySQLDatetimeStoresWallClocks pins the mechanics
+// under the MySQL time story (round-2 review #1, rebased by
+// arch-backlog #17): time columns are DATETIME(3), which stores the
+// wall clock of the writing connection's Loc and — per the MySQL
+// manual, unlike TIMESTAMP — performs no UTC conversion. Since #17 the
+// driver Loc is pinned to time.UTC, so the wall clock chok writes IS
+// the UTC wall clock whatever zone the Go value carries and whatever TZ
+// the process runs under: one instant, one stored value, across any mix
+// of chok processes. The stored text is asserted against the column
+// itself, because a symmetric conversion bug would survive a round
+// trip. The residual half of the old deployment invariant applies to
+// connections chok does not own: a foreign writer with a different Loc
+// still stores a different wall clock for the same instant, and no
+// read-side expression can repair it (the stored wall clock carries no
+// zone) — pinned through a real driver connection; if a future driver
+// or column-mapping change makes this converge, the invariant
+// documentation must be revisited along with this test.
 func TestAggregate_Round2MySQLDatetimeStoresWallClocks(t *testing.T) {
 	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
 	ctx := context.Background()
 
 	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
-	for _, status := range []string{"w1", "w2"} {
-		if err := s.Create(ctx, &AggSale{Status: status, Qty: 1, Price: 1, Flag: true, At: inst}); err != nil {
+	// The same instant enters through two different Go-side zones; the
+	// driver converges both onto the UTC baseline.
+	kathmandu := time.FixedZone("kathmandu", 5*3600+45*60)
+	for status, at := range map[string]time.Time{"w1": inst, "w2": inst.In(kathmandu)} {
+		if err := s.Create(ctx, &AggSale{Status: status, Qty: 1, Price: 1, Flag: true, At: at}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Same process, same Loc: one instant, one value.
 	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 1 {
-		t.Fatalf("single-writer baseline: CountDistinct = %d, %v; want 1", n, err)
+		t.Fatalf("chok writers: CountDistinct = %d, %v; want 1 — any Go-side zone must converge onto the UTC baseline", n, err)
+	}
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := gdb.Raw("SELECT DATE_FORMAT(at, '%Y-%m-%d %H:%i:%s') FROM agg_sales WHERE status = 'w1'").Row().Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if want := "2026-07-04 06:00:00"; stored != want {
+		t.Fatalf("stored wall clock = %q, want the UTC wall clock %q", stored, want)
 	}
 
-	// A writer three hours east of this process rewrites the second row
-	// with the SAME instant — the driver converts it to that zone's wall
-	// clock before sending.
-	_, offset := inst.In(time.Local).Zone()
-	east := openMySQLLocWriter(t, s, time.FixedZone("east3", offset+3*3600))
+	// A foreign writer three hours east of UTC rewrites the second row
+	// with the SAME instant — its driver converts it to that zone's wall
+	// clock before sending, and the rows diverge. This is the residual
+	// invariant: writers chok does not own must share the UTC baseline.
+	east := openMySQLLocWriter(t, s, time.FixedZone("east3", 3*3600))
 	if _, err := east.Exec("UPDATE agg_sales SET at = ? WHERE status = 'w2'", inst); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 2 {
-		t.Fatalf("cross-TZ writers: CountDistinct = %d, %v; want the documented divergence to 2", n, err)
+		t.Fatalf("foreign-Loc writer: CountDistinct = %d, %v; want the documented divergence to 2", n, err)
 	}
 }
 
-// TestAggregate_Round3MySQLDSTFoldCollapsesInstants pins the round-3
-// review #1 sharpening of the invariant: sharing one zone is NOT enough
-// when that zone has DST transitions. At the America/New_York 2026
-// fall-back, 05:30Z and 06:30Z are both wall clock 01:30 (EDT then
-// EST), so a single writer in that zone stores two DIFFERENT instants
-// as one identical DATETIME — CountDistinct folds, GROUP BY merges,
-// MIN/MAX cannot separate them, and the stored value carries nothing to
-// repair it with. Hence the deployment invariant demands one FIXED
-// zone, with TZ=UTC as the recommendation. Both writes go through a
-// real driver connection pinned to the DST zone.
+// TestAggregate_Round3MySQLDSTFoldCollapsesInstants pins the DST-fold
+// mechanics that motivated arch-backlog #17. A driver Loc with DST
+// transitions folds two instants into one wall clock at every
+// fall-back: at the America/New_York 2026 switch, 05:30Z and 06:30Z are
+// both wall clock 01:30 (EDT then EST), and the stored DATETIME carries
+// nothing to repair the collision from. Since #17 chok connections
+// write through Loc=time.UTC — transition-free, the conversion is
+// injective — so the first half asserts the fold CANNOT happen through
+// chok, even when the Go values themselves carry the DST zone. The
+// second half pins the fold itself through a real driver connection
+// kept in the DST zone: a foreign writer remains physically exposed,
+// which is why the residual invariant obliges non-chok writers to share
+// the UTC baseline.
 func TestAggregate_Round3MySQLDSTFoldCollapsesInstants(t *testing.T) {
 	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
 	ctx := context.Background()
@@ -1983,26 +2006,32 @@ func TestAggregate_Round3MySQLDSTFoldCollapsesInstants(t *testing.T) {
 	if beforeFold.Equal(afterFold) {
 		t.Fatal("sanity: the two instants must differ")
 	}
-	for _, status := range []string{"w1", "w2"} {
-		if err := s.Create(ctx, &AggSale{Status: status, Qty: 1, Price: 1, Flag: true, At: time.Now()}); err != nil {
+	// Hand chok the fold-prone instants IN New York time: the UTC driver
+	// baseline keeps them distinct regardless of the value's zone.
+	for status, at := range map[string]time.Time{"w1": beforeFold.In(ny), "w2": afterFold.In(ny)} {
+		if err := s.Create(ctx, &AggSale{Status: status, Qty: 1, Price: 1, Flag: true, At: at}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 2 {
+		t.Fatalf("chok writers: CountDistinct = %d, %v; want 2 — the UTC baseline is transition-free, the fold must not happen", n, err)
+	}
+
+	// The same two instants through a real NY-Loc connection: two
+	// distinct instants, one stored wall clock. The fold is real and
+	// unrepairable for any writer that keeps a DST zone.
 	nyWriter := openMySQLLocWriter(t, s, ny)
 	for status, at := range map[string]time.Time{"w1": beforeFold, "w2": afterFold} {
 		if _, err := nyWriter.Exec("UPDATE agg_sales SET at = ? WHERE status = ?", at, status); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Two distinct instants, one stored wall clock: the fold is real and
-	// unrepairable — the documented reason the invariant requires a
-	// fixed (transition-free) zone, recommending TZ=UTC.
 	if n, err := CountDistinct(ctx, s, "at"); err != nil || n != 1 {
-		t.Fatalf("DST fold: CountDistinct = %d, %v; the two instants collapse into 1 stored value", n, err)
+		t.Fatalf("NY-Loc foreign writer: CountDistinct = %d, %v; the two instants collapse into 1 stored value", n, err)
 	}
 	groups, err := GroupBy[time.Time](ctx, s, "at", []Aggregate{CountRows()})
 	if err != nil || len(groups) != 1 {
-		t.Fatalf("DST fold: groups = %v, %v; the two instants merge into 1 bucket", groups, err)
+		t.Fatalf("NY-Loc foreign writer: groups = %v, %v; the two instants merge into 1 bucket", groups, err)
 	}
 }
 
