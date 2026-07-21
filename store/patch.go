@@ -290,14 +290,18 @@ func patchPlanFor(rt reflect.Type) *patchPlan {
 // field correctly hides a deeper same-name pointer rather than letting it leak
 // in under a name the wire actually routes elsewhere.
 //
-// Phase 2 — selection: per public name the shallowest depth wins. If exactly
-// one patchable field sits at that depth it is emitted; if none do the name is
-// simply not patchable (its json-visible winner is a non-pointer, a nested
-// object, or opted out); if two or more patchable fields tie at that depth the
-// DTO is rejected — a genuine ambiguity about which field to patch, reported
-// loud at build (stricter than encoding/json's tag-dominance tie-break). A tie
-// among purely non-patchable candidates drops the name silently, mirroring
-// encoding/json.
+// Phase 2 — selection: per public name the shallowest depth wins, then
+// encoding/json's dominance picks the winner AMONG all candidates at that
+// depth — the unique tagged field, or the sole candidate, else the name is
+// dropped (ambiguous to encoding/json: two untagged, or two-plus tagged). The
+// winner is emitted only when it is patchable; a non-patchable or dropped
+// winner leaves the name un-patchable, exactly as encoding/json exposes it (or
+// doesn't). Because non-patchable candidates take part in this dominance, a
+// lone patchable field does NOT win a name that encoding/json would drop or
+// route to an opted-out / non-pointer / named-embed sibling. The single place
+// Patch is stricter: two or more PATCHABLE candidates tied at the shallowest
+// depth are rejected at build (a genuine patch-name clash) rather than resolved
+// by tag-dominance.
 //
 // Cycle detection is path-based (a type already on the current embed path is
 // not re-entered), so a genuine diamond — the same field reachable by two
@@ -308,6 +312,7 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 		field     patchField
 		depth     int
 		patchable bool // pointer leaf, not opted out / named embed / tainted
+		tagged    bool // has an explicit json name (drives encoding/json tie-break)
 	}
 	// All json-visible candidates keyed by public name; the resolution pass
 	// below picks the winner per name and decides patchability.
@@ -395,8 +400,9 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 			if sf.Anonymous && et.Kind() == reflect.Struct {
 				if explicit {
 					candidates[public] = append(candidates[public], candidate{
-						field: patchField{index: idx, public: public},
-						depth: fr.depth,
+						field:  patchField{index: idx, public: public},
+						depth:  fr.depth,
+						tagged: true, // a named embed always carries an explicit name
 					})
 					continue
 				}
@@ -421,13 +427,23 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 				field:     patchField{index: idx, public: public, elemType: elemType},
 				depth:     fr.depth,
 				patchable: isPtr && !nonPatchable,
+				tagged:    explicit,
 			})
 		}
 	}
 
-	// Resolve each public name: shallowest depth wins; among patchable fields
-	// at that depth, exactly one is emitted, two or more is a build-time
-	// ambiguity, none leaves the name un-patchable.
+	// Resolve each public name. encoding/json decides visibility first: among
+	// the candidates at the shallowest depth, the dominant field is the unique
+	// tagged one, or the sole candidate, else the name is dropped (ambiguous to
+	// encoding/json — e.g. two untagged siblings, or two-plus tagged). Patch
+	// then emits that winner only when it is patchable; a non-patchable or
+	// dropped winner leaves the name un-patchable exactly as encoding/json
+	// exposes it (or doesn't). A non-patchable sibling therefore still shapes
+	// the outcome: it can win the name via tag-dominance, or make it ambiguous,
+	// so Patch never routes a name to a field encoding/json shadows. The one
+	// place Patch is stricter: two or more PATCHABLE candidates tied at the
+	// shallowest depth are rejected at build (a genuine patch-name clash)
+	// rather than resolved by tag-dominance.
 	var ambiguous []string
 	fields := make([]patchField, 0, len(candidates))
 	for name, cs := range candidates {
@@ -437,20 +453,42 @@ func buildPatchPlan(rt reflect.Type) *patchPlan {
 				minDepth = c.depth
 			}
 		}
-		var patchAtMin []patchField
+		var atMin []candidate
+		patchableAtMin := 0
 		for _, c := range cs {
-			if c.depth == minDepth && c.patchable {
-				patchAtMin = append(patchAtMin, c.field)
+			if c.depth != minDepth {
+				continue
+			}
+			atMin = append(atMin, c)
+			if c.patchable {
+				patchableAtMin++
 			}
 		}
-		switch len(patchAtMin) {
-		case 0:
-			// Winner at the shallowest depth is non-patchable (non-pointer,
-			// named embed, or opted out): the name is not a patch field.
-		case 1:
-			fields = append(fields, patchAtMin[0])
-		default:
+		if patchableAtMin >= 2 {
 			ambiguous = append(ambiguous, name)
+			continue
+		}
+		// encoding/json dominance among the shallowest candidates: a single
+		// tagged field wins; failing that, a lone candidate wins; two-plus
+		// with equal tag status drop the name.
+		var winner candidate
+		found := false
+		taggedCount := 0
+		for _, c := range atMin {
+			if c.tagged {
+				taggedCount++
+				winner, found = c, true
+			}
+		}
+		if taggedCount != 1 {
+			if len(atMin) == 1 {
+				winner, found = atMin[0], true
+			} else {
+				found = false
+			}
+		}
+		if found && winner.patchable {
+			fields = append(fields, winner.field)
 		}
 	}
 

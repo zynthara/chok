@@ -945,13 +945,22 @@ func TestPatch_Round5_TwoOptedOutContainersSameNameNoError(t *testing.T) {
 	}
 }
 
-// r5 semantics — same-depth fail-loud is scoped to PATCHABLE fields: a single
-// patchable field wins over an opted-out same-name sibling at the same depth
-// (no ambiguity about what to patch). Only two or more patchable fields at one
-// depth are the build-time clash.
-func TestPatch_Round5_PatchableWinsOverSameDepthOptOut(t *testing.T) {
-	// Both fields resolve to the Go name "X" (no json tag → go vet quiet); one
-	// is patchable, the other opted out with a bare store tag.
+// --- review-round-6 regressions --------------------------------------------
+//
+// Selection must run encoding/json dominance among ALL candidates at the
+// shallowest depth (a non-patchable sibling can win the name via tag-dominance
+// or make it ambiguous) BEFORE emitting the patchable winner. Round 5's
+// "exactly one patchable at min depth wins" bypassed this: a lone patchable
+// field was emitted even when encoding/json dropped the name or routed it to a
+// non-patchable sibling, exposing a name the wire never accepts (P⊄J) and, for
+// a name that is not an update column, 500ing an otherwise-valid request.
+
+// r6 #1 (Medium) — two untagged same-depth siblings (one patchable, one opted
+// out) are ambiguous to encoding/json → the name is dropped, so Patch must drop
+// it too (round 5 wrongly emitted the patchable one).
+func TestPatch_Round6_UntaggedSameDepthAmbiguityDrops(t *testing.T) {
+	// Both resolve to the Go name "X" (no json tag → go vet quiet, and both
+	// untagged so encoding/json drops the name).
 	type a struct {
 		X *string
 	}
@@ -961,12 +970,98 @@ func TestPatch_Round5_PatchableWinsOverSameDepthOptOut(t *testing.T) {
 	type req struct {
 		a
 		b
+		Body *string `json:"body"`
 	}
-	plan := buildPatchPlan(reflect.TypeOf(req{}))
-	if plan.err != nil {
-		t.Fatalf("one patchable + one opted-out at same depth is not ambiguous, got %v", plan.err)
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "body" {
+		t.Errorf("plan = %v, want [body] (untagged same-depth ambiguity drops X)", got)
 	}
-	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "X" {
-		t.Errorf("plan = %v, want [X] (a.X patchable wins)", got)
+}
+
+// r6 #1 (Medium) — end-to-end: an untagged same-depth ambiguity on a name that
+// is NOT an update column must not phantom-500 a valid body-only PATCH. This is
+// the reviewer's minimal repro.
+func TestPatch_Round6_UntaggedAmbiguityNoPhantom500(t *testing.T) {
+	ctx := context.Background()
+	s := setupPatchStore(t)
+	p := seedPatchable(t, s)
+	type patchableG struct {
+		Ghost *string // untagged "Ghost", not an update column
+	}
+	type optedG struct {
+		Ghost *string `store:"-"` // untagged "Ghost", opted out
+	}
+	type req struct {
+		patchableG
+		optedG
+		Body *string `json:"body"`
+	}
+	// encoding/json drops the ambiguous "Ghost"; Patch must too, so the plan is
+	// [body] and a valid body update must not fail with ErrUnknownUpdateField.
+	if err := s.Update(ctx, RID(p.RID), Patch(&req{Body: ptr("ok")}).Onto(p)); err != nil {
+		t.Fatalf("valid body update must not 500 on a phantom ambiguous name, got %v", err)
+	}
+	if p.Body == nil || *p.Body != "ok" {
+		t.Errorf("Body = %v, want ok", p.Body)
+	}
+}
+
+// r6 #1 (Medium) — a tagged opted-out field wins the name via encoding/json
+// tag-dominance; the name is then not patchable and Patch must NOT fall back to
+// the untagged patchable sibling.
+func TestPatch_Round6_TaggedOptOutWinsThenDrops(t *testing.T) {
+	// a.X untagged (Go name "X"); ctrl.X tagged json:"X" but opted out. Only one
+	// side carries a json tag, so go vet's structtag check stays quiet.
+	type a struct {
+		X *string
+	}
+	type ctrl struct {
+		X *string `json:"X" store:"-"`
+	}
+	type req struct {
+		a
+		ctrl
+		Body *string `json:"body"`
+	}
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "body" {
+		t.Errorf("plan = %v, want [body] (tagged opt-out wins 'X' → not patchable)", got)
+	}
+}
+
+// r6 #1 (Medium) — a tagged non-pointer field wins the name via tag-dominance;
+// non-pointers are not patchable, so Patch must drop the name rather than route
+// it to the untagged pointer sibling.
+func TestPatch_Round6_TaggedNonPointerWinsThenDrops(t *testing.T) {
+	type a struct {
+		X *string
+	}
+	type b struct {
+		X string `json:"X"` // tagged non-pointer
+	}
+	type req struct {
+		a
+		b
+		Body *string `json:"body"`
+	}
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "body" {
+		t.Errorf("plan = %v, want [body] (tagged non-pointer wins 'X' → not patchable)", got)
+	}
+}
+
+// r6 — dominance is honoured in BOTH directions: a tagged patchable field with
+// a differently-named opted-out sibling is emitted (the fix must not over-drop).
+func TestPatch_Round6_TaggedPatchableStillEmitted(t *testing.T) {
+	type a struct {
+		X *string `json:"x"` // tagged patchable → public "x"
+	}
+	type b struct {
+		X *string `store:"-"` // untagged (Go name "X" != "x"), opted out
+	}
+	type req struct {
+		a
+		b
+	}
+	// "x" (a.X) and "X" (b.X Go name) are distinct names; "x" is patchable.
+	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "x" {
+		t.Errorf("plan = %v, want [x] (tagged patchable a.X emitted)", got)
 	}
 }
