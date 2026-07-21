@@ -713,13 +713,18 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   账本恰有此混合——≤beta.4 的 applied_at 走 DEFAULT、beta.5 起参数
   写入，账本只转 `provenance IN ('applied','baseline')` 的行——旧引擎
   写入时即打标，正向谓词对 beta.4 时代的空串行（DEFAULT 写入、本就
-  正确）fail-safe。**全部重基须在新版首次启动之前、停写窗口内完成**：
-  首启会应用 pending 迁移并刷新 manifest 的 updated_at，这些新写入
-  带着同样的标与列、事后重基会把正确的新值反向搬歪。beta.4 直跳的
-  库连这些列都没有——语句响亮失败即是信号：纯 beta.4 账本全为
-  DEFAULT 写入、本就无需重基，跳过即可；若已先启动，账本语句加
-  版本边界（AND version <= 升级前最高版本）、manifest 只转
-  claimed_at）。免迁的 DEFAULT 值另有一条**读侧披露**：旧读取原本
+  正确）fail-safe。**全部重基须在新版首次启动之前、停写窗口内完成**——
+  停的是**旧版本全部实例**（窗口内禁止滚动升级：旧实例事后再写
+  留下未转换行、新实例提前启动触发兜底），且用**新**二进制跑
+  `chok migrate up`/`repair` 本身就算首启（会应用 pending 迁移、
+  刷新 manifest）：首启的新写入带着同样的标与列、事后重基会把
+  正确的新值反向搬歪。beta.4 直跳的库连这些列都没有——语句响亮
+  失败即是信号：纯 beta.4 账本全为 DEFAULT 写入、本就无需重基，
+  跳过即可；若已先启动，账本语句加版本边界（AND version <=
+  升级前最高版本）、manifest 只转**升级前已存在 kind** 的
+  claimed_at（首启时新 claim/adopt 的行是新基准，数据侧无标可分，
+  kind 集合只有运维者知道；拿不准就整体跳过 manifest——其偏斜仅
+  记账留痕））。免迁的 DEFAULT 值另有一条**读侧披露**：旧读取原本
   把它们偏斜 (旧 session−旧进程) 返回，升级后 API 可见瞬间被校正
   这个差值（数据不动、可见值移动）。**DATE 列**存量不动（历日无时区可重基），但写入
   契约随基准改变：存的是**瞬间的 UTC 历日**——date-only 值请以 UTC
