@@ -351,18 +351,24 @@ gin 与 badger 自 go.mod 消失（含 sonic / quic-go / ristretto 等
 ### MySQL 时间写入基准 → UTC【行为变更，beta.6 之后】
 
 v1 与 v2（≤ beta.6）的 MySQL 驱动 `Loc=time.Local`：DATETIME 列存
-**进程时区**的墙钟。此后 v2 双钉 UTC——驱动 `Loc=time.UTC` +
-每连接 `SET time_zone='+00:00'`（后者同时统一
-`CURRENT_TIMESTAMP`/`NOW()` 与 TIMESTAMP 列的 SQL 侧求值基准）。
-**旧进程时区是 UTC 的部署零动作**（Go 的解析顺序：`TZ` →
-`/etc/localtime` → UTC；两者皆无的极简镜像是 UTC，烘了
-`/etc/localtime` 的镜像不是——动手前核实真实进程时区）；非 UTC
-进程写成的存量库需一次性重基：备份、停写后逐 DATETIME 列
-`CONVERT_TZ(col, '<旧进程时区偏移>', '+00:00')`（TIMESTAMP 列内部
-存 UTC 瞬间，无需处理）。完整配方与 DST 存量注意事项见根目录
-CHANGELOG 对应 Breaking 条目。同库的非 chok 写入方此后须同样按
-UTC 墙钟写入 DATETIME。API 响应里 MySQL 后端的时间戳渲染从进程
-时区偏移变为 `Z` 后缀（同一瞬间）。
+**进程时区**的墙钟，而 `CURRENT_TIMESTAMP`/`NOW()` 求值与
+TIMESTAMP 列解释骑在 **session（通常即服务器）时区**上——旧基准
+实为两个时区。此后 v2 双钉 UTC——驱动 `Loc=time.UTC` + 每连接
+`SET time_zone='+00:00'`。**两个旧时区都是 UTC 的部署才是零动作**
+（进程时区按 Go 解析顺序核实：`TZ` → `/etc/localtime` → UTC，烘了
+`/etc/localtime` 的镜像不是 UTC；session 时区即服务器 `time_zone`
+除非应用显式设过——UTC 进程配非 UTC 服务器仍有 session 写入的
+存量要迁）。重基按**来源**逐列：备份、停写后——驱动写入的
+DATETIME 按旧进程时区、SQL 求值的 DATETIME（软删 `deleted_at`）按
+旧 session 时区 `CONVERT_TZ` 到 +00:00；参数写入的 TIMESTAMP 列
+（含框架迁移账本）在两个旧时区不同时按
+`CONVERT_TZ(col, '<旧进程>', '<旧 session>')` 消偏斜，纯
+`DEFAULT CURRENT_TIMESTAMP` 生成的值无需处理。**DATE 列**存量
+不动，但写入契约改为「存瞬间的 UTC 历日」——date-only 值以 UTC
+午夜构造，东偏时区的本地午夜此后落到前一 UTC 日。完整配方与 DST
+存量注意事项见根目录 CHANGELOG 对应 Breaking 条目。同库的非 chok
+写入方此后须同样按 UTC 墙钟写入 DATETIME。API 响应里 MySQL 后端
+的时间戳渲染从进程时区偏移变为 `Z` 后缀（同一瞬间）。
 
 ---
 

@@ -698,11 +698,22 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   若中间隔着会话复用型代理（ProxySQL 一类），须确认其保持 session
   状态与后端连接的绑定，否则 SQL 侧求值会退回服务器时区（驱动侧
   DATETIME 读写不受影响）。PG（timestamptz）写入即归一
-  UTC，无此题。**存量迁移**：v2.0.0-beta.6 及更早版本按进程时区墙钟
-  写入的库，若旧进程时区不是 UTC，升级后需一次性重基——逐 DATETIME
-  列 `CONVERT_TZ(col, '<旧进程时区偏移>', '+00:00')`（TIMESTAMP 列
-  内部存 UTC 瞬间，无需迁移），完整配方见根目录 CHANGELOG 的
-  Breaking 条目。
+  UTC，无此题。**存量迁移**：≤ v2.0.0-beta.6 写入的库按**来源**
+  逐列重基——旧基准其实有两个时区（驱动写入列=旧**进程**时区；SQL
+  求值列=旧 **session**（通常即服务器）时区），两者都是 UTC 才可整体
+  跳过。驱动写入的 DATETIME（created_at/updated_at/业务字段）按旧
+  进程时区、SQL 求值的 DATETIME（软删 `deleted_at`、NOW() 喂的列）
+  按旧 session 时区 `CONVERT_TZ` 到 +00:00；**参数写入的 TIMESTAMP
+  列**（含框架迁移账本 applied_at/claimed_at 等）在旧进程≠旧 session
+  时区时内部瞬间偏斜两者之差（旧读取的反向抵消掩盖了它，UTC 对称
+  读取会暴露），按 `CONVERT_TZ(col, '<旧进程>', '<旧 session>')`
+  重基；纯 `DEFAULT CURRENT_TIMESTAMP` 生成的 TIMESTAMP 值瞬间本就
+  正确、无需处理。**DATE 列**存量不动（历日无时区可重基），但写入
+  契约随基准改变：存的是**瞬间的 UTC 历日**——date-only 值请以 UTC
+  午夜构造（`time.Date(y, m, d, 0, 0, 0, 0, time.UTC)`），东偏时区
+  的本地午夜此后落到前一 UTC 日，读回为存量历日的 UTC 午夜。完整
+  配方见根目录 CHANGELOG 的 Breaking 条目（可执行形态由
+  `TestMySQLUTCBaseline_LegacyRebaseRecipe` pin 住）。
 - 🚫 **字段名 typo 是服务端 bug**：原样返回 `where.ErrUnknownField`
   （→ 500），provenance 划界与 `Pluck`/`List` 一致（§11.2 例外①）。
 - 字符串/布尔列不可聚合（文本 MIN/MAX 的序由方言 collation 定义，跨

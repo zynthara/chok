@@ -388,8 +388,11 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   折叠与跨实例时区漂移，进程 TZ 不再参与正确性；残余约束=同库
   **非 chok 写入方**须同按 UTC 墙钟写（DATETIME 不带时区，外人写歪
   的存量读取侧无法修复；约束排序/过滤/游标全部时间比较面，聚合只是
-  继承）；旧版（≤beta.6，Loc=time.Local）非 UTC 进程写入的存量需
-  CONVERT_TZ 一次性重基（CHANGELOG Breaking 条目携配方）；PG
+  继承）；旧版（≤beta.6，Loc=time.Local）存量按**来源**逐列
+  CONVERT_TZ 重基——驱动写入列用旧进程时区、SQL 求值列（deleted_at）
+  用旧 session 时区、参数写入的 TIMESTAMP 消两者之差的偏斜
+  （CHANGELOG Breaking 条目携配方）；DATE 列契约=存瞬间的 **UTC
+  历日**（date-only 值以 UTC 午夜构造，东偏本地午夜落前一日）；PG
   timestamptz 无此题。能力矩阵两半：wire kind 管 Go 收敛，**数据库真实列型**管
   操作合法性——真实列型读自 catalog **纯元数据**（pragma_table_info /
   PG pg_catalog / MySQL information_schema，首次聚合懒解析+缓存；不用

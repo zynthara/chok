@@ -2,10 +2,16 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"os"
 	"testing"
 	"time"
 
+	gomysql "github.com/go-sql-driver/mysql"
+
+	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/dbtest"
+	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/store/where"
 )
 
@@ -128,5 +134,176 @@ func TestMySQLUTCBaseline_SoftDeleteSharesDriverBaseline(t *testing.T) {
 	// baseline on a non-UTC host this is off by the whole zone offset.
 	if d := time.Since(created); d < -5*time.Minute || d > 5*time.Minute {
 		t.Fatalf("created_at %s parsed as UTC is %v from now — not on the UTC baseline", createdText, d)
+	}
+}
+
+// openMySQLLegacyWriter opens a raw driver connection emulating a
+// pre-#17 chok process with BOTH legacy zones pinned explicitly: the
+// driver Loc (the old process zone, which formatted every parameter)
+// and the session time_zone (the old session/server zone, which
+// evaluated CURRENT_TIMESTAMP and interpreted TIMESTAMP-column
+// parameters). Pinning both keeps the legacy split deterministic
+// regardless of the host or server configuration.
+func openMySQLLegacyWriter(t *testing.T, dbName string, loc *time.Location, sessionTZ string) *sql.DB {
+	t.Helper()
+	cfg, err := gomysql.ParseDSN(os.Getenv(dbtest.MySQLDSNEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DBName = dbName
+	cfg.ParseTime = true
+	cfg.Loc = loc
+	cfg.Params = map[string]string{"time_zone": "'" + sessionTZ + "'"}
+	connector, err := gomysql.NewConnector(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := sql.OpenDB(connector)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+type legacyRebaseRow struct {
+	db.SoftDeleteModel
+	Status string     `json:"status" gorm:"size:16;not null"`
+	At     time.Time  `json:"at" gorm:"not null"`
+	Ts     *time.Time `json:"ts" gorm:"type:timestamp null"`
+}
+
+func (legacyRebaseRow) RIDPrefix() string { return "lgr" }
+func (legacyRebaseRow) TableName() string { return "legacy_rebase_rows" }
+
+// TestMySQLUTCBaseline_LegacyRebaseRecipe executes the CHANGELOG
+// migration recipe end to end against data written the way a pre-#17
+// deployment wrote it, with the two legacy zones deliberately split so
+// every provenance needs a DIFFERENT rebase: driver-written DATETIME
+// carries the old process zone's wall clock (+08:00 here),
+// SQL-evaluated DATETIME (deleted_at = CURRENT_TIMESTAMP) carries the
+// old session zone's (+05:00), and a parameter-written TIMESTAMP is
+// skewed by exactly the difference between the two — the old driver
+// formatted the +08 wall clock and the old session interpreted it at
+// +05, storing an internal instant 3h late, which the old asymmetric
+// read canceled and the new symmetric UTC read exposes. A recipe that
+// rebased every column by the process zone alone (the pre-round-3
+// wording) leaves deleted_at and the TIMESTAMP 3h wrong and fails
+// here.
+func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
+	h := dbtest.OpenMySQL(t)
+	ctx := context.Background()
+	if err := h.Migrate(ctx, db.Table(&legacyRebaseRow{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[legacyRebaseRow](h, log.Empty(), WithQueryFields("status", "at"))
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
+	if err := s.Create(ctx, &legacyRebaseRow{Status: "x", At: inst}); err != nil {
+		t.Fatal(err)
+	}
+	var dbName string
+	if err := gdb.Raw("SELECT DATABASE()").Row().Scan(&dbName); err != nil {
+		t.Fatal(err)
+	}
+	legacy := openMySQLLegacyWriter(t, dbName, time.FixedZone("proc8", 8*3600), "+05:00")
+	if _, err := legacy.Exec("UPDATE legacy_rebase_rows SET at = ?, ts = ? WHERE status = 'x'", inst, inst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec("UPDATE legacy_rebase_rows SET deleted_at = CURRENT_TIMESTAMP WHERE status = 'x'"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-recipe pin of the skew itself: the TIMESTAMP's internal
+	// instant sits 3h late (process offset minus session offset).
+	var preTs time.Time
+	if err := gdb.Raw("SELECT ts FROM legacy_rebase_rows WHERE status = 'x'").Row().Scan(&preTs); err != nil {
+		t.Fatal(err)
+	}
+	if want := inst.Add(3 * time.Hour); !preTs.Equal(want) {
+		t.Fatalf("legacy TIMESTAMP = %v, want the documented %v skew (Loc-formatted wall clock interpreted by a different session zone)", preTs, want)
+	}
+
+	// The recipe, one conversion per provenance (CHANGELOG Breaking
+	// entry): driver-written DATETIME by the old process zone,
+	// SQL-evaluated DATETIME by the old session zone, parameter-written
+	// TIMESTAMP by the difference between the two.
+	for _, stmt := range []string{
+		"UPDATE legacy_rebase_rows SET at = CONVERT_TZ(at, '+08:00', '+00:00') WHERE at IS NOT NULL",
+		"UPDATE legacy_rebase_rows SET deleted_at = CONVERT_TZ(deleted_at, '+05:00', '+00:00') WHERE deleted_at IS NOT NULL",
+		"UPDATE legacy_rebase_rows SET ts = CONVERT_TZ(ts, '+08:00', '+05:00') WHERE ts IS NOT NULL",
+	} {
+		if err := gdb.Exec(stmt).Error; err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	var at, ts, deletedAt time.Time
+	if err := gdb.Raw("SELECT at, ts, deleted_at FROM legacy_rebase_rows WHERE status = 'x'").Row().Scan(&at, &ts, &deletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !at.Equal(inst) {
+		t.Fatalf("rebased DATETIME = %v, want %v", at, inst)
+	}
+	if !ts.Equal(inst) {
+		t.Fatalf("rebased TIMESTAMP = %v, want %v", ts, inst)
+	}
+	if d := time.Since(deletedAt); d < -5*time.Minute || d > 5*time.Minute {
+		t.Fatalf("rebased deleted_at %v is %v from now — the session-zone half of the recipe missed", deletedAt, d)
+	}
+}
+
+type civilDateRow struct {
+	db.Model
+	Status string    `json:"status" gorm:"size:16;not null"`
+	D      time.Time `json:"d" gorm:"type:date;not null"`
+}
+
+func (civilDateRow) RIDPrefix() string { return "cvd" }
+func (civilDateRow) TableName() string { return "civil_date_rows" }
+
+// TestMySQLUTCBaseline_DateColumnCivilContract pins the DATE-column
+// side of the UTC baseline: the driver converts every time.Time
+// parameter to UTC before the server truncates it to a date, so the
+// stored civil date is the UTC calendar date of the instant. Construct
+// date-only values at UTC midnight; a local midnight east of UTC lands
+// on the PREVIOUS UTC day (2026-07-04 00:00 at +08:00 is 2026-07-03
+// 16:00Z — the pre-#17 Local baseline stored 2026-07-04 for it). Reads
+// come back as UTC midnight of the stored date.
+func TestMySQLUTCBaseline_DateColumnCivilContract(t *testing.T) {
+	h := dbtest.OpenMySQL(t)
+	ctx := context.Background()
+	if err := h.Migrate(ctx, db.Table(&civilDateRow{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[civilDateRow](h, log.Empty(), WithQueryFields("status", "d"))
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	utcMidnight := time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC)
+	east8Midnight := time.Date(2026, 7, 4, 0, 0, 0, 0, time.FixedZone("east8", 8*3600))
+	for status, d := range map[string]time.Time{"utc": utcMidnight, "east": east8Midnight} {
+		if err := s.Create(ctx, &civilDateRow{Status: status, D: d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for status, want := range map[string]string{"utc": "2026-07-04", "east": "2026-07-03"} {
+		var stored string
+		if err := gdb.Raw("SELECT CAST(d AS CHAR) FROM civil_date_rows WHERE status = ?", status).Row().Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored != want {
+			t.Fatalf("status %s: stored date %q, want %q", status, stored, want)
+		}
+	}
+	got, err := s.Get(ctx, Where(where.WithFilter("status", "utc")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.D.Equal(utcMidnight) || got.D.Location() != time.UTC {
+		t.Fatalf("read back %v (%v), want %v in UTC", got.D, got.D.Location(), utcMidnight)
 	}
 }
