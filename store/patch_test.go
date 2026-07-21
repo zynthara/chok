@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"sort"
@@ -1047,21 +1048,54 @@ func TestPatch_Round6_TaggedNonPointerWinsThenDrops(t *testing.T) {
 	}
 }
 
-// r6 — dominance is honoured in BOTH directions: a tagged patchable field with
-// a differently-named opted-out sibling is emitted (the fix must not over-drop).
-func TestPatch_Round6_TaggedPatchableStillEmitted(t *testing.T) {
-	type a struct {
-		X *string `json:"x"` // tagged patchable → public "x"
+// r6 — dominance is honoured in BOTH directions: when a tagged patchable field
+// and an untagged opted-out sibling genuinely CONTEND for the same public name,
+// encoding/json tag-dominance routes the name to the tagged patchable field, so
+// Patch emits it (the fix must not over-drop mixed-eligibility clashes). Both
+// sides resolve to "X" (only the patchable side is tagged, so go vet stays
+// quiet), so the same-name competition is real — a naive "drop any name with a
+// non-patchable sibling" rule would fail this.
+func TestPatch_Round6_TaggedPatchableWinsSameName(t *testing.T) {
+	type patchable struct {
+		X *string `json:"X"` // tagged → public "X", patchable
 	}
-	type b struct {
-		X *string `store:"-"` // untagged (Go name "X" != "x"), opted out
+	type opted struct {
+		X *string `store:"-"` // untagged Go name "X" → same public name, opted out
 	}
 	type req struct {
-		a
-		b
+		patchable
+		opted
 	}
-	// "x" (a.X) and "X" (b.X Go name) are distinct names; "x" is patchable.
-	if got := patchPlanPublicNames(t, req{}); len(got) != 1 || got[0] != "x" {
-		t.Errorf("plan = %v, want [x] (tagged patchable a.X emitted)", got)
+	// encoding/json: both resolve to "X" at the same depth, exactly one tagged
+	// (patchable.X) → tag-dominance routes "X" to patchable.X.
+	r := &req{patchable: patchable{X: ptr("P")}, opted: opted{X: ptr("O")}}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["X"] != "P" {
+		t.Fatalf(`json winner for "X" = %q, want "P" (patchable.X); harness assumption broken`, m["X"])
+	}
+	// The plan must contain "X" mapping to patchable.X (index [0,0]), not drop it
+	// and not route it to the opted-out opted.X (index [1,0]).
+	plan := buildPatchPlan(reflect.TypeOf(*r))
+	if plan.err != nil {
+		t.Fatalf("unexpected plan error: %v", plan.err)
+	}
+	var idx []int
+	for _, f := range plan.fields {
+		if f.public == "X" {
+			idx = f.index
+		}
+	}
+	if idx == nil {
+		t.Fatalf("plan = %v, want it to contain patchable name \"X\"", patchPlanPublicNames(t, *r))
+	}
+	if len(idx) != 2 || idx[0] != 0 || idx[1] != 0 {
+		t.Errorf(`"X" index = %v, want [0 0] (patchable.X, not opted.X [1 0])`, idx)
 	}
 }
