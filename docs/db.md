@@ -714,8 +714,11 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   写入，账本只转 `provenance IN ('applied','baseline')` 的行——旧引擎
   写入时即打标，正向谓词对 beta.4 时代的空串行（DEFAULT 写入、本就
   正确）fail-safe。**全部重基须在新版首次启动之前、停写窗口内完成**——
-  停的是**旧版本全部实例**（窗口内禁止滚动升级：旧实例事后再写
-  留下未转换行、新实例提前启动触发兜底），且用**新**二进制跑
+  停的是**该库全部写入方**：旧 chok 实例之外还包括外部服务、
+  ETL/定时任务、运维 SQL（正是不变量里那些「非 chok 写入方」）——
+  配方转换的是冻结快照，窗口内任何写入不是漏转就是被双转（窗口内
+  禁止滚动升级：旧实例事后再写留下未转换行、新实例提前启动触发
+  兜底），且用**新**二进制跑
   `chok migrate` 的**写命令**本身就算首启——裸 `up` 以新基准写
   应用账本、`up --all-owned`/`--component` 还会刷新 manifest、
   `repair mark-applied` 重写账本行 applied_at；`status` 纯读、
@@ -725,8 +728,10 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   跳过即可；若已先启动，账本语句加版本边界（AND version <=
   升级前最高版本）、manifest 只转**升级前已存在 kind** 的
   claimed_at（首启时新 claim/adopt 的行是新基准，数据侧无标可分，
-  kind 集合只有运维者知道；拿不准就整体跳过 manifest——其偏斜仅
-  记账留痕））。免迁的 DEFAULT 值另有一条**读侧披露**：旧读取原本
+  kind 集合只有运维者知道）；新版若还跑过 repair：mark-applied
+  重写过的旧 version 要从边界内再剔除，repair history 以升级前
+  MAX(id) 为界而非整列；任何边界不明的记账表整体跳过——偏斜仅
+  记账留痕）。免迁的 DEFAULT 值另有一条**读侧披露**：旧读取原本
   把它们偏斜 (旧 session−旧进程) 返回，升级后 API 可见瞬间被校正
   这个差值（数据不动、可见值移动）。**DATE 列**存量不动（历日无时区可重基），但写入
   契约随基准改变：存的是**瞬间的 UTC 历日**——date-only 值请以 UTC

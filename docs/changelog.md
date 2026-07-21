@@ -49,11 +49,14 @@
 > 搬歪）在双旧时区分裂时内部瞬间偏斜两者之差、须消偏；免迁的 DEFAULT 值升级后 API 可见瞬间被校正
 > (旧 session−旧进程)（旧读取原本偏斜返回）；Loc=UTC 连带钦定
 > **DATE 列 civil-date 契约**（存瞬间的 UTC 历日，date-only 值以
-> UTC 午夜构造，存量历日不动）；运维窗口=全量停**旧版本**实例、
-> 窗口内禁滚动升级、新二进制 `chok migrate` 写命令亦算首启
-> （`status` 纯读安全，机器证据=只读句柄上双状态入口成功），已先
-> 启动的兜底=账本加版本边界、manifest 只转升级前已存在 kind 的
-> claimed_at。端到端回归
+> UTC 午夜构造，存量历日不动）；运维窗口=全量停**该库所有写入方**
+> （旧 chok 实例 + 外部服务/ETL/运维 SQL——冻结快照，窗口内写入
+> 不是漏转就是双转）、窗口内禁滚动升级、新二进制 `chok migrate`
+> 写命令亦算首启（`status` 纯读安全，机器证据=只读句柄上双状态
+> 入口成功），已先启动的兜底=账本加版本边界（新版 mark-applied
+> 触过的旧 version 再剔除）、repair history 以升级前 MAX(id) 为界、
+> manifest 只转升级前已存在 kind 的 claimed_at、边界不明的记账表
+> 整体跳过。端到端回归
 > `TestMySQLUTCBaseline_LegacyRebaseRecipe`（分裂双旧时区 + 混合
 > 来源列 + 读侧校正）与 `_DateColumnCivilContract`。
 
