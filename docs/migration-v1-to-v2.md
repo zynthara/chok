@@ -377,8 +377,9 @@ DEFAULT 账本无需重基」的信号；已先启动则账本语句加
 `AND version <= 升级前最高版本`（新版 repair mark-applied 触过的
 旧 version 再剔除）、repair history 以升级前 MAX(id) 为界、
 manifest 只转**升级前已存在 kind** 的 claimed_at（首启新
-claim/adopt 的行是新基准）；边界不明的记账表整体跳过，偏斜仅
-记账留痕）。免迁的
+claim/adopt 的行是新基准）；边界不明的记账表整体跳过（偏斜仅
+记账留痕），**业务表则每条语句都要带升级前行边界**（新版写的行
+已是 UTC，再转即搬歪；划不出边界就回滚备份重来））。免迁的
 DEFAULT 值升级后 API 可见瞬间会被校正 (旧 session−旧进程) 的差
 （旧读取原本偏斜返回；数据不动、可见值移动）。**DATE 列**存量
 不动，但写入契约改为「存瞬间的 UTC 历日」——date-only 值以 UTC

@@ -56,7 +56,8 @@
 > 入口成功），已先启动的兜底=账本加版本边界（新版 mark-applied
 > 触过的旧 version 再剔除）、repair history 以升级前 MAX(id) 为界、
 > manifest 只转升级前已存在 kind 的 claimed_at、边界不明的记账表
-> 整体跳过。端到端回归
+> 整体跳过、业务表每条语句带各自升级前行边界（划不出=回滚备份
+> 重来）。端到端回归
 > `TestMySQLUTCBaseline_LegacyRebaseRecipe`（分裂双旧时区 + 混合
 > 来源列 + 读侧校正）与 `_DateColumnCivilContract`。
 
