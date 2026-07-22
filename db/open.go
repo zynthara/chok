@@ -300,7 +300,14 @@ func openMySQL(o *MySQLOptions, readOnly bool) (*gorm.DB, error) {
 			return nil, fmt.Errorf("db: open mysql: %w", err)
 		}
 		ownedPool = sql.OpenDB(connector)
-		dialector = mysql.New(mysql.Config{Conn: ownedPool})
+		// DSNConfig rides along for gorm's OWN time rendering: the
+		// dialector converts time variables to DSNConfig.Loc when it
+		// renders them into SQL text — Explain/ToSQL diagnostics and
+		// the migrator's DDL DEFAULT for time fields. mysql.Open gets
+		// this via ParseDSN; a bare Conn leaves it nil and those
+		// renderings would fall off the configured baseline. The DSN
+		// string New derives from it is never dialed (Conn wins).
+		dialector = mysql.New(mysql.Config{Conn: ownedPool, DSNConfig: cfg})
 	}
 
 	gdb, err := gorm.Open(dialector, &gorm.Config{

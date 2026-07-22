@@ -201,7 +201,11 @@ type MySQLOptions struct {
 	// DST zone folds distinct instants onto one stored wall clock —
 	// the defect the UTC baseline eliminated — while a fixed offset
 	// stays injective and needs no server tz tables. Connection
-	// establishment parameter: changes apply on restart.
+	// establishment parameter: changes apply on restart — and the
+	// baseline is a persistent data contract, so changing it over an
+	// existing database is a stop-write DATETIME rebase (old → new
+	// offset), not a reinterpretation; see the MySQL notes in
+	// docs/db.md.
 	TimeZone string `mapstructure:"time_zone" default:"utc"`
 
 	MaxOpenConns    int           `mapstructure:"max_open_conns"     default:"100"`

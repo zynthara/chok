@@ -29,6 +29,24 @@
 > 参数→专用槽→SET NAMES）在 connector 路径须手工重放，否则按 Params
 > 通道重放成 `SET charset=...` 被服务器拒（真 MySQL lane 实测抓到）。
 > 纯加法非 Breaking；校验/驱动配置共用一个解析器防两处漂移。
+>
+> **round-1 复审修正**（1H/1M）：① High——基准钦定为**持久化数据
+> 契约**：对非空库改 `mysql.time_zone`（默认→偏移、偏移 A→B、偏移
+> 改回默认同理）=停写重基事件——新基准句柄把旧基准 DATETIME 整体
+> 误读一个偏移差；须停写+备份后逐 DATETIME 列（含 deleted_at）
+> CONVERT_TZ 旧→新；**TIMESTAMP 不迁**（两半同偏移下写读对称、瞬间
+> 基准无关，盲转即腐蚀）、**DATE 不可重基**（历日冻结为旧基准语义，
+> 披露非迁移）；跳过条件改钉「旧基准==新基准」——原文档「都是 UTC 可
+> 整体跳过」把默认值硬编码进了跳过判据（UTC 存量配 +08 目标必须
+> 重基），根 CHANGELOG 配方目标同步参数化。真库测试补 UTC→+08 与
+> +08→-05 存量切换全程（误读精确 pin + 重基复原 + TIMESTAMP 三步
+> 全程不动）。② Medium——Conn dialector 补携 `DSNConfig`：gorm 自身
+> 的时间渲染（Explain/ToSQL 诊断、migrator 对解析成 time.Time 的
+> 字面默认值的 DDL 渲染）挂在 DSNConfig.Loc 而非驱动 Loc，`mysql.Open`
+> 经 ParseDSN 自动携带、裸 Conn 为 nil——固定偏移分支按值自带时区
+> 渲染、脱离配置基准且随宿主 TZ 漂移；`Conn!=nil` 时 DSN 字符串永不
+> 拨号，补传安全。ToSQL 双分支 parity + 跨基准 DDL 时间默认值同瞬间
+> 测试（偏移选 -05:00 避开宿主时区巧合），撤修复实测转红。
 
 ## Unreleased — MySQL 时间写入基准 → UTC 双钉（arch-backlog #17）
 

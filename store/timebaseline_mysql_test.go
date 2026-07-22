@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gomysql "github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
 
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/db/dbtest"
@@ -324,7 +325,199 @@ func TestMySQLUTCBaseline_FixedOffsetRoundTrip(t *testing.T) {
 	}
 }
 
-// TestMySQLUTCBaseline_FixedOffsetReadOnlyBackstop pins that the
+// TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase pins the knob's
+// persistent-contract half: mysql.time_zone is a property of the DATA,
+// not a per-process preference. Reconfiguring it over an existing
+// database misreads every stored DATETIME by the full offset delta
+// until the stop-write rebase runs — the pre-rebase misread is pinned
+// exactly (the failure mode the docs warn about), then the recipe (one
+// CONVERT_TZ old→new per DATETIME column, deleted_at included)
+// restores the instants — for UTC→+08:00 and again for +08:00→-05:00,
+// so both the default→offset switch and an offset A→B switch are
+// covered. The TIMESTAMP column is asserted correct at EVERY step with
+// NO conversion: its internal instant is baseline-independent (both
+// halves carry one offset, so parameter writes and reads stay
+// symmetric under any configured baseline) — converting it would be
+// the corruption, not the fix.
+func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
+	base := dbtest.OpenMySQL(t)
+	ctx := context.Background()
+	if err := base.Migrate(ctx, db.Table(&legacyRebaseRow{})); err != nil {
+		t.Fatal(err)
+	}
+	s0 := New[legacyRebaseRow](base, log.Empty(), WithQueryFields("status", "at"))
+	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
+	if err := s0.Create(ctx, &legacyRebaseRow{Status: "sw", At: inst}); err != nil {
+		t.Fatal(err)
+	}
+	gdb := base.Unsafe(ctx)
+	if err := gdb.Exec("UPDATE legacy_rebase_rows SET ts = ? WHERE status = 'sw'", inst).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	read := func(h *db.DB) (at, ts time.Time) {
+		t.Helper()
+		got, err := New[legacyRebaseRow](h, log.Empty(), WithQueryFields("status", "at")).
+			Get(ctx, Where(where.WithFilter("status", "sw")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Ts == nil {
+			t.Fatal("ts must be set")
+		}
+		return got.At, *got.Ts
+	}
+	rebase := func(from, to string) {
+		t.Helper()
+		// The documented recipe: writes stopped (this test IS the only
+		// writer), one conversion per DATETIME column from the old to
+		// the new baseline. ts (TIMESTAMP) is deliberately absent.
+		for _, col := range []string{"at", "deleted_at"} {
+			stmt := "UPDATE legacy_rebase_rows SET " + col + " = CONVERT_TZ(" + col + ", '" + from + "', '" + to + "') WHERE " + col + " IS NOT NULL"
+			if err := gdb.Exec(stmt).Error; err != nil {
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+	}
+	storedAt := func() string {
+		t.Helper()
+		var s string
+		if err := gdb.Raw("SELECT DATE_FORMAT(at, '%Y-%m-%d %H:%i:%s') FROM legacy_rebase_rows WHERE status = 'sw'").Row().Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Default UTC → +08:00. Pre-rebase, the offset handle parses the
+	// stored UTC wall clock AT +08:00: the DATETIME reads exactly 8h
+	// early; the TIMESTAMP instant is already correct.
+	h8 := openMySQLFixedOffset(t, base, "+08:00", false)
+	at, ts := read(h8)
+	if want := inst.Add(-8 * time.Hour); !at.Equal(want) {
+		t.Fatalf("pre-rebase DATETIME through +08:00 = %v, want the documented misread %v", at, want)
+	}
+	if !ts.Equal(inst) {
+		t.Fatalf("pre-rebase TIMESTAMP = %v, want %v — internal instants are baseline-independent", ts, inst)
+	}
+	rebase("+00:00", "+08:00")
+	if got := storedAt(); got != "2026-07-04 14:00:00" {
+		t.Fatalf("rebased wall clock = %q, want the +08:00 wall clock", got)
+	}
+	at, ts = read(h8)
+	if !at.Equal(inst) {
+		t.Fatalf("post-rebase DATETIME = %v, want %v", at, inst)
+	}
+	if !ts.Equal(inst) {
+		t.Fatalf("post-rebase TIMESTAMP = %v, want %v untouched", ts, inst)
+	}
+
+	// Offset A → B: +08:00 → -05:00. Same contract, no UTC leg — the
+	// conversion goes directly between the two baselines.
+	h5 := openMySQLFixedOffset(t, base, "-05:00", false)
+	at, ts = read(h5)
+	if want := inst.Add(13 * time.Hour); !at.Equal(want) {
+		t.Fatalf("pre-rebase DATETIME through -05:00 = %v, want the documented misread %v", at, want)
+	}
+	if !ts.Equal(inst) {
+		t.Fatalf("TIMESTAMP = %v, want %v", ts, inst)
+	}
+	rebase("+08:00", "-05:00")
+	if got := storedAt(); got != "2026-07-04 01:00:00" {
+		t.Fatalf("rebased wall clock = %q, want the -05:00 wall clock", got)
+	}
+	at, ts = read(h5)
+	if !at.Equal(inst) {
+		t.Fatalf("post-rebase DATETIME = %v, want %v", at, inst)
+	}
+	if !ts.Equal(inst) {
+		t.Fatalf("post-rebase TIMESTAMP = %v, want %v untouched — a blanket conversion would have corrupted it", ts, inst)
+	}
+}
+
+// timeDefaultRow carries a literal time DEFAULT: gorm parses it into a
+// time.Time (DefaultValueInterface) and the migrator renders it into
+// DDL through the dialector's Explain — the path that hangs off
+// DSNConfig.Loc rather than the driver Loc.
+type timeDefaultRow struct {
+	db.Model
+	Status string    `json:"status" gorm:"size:16;not null"`
+	At     time.Time `json:"at" gorm:"not null;default:2026-07-04 06:00:00"`
+}
+
+func (timeDefaultRow) RIDPrefix() string { return "tdr" }
+func (timeDefaultRow) TableName() string { return "time_default_rows" }
+
+// TestMySQLUTCBaseline_FixedOffsetExplainAndDDLDefault pins gorm's OWN
+// time rendering to the configured baseline on the connector path: the
+// dialector converts time variables to DSNConfig.Loc when it renders
+// SQL text — ToSQL/Explain diagnostics and the migrator's DDL DEFAULT
+// for time fields with a parsed literal default. mysql.Open feeds
+// DSNConfig via ParseDSN; the Conn dialector must carry it explicitly
+// or those renderings silently fall back to each value's own zone —
+// off-baseline, and host-TZ-dependent (gorm parses the default literal
+// in time.Local). The offset here is chosen ≠ UTC and ≠ any plausible
+// host zone so a dropped DSNConfig cannot pass by coincidence; the
+// assertion is baseline-parity with the default-UTC handle (same
+// instant), not a fixed wall-clock string, precisely because the
+// parsed instant is host-TZ-dependent.
+func TestMySQLUTCBaseline_FixedOffsetExplainAndDDLDefault(t *testing.T) {
+	ctx := context.Background()
+	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
+
+	// ToSQL leg: a time variable renders at the configured offset —
+	// matching what the driver actually sends — on both open paths.
+	baseUTC := dbtest.OpenMySQL(t)
+	h5 := openMySQLFixedOffset(t, baseUTC, "-05:00", false)
+	for _, tc := range []struct {
+		h    *db.DB
+		wall string
+	}{
+		{baseUTC, "2026-07-04 06:00:00"},
+		{h5, "2026-07-04 01:00:00"},
+	} {
+		sql := tc.h.Unsafe(ctx).ToSQL(func(tx *gorm.DB) *gorm.DB {
+			return tx.Table("legacy_rebase_rows").Where("at > ?", inst).Find(&[]map[string]interface{}{})
+		})
+		if !strings.Contains(sql, tc.wall) {
+			t.Fatalf("ToSQL rendered %q, want the baseline wall clock %q in it", sql, tc.wall)
+		}
+	}
+
+	// Migrator leg: the SAME model type migrated under each baseline
+	// must produce the SAME default instant — each database's stored
+	// DDL default, parsed at its own configured offset, agrees. Two
+	// separate throwaway databases: re-migrating one table under a
+	// second baseline would ALTER the first rendering away.
+	migratedDefault := func(h *db.DB) string {
+		t.Helper()
+		if err := h.Migrate(ctx, db.Table(&timeDefaultRow{})); err != nil {
+			t.Fatal(err)
+		}
+		var def string
+		if err := h.Unsafe(ctx).Raw("SELECT column_default FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'time_default_rows' AND column_name = 'at'").Row().Scan(&def); err != nil {
+			t.Fatal(err)
+		}
+		if i := strings.IndexByte(def, '.'); i >= 0 { // datetime(3) may echo fractional zeros
+			def = def[:i]
+		}
+		return def
+	}
+	parse := func(text string, loc *time.Location) time.Time {
+		t.Helper()
+		v, err := time.ParseInLocation("2006-01-02 15:04:05", text, loc)
+		if err != nil {
+			t.Fatalf("parse %q: %v", text, err)
+		}
+		return v
+	}
+	utcDefault := parse(migratedDefault(baseUTC), time.UTC)
+	off := openMySQLFixedOffset(t, dbtest.OpenMySQL(t), "-05:00", false)
+	offDefault := parse(migratedDefault(off), time.FixedZone("-05:00", -5*3600))
+	if !offDefault.Equal(utcDefault) {
+		t.Fatalf("DDL time default diverges across baselines: %v (utc) vs %v (-05:00) — the Conn dialector must carry DSNConfig", utcDefault, offDefault)
+	}
+}
+
 // read-only session backstop still reaches the server on the
 // NewConnector path: transaction_read_only travels in the same Params
 // SET the session time_zone does, and switching open paths for the
