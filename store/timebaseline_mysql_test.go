@@ -342,11 +342,17 @@ func TestMySQLUTCBaseline_FixedOffsetRoundTrip(t *testing.T) {
 // old-offset-alone spelling the legacy recipe shows is the to-UTC
 // special case: here it would subtract 0 on the first leg and 8h
 // instead of 13h on the second, leaving the row misread either way.
-// The TIMESTAMP column is asserted correct at EVERY step with NO
-// conversion: its internal instant is baseline-independent (both
-// halves carry one offset, so parameter writes and reads stay
-// symmetric under any configured baseline) — converting it would be
-// the corruption, not the fix.
+// Two boundary rows pin the ROUTING discipline as well: the fallback
+// set must be decided on ORIGINAL values (here one CASE statement per
+// column; freezing the flagged set before any UPDATE works too) —
+// re-evaluating the = col predicate after a blanket UPDATE re-flags
+// successfully converted rows whose converted value re-read as FROM
+// exits CONVERT_TZ's span (upper edge eastward, lower edge westward)
+// and hands them a silent second rebase. The TIMESTAMP column is
+// asserted correct at EVERY step with NO conversion: its internal
+// instant is baseline-independent (both halves carry one offset, so
+// parameter writes and reads stay symmetric under any configured
+// baseline) — converting it would be the corruption, not the fix.
 func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 	base := dbtest.OpenMySQL(t)
 	ctx := context.Background()
@@ -356,7 +362,18 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 	s0 := New[legacyRebaseRow](base, log.Empty(), WithQueryFields("status", "at"))
 	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
 	preEpoch := time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC) // outside CONVERT_TZ's span; ts stays NULL (1960 does not fit TIMESTAMP)
-	for status, at := range map[string]time.Time{"sw": inst, "pe": preEpoch} {
+	// Boundary-crossing rows: each converts SUCCESSFULLY, but its
+	// CONVERTED value re-read as FROM exits CONVERT_TZ's span on one
+	// leg — upper bound on the eastward leg (3001-01-18 20:00Z → +08 =
+	// 3001-01-19 04:00, which read as UTC is beyond the cap), lower
+	// bound on the westward leg (1970-01-01 04:00Z: its +08 wall 12:00
+	// converts to the -05 wall 1969-12-31 23:00, which read as +08 is a
+	// pre-epoch UTC intermediate). Any routing that re-evaluates the
+	// = col predicate after the blanket UPDATE spuriously re-flags
+	// them and rebases them twice.
+	upperEdge := time.Date(3001, 1, 18, 20, 0, 0, 0, time.UTC)
+	lowerEdge := time.Date(1970, 1, 1, 4, 0, 0, 0, time.UTC)
+	for status, at := range map[string]time.Time{"sw": inst, "pe": preEpoch, "ub": upperEdge, "lb": lowerEdge} {
 		if err := s0.Create(ctx, &legacyRebaseRow{Status: status, At: at}); err != nil {
 			t.Fatal(err)
 		}
@@ -388,29 +405,38 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 		// The documented recipe: writes stopped (this test IS the only
 		// writer), one conversion per DATETIME column from the old to
 		// the new baseline. ts (TIMESTAMP) is deliberately absent.
-		// Scan first: rows CONVERT_TZ will skip silently (returned
-		// unchanged, out of its span) — exactly the pre-epoch row.
-		var stuck int64
-		if err := gdb.Raw("SELECT COUNT(*) FROM legacy_rebase_rows WHERE at IS NOT NULL AND CONVERT_TZ(at, ?, ?) = at", from, to).Row().Scan(&stuck); err != nil {
+		// Scan first, both arms: IS NULL rows would abort to manual
+		// classification (none here — pinned 0), and = rows are the
+		// out-of-range set the interval fallback rescues — exactly the
+		// pre-epoch row.
+		var nulls, stuck int64
+		row := gdb.Raw("SELECT COUNT(CASE WHEN CONVERT_TZ(at, ?, ?) IS NULL THEN 1 END), COUNT(CASE WHEN CONVERT_TZ(at, ?, ?) = at THEN 1 END) FROM legacy_rebase_rows WHERE at IS NOT NULL", from, to, from, to).Row()
+		if err := row.Scan(&nulls, &stuck); err != nil {
 			t.Fatal(err)
+		}
+		if nulls != 0 {
+			t.Fatalf("IS NULL scan (%s→%s) = %d, want 0 — such rows abort to manual classification", from, to, nulls)
 		}
 		if stuck != 1 {
 			t.Fatalf("out-of-range scan (%s→%s) = %d, want 1 — the pre-epoch row must be flagged before the UPDATE", from, to, stuck)
 		}
+		// One CASE statement routes every row on its ORIGINAL value:
+		// flagged rows take the interval fallback — the SIGNED
+		// DIFFERENCE from − to of THIS switch, never the old offset
+		// alone (the to-UTC special case) — and the rest convert. The
+		// routing must NOT be re-evaluated after a blanket UPDATE: a
+		// successfully converted value re-read as FROM can exit
+		// CONVERT_TZ's span at either end (the ub/lb rows above) and
+		// would be re-flagged into a second rebase.
 		for _, col := range []string{"at", "deleted_at"} {
-			stmt := "UPDATE legacy_rebase_rows SET " + col + " = CONVERT_TZ(" + col + ", '" + from + "', '" + to + "') WHERE " + col + " IS NOT NULL"
+			stmt := "UPDATE legacy_rebase_rows SET " + col +
+				" = CASE WHEN CONVERT_TZ(" + col + ", '" + from + "', '" + to + "') = " + col +
+				" THEN DATE_SUB(" + col + ", INTERVAL '" + fallback + "' HOUR_MINUTE)" +
+				" ELSE CONVERT_TZ(" + col + ", '" + from + "', '" + to + "') END" +
+				" WHERE " + col + " IS NOT NULL"
 			if err := gdb.Exec(stmt).Error; err != nil {
 				t.Fatalf("%s: %v", stmt, err)
 			}
-		}
-		// The flagged rows take the interval fallback. The interval is
-		// the SIGNED DIFFERENCE from − to of THIS switch, never the old
-		// offset alone (that spelling is the to-UTC special case). The
-		// detector predicate still selects only the skipped rows: the
-		// converted ones no longer satisfy CONVERT_TZ(at) = at.
-		stmt := "UPDATE legacy_rebase_rows SET at = DATE_SUB(at, INTERVAL '" + fallback + "' HOUR_MINUTE) WHERE at IS NOT NULL AND CONVERT_TZ(at, '" + from + "', '" + to + "') = at"
-		if err := gdb.Exec(stmt).Error; err != nil {
-			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
 	storedAt := func(status string) string {
@@ -440,6 +466,9 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 	if got := storedAt("pe"); got != "1960-01-01 08:00:00" {
 		t.Fatalf("fallback-rebased pre-epoch wall clock = %q, want the +08:00 wall clock", got)
 	}
+	if got := storedAt("ub"); got != "3001-01-19 04:00:00" {
+		t.Fatalf("upper-edge wall clock = %q, want the single +08:00 conversion — a post-update re-evaluation re-flags it and rebases twice", got)
+	}
 	at, ts = readSw(h8)
 	if !at.Equal(inst) {
 		t.Fatalf("post-rebase DATETIME = %v, want %v", at, inst)
@@ -449,6 +478,11 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 	}
 	if got := read(h8, "pe"); !got.At.Equal(preEpoch) {
 		t.Fatalf("post-rebase pre-epoch DATETIME = %v, want %v — the interval fallback must carry old − new", got.At, preEpoch)
+	}
+	for status, want := range map[string]time.Time{"ub": upperEdge, "lb": lowerEdge} {
+		if got := read(h8, status); !got.At.Equal(want) {
+			t.Fatalf("post-rebase %s DATETIME = %v, want %v", status, got.At, want)
+		}
 	}
 
 	// Offset A → B: +08:00 → -05:00. Same contract, no UTC leg — the
@@ -470,6 +504,9 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 	if got := storedAt("pe"); got != "1959-12-31 19:00:00" {
 		t.Fatalf("fallback-rebased pre-epoch wall clock = %q, want the -05:00 wall clock", got)
 	}
+	if got := storedAt("lb"); got != "1969-12-31 23:00:00" {
+		t.Fatalf("lower-edge wall clock = %q, want the single -05:00 conversion — a post-update re-evaluation re-flags it and rebases twice", got)
+	}
 	at, ts = readSw(h5)
 	if !at.Equal(inst) {
 		t.Fatalf("post-rebase DATETIME = %v, want %v", at, inst)
@@ -479,6 +516,11 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 	}
 	if got := read(h5, "pe"); !got.At.Equal(preEpoch) {
 		t.Fatalf("post-rebase pre-epoch DATETIME = %v, want %v — an old-offset-alone interval (8h) would sit 5h off here", got.At, preEpoch)
+	}
+	for status, want := range map[string]time.Time{"ub": upperEdge, "lb": lowerEdge} {
+		if got := read(h5, status); !got.At.Equal(want) {
+			t.Fatalf("post-rebase %s DATETIME = %v, want %v", status, got.At, want)
+		}
 	}
 }
 
