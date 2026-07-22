@@ -10,6 +10,27 @@
 
 ---
 
+## Unreleased — join / append-only 表正门（arch-backlog #13）
+
+> `Modeler` 强制 embed `db.Model` 曾让纯 join 表和 append-only 流水表
+> 只能走 `h.Unsafe(ctx).AutoMigrate` / versioned SQL 二等通道。本次开
+> 两扇正门、两半分治（决策稿
+> `.private/docs/specs/v2-foreign-table-decision-claude.md`）：
+> **join 半边**只放宽迁移声明——`db.ForeignTable(&T{})`（struct + ≥1
+> primaryKey 列即可；chok 模型拒收指回 `db.Table`），不进 store（JOIN
+> DSL 仍刻意不做，行 DML 走 `h.Unsafe`）；**append-only 半边**给轻量
+> 基座 `db.AppendOnlyModel`（自增 PK + created_at，无 RID/version/软删
+> ——省的就是这些每行开销）+ 受限 `store.NewAppend`（只有
+> Create/BatchCreate/List，写改路径编译期不存在：新 marker
+> `db.AppendModeler` 与 `db.Modeler` 双向隔离）。核心纪律=**迁移声明
+> 放宽 ≠ store 约束放宽**，`Modeler` 与全部现有 store 类型契约零改动。
+> append `List` 无 RID 可绑 keyset（`ListWithCursor` 的 tie-breaker
+> 绑 RID 列），钦定 offset 分页 + 恒追加内部 PK tie-breaker（只进
+> ORDER BY、不出进程），无显式 order 默认插入序 `(created_at, id)`；
+> 增量消费走 created_at 水位线。不适用的 StoreOption（update 侧、
+> owner 全家、hooks、WithBus、WithDefaultPageSize）在 NewAppend
+> 构造期 panic，不静默失效。纯加法非 Breaking。
+
 ## Unreleased — MySQL 时间基准可配置：`mysql.time_zone` 固定偏移（arch-backlog #18）
 
 > #17「UTC 双钉」决策稿 §3-C 预批准的加法路径落地：`MySQLOptions` 增

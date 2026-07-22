@@ -7,11 +7,13 @@ import (
 	"github.com/zynthara/chok/v2/rid"
 )
 
-// ValidateModel checks model metadata:
+// ValidateModel checks full-model metadata:
 //   - Must embed db.Model or db.SoftDeleteModel
 //   - If RIDPrefixer, prefix must be valid
 //
-// Called by db.Table and store.New at construction time.
+// Called by db.Table and store.New at construction time. Append-only
+// models (db.AppendOnlyModel) validate via ValidateAppendModel instead;
+// db.Table dispatches between the two by marker interface.
 func ValidateModel(model any) error {
 	t := reflect.TypeOf(model)
 	if t.Kind() == reflect.Ptr {
@@ -35,6 +37,36 @@ func ValidateModel(model any) error {
 		}
 	}
 
+	return nil
+}
+
+// ValidateAppendModel checks append-only model metadata:
+//   - Must embed db.AppendOnlyModel (satisfy AppendModeler)
+//   - Must NOT also embed db.Model — carrying both markers makes the
+//     model's identity ambiguous (which store family owns it?)
+//   - Must NOT implement RIDPrefixer — append-only models have no RID
+//     column for the prefix to apply to
+//
+// Called by db.Table and store.NewAppend at construction time.
+func ValidateAppendModel(model any) error {
+	t := reflect.TypeOf(model)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return fmt.Errorf("db: model must be a struct, got %s", t.Kind())
+	}
+
+	ptr := reflect.New(t).Interface()
+	if _, ok := ptr.(AppendModeler); !ok {
+		return fmt.Errorf("db: %s must embed db.AppendOnlyModel", t.Name())
+	}
+	if _, ok := ptr.(Modeler); ok {
+		return fmt.Errorf("db: %s embeds both db.Model and db.AppendOnlyModel — pick one base (full model or append-only)", t.Name())
+	}
+	if _, ok := ptr.(RIDPrefixer); ok {
+		return fmt.Errorf("db: %s implements RIDPrefixer but append-only models have no RID column — remove the RIDPrefix method or embed db.Model", t.Name())
+	}
 	return nil
 }
 

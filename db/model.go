@@ -21,6 +21,17 @@ type Modeler interface {
 	chokModel()
 }
 
+// AppendModeler is the generic constraint for store.NewAppend /
+// store.AppendStore[T]. The unexported marker method ensures only types
+// embedding db.AppendOnlyModel satisfy it. The two markers are disjoint
+// by construction — AppendOnlyModel does not implement chokModel() and
+// Model does not implement chokAppendModel() — so append-only models
+// cannot enter store.New and full models cannot enter store.NewAppend;
+// the isolation holds at compile time, not by runtime checks.
+type AppendModeler interface {
+	chokAppendModel()
+}
+
 // Model is the base model with auto-increment PK, RID, optimistic lock, and timestamps.
 type Model struct {
 	ID        uint      `json:"-"          gorm:"primaryKey"`
@@ -38,6 +49,28 @@ type SoftDeleteModel struct {
 	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
 	DeleteToken string         `json:"-" gorm:"column:delete_token;default:'';not null;size:24"`
 }
+
+// AppendOnlyModel is the lightweight base for append-only tables —
+// audit trails, event logs, metric samples: rows are written once and
+// never updated. It carries an auto-increment PK and a creation
+// timestamp, nothing else. No RID, no Version, no UpdatedAt, no soft
+// delete — the full model's per-row overhead (RID unique-index
+// maintenance, optimistic-lock bookkeeping) is deliberately absent,
+// because the write-modify paths that need them do not exist here.
+//
+// Declare tables with db.Table (migration) and construct stores with
+// store.NewAppend, whose surface is Create / BatchCreate / List only.
+// The numeric ID stays internal (json:"-") and never appears in API
+// responses; rows are addressed by time and attribute filters, not by
+// per-row identifiers. Do not implement RIDPrefixer on an append-only
+// model — there is no RID column for the prefix to apply to, and
+// ValidateAppendModel rejects the combination.
+type AppendOnlyModel struct {
+	ID        uint      `json:"-"          gorm:"primaryKey"`
+	CreatedAt time.Time `json:"created_at" gorm:"autoCreateTime"`
+}
+
+func (AppendOnlyModel) chokAppendModel() {}
 
 // OwnedModel embeds Model and Owned — use when both ownership and
 // base model fields are needed (the common case).

@@ -247,7 +247,7 @@ raw SQL 恰有两扇门，名字即警示（M5 §5.2 复评定案）：
 | 门 | 语义 | 边界 |
 |---|---|---|
 | `Store.Unsafe(ctx)` | tx-aware + **scope 已应用** + scope 失败 fail-closed | store DSL 表达不了、但租户/属主语义必须保持的 SQL |
-| `(*db.DB).Unsafe(ctx)` | tx-aware + 无 scope | 基建层：外形表 AutoMigrate、事务内行锁 |
+| `(*db.DB).Unsafe(ctx)` | tx-aware + 无 scope | 基建层：join / 外形表行 DML（DDL 声明走 `db.ForeignTable`）、事务内行锁 |
 
 `db.InTx(ctx) bool` 提供无句柄的事务内省；事务上下文的 gorm 载体与
 所属 `*db.DB` 身份在 `internal/txctx`，用户代码拿不到。只有同一句柄
@@ -495,6 +495,18 @@ db:
   create|up|status|repair`。
 - auto：在第一条 DDL 前解析 GORM schema 并完成全部 `TableSpec` 的静态
   校验，再按声明顺序 AutoMigrate；后置声明错误不会留下可避免的前缀迁移。
+- **模型层级与声明分叉**（2026-07-22，arch-backlog #13）：不是每张表都
+  背 `db.Model` 的每行开销。`db.Table` 收两类 chok 形状——Model 系
+  （全功能 store）与 `db.AppendOnlyModel`（append-only 流水表：仅自增
+  PK + created_at，无 RID/version/软删；配受限的 `store.NewAppend`，
+  只有 Create/BatchCreate/List，写改路径编译期不存在，marker 与
+  `Modeler` 双向隔离——**迁移声明放宽 ≠ store 约束放宽**，`Modeler`
+  不动）。join / 外来形状表用 `db.ForeignTable` 声明（struct + ≥1
+  primaryKey 列即可，chok 模型拒收指回 `db.Table`）——纯 DDL，无
+  store，行 DML 走 `h.Unsafe(ctx)`（单表 store 边界不破，JOIN DSL
+  仍刻意不做）。append List 无 RID 可绑 keyset，钦定 offset 分页 +
+  恒追加内部 PK tie-breaker（只进 ORDER BY 不出进程），无显式 order
+  默认插入序 `(created_at, id)`。
 - PG/MySQL session lock 的释放使用保留父 context value 的独立 5 秒 deadline；
   unlock 报错、返回未持锁或超时时将物理连接标为 bad connection 后关闭，
   不依赖 `sql.Conn.Close`（它只归还连接池）释放 session lock。SQLite ledger

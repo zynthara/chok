@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 // TableSpec holds migration information for a single model.
@@ -14,6 +16,7 @@ type TableSpec struct {
 	model   any
 	indexes []SoftIndex
 	soft    bool // true if model embeds SoftDeleteModel
+	foreign bool // true if declared via ForeignTable (chok does not manage the shape)
 }
 
 // SoftIndex represents a composite unique index that includes delete_token
@@ -23,10 +26,17 @@ type SoftIndex struct {
 	Columns []string
 }
 
-// Table constructs a TableSpec. Panics if model metadata is invalid
-// (does not embed db.Model, illegal RIDPrefix, etc.) — fail-fast at Setup.
+// Table constructs a TableSpec for a chok-shaped model. Panics if
+// model metadata is invalid — fail-fast at Setup. Accepted bases:
+//
+//   - db.Model / db.SoftDeleteModel embedders (full models, ValidateModel)
+//   - db.AppendOnlyModel embedders (append-only tables, ValidateAppendModel)
+//
+// Foreign-shaped tables — join tables, externally-owned schemas that
+// embed no chok base — declare their migration with db.ForeignTable
+// instead; passing one here panics with that pointer.
 func Table(model any, indexes ...SoftIndex) TableSpec {
-	if err := ValidateModel(model); err != nil {
+	if err := validateTableModel(model); err != nil {
 		panic(fmt.Sprintf("db.Table: %v", err))
 	}
 	return TableSpec{
@@ -34,6 +44,91 @@ func Table(model any, indexes ...SoftIndex) TableSpec {
 		indexes: indexes,
 		soft:    IsSoftDeleteModel(model),
 	}
+}
+
+// validateTableModel dispatches db.Table's validation by marker
+// interface: full models keep the ValidateModel path, append-only
+// models take ValidateAppendModel, and everything else is rejected
+// with directions to the right door.
+func validateTableModel(model any) error {
+	t := reflect.TypeOf(model)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return fmt.Errorf("db: model must be a struct, got %s", t.Kind())
+	}
+	ptr := reflect.New(t).Interface()
+	if _, ok := ptr.(Modeler); ok {
+		return ValidateModel(model)
+	}
+	if _, ok := ptr.(AppendModeler); ok {
+		return ValidateAppendModel(model)
+	}
+	return fmt.Errorf("db: %s must embed db.Model, db.SoftDeleteModel or db.AppendOnlyModel "+
+		"(foreign-shaped tables — join tables, externally-owned schemas — declare with db.ForeignTable)", t.Name())
+}
+
+// ForeignTable constructs a TableSpec for a foreign-shaped table —
+// one chok does not manage: join tables with composite primary keys,
+// tables mirrored from an external system, any struct that embeds no
+// chok base model. The spec participates in db.Migrate / db.WithTables
+// AutoMigrate like any other declaration, but chok imposes none of its
+// model conventions on it: no RID, no version, no SoftUnique support.
+//
+// Validation is intentionally thin — the model must be a struct with
+// at least one gorm primaryKey column (join tables typically declare a
+// composite key across their reference columns). chok-shaped models
+// (anything embedding db.Model, db.SoftDeleteModel or
+// db.AppendOnlyModel) are rejected: they have their own door, db.Table,
+// and must not skip its validation through this one.
+//
+// There is no store for foreign tables — chok deliberately ships no
+// JOIN DSL. Row DML goes through the handle escape hatch:
+//
+//	gdb := h.Unsafe(ctx)
+//	gdb.Create(&UserRole{UserID: u.ID, RoleID: r.ID})
+//	gdb.Delete(&UserRole{}, "user_id = ? AND role_id = ?", u.ID, r.ID)
+func ForeignTable(model any) TableSpec {
+	if err := validateForeignModel(model); err != nil {
+		panic(fmt.Sprintf("db.ForeignTable: %v", err))
+	}
+	return TableSpec{
+		model:   model,
+		foreign: true,
+	}
+}
+
+// validateForeignModel checks a foreign-shaped table declaration:
+// a struct, not a chok model, with at least one primary-key column in
+// its parsed GORM schema.
+func validateForeignModel(model any) error {
+	t := reflect.TypeOf(model)
+	if t == nil {
+		return fmt.Errorf("db: foreign table model must not be nil")
+	}
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return fmt.Errorf("db: foreign table model must be a struct, got %s", t.Kind())
+	}
+	ptr := reflect.New(t).Interface()
+	if _, ok := ptr.(Modeler); ok {
+		return fmt.Errorf("db: %s embeds a chok base model — declare it with db.Table, not db.ForeignTable", t.Name())
+	}
+	if _, ok := ptr.(AppendModeler); ok {
+		return fmt.Errorf("db: %s embeds db.AppendOnlyModel — declare it with db.Table, not db.ForeignTable", t.Name())
+	}
+	s, err := schema.Parse(ptr, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		return fmt.Errorf("db: parse GORM schema for %s: %w", t.Name(), err)
+	}
+	if len(s.PrimaryFields) == 0 {
+		return fmt.Errorf("db: foreign table %s has no primary key — tag at least one column with gorm:\"primaryKey\" "+
+			"(join tables typically declare a composite key)", t.Name())
+	}
+	return nil
 }
 
 // SoftUnique declares a composite unique index including delete_token.

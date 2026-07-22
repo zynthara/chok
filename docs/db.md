@@ -27,6 +27,7 @@
 |---|---|
 | 跑起来看效果 | [§2 五分钟上手](#2-五分钟上手) |
 | 定义一张表 / 选属主与软删 | [§3 定义模型](#3-定义模型) |
+| 审计流水 / 事件日志（append-only）、join 表 | [§3.5 append-only 表与外形表](#35-append-only-表与外形表join) |
 | 字段名要编译期检查（去手打字符串） | [§3.3 字段引用生成](#33-字段引用生成chok-gen-fields) |
 | 构造一个 Store、控制可查可写字段 | [§4 构造 Store](#4-构造-store) |
 | 按 ID 取一行 / 列表过滤分页 / 只要数量 | [§5 读取数据](#5-读取数据) |
@@ -146,6 +147,11 @@ chok.New("blog",
 | `db.SoftDeleteModel` | Model + 软删除（`deleted_at` + `delete_token`） | 需要回收站 / 可恢复 |
 | `db.OwnedModel` | Model + `owner_id`（自动属主隔离） | 用户私有数据 |
 | `db.OwnedSoftDeleteModel` | 以上全部 | 用户私有 + 可恢复（**最常用**） |
+
+此外还有两个**不进 `store.New`** 的表形态，见
+[§3.5](#35-append-only-表与外形表join)：`db.AppendOnlyModel`（append-only
+流水表，配受限的 `store.NewAppend`）与 `db.ForeignTable`（join / 外来形状
+表，纯迁移声明、无 store）。
 
 实现 `RIDPrefix() string` 后，`Create` 自动生成 `pst_xxx` 形式的对外 ID。
 
@@ -339,6 +345,79 @@ db.Module(db.WithTables(
 > 🔒 另外 **`versioned` 模式忽略 `WithTables`**（含其中的 `SoftUnique`）：应用
 > schema 全部来自迁移文件，索引要在编号 SQL 里按方言手写（PG partial index /
 > MySQL·SQLite 含 `delete_token` 的复合唯一索引）。
+
+### 3.5 append-only 表与外形表（join）
+
+不是每张表都该背 `db.Model` 的每行开销（RID 唯一索引 + 乐观锁版本 +
+双时间戳）。两类表有自己的正门：
+
+**append-only 流水表**（审计日志、事件流水、指标采样——只插入、永不改写）
+内嵌 `db.AppendOnlyModel`：只有自增 PK（`json:"-"`，不出进程）+
+`created_at`。声明迁移仍走 `db.Table`，store 走**受限的**
+`store.NewAppend`——只有 `Create` / `BatchCreate` / `List`，
+Update / Delete / 软删 / 乐观锁在类型上**不存在**（编译期约束
+`db.AppendModeler` 与 `db.Modeler` 双向隔离：append 模型进不了
+`store.New`，普通模型也进不了 `store.NewAppend`）：
+
+```go
+type AuditEntry struct {
+    db.AppendOnlyModel
+    Actor  string `json:"actor"  gorm:"size:100" store:"query"`
+    Action string `json:"action" gorm:"size:100" store:"query"`
+}
+
+db.Module(db.WithTables(db.Table(&AuditEntry{})))
+audits := store.NewAppend[AuditEntry](db.From(k), log.From(k))
+
+audits.Create(ctx, &AuditEntry{Actor: "alice", Action: "login"})
+page, _ := audits.List(ctx, where.WithFilter("actor", "alice"),
+    where.WithPage(1, 50), where.WithCount())
+```
+
+- **选项面**：沿用 `store.New` 的词汇——`WithQueryFields` / `store:"query"`
+  tag / `WithColumnAlias` / `WithConstraintFields` / `WithScope` /
+  `WithStrict` / `WithMaxPageSize` / `WithReadOnly` 照常；不适用的
+  （update 侧、owner 全家、hooks、`WithBus`、`WithDefaultPageSize`）
+  **构造期 panic**，不静默失效。`store:"update"` tag 同样构造期 panic。
+- **幂等写入**：append-only 表的去重钦定形态 = 唯一索引 + `Create` 撞
+  `ErrDuplicate`，配 `WithConstraintFields` 把冲突归因到公开字段名。
+- **分页恒确定**：`List` 无显式 `WithOrder` 时默认按插入序
+  （`created_at`, 内部 PK）；有显式 order 时也会在尾部追加内部 PK 作
+  tie-breaker——批量插入落在同一毫秒是常态，没有 tie-breaker 的
+  LIMIT/OFFSET 会跨页丢行/重行。PK 只进 ORDER BY，不出现在任何响应。
+- **没有 `ListWithCursor`**：keyset 游标的 tie-breaker 绑 RID 列，append
+  模型没有。增量消费用水位线：`where.WithFilter("created_at", where.Gt,
+  lastSeen)`。
+- 🚫 别实现 `RIDPrefix()`——没有 RID 列，构造期报错。
+
+**外形表**（join 表、外部系统镜像表——不内嵌任何 chok 基座）用
+`db.ForeignTable` 声明迁移。校验刻意薄：struct + 至少一个
+`gorm:"primaryKey"` 列（join 表典型是复合主键）；chok 模型会被拒绝并
+指回 `db.Table`。**没有 store**——chok 刻意不做 JOIN
+DSL，join 行的增删走句柄逃生门（[§10](#10-逃生门unsafe危险区)）：
+
+```go
+type UserRole struct {
+    UserID uint `gorm:"primaryKey"`
+    RoleID uint `gorm:"primaryKey"`
+}
+
+db.Module(db.WithTables(db.ForeignTable(&UserRole{})))
+
+gdb := h.Unsafe(ctx) // 基建层代码；跨表读回业务面用两步 IN（§5.5）
+gdb.Create(&UserRole{UserID: uid, RoleID: rid})
+gdb.Delete(&UserRole{}, "user_id = ? AND role_id = ?", uid, rid)
+```
+
+| 入口 | 校验 | 用途 |
+|---|---|---|
+| `db.Table` | 内嵌 Model/SoftDeleteModel **或** AppendOnlyModel | 进 store 的表 + append-only 表 |
+| `db.ForeignTable` | 任意 struct + ≥1 个 primaryKey 列 | join / 外来形状表，纯 DDL |
+| `store.New` | `db.Modeler`（Model 系） | 全功能 store |
+| `store.NewAppend` | `db.AppendModeler`（AppendOnlyModel） | 受限 append store |
+
+> 🔒 `versioned` 模式下三种表一视同仁：`WithTables` 被忽略，schema 全部
+> 来自编号迁移文件。
 
 ---
 
@@ -1388,7 +1467,7 @@ olap := db.From(k, "analytics")    // 具名实例
 | 门 | 事务感知 | scope | 用途 |
 |---|---|---|---|
 | `Store.Unsafe(ctx)` | ✅（仅同句柄事务） | 🔒 已应用，scope 失败 fail-closed | store DSL 写不出的 SQL，但 owner / 租户过滤必须保持 |
-| `(*db.DB).Unsafe(ctx)` | ✅（仅同句柄事务） | ❌ 无 | 基建层：外形表 AutoMigrate、事务内行锁 |
+| `(*db.DB).Unsafe(ctx)` | ✅（仅同句柄事务） | ❌ 无 | 基建层：join / 外形表行 DML（DDL 声明走 `db.ForeignTable`，§3.5）、事务内行锁 |
 
 ```go
 gdb, err := posts.Unsafe(ctx)  // 注意：返回 error（scope 解析失败即拒）
@@ -1512,6 +1591,7 @@ chok.New("app",
   db.From(k, instance...)   db.Module(opts...)   db.As(name)
   db.WithTables(specs...)   db.WithMigrations(fs)
   db.Table(model, indexes...)   db.SoftUnique(name, cols...)
+  db.ForeignTable(model)        // join / 外形表，纯迁移声明（§3.5）
   h.RunInTx(ctx, fn)   h.Migrate(ctx, specs...)   h.Ping(ctx)   h.Unsafe(ctx)
   db.InTx(ctx)
 
@@ -1555,6 +1635,11 @@ Store[T]（写）
   Upsert(ctx, *T, conflictCols, updateCols...)
   BatchUpsert(ctx, []*T, conflictCols, updateCols...)    // 两者均禁属主模型
   Tx(ctx, fn)          Unsafe(ctx)
+
+AppendStore[T]（append-only 表，§3.5；T 内嵌 db.AppendOnlyModel）
+  store.NewAppend[T](h, logger, ...StoreOption)
+  Create(ctx, *T)      BatchCreate(ctx, []*T)      List(ctx, ...where.Option)
+  // 仅此三个——写改路径编译期不存在
 
 定位 / 变更 / 选项
   store.RID(s)  store.ID(n)  store.Where(opts...)

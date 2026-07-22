@@ -228,6 +228,13 @@ type hooks[T any] struct {
 }
 
 // StoreOption configures a Store.
+//
+// NewAppend shares this option vocabulary: options that have no
+// meaning on an append-only store (the update side, the owner family,
+// hooks, the event bus, ListFromQuery's default page size) panic at
+// construction there instead of silently no-opping. When adding a new
+// knob to storeConfig, classify it for NewAppend too — either wire it
+// through or add it to the rejection list (see newAppendRejectOptions).
 type StoreOption func(*storeConfig)
 
 type storeConfig struct {
@@ -1644,14 +1651,22 @@ func mapError(err error) error {
 // app-wide and has no idea which Store produced the error, so the mapping
 // rides the error value itself.
 func (s *Store[T]) mapError(err error) error {
+	return mapErrorWithConstraints(err, s.constraintFields)
+}
+
+// mapErrorWithConstraints is the store-instance error-mapping kernel
+// shared by Store.mapError and AppendStore: package mapError first,
+// then the constraint→field declaration resolves duplicate errors to
+// the public field name the API should blame.
+func mapErrorWithConstraints(err error, constraintFields map[string]string) error {
 	mapped := mapError(err)
-	if len(s.constraintFields) == 0 {
+	if len(constraintFields) == 0 {
 		return mapped
 	}
 	var dup *DuplicateEntryError
 	if errors.As(mapped, &dup) && dup.Field == "" {
 		if constraint := extractConstraintName(dup.Detail); constraint != "" {
-			if field, ok := lookupConstraintField(s.constraintFields, constraint); ok {
+			if field, ok := lookupConstraintField(constraintFields, constraint); ok {
 				dup.Field = field
 			}
 		}
