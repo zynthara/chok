@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -569,6 +570,18 @@ func TestMySQLUTCBaseline_EpochEdgeTimestampFallback(t *testing.T) {
 	}
 	if stuck != 1 {
 		t.Fatalf("near-epoch TIMESTAMP scan = %d, want 1 — CONVERT_TZ must return it unmoved", stuck)
+	}
+	// The rejection below relies on strict mode — the default on every
+	// documented environment. Assert rather than assume (mirroring the
+	// session-tz pin): a non-strict server would zero-clamp the same
+	// write with a bare warning, which is exactly why the recipe
+	// routes these rows to manual handling under BOTH modes.
+	var mode string
+	if err := gdb.Raw("SELECT @@session.sql_mode").Row().Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mode, "STRICT_TRANS_TABLES") {
+		t.Skipf("server not strict (%s) — the write-back would zero-clamp instead of rejecting", mode)
 	}
 	// The signed-interval result (1969-12-31 23:00) is below the
 	// column's own range: strict mode rejects the write-back — the
