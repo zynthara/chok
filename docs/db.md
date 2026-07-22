@@ -728,8 +728,9 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   跳过即可；若已先启动，账本语句加版本边界（AND version <=
   升级前最高版本）、manifest 只转**升级前已存在 kind** 的
   claimed_at（首启时新 claim/adopt 的行是新基准，数据侧无标可分，
-  kind 集合只有运维者知道）；新版若还跑过 repair：mark-applied
-  重写过的旧 version 要从边界内再剔除，repair history 以升级前
+  kind 集合只有运维者知道）；新版若还跑过 repair：被新版**重建或刷新**过的
+  version 都要从边界内剔除——mark-applied 重写的，和 retry 删行后
+  再次 up 以同 version 重建的；repair history 以升级前
   MAX(id) 为界而非整列；任何边界不明的记账表整体跳过——偏斜仅
   记账留痕。**业务表没有这个豁免**，且 id 边界只是半条线：
   AND id <= 升级前 MAX(id) 只能排除首启后**新插入**的行；新版会在
@@ -742,9 +743,14 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   这个差值（数据不动、可见值移动）。**DATE 列**存量不动（历日无时区可重基），但写入
   契约随基准改变：存的是**瞬间的 UTC 历日**——date-only 值请以 UTC
   午夜构造（`time.Date(y, m, d, 0, 0, 0, 0, time.UTC)`），东偏时区
-  的本地午夜此后落到前一 UTC 日，读回为存量历日的 UTC 午夜。完整
+  的本地午夜此后落到前一 UTC 日，读回为存量历日的 UTC 午夜。两条执行纪律：**命名时区转换前必须预检**
+  （`SELECT CONVERT_TZ('2026-01-01 00:00:00','<ZONE>','+00:00')` 非
+  NULL 才继续——tz 表未装载/时区名错时它**静默返 NULL**，可空列如
+  `deleted_at` 会被写成 NULL、软删行复活）；**配方不可重复执行**
+  （二遍越过正确瞬间）——尽量单事务整跑（纯 InnoDB UPDATE 可回滚），
+  否则逐语句记完成点、状态不明回滚备份。完整
   配方见根目录 CHANGELOG 的 Breaking 条目（可执行形态由
-  `TestMySQLUTCBaseline_LegacyRebaseRecipe` pin 住）。
+  `TestMySQLUTCBaseline_LegacyRebaseRecipe` 及其姊妹测试 pin 住）。
 - 🚫 **字段名 typo 是服务端 bug**：原样返回 `where.ErrUnknownField`
   （→ 500），provenance 划界与 `Pluck`/`List` 一致（§11.2 例外①）。
 - 字符串/布尔列不可聚合（文本 MIN/MAX 的序由方言 collation 定义，跨

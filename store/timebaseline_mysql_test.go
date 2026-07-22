@@ -348,6 +348,58 @@ func TestMySQLUTCBaseline_LegacyRebaseRecipe(t *testing.T) {
 	}
 }
 
+// TestMySQLUTCBaseline_NamedZoneNullHazard pins the failure mode the
+// recipe's mandatory preflight exists to prevent: CONVERT_TZ does not
+// error on an unknown zone or unloaded server tz tables — it returns
+// NULL, and on a nullable column that NULL is written silently.
+// deleted_at is exactly such a column, so a soft-deleted row whose
+// deleted_at becomes NULL is RESURRECTED — business data corruption,
+// not bookkeeping noise. An invalid zone name reproduces the
+// unloaded-tz-tables behaviour deterministically regardless of the
+// server's tz table state. The probe the recipe mandates before any
+// named-zone UPDATE is asserted in both directions: NULL for a broken
+// zone (abort), non-NULL for a numeric offset (proceed).
+func TestMySQLUTCBaseline_NamedZoneNullHazard(t *testing.T) {
+	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
+	ctx := context.Background()
+
+	if err := s.Create(ctx, &AggSale{Status: "z", Qty: 1, Price: 1, Flag: true, At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, Where(where.WithFilter("status", "z"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, Where(where.WithFilter("status", "z"))); err == nil {
+		t.Fatal("sanity: the soft-deleted row must be invisible")
+	}
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe sql.NullString
+	if err := gdb.Raw("SELECT CONVERT_TZ('2026-01-01 00:00:00', 'No/Such_Zone', '+00:00')").Row().Scan(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Valid {
+		t.Fatalf("broken-zone probe = %q, want NULL — the abort criterion the recipe's preflight relies on", probe.String)
+	}
+	if err := gdb.Raw("SELECT CONVERT_TZ('2026-01-01 00:00:00', '+08:00', '+00:00')").Row().Scan(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if !probe.Valid {
+		t.Fatal("numeric-offset probe must be non-NULL")
+	}
+	// Skipping the preflight and running the UPDATE anyway: MySQL
+	// reports success, the NULL lands silently, and the soft-deleted
+	// row comes back to life.
+	if err := gdb.Exec("UPDATE agg_sales SET deleted_at = CONVERT_TZ(deleted_at, 'No/Such_Zone', '+00:00') WHERE deleted_at IS NOT NULL").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, Where(where.WithFilter("status", "z"))); err != nil {
+		t.Fatalf("expected the documented resurrection — soft-deleted row visible after the silent NULL; got %v", err)
+	}
+}
+
 type civilDateRow struct {
 	db.Model
 	Status string    `json:"status" gorm:"size:16;not null"`
