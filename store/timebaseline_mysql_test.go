@@ -400,6 +400,63 @@ func TestMySQLUTCBaseline_NamedZoneNullHazard(t *testing.T) {
 	}
 }
 
+// TestMySQLUTCBaseline_OutOfRangeUnconverted pins the second silent
+// CONVERT_TZ failure mode the recipe's per-column scan exists to
+// catch: values outside CONVERT_TZ's supported span (roughly the
+// 64-bit TIMESTAMP range — pre-epoch history, far-future dates) are
+// neither converted nor NULLed nor errored — they are returned
+// UNCHANGED, so the UPDATE reports success while the row silently
+// keeps its old wall clock. DATETIME itself spans years 1000-9999, so
+// such rows are perfectly storable. The unconverted-row detector the
+// recipe mandates (converted = original, valid whenever the two zones
+// differ) and the fixed-offset fallback (interval arithmetic, exact
+// across the whole DATETIME range) are both asserted here.
+func TestMySQLUTCBaseline_OutOfRangeUnconverted(t *testing.T) {
+	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
+	ctx := context.Background()
+
+	old := time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := s.Create(ctx, &AggSale{Status: "pre", Qty: 1, Price: 1, Flag: true, At: old}); err != nil {
+		t.Fatal(err)
+	}
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The recipe's unconverted-row detector fires on this row before
+	// any UPDATE runs.
+	var stuck int64
+	if err := gdb.Raw("SELECT COUNT(*) FROM agg_sales WHERE at IS NOT NULL AND CONVERT_TZ(at, '+08:00', '+00:00') = at").Row().Scan(&stuck); err != nil {
+		t.Fatal(err)
+	}
+	if stuck != 1 {
+		t.Fatalf("unconverted-row scan = %d, want 1 — the pre-epoch row must be flagged before the UPDATE", stuck)
+	}
+	// Running the blanket UPDATE anyway: success reported, value
+	// untouched — the silent skip the scan exists to prevent.
+	if err := gdb.Exec("UPDATE agg_sales SET at = CONVERT_TZ(at, '+08:00', '+00:00') WHERE at IS NOT NULL").Error; err != nil {
+		t.Fatal(err)
+	}
+	var after time.Time
+	if err := gdb.Raw("SELECT at FROM agg_sales WHERE status = 'pre'").Row().Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if !after.Equal(old) {
+		t.Fatalf("out-of-range value = %v, want it returned unchanged (%v) — CONVERT_TZ must not have touched it", after, old)
+	}
+	// The fixed-offset fallback is exact across the whole DATETIME
+	// range: interval arithmetic lands the true instant.
+	if err := gdb.Exec("UPDATE agg_sales SET at = DATE_SUB(at, INTERVAL '8:00' HOUR_MINUTE) WHERE status = 'pre'").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Raw("SELECT at FROM agg_sales WHERE status = 'pre'").Row().Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if want := old.Add(-8 * time.Hour); !after.Equal(want) {
+		t.Fatalf("interval-rebased value = %v, want %v", after, want)
+	}
+}
+
 type civilDateRow struct {
 	db.Model
 	Status string    `json:"status" gorm:"size:16;not null"`

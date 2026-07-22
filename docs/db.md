@@ -743,12 +743,18 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   这个差值（数据不动、可见值移动）。**DATE 列**存量不动（历日无时区可重基），但写入
   契约随基准改变：存的是**瞬间的 UTC 历日**——date-only 值请以 UTC
   午夜构造（`time.Date(y, m, d, 0, 0, 0, 0, time.UTC)`），东偏时区
-  的本地午夜此后落到前一 UTC 日，读回为存量历日的 UTC 午夜。两条执行纪律：**命名时区转换前必须预检**
+  的本地午夜此后落到前一 UTC 日，读回为存量历日的 UTC 午夜。四条执行纪律：①**命名时区先跑探针**
   （`SELECT CONVERT_TZ('2026-01-01 00:00:00','<ZONE>','+00:00')` 非
   NULL 才继续——tz 表未装载/时区名错时它**静默返 NULL**，可空列如
-  `deleted_at` 会被写成 NULL、软删行复活）；**配方不可重复执行**
-  （二遍越过正确瞬间）——尽量单事务整跑（纯 InnoDB UPDATE 可回滚），
-  否则逐语句记完成点、状态不明回滚备份。完整
+  `deleted_at` 会被写成 NULL、软删行复活）；②**每条 UPDATE 前按同
+  谓词扫描数据**（converted IS NULL 或 converted=原值 的计数须为
+  0——超出 CONVERT_TZ 支持范围的值**原样返回不报错**，1960 年史料
+  能过探针却不被转换；固定偏移的范围外行改用区间算术
+  `DATE_SUB(col, INTERVAL ...)`，命名时区的走应用侧处置）；③**单
+  事务整跑前核验目标表全为 InnoDB**（information_schema.tables 引擎
+  扫描须空——非事务表无视 ROLLBACK、留下半迁）；④**配方不可重复
+  执行**（二遍越过正确瞬间）——无事务则逐语句记完成点、状态不明
+  回滚备份。完整
   配方见根目录 CHANGELOG 的 Breaking 条目（可执行形态由
   `TestMySQLUTCBaseline_LegacyRebaseRecipe` 及其姊妹测试 pin 住）。
 - 🚫 **字段名 typo 是服务端 bug**：原样返回 `where.ErrUnknownField`

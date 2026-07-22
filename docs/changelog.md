@@ -60,7 +60,10 @@
 > updated_at 等可刷新列被首启后流量触碰即无正确就地转换→回滚
 > 备份重来；repair 剔除面含 retry 后重跑 up 重建的 version）；
 > 执行纪律=命名时区先 CONVERT_TZ 探针（静默 NULL 会复活软删行）+
-> 配方不可重复执行（单事务或记完成点，状态不明回滚）。端到端回归
+> 每列 UPDATE 前同谓词数据扫描（范围外值**原样返回不报错**——
+> 1960 史料过探针不被转，固定偏移改区间算术）+ 单事务前核验全表
+> InnoDB（非事务表无视 ROLLBACK）+ 配方不可重复执行（记完成点，
+> 状态不明回滚）。端到端回归
 > `TestMySQLUTCBaseline_LegacyRebaseRecipe`（分裂双旧时区 + 混合
 > 来源列 + 读侧校正）与 `_DateColumnCivilContract`。
 
