@@ -10,6 +10,26 @@
 
 ---
 
+## Unreleased — MySQL 时间基准可配置：`mysql.time_zone` 固定偏移（arch-backlog #18）
+
+> #17「UTC 双钉」决策稿 §3-C 预批准的加法路径落地：`MySQLOptions` 增
+> `time_zone`（默认 `utc`；不配 = #17 现状**字节级不变**——Loc 仍是
+> time.UTC 单例、session 钉仍是字面 `'+00:00'`、开门仍走原 DSN 路径），
+> 可配一个**固定数字偏移**（`+08:00`，MySQL 接受区间 -13:59..+14:00），
+> 服务「库里直接存本地墙钟」的真实下游诉求（DBA 裸 SQL 按本地日直读/
+> 分组）。同一偏移**同时**下发驱动 `Loc` 与 session `time_zone`——双钉
+> 不拆、单一基准，#17 的全部正确性论证原样成立（固定偏移与 UTC 同样
+> 无转换、瞬间→墙钟单射）；**只收固定偏移、拒命名/IANA 时区**——DST
+> 区会把 #17 消灭的秋季回拨折叠引回来，固定偏移还免掉服务器 tz 表
+> （mysql_tzinfo_to_sql）依赖；跨实例一致性由配置下发保证，外部写入方
+> 须知参数化为「按所配基准写」。实现连开门方式一起改（决策稿点名的
+> 伏笔）：固定偏移走 `mysql.NewConnector` + gorm `mysql.New(Conn)`——
+> `FormatDSN` 序列化不了 FixedZone（loc=+08:00 在 LoadLocation 处断，
+> #7 round-3 踩过的同一坑）；DSN 往返顺带执行的 charset 归位（charset
+> 参数→专用槽→SET NAMES）在 connector 路径须手工重放，否则按 Params
+> 通道重放成 `SET charset=...` 被服务器拒（真 MySQL lane 实测抓到）。
+> 纯加法非 Breaking；校验/驱动配置共用一个解析器防两处漂移。
+
 ## Unreleased — MySQL 时间写入基准 → UTC 双钉（arch-backlog #17）
 
 > #7 聚合复审 round-2/3 立项的决策项收口。旧状 `Loc=time.Local`（v1
@@ -31,7 +51,8 @@
 > 考虑并否决：只改 Loc 半件（deleted_at 双基准保留，代价相同收益减半）、
 > 现状+启动 warn 护栏（三个根因一个不修，把债滚到 GA 后）、config 开关
 > （给 per-deployment 基准差异发身份证，local 模式的缺陷成为永久支持
-> 义务；真需求出现时加固定偏移白名单字段是纯加法，门没焊死）。
+> 义务；真需求出现时加固定偏移白名单字段是纯加法，门没焊死——该门
+> 已由 #18 `mysql.time_zone` 落地，见上节）。
 > **Breaking**：存量库需 `CONVERT_TZ` 一次性重基（固定偏移精确
 > 无损），配方在根目录 CHANGELOG；beta 是此变更唯一的低成本窗口。
 > 真驱动 pin 测试同步翻转：round-2/3 测试改为断言 chok 侧恒 UTC

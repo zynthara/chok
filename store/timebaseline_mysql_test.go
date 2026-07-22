@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +137,212 @@ func TestMySQLUTCBaseline_SoftDeleteSharesDriverBaseline(t *testing.T) {
 	// baseline on a non-UTC host this is off by the whole zone offset.
 	if d := time.Since(created); d < -5*time.Minute || d > 5*time.Minute {
 		t.Fatalf("created_at %s parsed as UTC is %v from now — not on the UTC baseline", createdText, d)
+	}
+}
+
+// openMySQLFixedOffset opens a second chok handle onto base's
+// throwaway database with mysql.time_zone set — the §3-C fixed-offset
+// knob, which rides the NewConnector open path (a FixedZone cannot
+// survive a DSN round trip; see openMySQL).
+func openMySQLFixedOffset(t *testing.T, base *db.DB, tz string, readOnly bool) *db.DB {
+	t.Helper()
+	var dbName string
+	if err := base.Unsafe(context.Background()).Raw("SELECT DATABASE()").Row().Scan(&dbName); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := gomysql.ParseDSN(os.Getenv(dbtest.MySQLDSNEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(cfg.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := db.Open(db.Options{Driver: "mysql", ReadOnly: readOnly, MySQL: db.MySQLOptions{
+		Host: host, Port: port, Username: cfg.User, Password: cfg.Passwd,
+		Database: dbName, TimeZone: tz,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
+
+// TestMySQLUTCBaseline_FixedOffsetRoundTrip pins the §3-C knob on both
+// baseline halves and in both directions (east AND west — the sign is
+// where a template copy goes wrong): with mysql.time_zone set, DATETIME
+// stores the CONFIGURED offset's wall clock (not UTC, not the process
+// zone, whatever zone the Go value carries), reads back as the same
+// instant rendered at that offset, the session time_zone carries the
+// SAME offset (single baseline, driver ⟷ session), and the soft
+// delete's SQL-evaluated deleted_at lands beside the driver-written
+// created_at. charset and ParseTime are asserted alive because this
+// whole test rides the NewConnector path the default UTC baseline
+// never takes.
+func TestMySQLUTCBaseline_FixedOffsetRoundTrip(t *testing.T) {
+	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		tz              string
+		offset          int    // seconds east of UTC
+		wall            string // the wall clock DATETIME must store for inst
+		utcMidnightDate string // the civil date DATE stores for 2026-07-04 00:00Z
+	}{
+		{"+08:00", 8 * 3600, "2026-07-04 14:00:00", "2026-07-04"},
+		{"-05:00", -5 * 3600, "2026-07-04 01:00:00", "2026-07-03"}, // west of UTC the date flips
+	} {
+		t.Run(tc.tz, func(t *testing.T) {
+			base := dbtest.OpenMySQL(t)
+			h := openMySQLFixedOffset(t, base, tc.tz, false)
+			s := setupAggStoreOn(t, h) // DDL through the connector path too
+			ctx := context.Background()
+			gdb, err := s.Unsafe(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Session half: the pin carries the configured offset.
+			var sessionTZ string
+			if err := gdb.Raw("SELECT @@session.time_zone").Row().Scan(&sessionTZ); err != nil {
+				t.Fatal(err)
+			}
+			if sessionTZ != tc.tz {
+				t.Fatalf("@@session.time_zone = %q, want the configured %q", sessionTZ, tc.tz)
+			}
+			// charset rides its own SET NAMES channel — assert it
+			// survived the connector path rather than assume.
+			var charset string
+			if err := gdb.Raw("SELECT @@session.character_set_client").Row().Scan(&charset); err != nil {
+				t.Fatal(err)
+			}
+			if charset != "utf8mb4" {
+				t.Fatalf("@@session.character_set_client = %q, want utf8mb4", charset)
+			}
+
+			// Driver half: a Go value carrying an unrelated zone stores
+			// the configured offset's wall clock.
+			elsewhere := time.FixedZone("elsewhere", 3*3600)
+			if err := s.Create(ctx, &AggSale{Status: "rt", Qty: 1, Price: 1, Flag: true, At: inst.In(elsewhere)}); err != nil {
+				t.Fatal(err)
+			}
+			var stored string
+			if err := gdb.Raw("SELECT DATE_FORMAT(at, '%Y-%m-%d %H:%i:%s') FROM agg_sales WHERE status = 'rt'").Row().Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored != tc.wall {
+				t.Fatalf("stored wall clock = %q, want the %s wall clock %q", stored, tc.tz, tc.wall)
+			}
+			// Round trip: same instant, rendered at the configured
+			// offset (ParseTime alive on the connector path).
+			got, err := s.Get(ctx, Where(where.WithFilter("status", "rt")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.At.Equal(inst) {
+				t.Fatalf("read back %v, want the instant %v", got.At, inst)
+			}
+			if _, off := got.At.Zone(); off != tc.offset {
+				t.Fatalf("read back at offset %d, want %d", off, tc.offset)
+			}
+
+			// SQL-evaluated half shares the baseline: soft delete's
+			// CURRENT_TIMESTAMP sits beside the driver-written
+			// created_at (skew-tolerant), and created_at parsed AT THE
+			// CONFIGURED OFFSET is near now in absolute terms — under a
+			// UTC (or any other) baseline this is off by the whole
+			// offset difference.
+			if err := s.Create(ctx, &AggSale{Status: "sd", Qty: 1, Price: 1, Flag: true, At: time.Now()}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Delete(ctx, Where(where.WithFilter("status", "sd"))); err != nil {
+				t.Fatal(err)
+			}
+			var createdText, deletedText string
+			row := gdb.Raw("SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'), DATE_FORMAT(deleted_at, '%Y-%m-%d %H:%i:%s') FROM agg_sales WHERE status = 'sd'").Row()
+			if err := row.Scan(&createdText, &deletedText); err != nil {
+				t.Fatal(err)
+			}
+			zone := time.FixedZone(tc.tz, tc.offset)
+			parse := func(text string) time.Time {
+				v, err := time.ParseInLocation("2006-01-02 15:04:05", text, zone)
+				if err != nil {
+					t.Fatalf("parse %q: %v", text, err)
+				}
+				return v
+			}
+			created, deleted := parse(createdText), parse(deletedText)
+			if d := deleted.Sub(created); d < -5*time.Minute || d > 5*time.Minute {
+				t.Fatalf("deleted_at %s vs created_at %s: %v apart — the SQL-evaluated and driver baselines have forked", deletedText, createdText, d)
+			}
+			if d := time.Since(created); d < -5*time.Minute || d > 5*time.Minute {
+				t.Fatalf("created_at %s parsed at %s is %v from now — not on the configured baseline", createdText, tc.tz, d)
+			}
+
+			// DATE contract follows the knob: the stored civil date is
+			// the instant's calendar date AT THE CONFIGURED OFFSET —
+			// construct date-only values at that offset's midnight. A
+			// UTC midnight keeps its date east of UTC but lands on the
+			// PREVIOUS date west of it (the direction flip the west
+			// subtest exists for).
+			if err := h.Migrate(ctx, db.Table(&civilDateRow{})); err != nil {
+				t.Fatal(err)
+			}
+			ds := New[civilDateRow](h, log.Empty(), WithQueryFields("status", "d"))
+			offsetMidnight := time.Date(2026, 7, 4, 0, 0, 0, 0, zone)
+			for status, d := range map[string]time.Time{
+				"om": offsetMidnight,
+				"um": time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC),
+			} {
+				if err := ds.Create(ctx, &civilDateRow{Status: status, D: d}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for status, want := range map[string]string{"om": "2026-07-04", "um": tc.utcMidnightDate} {
+				var storedDate string
+				if err := gdb.Raw("SELECT CAST(d AS CHAR) FROM civil_date_rows WHERE status = ?", status).Row().Scan(&storedDate); err != nil {
+					t.Fatal(err)
+				}
+				if storedDate != want {
+					t.Fatalf("status %s: stored date %q, want %q", status, storedDate, want)
+				}
+			}
+			gotDate, err := ds.Get(ctx, Where(where.WithFilter("status", "om")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !gotDate.D.Equal(offsetMidnight) {
+				t.Fatalf("read back %v, want the configured offset's midnight %v", gotDate.D, offsetMidnight)
+			}
+			if _, off := gotDate.D.Zone(); off != tc.offset {
+				t.Fatalf("date read back at offset %d, want %d", off, tc.offset)
+			}
+		})
+	}
+}
+
+// TestMySQLUTCBaseline_FixedOffsetReadOnlyBackstop pins that the
+// read-only session backstop still reaches the server on the
+// NewConnector path: transaction_read_only travels in the same Params
+// SET the session time_zone does, and switching open paths for the
+// offset knob must not shed it.
+func TestMySQLUTCBaseline_FixedOffsetReadOnlyBackstop(t *testing.T) {
+	base := dbtest.OpenMySQL(t)
+	setupAggStoreOn(t, base) // migrate through the writable default handle
+	ro := openMySQLFixedOffset(t, base, "+08:00", true)
+	var readOnlyFlag, sessionTZ string
+	row := ro.Unsafe(context.Background()).Raw("SELECT @@session.transaction_read_only, @@session.time_zone").Row()
+	if err := row.Scan(&readOnlyFlag, &sessionTZ); err != nil {
+		t.Fatal(err)
+	}
+	if readOnlyFlag != "1" {
+		t.Fatalf("@@session.transaction_read_only = %q, want 1 — the read-only backstop must survive the connector path", readOnlyFlag)
+	}
+	if sessionTZ != "+08:00" {
+		t.Fatalf("@@session.time_zone = %q, want +08:00 (both params ride the same SET)", sessionTZ)
 	}
 }
 

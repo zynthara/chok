@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"net/url"
 	"os"
@@ -281,29 +282,61 @@ func openMySQL(o *MySQLOptions, readOnly bool) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	cfg := mysqlDriverConfig(o, tlsName, readOnly)
+	cfg, err := mysqlDriverConfig(o, tlsName, readOnly)
+	if err != nil {
+		return nil, err
+	}
 
-	gdb, err := gorm.Open(mysql.Open(cfg.FormatDSN()), &gorm.Config{
+	var dialector gorm.Dialector
+	var ownedPool *sql.DB
+	if cfg.Loc == time.UTC {
+		// Default UTC baseline: the DSN round trip is lossless
+		// (FormatDSN omits loc entirely for UTC) — the #17-verified
+		// path, byte-identical to before the time_zone knob existed.
+		dialector = mysql.Open(cfg.FormatDSN())
+	} else {
+		connector, err := mysqlFixedOffsetConnector(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("db: open mysql: %w", err)
+		}
+		ownedPool = sql.OpenDB(connector)
+		dialector = mysql.New(mysql.Config{Conn: ownedPool})
+	}
+
+	gdb, err := gorm.Open(dialector, &gorm.Config{
 		Logger: logger.Discard,
 	})
 	if err != nil {
+		if ownedPool != nil {
+			_ = ownedPool.Close()
+		}
 		return nil, fmt.Errorf("db: open mysql: %w", err)
 	}
 	applyPool(gdb, o.MaxOpenConns, o.MaxIdleConns, o.ConnMaxLifetime, o.ConnMaxIdleTime)
 	return gdb, nil
 }
 
-func mysqlDriverConfig(o *MySQLOptions, tlsName string, readOnly bool) *gomysql.Config {
+// mysqlDriverConfig builds the driver config with the write baseline
+// pinned on both halves — UTC by default, one fixed numeric offset
+// under mysql.time_zone (both halves carry the SAME offset; named
+// zones never reach here, Validate rejects them because DST would
+// reintroduce the fold #17 eliminated).
+func mysqlDriverConfig(o *MySQLOptions, tlsName string, readOnly bool) (*gomysql.Config, error) {
+	loc, sessionTZ, err := parseMySQLTimeZone(o.TimeZone)
+	if err != nil {
+		return nil, err // unreachable after Validate; kept for direct callers
+	}
 	params := map[string]string{
 		"charset": "utf8mb4",
-		// UTC write baseline, server half. Session time_zone governs what
-		// the driver's Loc cannot reach: SQL-evaluated timestamps
-		// (CURRENT_TIMESTAMP / NOW(), which write the soft-delete
-		// deleted_at) and TIMESTAMP-column conversion. Left unset it
-		// inherits the server's global zone, forking those values onto a
-		// second baseline whenever the server zone differs from the
-		// process zone. The numeric offset needs no server tz tables.
-		"time_zone": "'+00:00'",
+		// Write baseline, server half — the same offset as the driver
+		// Loc below. Session time_zone governs what the driver's Loc
+		// cannot reach: SQL-evaluated timestamps (CURRENT_TIMESTAMP /
+		// NOW(), which write the soft-delete deleted_at) and
+		// TIMESTAMP-column conversion. Left unset it inherits the
+		// server's global zone, forking those values onto a second
+		// baseline whenever the server zone differs from the configured
+		// one. A numeric offset needs no server tz tables.
+		"time_zone": sessionTZ,
 	}
 	if readOnly {
 		// go-sql-driver applies arbitrary Params as SET statements whenever a
@@ -319,18 +352,45 @@ func mysqlDriverConfig(o *MySQLOptions, tlsName string, readOnly bool) *gomysql.
 		DBName:    o.Database,
 		Params:    params,
 		ParseTime: true,
-		// UTC write baseline, driver half (arch-backlog #17). DATETIME
-		// stores a naked wall clock; Loc decides WHICH wall clock the
-		// driver writes and how it parses one back. UTC makes instant →
-		// wall clock injective (no DST fold) and identical across
-		// processes, so ordering / range filters / cursors / aggregates
-		// compare instants regardless of any machine's TZ. time.Local
-		// (the v1 heritage) tied that correctness to the deployment
-		// environment; go-sql-driver's own default is UTC.
-		Loc:                  time.UTC,
+		// Write baseline, driver half (arch-backlog #17; the offset
+		// knob is the decision doc's §3-C addendum). DATETIME stores a
+		// naked wall clock; Loc decides WHICH wall clock the driver
+		// writes and how it parses one back. The default is UTC —
+		// instant → wall clock stays injective (no DST fold) and
+		// identical across processes, so ordering / range filters /
+		// cursors / aggregates compare instants regardless of any
+		// machine's TZ; time.Local (the v1 heritage) tied that
+		// correctness to the deployment environment. A configured fixed
+		// offset keeps every property except the rendering: offsets
+		// never transition, and both baseline halves move together.
+		Loc:                  loc,
 		AllowNativePasswords: true,
 		TLSConfig:            tlsName,
+	}, nil
+}
+
+// mysqlFixedOffsetConnector hands the driver its Config directly —
+// the fixed-offset baseline cannot ride a DSN string, because
+// FormatDSN serialises loc=+08:00 and connection time then dies
+// inside time.LoadLocation ("unknown time zone": a FixedZone name is
+// not loadable — the #7 round-3 pin-test trap that forced the
+// NewConnector shape). Skipping the DSN round trip skips one
+// canonicalisation ParseDSN would have performed, which is replayed
+// here by hand: a Params entry named charset moves into the config's
+// dedicated charset slot (connection-time SET NAMES); handed over
+// verbatim it would be replayed as SET charset=... and rejected by
+// the server ("Unknown system variable"). time_zone and
+// transaction_read_only stay in Params — the same replayed-SET
+// channel the DSN path gives them.
+func mysqlFixedOffsetConnector(cfg *gomysql.Config) (driver.Connector, error) {
+	cfg = cfg.Clone()
+	if charset := cfg.Params["charset"]; charset != "" {
+		delete(cfg.Params, "charset")
+		if err := cfg.Apply(gomysql.Charset(charset, "")); err != nil {
+			return nil, err
+		}
 	}
+	return gomysql.NewConnector(cfg)
 }
 
 // mysqlTLSConfig resolves the value for gomysql.Config.TLSConfig

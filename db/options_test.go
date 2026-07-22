@@ -49,6 +49,26 @@ func TestOptions_Validate(t *testing.T) {
 			o.Driver = "mysql"
 			o.MySQL = MySQLOptions{Host: "h", Port: 3306, Database: "d", TLS: "skip-verify", CACert: "/etc/ca.pem"}
 		}, ""},
+		{"mysql utc alias time zone", func(o *Options) {
+			o.Driver = "mysql"
+			o.MySQL = MySQLOptions{Host: "h", Port: 3306, Database: "d", TimeZone: "UTC"}
+		}, ""},
+		{"mysql fixed offset time zone", func(o *Options) {
+			o.Driver = "mysql"
+			o.MySQL = MySQLOptions{Host: "h", Port: 3306, Database: "d", TimeZone: "-05:00"}
+		}, ""},
+		{"mysql named time zone rejected", func(o *Options) {
+			o.Driver = "mysql"
+			o.MySQL = MySQLOptions{Host: "h", Port: 3306, Database: "d", TimeZone: "Asia/Shanghai"}
+		}, "time_zone must be"},
+		{"mysql malformed time zone", func(o *Options) {
+			o.Driver = "mysql"
+			o.MySQL = MySQLOptions{Host: "h", Port: 3306, Database: "d", TimeZone: "+8:00"}
+		}, "time_zone must be"},
+		{"mysql out-of-range time zone", func(o *Options) {
+			o.Driver = "mysql"
+			o.MySQL = MySQLOptions{Host: "h", Port: 3306, Database: "d", TimeZone: "+15:00"}
+		}, "time_zone must be"},
 		{"postgres discrete valid", func(o *Options) {
 			o.Driver = "postgres"
 			o.Postgres = PostgresOptions{Host: "h", Port: 5432, Database: "d", SSLMode: "disable"}
@@ -103,6 +123,59 @@ func TestOptions_Validate(t *testing.T) {
 				t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
 			}
 		})
+	}
+}
+
+// parseMySQLTimeZone is the single grammar both Validate and the
+// driver config share. The UTC identities are load-bearing for the
+// arch-backlog #17 baseline: the default path must keep returning the
+// time.UTC singleton (not an equal FixedZone) and the exact "'+00:00'"
+// params value, or openMySQL's DSN-vs-connector branch and the #17
+// byte-identical guarantee both silently move.
+func TestParseMySQLTimeZone(t *testing.T) {
+	for _, v := range []string{"", "utc", "UTC", "+00:00", "-00:00"} {
+		loc, session, err := parseMySQLTimeZone(v)
+		if err != nil {
+			t.Fatalf("%q: %v", v, err)
+		}
+		if loc != time.UTC { // identity, not equality — do not soften
+			t.Fatalf("%q: loc = %v, want the time.UTC singleton", v, loc)
+		}
+		if session != "'+00:00'" {
+			t.Fatalf("%q: session = %q, want the #17 literal \"'+00:00'\"", v, session)
+		}
+	}
+	for _, tc := range []struct {
+		in      string
+		secs    int
+		session string
+	}{
+		{"+08:00", 8 * 3600, "'+08:00'"},
+		{"-05:00", -5 * 3600, "'-05:00'"},
+		{"+05:45", 5*3600 + 45*60, "'+05:45'"},     // Kathmandu-shaped offset, minutes half exercised
+		{"+14:00", 14 * 3600, "'+14:00'"},          // MySQL's east bound
+		{"-13:59", -(13*3600 + 59*60), "'-13:59'"}, // MySQL's west bound
+	} {
+		loc, session, err := parseMySQLTimeZone(tc.in)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.in, err)
+		}
+		if _, off := time.Now().In(loc).Zone(); off != tc.secs {
+			t.Fatalf("%q: offset = %d, want %d", tc.in, off, tc.secs)
+		}
+		if session != tc.session {
+			t.Fatalf("%q: session = %q, want %q", tc.in, session, tc.session)
+		}
+	}
+	for _, v := range []string{
+		"Asia/Shanghai", "America/New_York", "local", "Local", // named zones: DST would fold instants
+		"SYSTEM",                                                              // MySQL's server-zone escape hatch — the fork #17 killed
+		"+8:00", "08:00", "+08:0", "+08:00:00", " +08:00", "+08 00", "+0a:00", // malformed
+		"+15:00", "-14:00", "+08:60", // out of MySQL's -13:59..+14:00 span / minutes > 59
+	} {
+		if _, _, err := parseMySQLTimeZone(v); err == nil {
+			t.Fatalf("%q: want rejection, got nil error", v)
+		}
 	}
 }
 

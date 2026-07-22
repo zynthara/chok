@@ -381,18 +381,23 @@ OwnerScope 得到旁路交集而非覆盖，这正是旧文档引导过的误配
   聚合读取处经框架自产 strftime 表达式归一 UTC/毫秒（混合偏移不再
   选错极值/裂组；数值存量按 Unix 秒读，不用会误读 1970 年初的
   'auto'；仅聚合，存储与 filter/排序/游标不动）；MySQL DATETIME 存
-  裸墙钟，chok 把写入基准**双钉 UTC**（驱动 Loc=time.UTC 管 DATETIME
-  读写；每连接 SET time_zone='+00:00' 管 SQL 侧求值——软删 deleted_at
-  的 CURRENT_TIMESTAMP、用户 SQL 的 NOW()、TIMESTAMP 列转换，与驱动
-  写入同基准，不再悬在服务器时区上）：chok 写入方结构性免疫 DST
+  裸墙钟，chok 把写入基准**双钉**——默认 UTC（驱动 Loc=time.UTC 管
+  DATETIME 读写；每连接 SET time_zone='+00:00' 管 SQL 侧求值——软删
+  deleted_at 的 CURRENT_TIMESTAMP、用户 SQL 的 NOW()、TIMESTAMP 列
+  转换，与驱动写入同基准，不再悬在服务器时区上），`mysql.time_zone`
+  可配一个固定数字偏移（§3-C 加法路径：两半携同一偏移、仍单基准；
+  命名/IANA 时区被拒——DST 区会引回回拨折叠，固定偏移免服务器 tz 表
+  依赖；同库实例同偏移由配置下发保证）：chok 写入方结构性免疫 DST
   折叠与跨实例时区漂移，进程 TZ 不再参与正确性；残余约束=同库
-  **非 chok 写入方**须同按 UTC 墙钟写（DATETIME 不带时区，外人写歪
+  **非 chok 写入方**须同按所配基准（默认 UTC）墙钟写（DATETIME 不带
+  时区，外人写歪
   的存量读取侧无法修复；约束排序/过滤/游标全部时间比较面，聚合只是
   继承）；旧版（≤beta.6，Loc=time.Local）存量按**来源**逐列
   CONVERT_TZ 重基——驱动写入列用旧进程时区、SQL 求值列（deleted_at）
   用旧 session 时区、参数写入的 TIMESTAMP 消两者之差的偏斜
-  （CHANGELOG Breaking 条目携配方）；DATE 列契约=存瞬间的 **UTC
-  历日**（date-only 值以 UTC 午夜构造，东偏本地午夜落前一日）；PG
+  （CHANGELOG Breaking 条目携配方）；DATE 列契约=存瞬间按**所配基准
+  （默认 UTC）的历日**（date-only 值以所配基准的午夜构造，其他
+  时区的本地午夜落到相邻历日）；PG
   timestamptz 无此题。能力矩阵两半：wire kind 管 Go 收敛，**数据库真实列型**管
   操作合法性——真实列型读自 catalog **纯元数据**（pragma_table_info /
   PG pg_catalog / MySQL information_schema，首次聚合懒解析+缓存；不用

@@ -120,6 +120,7 @@ Named instances: sections marked *multi-instance* accept an
 | `mysql.database` | string | — | restart | — |
 | `mysql.tls` | string | — | restart | — |
 | `mysql.ca_cert` | string | — | restart | — |
+| `mysql.time_zone` | string | `utc` | restart | — |
 | `mysql.max_open_conns` | int | `100` | restart | — |
 | `mysql.max_idle_conns` | int | `10` | restart | — |
 | `mysql.conn_max_lifetime` | duration | `1h` | restart | — |

@@ -681,17 +681,27 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   不用 SQLite 的 'auto' 启发——它会把 1970 年头 63 天的 Unix 秒误读成
   Julian day；Julian REAL 刻意不支持）。这只影响聚合，存储值、filter
   与排序不动。② **MySQL 的时间列是 DATETIME，存裸墙钟；chok 把写入
-  基准双钉在 UTC**（驱动 `Loc=time.UTC` 管 DATETIME 读写；每连接
+  基准双钉在 UTC（默认）**（驱动 `Loc=time.UTC` 管 DATETIME 读写；每连接
   `SET time_zone='+00:00'` 管 SQL 侧求值——软删写 `deleted_at` 的
   `CURRENT_TIMESTAMP`、用户 SQL 的 `NOW()`、TIMESTAMP 列转换，否则
-  这半边悬在服务器时区上，与驱动侧分叉成第二条基准）。chok 写入方
+  这半边悬在服务器时区上，与驱动侧分叉成第二条基准）。**基准可配**
+  （#17 决策稿 §3-C 加法路径）：`mysql.time_zone`（默认 `utc`）可改成
+  一个**固定数字偏移**（如 `+08:00`——库的裸 SQL 消费方要按本地墙钟
+  直读/按本地日分组时用），同一偏移同时下发两半（驱动 `Loc` 与
+  session `time_zone` 携同一偏移，仍是单基准）；**命名/IANA 时区被
+  拒**（`Asia/Shanghai` 这类 DST 区会把已消灭的回拨折叠引回来，固定
+  偏移还免了服务器 tz 表 `mysql_tzinfo_to_sql` 依赖）；连接建立期
+  参数，改后重启生效；同库多实例须配同一偏移（跨实例一致性由配置
+  下发保证）。chok 写入方
   因此**结构性正确**：进程 TZ 任意、跨实例任意混合、Go 值带什么时区
-  都无所谓——UTC 无 DST 转换，瞬间→墙钟是单射，不存在秋季回拨把两个
-  瞬间折成同一墙钟的折叠（America/New_York 的 11 月切换日 05:30Z 与
+  都无所谓——UTC 与任何固定偏移都无 DST 转换，瞬间→墙钟是单射，不存
+  在秋季回拨把两个瞬间折成同一墙钟的折叠（America/New_York 的 11 月
+  切换日 05:30Z 与
   06:30Z 都是 01:30——v2.0.0-beta.6 及更早的 `Loc=time.Local` 下这在
   单进程内就会发生）。残余约束只剩一条**外部写入方须知**：DATETIME
   不带时区，框架管不到别人的连接——同库的非 chok 写入方必须同样按
-  UTC 墙钟写入，否则同一瞬间两种墙钟、读取侧无法修复。这条约束同样
+  **所配基准**（默认 UTC）的墙钟写入，否则同一瞬间两种墙钟、读取侧
+  无法修复。这条约束同样
   覆盖排序 / 范围过滤 / 游标，不只聚合。运维注记：`time_zone` 经
   每连接 SET 下发（与只读句柄的 transaction_read_only 同通道；
   charset 的 SET NAMES 是另一条连接建立期路径，同属会话状态）——
@@ -703,7 +713,8 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   求值列=旧 **session**（通常即服务器）时区），两者都是 UTC 才可整体
   跳过。驱动写入的 DATETIME（created_at/updated_at/业务字段）按旧
   进程时区、SQL 求值的 DATETIME（软删 `deleted_at`、NOW() 喂的列）
-  按旧 session 时区 `CONVERT_TZ` 到 +00:00；**参数写入的 TIMESTAMP
+  按旧 session 时区 `CONVERT_TZ` 到 +00:00（配了非默认
+  `mysql.time_zone` 的库把目标 `'+00:00'` 换成所配偏移）；**参数写入的 TIMESTAMP
   列**（含框架迁移账本 applied_at/claimed_at 等）在旧进程≠旧 session
   时区时内部瞬间偏斜两者之差（旧读取的反向抵消掩盖了它，UTC 对称
   读取会暴露），按 `CONVERT_TZ(col, '<旧进程>', '<旧 session>')`
@@ -741,9 +752,11 @@ search_path 仅事务内 `SET LOCAL` 形态连贯）。属主/自定义 scope
   可刷新列没有正确的就地转换——回滚备份、按正确顺序重来）。免迁的 DEFAULT 值另有一条**读侧披露**：旧读取原本
   把它们偏斜 (旧 session−旧进程) 返回，升级后 API 可见瞬间被校正
   这个差值（数据不动、可见值移动）。**DATE 列**存量不动（历日无时区可重基），但写入
-  契约随基准改变：存的是**瞬间的 UTC 历日**——date-only 值请以 UTC
-  午夜构造（`time.Date(y, m, d, 0, 0, 0, 0, time.UTC)`），东偏时区
-  的本地午夜此后落到前一 UTC 日，读回为存量历日的 UTC 午夜。四条执行纪律：①**命名时区先跑探针**
+  契约随基准改变：存的是**瞬间按所配基准（默认 UTC）的历日**——
+  date-only 值请以所配基准的午夜构造（默认
+  `time.Date(y, m, d, 0, 0, 0, 0, time.UTC)`；配了偏移用
+  `time.FixedZone` 同偏移的午夜），其他时区的本地午夜会落到相邻
+  历日，读回为存量历日按所配基准的午夜。四条执行纪律：①**命名时区先跑探针**
   （`SELECT CONVERT_TZ('2026-01-01 00:00:00','<ZONE>','+00:00')` 非
   NULL 才继续——tz 表未装载/时区名错时它**静默返 NULL**，可空列如
   `deleted_at` 会被写成 NULL、软删行复活）；②**每条 UPDATE 前按同

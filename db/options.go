@@ -169,13 +169,15 @@ type SQLiteOptions struct {
 // per-host tls.Config against that CA (managed databases presenting a
 // private-CA certificate — DigitalOcean, RDS — need exactly this).
 //
-// Time values ride a fixed UTC baseline, not the process zone: the
-// driver Loc is time.UTC (DATETIME columns store and parse UTC wall
-// clocks) and every connection pins its session time_zone to +00:00
-// (SQL-evaluated timestamps share that baseline). Non-chok writers to
-// the same database must write UTC wall clocks too; see the MySQL
-// notes in docs/db.md and the CHANGELOG migration entry for databases
-// written by pre-UTC-baseline versions.
+// Time values ride a fixed write baseline, not the process zone —
+// UTC by default: the driver Loc is time.UTC (DATETIME columns store
+// and parse UTC wall clocks) and every connection pins its session
+// time_zone to +00:00 (SQL-evaluated timestamps share that baseline).
+// TimeZone moves both halves together to one fixed numeric offset;
+// named/IANA zones are rejected. Non-chok writers to the same
+// database must write the configured baseline's wall clocks too; see
+// the MySQL notes in docs/db.md and the CHANGELOG migration entry for
+// databases written by pre-UTC-baseline versions.
 type MySQLOptions struct {
 	Host     string `mapstructure:"host"     default:"127.0.0.1"`
 	Port     int    `mapstructure:"port"     default:"3306"`
@@ -188,6 +190,19 @@ type MySQLOptions struct {
 	// "preferred" (TLS when offered). Ignored when CACert is set.
 	TLS    string `mapstructure:"tls"`
 	CACert string `mapstructure:"ca_cert"`
+
+	// TimeZone is the write baseline for time values: "" or "utc"
+	// (the default) or a fixed numeric offset "±HH:MM" (e.g. "+08:00")
+	// for databases whose raw-SQL consumers read local wall clocks.
+	// The offset is pinned on both baseline halves — the driver Loc
+	// (DATETIME storage and parsing) and the per-connection session
+	// time_zone (CURRENT_TIMESTAMP/NOW(), TIMESTAMP-column
+	// conversion). Named/IANA zones (Asia/Shanghai) are rejected: a
+	// DST zone folds distinct instants onto one stored wall clock —
+	// the defect the UTC baseline eliminated — while a fixed offset
+	// stays injective and needs no server tz tables. Connection
+	// establishment parameter: changes apply on restart.
+	TimeZone string `mapstructure:"time_zone" default:"utc"`
 
 	MaxOpenConns    int           `mapstructure:"max_open_conns"     default:"100"`
 	MaxIdleConns    int           `mapstructure:"max_idle_conns"     default:"10"`
@@ -297,7 +312,60 @@ func (o *MySQLOptions) validate() error {
 	default:
 		return fmt.Errorf(`db: mysql: tls must be one of ""|true|false|skip-verify|preferred, got %q`, o.TLS)
 	}
+	if _, _, err := parseMySQLTimeZone(o.TimeZone); err != nil {
+		return err
+	}
 	return nil
+}
+
+// parseMySQLTimeZone normalises the configured MySQL time baseline
+// (the §3-C addendum to arch-backlog #17) into its two pinned halves:
+// the driver Loc and the session time_zone SET value (quoted — the
+// Params convention; go-sql-driver splices Params values verbatim
+// into the connection-time SET). "" and "utc"/"UTC" — and a zero
+// offset under either sign — are the default UTC baseline and return
+// exactly time.UTC and "'+00:00'", byte-identical to the pre-knob #17
+// pins. Anything else must be a fixed numeric offset "±HH:MM" inside
+// MySQL's accepted span, -13:59 to +14:00 (no seconds — session
+// time_zone takes none either). Named/IANA zones are rejected on
+// purpose: a DST zone would reintroduce the fall-back fold #17
+// eliminated (two instants, one stored wall clock), and a fixed
+// offset works without the server tz tables mysql_tzinfo_to_sql
+// loads. Both callers — validate and the driver config — share this
+// single parse so the accepted grammar cannot drift between them.
+func parseMySQLTimeZone(v string) (*time.Location, string, error) {
+	if v == "" || v == "utc" || v == "UTC" {
+		return time.UTC, "'+00:00'", nil
+	}
+	fail := func() (*time.Location, string, error) {
+		return nil, "", fmt.Errorf("db: mysql: time_zone must be \"utc\" or a fixed numeric offset ±HH:MM between -13:59 and +14:00, got %q (named zones are rejected: DST folds distinct instants onto one stored wall clock, and fixed offsets need no server tz tables)", v)
+	}
+	if len(v) != 6 || (v[0] != '+' && v[0] != '-') || v[3] != ':' {
+		return fail()
+	}
+	for _, i := range []int{1, 2, 4, 5} {
+		if v[i] < '0' || v[i] > '9' {
+			return fail()
+		}
+	}
+	hh := int(v[1]-'0')*10 + int(v[2]-'0')
+	mm := int(v[4]-'0')*10 + int(v[5]-'0')
+	if mm > 59 {
+		return fail()
+	}
+	minutes := hh*60 + mm
+	neg := v[0] == '-'
+	if (neg && minutes > 13*60+59) || (!neg && minutes > 14*60) {
+		return fail()
+	}
+	if minutes == 0 {
+		return time.UTC, "'+00:00'", nil
+	}
+	secs := minutes * 60
+	if neg {
+		secs = -secs
+	}
+	return time.FixedZone(v, secs), "'" + v + "'", nil
 }
 
 func (o *PostgresOptions) validate() error {

@@ -112,8 +112,81 @@ func TestMySQLTLSConfig_BadCA(t *testing.T) {
 	}
 }
 
+// TestMySQLDriverConfig_TimeZoneBothHalves pins that the configured
+// baseline reaches BOTH halves with the same offset — and that the
+// default path is byte-identical to the pre-knob #17 pins: the
+// time.UTC singleton (identity, which also selects openMySQL's
+// DSN branch) and the literal "'+00:00'" params value.
+func TestMySQLDriverConfig_TimeZoneBothHalves(t *testing.T) {
+	base := MySQLOptions{Host: "h", Port: 3306, Database: "d"}
+
+	cfg, err := mysqlDriverConfig(&base, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Loc != time.UTC { // identity, not equality — do not soften
+		t.Fatalf("default Loc = %v, want the time.UTC singleton", cfg.Loc)
+	}
+	if cfg.Params["time_zone"] != "'+00:00'" {
+		t.Fatalf("default session pin = %q, want the #17 literal \"'+00:00'\"", cfg.Params["time_zone"])
+	}
+
+	east := base
+	east.TimeZone = "+08:00"
+	cfg, err = mysqlDriverConfig(&east, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, off := time.Now().In(cfg.Loc).Zone(); off != 8*3600 {
+		t.Fatalf("driver half offset = %d, want %d", off, 8*3600)
+	}
+	if cfg.Params["time_zone"] != "'+08:00'" {
+		t.Fatalf("session half = %q, want \"'+08:00'\" (same offset as the driver half)", cfg.Params["time_zone"])
+	}
+
+	bad := base
+	bad.TimeZone = "Asia/Shanghai"
+	if _, err := mysqlDriverConfig(&bad, "", false); err == nil {
+		t.Fatal("named zone must be rejected for direct callers too")
+	}
+}
+
+// TestMySQLFixedOffsetConnector_ResolvesRegisteredTLS pins the TLS leg
+// of the fixed-offset open path: NewConnector normalises the Config at
+// construction, so an unknown TLSConfig name errors right there — a
+// registered per-host name (the CACert flow) must survive it. No live
+// MySQL needed; resolution happens before any dial. The production
+// helper is used so the charset canonicalisation it performs is
+// covered on the same call.
+func TestMySQLFixedOffsetConnector_ResolvesRegisteredTLS(t *testing.T) {
+	ca := writeTestCA(t)
+	host := "db-offset-tls-test.internal"
+	o := &MySQLOptions{Host: host, Port: 3306, Database: "d", CACert: ca, TimeZone: "+08:00"}
+	name, err := mysqlTLSConfig(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := mysqlDriverConfig(o, name, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mysqlFixedOffsetConnector(cfg); err != nil {
+		t.Fatalf("connector must resolve the registered TLS name %q: %v", name, err)
+	}
+	// And the unknown-name failure mode stays loud (the property the
+	// assertion above rides on).
+	broken := cfg.Clone()
+	broken.TLSConfig = "chok-mysql-never-registered"
+	if _, err := mysqlFixedOffsetConnector(broken); err == nil {
+		t.Fatal("an unregistered TLS name must fail at connector construction")
+	}
+}
+
 func TestReadOnly_DriverSessionDefaults(t *testing.T) {
-	mysqlCfg := mysqlDriverConfig(&MySQLOptions{Host: "h", Port: 3306, Database: "d"}, "", true)
+	mysqlCfg, err := mysqlDriverConfig(&MySQLOptions{Host: "h", Port: 3306, Database: "d"}, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if mysqlCfg.Params["transaction_read_only"] != "1" {
 		t.Fatalf("mysql read-only session default missing: %#v", mysqlCfg.Params)
 	}

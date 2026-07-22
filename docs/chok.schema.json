@@ -458,6 +458,10 @@
                     "default": 3306,
                     "type": "integer"
                   },
+                  "time_zone": {
+                    "default": "utc",
+                    "type": "string"
+                  },
                   "tls": {
                     "type": "string"
                   },
@@ -659,6 +663,10 @@
             "port": {
               "default": 3306,
               "type": "integer"
+            },
+            "time_zone": {
+              "default": "utc",
+              "type": "string"
             },
             "tls": {
               "type": "string"
