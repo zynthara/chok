@@ -93,33 +93,88 @@ func ValidateAppendModel(model any) error {
 		return fmt.Errorf("db: parse GORM schema for %s: %w", t.Name(), err)
 	}
 	for _, name := range []string{"ID", "CreatedAt"} {
-		base := appendBaseField(s, name)
+		base := appendBaseField(t, s, name)
 		if base == nil {
 			return fmt.Errorf("db: %s declares its own %s, displacing AppendOnlyModel.%s — the append-only base owns ID and CreatedAt; rename the model's field", t.Name(), name, name)
 		}
 		if lu := s.LookUpField(name); lu != base {
 			return fmt.Errorf("db: %s.%s shadows AppendOnlyModel.%s — the append-only base owns ID and CreatedAt; rename the model's field", t.Name(), name, name)
 		}
+		// Same-column takeover (round-2 review): a differently-named
+		// field claiming the base's COLUMN wins GORM's DBName binding
+		// (shorter bind path), silencing the base's autoCreateTime /
+		// primary key while every name-based check above still resolves
+		// the base field. Reject any other field on the base's column.
+		for _, f := range s.Fields {
+			if f != base && f.DBName == base.DBName {
+				return fmt.Errorf("db: %s.%s maps to column %q, which AppendOnlyModel.%s owns — pick a different column name", t.Name(), f.Name, base.DBName, name)
+			}
+		}
+		if owner := s.FieldsByDBName[base.DBName]; owner != base {
+			// Belt-and-braces for a GORM version that prunes the losing
+			// field from Fields instead of keeping both.
+			return fmt.Errorf("db: %s: column %q is not bound to AppendOnlyModel.%s — the append-only base owns its columns", t.Name(), base.DBName, name)
+		}
 	}
-	baseID := appendBaseField(s, "ID")
+	baseID := appendBaseField(t, s, "ID")
 	if len(s.PrimaryFields) != 1 || s.PrimaryFields[0] != baseID {
 		return fmt.Errorf("db: %s: the primary key must be exactly AppendOnlyModel's auto-increment ID — remove extra gorm:\"primaryKey\" tags", t.Name())
 	}
 	return nil
 }
 
+// appendOnlyModelType identifies the base by TYPE — an embed through a
+// type alias (type Base = db.AppendOnlyModel) binds under the alias's
+// field name, so matching the literal "AppendOnlyModel" in BindNames
+// would falsely reject legal models.
+var appendOnlyModelType = reflect.TypeOf(AppendOnlyModel{})
+
 // appendBaseField resolves the AppendOnlyModel-owned field of the
-// given Go name from a parsed schema, identified by its reflection
-// bind path (…, "AppendOnlyModel", name) so a same-named model field
-// cannot shadow the resolution. Returns nil when the base field was
-// displaced entirely (GORM dropped it in favour of the model's own).
-func appendBaseField(s *schema.Schema, name string) *schema.Field {
+// given Go name from a parsed schema: the schema field whose bind
+// path's declaring struct is db.AppendOnlyModel itself. A same-named
+// model field (bind path rooted at the model) never matches, so
+// shadowing cannot redirect the resolution. Returns nil when the base
+// field was displaced entirely.
+func appendBaseField(root reflect.Type, s *schema.Schema, name string) *schema.Field {
 	for _, f := range s.Fields {
-		if n := len(f.BindNames); n >= 2 && f.BindNames[n-1] == name && f.BindNames[n-2] == "AppendOnlyModel" {
+		if n := len(f.BindNames); n >= 2 && f.BindNames[n-1] == name && bindParentType(root, f.BindNames) == appendOnlyModelType {
 			return f
 		}
 	}
 	return nil
+}
+
+// bindParentType walks root along a GORM bind path (each element a
+// direct field of the level above) and returns the struct type that
+// declares the leaf field; nil when the path does not resolve.
+func bindParentType(root reflect.Type, bind []string) reflect.Type {
+	t := root
+	for i := 0; i < len(bind)-1; i++ {
+		f, ok := directStructField(t, bind[i])
+		if !ok {
+			return nil
+		}
+		ft := f.Type
+		if ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if ft.Kind() != reflect.Struct {
+			return nil
+		}
+		t = ft
+	}
+	return t
+}
+
+// directStructField finds a field declared directly on t (no promoted
+// lookup — bind path elements are per-level direct fields).
+func directStructField(t reflect.Type, name string) (reflect.StructField, bool) {
+	for i := range t.NumField() {
+		if f := t.Field(i); f.Name == name {
+			return f, true
+		}
+	}
+	return reflect.StructField{}, false
 }
 
 // IsSoftDeleteModel returns true if the model embeds SoftDeleteModel,

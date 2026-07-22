@@ -110,19 +110,34 @@ func NewAppend[T db.AppendModeler](h *db.DB, logger log.Logger, opts ...StoreOpt
 	modelSchema := stmt.Schema
 
 	// Resolve the deterministic-order columns once, addressed by their
-	// reflection bind path (…, "AppendOnlyModel", name) rather than a
-	// name lookup — LookUpField prefers a model's own same-named field,
-	// which would rebind the tie-breaker onto a possibly non-unique
-	// column. ValidateAppendModel already rejects such shadowing, so a
-	// miss here is defense-in-depth. This parse used the handle's real
-	// naming strategy, so DBName is the actual column.
-	idField := appendOwnedField(modelSchema, "ID")
+	// reflection bind path (declaring struct must be AppendOnlyModel
+	// itself) rather than a name lookup — LookUpField prefers a model's
+	// own same-named field, which would rebind the tie-breaker onto a
+	// possibly non-unique column. ValidateAppendModel already rejects
+	// shadowing/takeover, so a miss here is defense-in-depth. This
+	// parse used the handle's real naming strategy, so DBName is the
+	// actual column.
+	idField := appendOwnedField(t, modelSchema, "ID")
 	if idField == nil || idField.DBName == "" {
 		panic(fmt.Sprintf("store.NewAppend: %s has no AppendOnlyModel.ID column in its parsed schema", t.Name()))
 	}
-	createdAtField := appendOwnedField(modelSchema, "CreatedAt")
+	createdAtField := appendOwnedField(t, modelSchema, "CreatedAt")
 	if createdAtField == nil || createdAtField.DBName == "" {
 		panic(fmt.Sprintf("store.NewAppend: %s has no AppendOnlyModel.CreatedAt column in its parsed schema", t.Name()))
+	}
+	// Column ownership under THIS handle's naming strategy: validation
+	// parsed with the default strategy, so a custom strategy could map
+	// another field onto the base's column only here. The base fields
+	// must win the DBName binding, or Create/Scan would run against the
+	// usurping field (base autoCreateTime silently stops firing).
+	for _, base := range []*schema.Field{idField, createdAtField} {
+		if owner := modelSchema.FieldsByDBName[base.DBName]; owner != base {
+			ownerName := "<none>"
+			if owner != nil {
+				ownerName = owner.Name
+			}
+			panic(fmt.Sprintf("store.NewAppend: %s: column %q is bound to field %s, not the append base — pick a different column name", t.Name(), base.DBName, ownerName))
+		}
 	}
 
 	cfg := &storeConfig{}
@@ -389,18 +404,53 @@ func (s *AppendStore[T]) rejectWrite(op string) error {
 	return fmt.Errorf("store: %s: %w", op, db.ErrReadOnly)
 }
 
+// appendBaseType identifies db.AppendOnlyModel by TYPE — an embed
+// through a type alias binds under the alias's field name, so a
+// literal name match in BindNames would falsely reject legal models.
+var appendBaseType = reflect.TypeOf(db.AppendOnlyModel{})
+
 // appendOwnedField resolves the AppendOnlyModel-owned field of the
-// given Go name by its reflection bind path — the store-side twin of
-// db's validation-time resolution (db/validate.go appendBaseField),
-// re-run here against the handle-parsed schema so DBName reflects the
-// real naming strategy.
-func appendOwnedField(s *schema.Schema, name string) *schema.Field {
+// given Go name by its reflection bind path (the declaring struct must
+// be db.AppendOnlyModel itself) — the store-side twin of db's
+// validation-time resolution (db/validate.go appendBaseField), re-run
+// here against the handle-parsed schema so DBName reflects the real
+// naming strategy.
+func appendOwnedField(root reflect.Type, s *schema.Schema, name string) *schema.Field {
 	for _, f := range s.Fields {
-		if n := len(f.BindNames); n >= 2 && f.BindNames[n-1] == name && f.BindNames[n-2] == "AppendOnlyModel" {
+		if n := len(f.BindNames); n >= 2 && f.BindNames[n-1] == name && appendBindParent(root, f.BindNames) == appendBaseType {
 			return f
 		}
 	}
 	return nil
+}
+
+// appendBindParent walks root along a GORM bind path (each element a
+// direct field of the level above) and returns the struct type that
+// declares the leaf field; nil when the path does not resolve.
+func appendBindParent(root reflect.Type, bind []string) reflect.Type {
+	t := root
+	for i := 0; i < len(bind)-1; i++ {
+		var sf reflect.StructField
+		found := false
+		for j := range t.NumField() {
+			if f := t.Field(j); f.Name == bind[i] {
+				sf, found = f, true
+				break
+			}
+		}
+		if !found {
+			return nil
+		}
+		ft := sf.Type
+		if ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if ft.Kind() != reflect.Struct {
+			return nil
+		}
+		t = ft
+	}
+	return t
 }
 
 // applyScopes runs all registered ScopeFuncs against the given DB.

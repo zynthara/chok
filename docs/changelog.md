@@ -43,6 +43,16 @@
 > 直接拒绝遮蔽 ID/CreatedAt 或追加 primaryKey 列的模型；③ 文档原推荐
 > 的三参 `WithFilter` 不能编译（应为 `WithFilterOp`），且 `Gt` 水位线
 > 在平局/并发提交下静默漏行——文档全面改为上述重叠水位线 + 去重形态。
+>
+> **round-2 复审修正**（1M）：②的同名遮蔽修了、但**同列异名**仍能穿——
+> `SourceTime time.Time gorm:"column:created_at"` 按更短绑定路径赢走
+> GORM 的列绑定（基座 autoCreateTime 静默失效、水位线列变调用方可控），
+> 而按名查找仍返回基座字段、三门全放行。修复：`ValidateAppendModel`
+> 加列所有权检查（基座列上出现任何其他字段即拒，`FieldsByDBName` 兜底），
+> `NewAppend` 在句柄真实 naming strategy 的 schema 上重复防御（自定义
+> naming 只在这里可见）；基座字段解析同时从字面 `"AppendOnlyModel"`
+> 匹配改为**声明类型**匹配——type alias 嵌入（bind 路径带别名字段名）
+> 是合法模型，字面匹配会误拒。
 
 ## Unreleased — MySQL 时间基准可配置：`mysql.time_zone` 固定偏移（arch-backlog #18）
 

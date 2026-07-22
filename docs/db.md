@@ -394,8 +394,10 @@ page, _ := audits.List(ctx, where.WithFilter("actor", "alice"),
   依赖 `created_at` 单调前进：长事务可能把行提交进已扫过的窗口，需要
   **保证不漏**的消费属于 outbox 模式的领域，不是 List 轮询能给的。
 - 🚫 别实现 `RIDPrefix()`——没有 RID 列，构造期报错。🚫 也别声明自己的
-  `ID` / `CreatedAt` 字段或额外的 `primaryKey` 列——这两个名字归基座所有
-  （分页 tie-breaker 绑在它们上），遮蔽/顶替在构造期报错。
+  `ID` / `CreatedAt` 字段、额外的 `primaryKey` 列，或用
+  `gorm:"column:id"` / `gorm:"column:created_at"` 把别的字段映到基座列
+  ——这两个名字**和列**都归基座所有（分页 tie-breaker、autoCreateTime
+  绑在它们上），同名遮蔽 / 同列占用 / 主键顶替一律构造期报错。
 
 **外形表**（join 表、外部系统镜像表——不内嵌任何 chok 基座）用
 `db.ForeignTable` 声明迁移。校验刻意薄：struct + 至少一个

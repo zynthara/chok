@@ -73,6 +73,35 @@ type ExtraPKAppend struct {
 	Key string `json:"key" gorm:"primaryKey;size:32"`
 }
 
+// TakeoverCreatedAtAppend claims the base's COLUMN under a different
+// field name (round-2 review): GORM's DBName binding prefers the
+// shorter bind path, so SourceTime wins created_at while every
+// name-based lookup still resolves the base field — autoCreateTime
+// silently stops firing and the watermark column becomes
+// caller-controlled.
+type TakeoverCreatedAtAppend struct {
+	AppendOnlyModel
+	SourceTime time.Time `json:"source_time" gorm:"column:created_at"`
+}
+
+// TakeoverIDAppend claims the base's id column.
+type TakeoverIDAppend struct {
+	AppendOnlyModel
+	Seq uint `json:"seq" gorm:"column:id"`
+}
+
+// AliasAppendBase embeds the base through a type alias: the bind path
+// carries the alias's field name ("AliasAppendBase"), so base-field
+// resolution must match by declaring TYPE, not by the literal name
+// "AppendOnlyModel" (round-2 review — a name match falsely rejects
+// this legal model).
+type AliasAppendBase = AppendOnlyModel
+
+type AliasEmbedAppend struct {
+	AliasAppendBase
+	Kind string `json:"kind" gorm:"size:40"`
+}
+
 // PrefixedAppend implements RIDPrefixer on an append-only model —
 // there is no RID column for the prefix to apply to.
 type PrefixedAppend struct {
@@ -230,6 +259,8 @@ func TestValidateAppendModel_Rejections(t *testing.T) {
 		{"shadowed ID", &ShadowIDAppend{}, "shadows AppendOnlyModel.ID"},
 		{"shadowed CreatedAt", &ShadowCreatedAtAppend{}, "shadows AppendOnlyModel.CreatedAt"},
 		{"extra primary key", &ExtraPKAppend{}, "primary key must be exactly"},
+		{"created_at column takeover", &TakeoverCreatedAtAppend{}, `maps to column "created_at"`},
+		{"id column takeover", &TakeoverIDAppend{}, `maps to column "id"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -271,4 +302,22 @@ func TestDoubleEmbed_RejectedEverywhere(t *testing.T) {
 // append models fail the migration door too, not just store.NewAppend.
 func TestTable_ShadowedAppendModel_Panics(t *testing.T) {
 	mustPanicContaining(t, "shadows AppendOnlyModel.ID", func() { Table(&ShadowIDAppend{}) })
+}
+
+// Round-2 review: same-column takeover fails the migration door too.
+func TestTable_ColumnTakeoverAppendModel_Panics(t *testing.T) {
+	mustPanicContaining(t, `maps to column "created_at"`, func() { Table(&TakeoverCreatedAtAppend{}) })
+}
+
+// Round-2 review: an embed through a type alias is a legal append
+// model — base-field resolution matches by declaring type, so the
+// alias's bind-path name must not cause a false rejection.
+func TestValidateAppendModel_AliasEmbedAccepted(t *testing.T) {
+	if err := ValidateAppendModel(&AliasEmbedAppend{}); err != nil {
+		t.Fatalf("alias embed must validate: %v", err)
+	}
+	gdb := openTestDB(t)
+	if err := Migrate(context.Background(), gdb, Table(&AliasEmbedAppend{})); err != nil {
+		t.Fatalf("alias embed must migrate: %v", err)
+	}
 }

@@ -70,6 +70,24 @@ type ShadowIDSample struct {
 	ID string `json:"event_key" gorm:"column:event_key;size:64"`
 }
 
+// TakeoverSample claims the base's created_at COLUMN under a different
+// field name — round-2 review: GORM binds the column to the shorter
+// path, so without rejection the base autoCreateTime stops firing.
+type TakeoverSample struct {
+	db.AppendOnlyModel
+	SourceTime time.Time `json:"source_time" gorm:"column:created_at"`
+}
+
+// AliasSampleBase embeds the base through a type alias — a legal
+// append model whose bind path carries the alias's name; round-2
+// review: type-based base resolution must not falsely reject it.
+type AliasSampleBase = db.AppendOnlyModel
+
+type AliasedSample struct {
+	AliasSampleBase
+	Kind string `json:"kind" gorm:"size:40" store:"query"`
+}
+
 // --- helpers ---
 
 func setupAuditStore(t *testing.T) (*AppendStore[AuditEntry], *db.DB) {
@@ -179,6 +197,34 @@ func TestNewAppend_DoubleBaseAndShadowingPanic(t *testing.T) {
 	mustPanic("pick one base", func() { _ = New[DoubleBaseSample](h, log.Empty()) })
 	mustPanic("pick one base", func() { _ = NewAppend[DoubleBaseSample](h, log.Empty()) })
 	mustPanic("shadows AppendOnlyModel.ID", func() { _ = NewAppend[ShadowIDSample](h, log.Empty()) })
+	mustPanic(`maps to column "created_at"`, func() { _ = NewAppend[TakeoverSample](h, log.Empty()) })
+}
+
+// Round-2 review: an alias embed is legal end-to-end — construction,
+// autoCreateTime, filtering and the deterministic default order all
+// ride the type-resolved base columns.
+func TestNewAppend_AliasEmbedWorks(t *testing.T) {
+	h := setupDB(t)
+	ctx := context.Background()
+	if err := h.Migrate(ctx, db.Table(&AliasedSample{})); err != nil {
+		t.Fatal(err)
+	}
+	s := NewAppend[AliasedSample](h, log.Empty())
+	for _, kind := range []string{"a", "b"} {
+		if err := s.Create(ctx, &AliasedSample{Kind: kind}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := s.List(ctx, where.WithFilter("kind", "a"), where.WithCount())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Kind != "a" {
+		t.Fatalf("alias-embed store must filter normally: %+v", page)
+	}
+	if page.Items[0].CreatedAt.IsZero() {
+		t.Fatal("autoCreateTime must fire on the alias-embedded base")
+	}
 }
 
 func TestNewAppend_UpdateTagPanics(t *testing.T) {
