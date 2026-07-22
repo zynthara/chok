@@ -477,6 +477,108 @@ func TestMySQLUTCBaseline_OutOfRangeUnconverted(t *testing.T) {
 	}
 }
 
+// TestMySQLUTCBaseline_InvalidDateNullsBothPaths pins why the recipe
+// splits the scan's two arms instead of routing every flagged row to
+// the interval fallback: a zero or otherwise invalid stored date makes
+// CONVERT_TZ return NULL even under two valid numeric offsets — and
+// DATE_SUB returns NULL on the very same value, so the fallback cannot
+// rescue an IS NULL row; on a nullable column it would swallow the
+// NULL silently (the resurrection door again), on a NOT NULL column it
+// fails mid-batch. IS NULL rows abort to manual classification.
+func TestMySQLUTCBaseline_InvalidDateNullsBothPaths(t *testing.T) {
+	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
+	ctx := context.Background()
+
+	if err := s.Create(ctx, &AggSale{Status: "zed", Qty: 1, Price: 1, Flag: true, At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dbName string
+	if err := gdb.Raw("SELECT DATABASE()").Row().Scan(&dbName); err != nil {
+		t.Fatal(err)
+	}
+	// A legacy-era connection with strictness off: how zero dates got
+	// into old databases in the first place.
+	cfg, err := gomysql.ParseDSN(os.Getenv(dbtest.MySQLDSNEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DBName = dbName
+	cfg.Params = map[string]string{"sql_mode": "''"}
+	connector, err := gomysql.NewConnector(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lax := sql.OpenDB(connector)
+	t.Cleanup(func() { _ = lax.Close() })
+	if _, err := lax.Exec("UPDATE agg_sales SET at = '0000-00-00 00:00:00' WHERE status = 'zed'"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both paths NULL on the same value: the scan's IS NULL arm is the
+	// only thing standing between this row and a silently swallowed
+	// NULL.
+	var convNull, subNull bool
+	row := gdb.Raw("SELECT CONVERT_TZ(at, '+08:00', '+00:00') IS NULL, DATE_SUB(at, INTERVAL '8:00' HOUR_MINUTE) IS NULL FROM agg_sales WHERE status = 'zed'").Row()
+	if err := row.Scan(&convNull, &subNull); err != nil {
+		t.Fatal(err)
+	}
+	if !convNull {
+		t.Fatal("CONVERT_TZ on a zero date must be NULL even under valid numeric offsets")
+	}
+	if !subNull {
+		t.Fatal("DATE_SUB on the same zero date must be NULL too — the interval fallback cannot rescue IS NULL rows")
+	}
+}
+
+// TestMySQLUTCBaseline_EpochEdgeTimestampFallback pins the step-3
+// fallback's own bound: the target is a TIMESTAMP column whose
+// storable range is 1970-2038 — narrower than DATETIME's. A near-epoch
+// value can sit unmoved by CONVERT_TZ (its UTC intermediate leaves the
+// supported span, the silent skip the scan detects) while the signed
+// interval's result falls BELOW what the column can store: strict mode
+// rejects the write-back loudly. Those rows go to manual handling, not
+// the fallback.
+func TestMySQLUTCBaseline_EpochEdgeTimestampFallback(t *testing.T) {
+	h := dbtest.OpenMySQL(t)
+	ctx := context.Background()
+	if err := h.Migrate(ctx, db.Table(&legacyRebaseRow{})); err != nil {
+		t.Fatal(err)
+	}
+	s := New[legacyRebaseRow](h, log.Empty(), WithQueryFields("status", "at"))
+	gdb, err := s.Unsafe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(ctx, &legacyRebaseRow{Status: "ep", At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	// Internal instant 1970-01-01 02:00Z: storable in TIMESTAMP, but
+	// CONVERT_TZ('+08:00','+05:00') routes through a pre-epoch UTC
+	// intermediate and returns it unchanged — the detector fires.
+	edge := time.Date(1970, 1, 1, 2, 0, 0, 0, time.UTC)
+	if err := gdb.Exec("UPDATE legacy_rebase_rows SET ts = ? WHERE status = 'ep'", edge).Error; err != nil {
+		t.Fatal(err)
+	}
+	var stuck int64
+	if err := gdb.Raw("SELECT COUNT(*) FROM legacy_rebase_rows WHERE ts IS NOT NULL AND CONVERT_TZ(ts, '+08:00', '+05:00') = ts").Row().Scan(&stuck); err != nil {
+		t.Fatal(err)
+	}
+	if stuck != 1 {
+		t.Fatalf("near-epoch TIMESTAMP scan = %d, want 1 — CONVERT_TZ must return it unmoved", stuck)
+	}
+	// The signed-interval result (1969-12-31 23:00) is below the
+	// column's own range: strict mode rejects the write-back — the
+	// loud signal that this row belongs to manual handling.
+	err = gdb.Exec("UPDATE legacy_rebase_rows SET ts = DATE_SUB(ts, INTERVAL '3:00' HOUR_MINUTE) WHERE status = 'ep'").Error
+	if err == nil {
+		t.Fatal("expected the strict-mode range rejection: the fallback result is below TIMESTAMP's storable range")
+	}
+}
+
 type civilDateRow struct {
 	db.Model
 	Status string    `json:"status" gorm:"size:16;not null"`
