@@ -61,7 +61,8 @@
 > 备份重来；repair 剔除面含 retry 后重跑 up 重建的 version）；
 > 执行纪律=命名时区先 CONVERT_TZ 探针（静默 NULL 会复活软删行）+
 > 每列 UPDATE 前同谓词数据扫描（范围外值**原样返回不报错**——
-> 1960 史料过探针不被转，固定偏移改区间算术）+ 单事务前核验全表
+> 1960 史料过探针不被转，固定偏移改**带符号 interval** 区间算术：
+> 东偏减西偏加、照抄正号反向错 10h）+ 单事务前核验全表
 > InnoDB（非事务表无视 ROLLBACK）+ 配方不可重复执行（记完成点，
 > 状态不明回滚）。端到端回归
 > `TestMySQLUTCBaseline_LegacyRebaseRecipe`（分裂双旧时区 + 混合

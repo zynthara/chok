@@ -455,6 +455,26 @@ func TestMySQLUTCBaseline_OutOfRangeUnconverted(t *testing.T) {
 	if want := old.Add(-8 * time.Hour); !after.Equal(want) {
 		t.Fatalf("interval-rebased value = %v, want %v", after, want)
 	}
+
+	// West of UTC the direction inverts, and the SIGNED interval is
+	// what keeps the template correct: DATE_SUB with a negative
+	// interval ADDS — for an old zone of -05:00 the true instant is
+	// the wall clock plus 5h, the direction CONVERT_TZ would have
+	// encoded automatically. Copying the east template's positive
+	// interval here would subtract instead and land 10h wrong.
+	if err := s.Create(ctx, &AggSale{Status: "wst", Qty: 1, Price: 1, Flag: true, At: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec("UPDATE agg_sales SET at = DATE_SUB(at, INTERVAL '-5:00' HOUR_MINUTE) WHERE status = 'wst'").Error; err != nil {
+		t.Fatal(err)
+	}
+	var west time.Time
+	if err := gdb.Raw("SELECT at FROM agg_sales WHERE status = 'wst'").Row().Scan(&west); err != nil {
+		t.Fatal(err)
+	}
+	if want := old.Add(5 * time.Hour); !west.Equal(want) {
+		t.Fatalf("west-offset interval rebase = %v, want %v — the signed (negative) interval must ADD", west, want)
+	}
 }
 
 type civilDateRow struct {
