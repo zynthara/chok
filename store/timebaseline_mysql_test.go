@@ -348,7 +348,10 @@ func TestMySQLUTCBaseline_FixedOffsetRoundTrip(t *testing.T) {
 // re-evaluating the = col predicate after a blanket UPDATE re-flags
 // successfully converted rows whose converted value re-read as FROM
 // exits CONVERT_TZ's span (upper edge eastward, lower edge westward)
-// and hands them a silent second rebase. The TIMESTAMP column is
+// and hands them a silent second rebase. The scan discipline is
+// pinned per target column with the arms counted apart: the IS NULL
+// arm must be 0 (abort to manual), while a positive = arm is the
+// interval set, not a stop signal. The TIMESTAMP column is
 // asserted correct at EVERY step with NO conversion: its internal
 // instant is baseline-independent (both halves carry one offset, so
 // parameter writes and reads stay symmetric under any configured
@@ -405,20 +408,25 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 		// The documented recipe: writes stopped (this test IS the only
 		// writer), one conversion per DATETIME column from the old to
 		// the new baseline. ts (TIMESTAMP) is deliberately absent.
-		// Scan first, both arms: IS NULL rows would abort to manual
-		// classification (none here — pinned 0), and = rows are the
-		// out-of-range set the interval fallback rescues — exactly the
-		// pre-epoch row.
-		var nulls, stuck int64
-		row := gdb.Raw("SELECT COUNT(CASE WHEN CONVERT_TZ(at, ?, ?) IS NULL THEN 1 END), COUNT(CASE WHEN CONVERT_TZ(at, ?, ?) = at THEN 1 END) FROM legacy_rebase_rows WHERE at IS NOT NULL", from, to, from, to).Row()
-		if err := row.Scan(&nulls, &stuck); err != nil {
-			t.Fatal(err)
-		}
-		if nulls != 0 {
-			t.Fatalf("IS NULL scan (%s→%s) = %d, want 0 — such rows abort to manual classification", from, to, nulls)
-		}
-		if stuck != 1 {
-			t.Fatalf("out-of-range scan (%s→%s) = %d, want 1 — the pre-epoch row must be flagged before the UPDATE", from, to, stuck)
+		// Scan first, EVERY target column separately (a clean at says
+		// nothing about deleted_at), the two arms counted apart: the
+		// IS NULL arm must be 0 — those rows abort to manual
+		// classification; the = arm MAY be positive and is not a stop
+		// signal — it is exactly the out-of-range set the interval arm
+		// rescues (the pre-epoch row in at; deleted_at is all NULL and
+		// scans empty).
+		for col, wantStuck := range map[string]int64{"at": 1, "deleted_at": 0} {
+			var nulls, stuck int64
+			row := gdb.Raw("SELECT COUNT(CASE WHEN CONVERT_TZ("+col+", ?, ?) IS NULL THEN 1 END), COUNT(CASE WHEN CONVERT_TZ("+col+", ?, ?) = "+col+" THEN 1 END) FROM legacy_rebase_rows WHERE "+col+" IS NOT NULL", from, to, from, to).Row()
+			if err := row.Scan(&nulls, &stuck); err != nil {
+				t.Fatal(err)
+			}
+			if nulls != 0 {
+				t.Fatalf("%s IS NULL scan (%s→%s) = %d, want 0 — such rows abort to manual classification", col, from, to, nulls)
+			}
+			if stuck != wantStuck {
+				t.Fatalf("%s out-of-range scan (%s→%s) = %d, want %d", col, from, to, stuck, wantStuck)
+			}
 		}
 		// One CASE statement routes every row on its ORIGINAL value:
 		// flagged rows take the interval fallback — the SIGNED

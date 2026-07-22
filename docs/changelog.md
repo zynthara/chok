@@ -72,6 +72,18 @@
 > （东腿）与下界穿越行（西腿）各全程；旧两段式写法对上界行实测
 > 转红（3001-01-19 12:00，与推导一致）。文本四处同改（根 CHANGELOG
 > 双条目、db.md 纪律+旋钮段、migration-v1-to-v2）。
+>
+> **round-4 复审修正**（1M）：预扫描示例与新分流算法**对齐**——round-3
+> 后合法状态是「IS NULL 臂=0 且 =原值 臂可 >0」（范围外行本就该进
+> 区间臂），但三处示例仍是 `IS NULL OR =原值` 单一合并计数 +「须为
+> 0 才继续」，照文档执行会在 CASE 前误中止、与测试矛盾。扫描 SQL
+> 改**双臂条件计数**（`COUNT(CASE WHEN ... IS NULL)` /
+> `COUNT(CASE WHEN ... = col)`），语义钉死：NULL 臂 >0 中止人工；
+> =原值 臂 >0 非停止信号、即区间臂行集，纯 blanket UPDATE 仅在该臂
+> 也为 0 时可跑；且**逐目标列各自扫描**（at 干净不代表 deleted_at）。
+> 测试 rebase 的扫描改逐列双臂断言（at: NULL=0/=原值=1；
+> deleted_at: 全 NULL 扫描为空）。三处同改（根 CHANGELOG、db.md ②、
+> migration-v1-to-v2）。
 
 ## Unreleased — MySQL 时间写入基准 → UTC 双钉（arch-backlog #17）
 
