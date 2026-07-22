@@ -47,6 +47,18 @@
 > 渲染、脱离配置基准且随宿主 TZ 漂移；`Conn!=nil` 时 DSN 字符串永不
 > 拨号，补传安全。ToSQL 双分支 parity + 跨基准 DDL 时间默认值同瞬间
 > 测试（偏移选 -05:00 避开宿主时区巧合），撤修复实测转红。
+>
+> **round-2 复审修正**（1H）：范围外 DATETIME 的 interval 回退公式
+> 泛化——原文「interval 带旧偏移自己的符号」只是 **FROM − TO** 在
+> 目标=UTC 时的特例；round-1 把执行纪律泛化引用到任意基准切换时
+> 公式没跟上：UTC→+08 存量按旧公式减 0（原地不动、仍误读 8h）、
+> +08→-05 只减 8h（残留 5h 偏差）。统一钉为「interval 恒为该条
+> CONVERT_TZ 的 FROM − TO 带符号差」（legacy 配方步 1/2 = 旧进程/旧
+> session − 目标；step-3 恒为旧进程−旧 session——它救的转换两端就是
+> 两个旧时区，与目标无关），四处文本同改（根 CHANGELOG 双条目、
+> db.md 两处、migration-v1-to-v2）。切换测试补 pre-epoch 行全程：
+> 两腿各 pin 扫描检出→CONVERT_TZ 静默跳过→按差回退复原（'-8:00'
+> 加 8h、'13:00'），错误公式（减 0）实测转红。
 
 ## Unreleased — MySQL 时间写入基准 → UTC 双钉（arch-backlog #17）
 

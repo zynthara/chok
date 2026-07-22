@@ -334,8 +334,16 @@ func TestMySQLUTCBaseline_FixedOffsetRoundTrip(t *testing.T) {
 // CONVERT_TZ old→new per DATETIME column, deleted_at included)
 // restores the instants — for UTC→+08:00 and again for +08:00→-05:00,
 // so both the default→offset switch and an offset A→B switch are
-// covered. The TIMESTAMP column is asserted correct at EVERY step with
-// NO conversion: its internal instant is baseline-independent (both
+// covered. A pre-epoch row rides along through both legs: CONVERT_TZ
+// returns it unchanged (outside its supported span — the silent skip
+// the scan detects), and the interval fallback that rescues it must
+// subtract the SIGNED DIFFERENCE old − new of THAT switch — UTC→+08:00
+// is INTERVAL '-8:00' (adds 8h), +08:00→-05:00 is '13:00'. The
+// old-offset-alone spelling the legacy recipe shows is the to-UTC
+// special case: here it would subtract 0 on the first leg and 8h
+// instead of 13h on the second, leaving the row misread either way.
+// The TIMESTAMP column is asserted correct at EVERY step with NO
+// conversion: its internal instant is baseline-independent (both
 // halves carry one offset, so parameter writes and reads stay
 // symmetric under any configured baseline) — converting it would be
 // the corruption, not the fix.
@@ -347,42 +355,68 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 	}
 	s0 := New[legacyRebaseRow](base, log.Empty(), WithQueryFields("status", "at"))
 	inst := time.Date(2026, 7, 4, 6, 0, 0, 0, time.UTC)
-	if err := s0.Create(ctx, &legacyRebaseRow{Status: "sw", At: inst}); err != nil {
-		t.Fatal(err)
+	preEpoch := time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC) // outside CONVERT_TZ's span; ts stays NULL (1960 does not fit TIMESTAMP)
+	for status, at := range map[string]time.Time{"sw": inst, "pe": preEpoch} {
+		if err := s0.Create(ctx, &legacyRebaseRow{Status: status, At: at}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	gdb := base.Unsafe(ctx)
 	if err := gdb.Exec("UPDATE legacy_rebase_rows SET ts = ? WHERE status = 'sw'", inst).Error; err != nil {
 		t.Fatal(err)
 	}
 
-	read := func(h *db.DB) (at, ts time.Time) {
+	read := func(h *db.DB, status string) *legacyRebaseRow {
 		t.Helper()
 		got, err := New[legacyRebaseRow](h, log.Empty(), WithQueryFields("status", "at")).
-			Get(ctx, Where(where.WithFilter("status", "sw")))
+			Get(ctx, Where(where.WithFilter("status", status)))
 		if err != nil {
 			t.Fatal(err)
 		}
+		return got
+	}
+	readSw := func(h *db.DB) (at, ts time.Time) {
+		t.Helper()
+		got := read(h, "sw")
 		if got.Ts == nil {
 			t.Fatal("ts must be set")
 		}
 		return got.At, *got.Ts
 	}
-	rebase := func(from, to string) {
+	rebase := func(from, to, fallback string) {
 		t.Helper()
 		// The documented recipe: writes stopped (this test IS the only
 		// writer), one conversion per DATETIME column from the old to
 		// the new baseline. ts (TIMESTAMP) is deliberately absent.
+		// Scan first: rows CONVERT_TZ will skip silently (returned
+		// unchanged, out of its span) — exactly the pre-epoch row.
+		var stuck int64
+		if err := gdb.Raw("SELECT COUNT(*) FROM legacy_rebase_rows WHERE at IS NOT NULL AND CONVERT_TZ(at, ?, ?) = at", from, to).Row().Scan(&stuck); err != nil {
+			t.Fatal(err)
+		}
+		if stuck != 1 {
+			t.Fatalf("out-of-range scan (%s→%s) = %d, want 1 — the pre-epoch row must be flagged before the UPDATE", from, to, stuck)
+		}
 		for _, col := range []string{"at", "deleted_at"} {
 			stmt := "UPDATE legacy_rebase_rows SET " + col + " = CONVERT_TZ(" + col + ", '" + from + "', '" + to + "') WHERE " + col + " IS NOT NULL"
 			if err := gdb.Exec(stmt).Error; err != nil {
 				t.Fatalf("%s: %v", stmt, err)
 			}
 		}
+		// The flagged rows take the interval fallback. The interval is
+		// the SIGNED DIFFERENCE from − to of THIS switch, never the old
+		// offset alone (that spelling is the to-UTC special case). The
+		// detector predicate still selects only the skipped rows: the
+		// converted ones no longer satisfy CONVERT_TZ(at) = at.
+		stmt := "UPDATE legacy_rebase_rows SET at = DATE_SUB(at, INTERVAL '" + fallback + "' HOUR_MINUTE) WHERE at IS NOT NULL AND CONVERT_TZ(at, '" + from + "', '" + to + "') = at"
+		if err := gdb.Exec(stmt).Error; err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
 	}
-	storedAt := func() string {
+	storedAt := func(status string) string {
 		t.Helper()
 		var s string
-		if err := gdb.Raw("SELECT DATE_FORMAT(at, '%Y-%m-%d %H:%i:%s') FROM legacy_rebase_rows WHERE status = 'sw'").Row().Scan(&s); err != nil {
+		if err := gdb.Raw("SELECT DATE_FORMAT(at, '%Y-%m-%d %H:%i:%s') FROM legacy_rebase_rows WHERE status = ?", status).Row().Scan(&s); err != nil {
 			t.Fatal(err)
 		}
 		return s
@@ -392,45 +426,59 @@ func TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase(t *testing.T) {
 	// stored UTC wall clock AT +08:00: the DATETIME reads exactly 8h
 	// early; the TIMESTAMP instant is already correct.
 	h8 := openMySQLFixedOffset(t, base, "+08:00", false)
-	at, ts := read(h8)
+	at, ts := readSw(h8)
 	if want := inst.Add(-8 * time.Hour); !at.Equal(want) {
 		t.Fatalf("pre-rebase DATETIME through +08:00 = %v, want the documented misread %v", at, want)
 	}
 	if !ts.Equal(inst) {
 		t.Fatalf("pre-rebase TIMESTAMP = %v, want %v — internal instants are baseline-independent", ts, inst)
 	}
-	rebase("+00:00", "+08:00")
-	if got := storedAt(); got != "2026-07-04 14:00:00" {
+	rebase("+00:00", "+08:00", "-8:00") // fallback = 0 − 8, NOT the old offset (0) — that would leave the pre-epoch row untouched
+	if got := storedAt("sw"); got != "2026-07-04 14:00:00" {
 		t.Fatalf("rebased wall clock = %q, want the +08:00 wall clock", got)
 	}
-	at, ts = read(h8)
+	if got := storedAt("pe"); got != "1960-01-01 08:00:00" {
+		t.Fatalf("fallback-rebased pre-epoch wall clock = %q, want the +08:00 wall clock", got)
+	}
+	at, ts = readSw(h8)
 	if !at.Equal(inst) {
 		t.Fatalf("post-rebase DATETIME = %v, want %v", at, inst)
 	}
 	if !ts.Equal(inst) {
 		t.Fatalf("post-rebase TIMESTAMP = %v, want %v untouched", ts, inst)
 	}
+	if got := read(h8, "pe"); !got.At.Equal(preEpoch) {
+		t.Fatalf("post-rebase pre-epoch DATETIME = %v, want %v — the interval fallback must carry old − new", got.At, preEpoch)
+	}
 
 	// Offset A → B: +08:00 → -05:00. Same contract, no UTC leg — the
-	// conversion goes directly between the two baselines.
+	// conversion goes directly between the two baselines, and the
+	// fallback interval is their difference (8 − (−5) = 13h), not the
+	// old offset's 8h.
 	h5 := openMySQLFixedOffset(t, base, "-05:00", false)
-	at, ts = read(h5)
+	at, ts = readSw(h5)
 	if want := inst.Add(13 * time.Hour); !at.Equal(want) {
 		t.Fatalf("pre-rebase DATETIME through -05:00 = %v, want the documented misread %v", at, want)
 	}
 	if !ts.Equal(inst) {
 		t.Fatalf("TIMESTAMP = %v, want %v", ts, inst)
 	}
-	rebase("+08:00", "-05:00")
-	if got := storedAt(); got != "2026-07-04 01:00:00" {
+	rebase("+08:00", "-05:00", "13:00")
+	if got := storedAt("sw"); got != "2026-07-04 01:00:00" {
 		t.Fatalf("rebased wall clock = %q, want the -05:00 wall clock", got)
 	}
-	at, ts = read(h5)
+	if got := storedAt("pe"); got != "1959-12-31 19:00:00" {
+		t.Fatalf("fallback-rebased pre-epoch wall clock = %q, want the -05:00 wall clock", got)
+	}
+	at, ts = readSw(h5)
 	if !at.Equal(inst) {
 		t.Fatalf("post-rebase DATETIME = %v, want %v", at, inst)
 	}
 	if !ts.Equal(inst) {
 		t.Fatalf("post-rebase TIMESTAMP = %v, want %v untouched — a blanket conversion would have corrupted it", ts, inst)
+	}
+	if got := read(h5, "pe"); !got.At.Equal(preEpoch) {
+		t.Fatalf("post-rebase pre-epoch DATETIME = %v, want %v — an old-offset-alone interval (8h) would sit 5h off here", got.At, preEpoch)
 	}
 }
 
@@ -812,7 +860,10 @@ func TestMySQLUTCBaseline_NamedZoneNullHazard(t *testing.T) {
 // such rows are perfectly storable. The unconverted-row detector the
 // recipe mandates (converted = original, valid whenever the two zones
 // differ) and the fixed-offset fallback (interval arithmetic, exact
-// across the whole DATETIME range) are both asserted here.
+// across the whole DATETIME range) are both asserted here — in the
+// legacy recipe's to-UTC frame, where FROM − TO reduces to the old
+// offset alone; the general formula under any other target is pinned
+// by TestMySQLUTCBaseline_FixedOffsetBaselineSwitchRebase.
 func TestMySQLUTCBaseline_OutOfRangeUnconverted(t *testing.T) {
 	s := setupAggStoreOn(t, dbtest.OpenMySQL(t))
 	ctx := context.Background()
