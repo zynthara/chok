@@ -386,9 +386,16 @@ page, _ := audits.List(ctx, where.WithFilter("actor", "alice"),
   tie-breaker——批量插入落在同一毫秒是常态，没有 tie-breaker 的
   LIMIT/OFFSET 会跨页丢行/重行。PK 只进 ORDER BY，不出现在任何响应。
 - **没有 `ListWithCursor`**：keyset 游标的 tie-breaker 绑 RID 列，append
-  模型没有。增量消费用水位线：`where.WithFilter("created_at", where.Gt,
-  lastSeen)`。
-- 🚫 别实现 `RIDPrefix()`——没有 RID 列，构造期报错。
+  模型没有。增量消费用**重叠水位线 + 唯一键去重**：
+  `where.WithFilterOp("created_at", where.Gte, lastSeen)`（≥ 上次已读的
+  最大 `created_at`，会重读同刻行），再按业务唯一键（幂等键列）丢弃已
+  消费过的行。⚠️ 单纯 `Gt` 会漏行——页边界切在 `created_at` 平局中间时，
+  等于水位线的未读行被跳过；同刻行在读取之后才提交同样丢失。水位线还
+  依赖 `created_at` 单调前进：长事务可能把行提交进已扫过的窗口，需要
+  **保证不漏**的消费属于 outbox 模式的领域，不是 List 轮询能给的。
+- 🚫 别实现 `RIDPrefix()`——没有 RID 列，构造期报错。🚫 也别声明自己的
+  `ID` / `CreatedAt` 字段或额外的 `primaryKey` 列——这两个名字归基座所有
+  （分页 tie-breaker 绑在它们上），遮蔽/顶替在构造期报错。
 
 **外形表**（join 表、外部系统镜像表——不内嵌任何 chok 基座）用
 `db.ForeignTable` 声明迁移。校验刻意薄：struct + 至少一个

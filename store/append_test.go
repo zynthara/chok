@@ -50,6 +50,26 @@ type UpdateTaggedSample struct {
 	Kind string `json:"kind" gorm:"size:40" store:"query,update"`
 }
 
+// DoubleBaseSample embeds both bases (the append one through an
+// intermediate so the duplicate created_at json tags sit at different
+// depths and don't trip go vet). Both markers promote, so this
+// compiles against store.New AND store.NewAppend — round-1 review #1:
+// both constructors must refuse it at construction.
+type doubleBasePart struct{ db.AppendOnlyModel }
+
+type DoubleBaseSample struct {
+	db.Model
+	doubleBasePart
+}
+
+// ShadowIDSample shadows the base ID with its own column — round-1
+// review #2: without rejection the pagination tie-breaker would bind
+// to the possibly non-unique event_key column.
+type ShadowIDSample struct {
+	db.AppendOnlyModel
+	ID string `json:"event_key" gorm:"column:event_key;size:64"`
+}
+
 // --- helpers ---
 
 func setupAuditStore(t *testing.T) (*AppendStore[AuditEntry], *db.DB) {
@@ -139,6 +159,26 @@ func TestNewAppend_RejectedOptionsPanic(t *testing.T) {
 			_ = NewAppend[AuditEntry](h, log.Empty(), tc.opt)
 		})
 	}
+}
+
+// Round-1 review #1/#2: types that slip past the generic constraints
+// (double-base embeds satisfy both markers; shadowed base fields keep
+// the marker) must die at construction, in BOTH constructors.
+func TestNewAppend_DoubleBaseAndShadowingPanic(t *testing.T) {
+	h := setupDB(t)
+	mustPanic := func(want string, fn func()) {
+		t.Helper()
+		defer func() {
+			if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), want) {
+				t.Fatalf("want panic containing %q, got %v", want, r)
+			}
+		}()
+		fn()
+	}
+	// Compiles against both constructors — the loophole under test.
+	mustPanic("pick one base", func() { _ = New[DoubleBaseSample](h, log.Empty()) })
+	mustPanic("pick one base", func() { _ = NewAppend[DoubleBaseSample](h, log.Empty()) })
+	mustPanic("shadows AppendOnlyModel.ID", func() { _ = NewAppend[ShadowIDSample](h, log.Empty()) })
 }
 
 func TestNewAppend_UpdateTagPanics(t *testing.T) {

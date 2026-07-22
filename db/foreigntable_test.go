@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- test models (foreign-table / append-only gate, arch-backlog #13) ---
@@ -37,6 +38,40 @@ type BothBases struct {
 }
 
 func (BothBases) chokAppendModel() {}
+
+// DoubleEmbed is the REAL double-base type (round-1 review #1): both
+// markers promote through embedding, so it compiles against store.New
+// AND store.NewAppend — every construction door must refuse it at
+// runtime. The append base rides an intermediate embed so the two
+// CreatedAt json tags sit at different depths (same-depth duplicates
+// trip go vet's structtag check); marker promotion is depth-agnostic.
+type doubleEmbedPart struct{ AppendOnlyModel }
+
+type DoubleEmbed struct {
+	Model
+	doubleEmbedPart
+}
+
+// ShadowIDAppend shadows the base ID with a model-declared field —
+// LookUpField would resolve "ID" to the possibly non-unique event_key
+// column (round-1 review #2).
+type ShadowIDAppend struct {
+	AppendOnlyModel
+	ID string `json:"event_key" gorm:"column:event_key;size:64"`
+}
+
+// ShadowCreatedAtAppend shadows the base CreatedAt.
+type ShadowCreatedAtAppend struct {
+	AppendOnlyModel
+	CreatedAt time.Time `json:"happened_at" gorm:"column:happened_at"`
+}
+
+// ExtraPKAppend adds a second primary-key column — the base's
+// auto-increment ID must be the whole primary key.
+type ExtraPKAppend struct {
+	AppendOnlyModel
+	Key string `json:"key" gorm:"primaryKey;size:32"`
+}
 
 // PrefixedAppend implements RIDPrefixer on an append-only model —
 // there is no RID column for the prefix to apply to.
@@ -190,7 +225,11 @@ func TestValidateAppendModel_Rejections(t *testing.T) {
 		{"missing embed", &struct{ Name string }{}, "must embed db.AppendOnlyModel"},
 		{"full model", &TestItem{}, "must embed db.AppendOnlyModel"},
 		{"both bases", &BothBases{}, "pick one base"},
+		{"true double embed", &DoubleEmbed{}, "pick one base"},
 		{"rid prefixer", &PrefixedAppend{}, "RIDPrefixer"},
+		{"shadowed ID", &ShadowIDAppend{}, "shadows AppendOnlyModel.ID"},
+		{"shadowed CreatedAt", &ShadowCreatedAtAppend{}, "shadows AppendOnlyModel.CreatedAt"},
+		{"extra primary key", &ExtraPKAppend{}, "primary key must be exactly"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -204,4 +243,32 @@ func TestValidateAppendModel_Rejections(t *testing.T) {
 
 func TestTable_AppendOnlyRIDPrefixer_Panics(t *testing.T) {
 	mustPanicContaining(t, "RIDPrefixer", func() { Table(&PrefixedAppend{}) })
+}
+
+// Round-1 review #1: a real double-base embed satisfies BOTH markers,
+// so it reaches every construction door — each must refuse it.
+// ValidateModel dispatches first in db.Table (Modeler wins), so its
+// symmetric AppendModeler rejection is what closes the loophole there
+// and in store.New.
+func TestDoubleEmbed_RejectedEverywhere(t *testing.T) {
+	var m any = &DoubleEmbed{}
+	if _, ok := m.(Modeler); !ok {
+		t.Fatal("precondition: DoubleEmbed must satisfy Modeler")
+	}
+	if _, ok := m.(AppendModeler); !ok {
+		t.Fatal("precondition: DoubleEmbed must satisfy AppendModeler")
+	}
+	if err := ValidateModel(&DoubleEmbed{}); err == nil || !strings.Contains(err.Error(), "pick one base") {
+		t.Fatalf("ValidateModel must reject the double embed, got %v", err)
+	}
+	if err := ValidateAppendModel(&DoubleEmbed{}); err == nil || !strings.Contains(err.Error(), "pick one base") {
+		t.Fatalf("ValidateAppendModel must reject the double embed, got %v", err)
+	}
+	mustPanicContaining(t, "pick one base", func() { Table(&DoubleEmbed{}) })
+}
+
+// Round-1 review #2: db.Table shares ValidateAppendModel, so shadowed
+// append models fail the migration door too, not just store.NewAppend.
+func TestTable_ShadowedAppendModel_Panics(t *testing.T) {
+	mustPanicContaining(t, "shadows AppendOnlyModel.ID", func() { Table(&ShadowIDAppend{}) })
 }

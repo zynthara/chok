@@ -34,8 +34,19 @@ import (
 //
 // Keyset pagination (ListWithCursor) is not available: its tie-breaker
 // binds to the RID column, which append-only models deliberately lack.
-// Incremental consumers advance a created_at watermark instead:
-// where.WithFilter("created_at", where.Gt, lastSeen).
+// Incremental consumers use an OVERLAPPING created_at watermark plus
+// unique-key dedup — a strict Gt watermark loses rows, both at
+// created_at ties (the page boundary can split a tie; rows equal to
+// the watermark are then skipped) and under concurrent commits (a
+// same-timestamp row committing after the read):
+//
+//	where.WithFilterOp("created_at", where.Gte, lastSeen)
+//
+// then discard rows whose business key (the unique/idempotency column)
+// was already consumed. The watermark also assumes created_at moves
+// forward: a long transaction can commit a row dated before an
+// already-scanned window — consumers needing guaranteed delivery are
+// outbox territory, not a List loop.
 //
 // Transactions join via context propagation exactly like Store — pass
 // a db.RunInTx txCtx and every call rides that transaction. There is
@@ -98,15 +109,20 @@ func NewAppend[T db.AppendModeler](h *db.DB, logger log.Logger, opts ...StoreOpt
 	}
 	modelSchema := stmt.Schema
 
-	// Resolve the deterministic-order columns once. ValidateAppendModel
-	// guarantees the AppendOnlyModel embed, so both fields always parse.
-	idField := modelSchema.LookUpField("ID")
+	// Resolve the deterministic-order columns once, addressed by their
+	// reflection bind path (…, "AppendOnlyModel", name) rather than a
+	// name lookup — LookUpField prefers a model's own same-named field,
+	// which would rebind the tie-breaker onto a possibly non-unique
+	// column. ValidateAppendModel already rejects such shadowing, so a
+	// miss here is defense-in-depth. This parse used the handle's real
+	// naming strategy, so DBName is the actual column.
+	idField := appendOwnedField(modelSchema, "ID")
 	if idField == nil || idField.DBName == "" {
-		panic(fmt.Sprintf("store.NewAppend: %s has no ID column in its parsed schema", t.Name()))
+		panic(fmt.Sprintf("store.NewAppend: %s has no AppendOnlyModel.ID column in its parsed schema", t.Name()))
 	}
-	createdAtField := modelSchema.LookUpField("CreatedAt")
+	createdAtField := appendOwnedField(modelSchema, "CreatedAt")
 	if createdAtField == nil || createdAtField.DBName == "" {
-		panic(fmt.Sprintf("store.NewAppend: %s has no CreatedAt column in its parsed schema", t.Name()))
+		panic(fmt.Sprintf("store.NewAppend: %s has no AppendOnlyModel.CreatedAt column in its parsed schema", t.Name()))
 	}
 
 	cfg := &storeConfig{}
@@ -371,6 +387,20 @@ func (s *AppendStore[T]) rejectWrite(op string) error {
 		return nil
 	}
 	return fmt.Errorf("store: %s: %w", op, db.ErrReadOnly)
+}
+
+// appendOwnedField resolves the AppendOnlyModel-owned field of the
+// given Go name by its reflection bind path — the store-side twin of
+// db's validation-time resolution (db/validate.go appendBaseField),
+// re-run here against the handle-parsed schema so DBName reflects the
+// real naming strategy.
+func appendOwnedField(s *schema.Schema, name string) *schema.Field {
+	for _, f := range s.Fields {
+		if n := len(f.BindNames); n >= 2 && f.BindNames[n-1] == name && f.BindNames[n-2] == "AppendOnlyModel" {
+			return f
+		}
+	}
+	return nil
 }
 
 // applyScopes runs all registered ScopeFuncs against the given DB.

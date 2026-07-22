@@ -27,9 +27,22 @@
 > append `List` 无 RID 可绑 keyset（`ListWithCursor` 的 tie-breaker
 > 绑 RID 列），钦定 offset 分页 + 恒追加内部 PK tie-breaker（只进
 > ORDER BY、不出进程），无显式 order 默认插入序 `(created_at, id)`；
-> 增量消费走 created_at 水位线。不适用的 StoreOption（update 侧、
+> 增量消费走**重叠水位线**（`WithFilterOp("created_at", where.Gte,
+> lastSeen)` + 业务唯一键去重——单纯 `Gt` 在 created_at 平局与并发提交
+> 下漏行，保证不漏属 outbox 领域）。不适用的 StoreOption（update 侧、
 > owner 全家、hooks、WithBus、WithDefaultPageSize）在 NewAppend
 > 构造期 panic，不静默失效。纯加法非 Breaking。
+>
+> **round-1 复审修正**（3M）：① 双嵌两基座的类型同时满足两个 marker、
+> 能通过两个构造器的泛型编译——`ValidateModel` 补对称拒收
+> AppendModeler（与 ValidateAppendModel 互镜），db.Table / store.New /
+> store.NewAppend 三门统一构造期拒绝；② 排序列原用 `LookUpField`
+> 按名解析，模型自有同名字段（如 `ID string gorm:"column:event_key"`）
+> 会遮蔽基座列、把 tie-breaker 绑上可能非唯一的列——改按反射绑定路径
+> `(…, AppendOnlyModel, 字段)` 定位基座列，且 `ValidateAppendModel`
+> 直接拒绝遮蔽 ID/CreatedAt 或追加 primaryKey 列的模型；③ 文档原推荐
+> 的三参 `WithFilter` 不能编译（应为 `WithFilterOp`），且 `Gt` 水位线
+> 在平局/并发提交下静默漏行——文档全面改为上述重叠水位线 + 去重形态。
 
 ## Unreleased — MySQL 时间基准可配置：`mysql.time_zone` 固定偏移（arch-backlog #18）
 

@@ -23,11 +23,14 @@ type Modeler interface {
 
 // AppendModeler is the generic constraint for store.NewAppend /
 // store.AppendStore[T]. The unexported marker method ensures only types
-// embedding db.AppendOnlyModel satisfy it. The two markers are disjoint
-// by construction — AppendOnlyModel does not implement chokModel() and
-// Model does not implement chokAppendModel() — so append-only models
-// cannot enter store.New and full models cannot enter store.NewAppend;
-// the isolation holds at compile time, not by runtime checks.
+// embedding db.AppendOnlyModel satisfy it. Neither base implements the
+// other's marker, so for single-base models the isolation holds at
+// compile time: append-only models cannot enter store.New and full
+// models cannot enter store.NewAppend. A type embedding BOTH bases
+// carries both markers and compiles against either constructor — that
+// loophole is closed at construction time instead: ValidateModel and
+// ValidateAppendModel each reject the other marker, so db.Table,
+// store.New and store.NewAppend all refuse the double embed.
 type AppendModeler interface {
 	chokAppendModel()
 }
