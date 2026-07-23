@@ -84,8 +84,11 @@ func newRelay[T db.AppendModeler](name string, handler HandlerFor[T], c *core, c
 		// on models without the base. Kept as a defensive error.
 		return nil, fmt.Errorf("outbox: relay %q model %T does not embed db.AppendOnlyModel", name, zero)
 	}
+	// "id" is declared for the stage-1 boundary keyset (id > w.ID) —
+	// an internal filter on the relay's private store; the numeric PK
+	// still never appears in any response.
 	scanOpts := []store.StoreOption{
-		store.WithQueryFields("created_at"),
+		store.WithQueryFields("created_at", "id"),
 		store.WithMaxPageSize(0),
 	}
 	if len(cfg.topics) > 0 {
@@ -140,7 +143,6 @@ func (r *relay[T]) run(ctx context.Context) error {
 	// (round-2 review).
 	r.prune(w)
 	cand := w
-	pos := scanPos{ts: w.At}
 
 	// Rows younger than the cutoff are unsettled: a still-open
 	// transaction may yet commit a row with an earlier created_at, so
@@ -163,14 +165,67 @@ func (r *relay[T]) run(ctx context.Context) error {
 	// takes a fresh cutoff and rescans the overlap from the persisted
 	// watermark, so entries settle and prune across sweeps.
 	cutoff := r.now().Add(-r.settle)
+	pages := 0
 	drained := false
-	for pages := 0; pages < r.maxPages; pages++ {
+
+	// Stage 1 — the watermark-boundary tie remainder, resumed by
+	// COMPOSITE position (round-4 review): rows AT w.At with id > w.ID,
+	// advanced by id keyset. Restarting every sweep at created_at >=
+	// w.At OFFSET 0 refetched the covered prefix just to skip it in Go;
+	// each refetch burned page budget, so a settled tie group wider
+	// than one sweep's budget ate every sweep before reaching its own
+	// tail — the tail rows starved forever (and the strict < cleanup
+	// never removes the same-timestamp prefix, so it never recovered).
+	// Excluding the prefix in SQL by exact keyset at the persisted
+	// watermark is safe for the same reason the Go-side covers() skip
+	// was: the watermark is a settled position, nothing can still
+	// commit at or before it.
+	if w.ok {
+		bAt, lastID := w.At, w.ID // fixed boundary; w advances as batches persist
+		for pages < r.maxPages {
+			if err := ctx.Err(); err != nil {
+				r.persist(ctx, &w, cand)
+				return err
+			}
+			pages++
+			batch := r.batch()
+			page, err := r.scan.List(ctx,
+				where.WithFilterOp("created_at", where.Eq, bAt),
+				where.WithFilterOp("id", where.Gt, lastID),
+				where.WithPage(1, batch),
+			)
+			if err != nil {
+				r.persist(ctx, &w, cand)
+				return fmt.Errorf("outbox: relay %q: scan boundary: %w", r.name, err)
+			}
+			for i := range page.Items {
+				at, id := r.rowPos(&page.Items[i])
+				lastID = id
+				if err := r.deliver(ctx, &page.Items[i], at, id, w, &cand, cutoff); err != nil {
+					r.persist(ctx, &w, cand)
+					return err
+				}
+			}
+			r.persist(ctx, &w, cand)
+			if len(page.Items) < batch {
+				break
+			}
+		}
+	}
+
+	// Stage 2 — strictly beyond the boundary timestamp; the first
+	// fetch uses Gt so the boundary group is never refetched, then the
+	// cursor falls back to the Gte-plus-offset progression for tie
+	// groups it discovers itself.
+	pos := scanPos{ts: w.At}
+	strict := w.ok
+	for ; pages < r.maxPages; pages++ {
 		if err := ctx.Err(); err != nil {
 			r.persist(ctx, &w, cand)
 			return err
 		}
 		batch := r.batch()
-		items, err := r.scanFrom(ctx, pos, batch)
+		items, err := r.scanForward(ctx, pos, batch, strict)
 		if err != nil {
 			r.persist(ctx, &w, cand)
 			return err
@@ -179,6 +234,7 @@ func (r *relay[T]) run(ctx context.Context) error {
 			drained = true
 			break
 		}
+		strict = false
 		for i := range items {
 			at, id := r.rowPos(&items[i])
 			if at.Equal(pos.ts) {
@@ -186,25 +242,9 @@ func (r *relay[T]) run(ctx context.Context) error {
 			} else {
 				pos = scanPos{ts: at, offset: 1}
 			}
-			delivered := w.covers(at, id)
-			if !delivered {
-				if _, seen := r.mem[id]; seen {
-					delivered = true
-				}
-			}
-			if !delivered {
-				if err := r.handler(ctx, items[i]); err != nil {
-					r.persist(ctx, &w, cand)
-					return fmt.Errorf("outbox: relay %q: deliver row (created_at=%s, id=%d): %w",
-						r.name, at.Format(time.RFC3339Nano), id, err)
-				}
-				r.mem[id] = at
-			}
-			// Everything up to and including this row is delivered
-			// (head-of-line: a failure returns above, so the prefix is
-			// contiguous). Settled rows become the next watermark.
-			if !at.After(cutoff) {
-				cand = watermark{At: at, ID: id, ok: true}
+			if err := r.deliver(ctx, &items[i], at, id, w, &cand, cutoff); err != nil {
+				r.persist(ctx, &w, cand)
+				return err
 			}
 		}
 		// Per-batch persistence bounds the crash replay window during
@@ -262,24 +302,59 @@ func (r *relay[T]) frontier(ctx context.Context, cutoff time.Time) (watermark, e
 	return watermark{At: at, ID: id, ok: true}, nil
 }
 
-// scanFrom fetches one batch at the cursor: created_at >= pos.ts (the
-// Gte overlap of §3.5 — the zero boundary means "from the beginning"
-// and adds no filter), ordered (created_at, id) by AppendStore's
-// deterministic-order guarantee, skipping the pos.offset rows already
-// consumed at this boundary.
-func (r *relay[T]) scanFrom(ctx context.Context, pos scanPos, batch int) ([]T, error) {
+// scanForward fetches one stage-2 batch at the cursor, ordered
+// (created_at, id) by AppendStore's deterministic-order guarantee.
+// The first fetch after a watermark is strict (created_at > pos.ts —
+// stage 1 owns the boundary group); afterwards it is the Gte overlap
+// of §3.5 (zero boundary means "from the beginning" and adds no
+// filter), skipping the pos.offset rows already consumed at this
+// boundary.
+func (r *relay[T]) scanForward(ctx context.Context, pos scanPos, batch int, strict bool) ([]T, error) {
 	// Option order matters: WithPage(1, batch) contributes the LIMIT,
 	// then WithOffset overrides its zero offset (the DSL has no
 	// standalone limit option).
-	opts := []where.Option{where.WithPage(1, batch), where.WithOffset(pos.offset)}
-	if !pos.ts.IsZero() {
-		opts = append(opts, where.WithFilterOp("created_at", where.Gte, pos.ts))
+	opts := []where.Option{where.WithPage(1, batch)}
+	switch {
+	case strict:
+		// Stage 2's first fetch: strictly beyond the watermark
+		// boundary (its tie group was drained by stage 1).
+		opts = append(opts, where.WithFilterOp("created_at", where.Gt, pos.ts))
+	default:
+		opts = append(opts, where.WithOffset(pos.offset))
+		if !pos.ts.IsZero() {
+			opts = append(opts, where.WithFilterOp("created_at", where.Gte, pos.ts))
+		}
 	}
 	page, err := r.scan.List(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("outbox: relay %q: scan: %w", r.name, err)
 	}
 	return page.Items, nil
+}
+
+// deliver handles one scanned row: dedup (persisted-watermark keyset,
+// then process memory), the user handler, and the settled-candidate
+// advance. Everything up to and including this row is delivered when
+// it returns nil (head-of-line: an error aborts the sweep above, so
+// the prefix stays contiguous).
+func (r *relay[T]) deliver(ctx context.Context, row *T, at time.Time, id uint, w watermark, cand *watermark, cutoff time.Time) error {
+	delivered := w.covers(at, id)
+	if !delivered {
+		if _, seen := r.mem[id]; seen {
+			delivered = true
+		}
+	}
+	if !delivered {
+		if err := r.handler(ctx, *row); err != nil {
+			return fmt.Errorf("outbox: relay %q: deliver row (created_at=%s, id=%d): %w",
+				r.name, at.Format(time.RFC3339Nano), id, err)
+		}
+		r.mem[id] = at
+	}
+	if !at.After(cutoff) {
+		*cand = watermark{At: at, ID: id, ok: true}
+	}
+	return nil
 }
 
 // persist advances the stored watermark to cand when it moved, then

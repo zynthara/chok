@@ -76,3 +76,14 @@ func TestOutboxRelay_MySQLLateCommitRealTx(t *testing.T) {
 	}
 	lateCommitRealTx(t, newCore(h, log.Empty()))
 }
+
+// TestOutboxRelay_MySQLWideSettledTie runs the round-4 starvation
+// shape on real MySQL, where datetime(3) rounding makes tie groups
+// wider than a sweep budget the realistic path.
+func TestOutboxRelay_MySQLWideSettledTie(t *testing.T) {
+	h := dbtest.OpenMySQL(t)
+	if err := MigrateSchema(context.Background(), h); err != nil {
+		t.Fatal(err)
+	}
+	wideSettledTie(t, newCore(h, log.Empty()))
+}

@@ -1096,3 +1096,61 @@ func TestOutboxRelay_LateCommitRealTx(t *testing.T) {
 	c := openCore(t)
 	lateCommitRealTx(t, c)
 }
+
+// Round-4 review (Critical): a settled tie group wider than one
+// sweep's page budget must not starve its own tail. The old scan
+// restarted every sweep at created_at >= W.At OFFSET 0, refetching the
+// covered prefix just to skip it in Go — each refetch burned budget,
+// so rows past the budget boundary inside the tie group were never
+// reached (and the strict < cleanup never removes the same-timestamp
+// prefix, so it never recovered). The composite-watermark resume
+// (created_at = W.At AND id > W.ID, then created_at > W.At) excludes
+// the prefix in SQL.
+func TestRelay_Round4WideSettledTieDoesNotStarveTail(t *testing.T) {
+	wideSettledTie(t, openCore(t))
+}
+
+// wideSettledTie is the round-4 shape shared with the MySQL lane twin
+// (datetime(3) makes wide same-timestamp groups the realistic path).
+func wideSettledTie(t *testing.T, c *core) {
+	t.Helper()
+	ctx := context.Background()
+	ts := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
+	const n = 13 // maxPages(3) × batch(4) + 1
+	for i := 1; i <= n; i++ {
+		insertAt(t, c, ts, 0, "t", fmt.Sprintf("m%02d", i))
+	}
+	// Rows after the tie group prove the tail is reachable in order.
+	insertAt(t, c, ts.Add(time.Second), 0, "t", "n1")
+	insertAt(t, c, ts.Add(2*time.Second), 0, "t", "n2")
+
+	cp := &capture{}
+	r := mkRelay(t, c, "wide-tie", cp, 0, 4)
+	r.maxPages = 3
+
+	if err := r.run(ctx); err != nil { // budget-bounded: first 12 of the tie
+		t.Fatal(err)
+	}
+	if len(cp.payloads()) != 12 {
+		t.Fatalf("first sweep delivered %d, want 12 (budget)", len(cp.payloads()))
+	}
+	if err := r.run(ctx); err != nil { // boundary resume: m13, then n1 n2
+		t.Fatal(err)
+	}
+	want := make([]string, 0, n+2)
+	for i := 1; i <= n; i++ {
+		want = append(want, fmt.Sprintf("m%02d", i))
+	}
+	want = append(want, "n1", "n2")
+	wantPayloads(t, cp.payloads(), want)
+
+	// Steady state: nothing redelivered, watermark at the true tail.
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wantPayloads(t, cp.payloads(), want)
+	w, err := c.states.load(ctx, "wide-tie")
+	if err != nil || !w.ok || !w.At.Equal(ts.Add(2*time.Second)) {
+		t.Fatalf("watermark = %+v, %v — want the n2 position", w, err)
+	}
+}

@@ -46,7 +46,11 @@
 > 止，下一 tick 以新 cutoff 从持久水位线重叠续扫，条目跨轮结算修
 > 剪）；filtered 前沿 probe 复用同一个 pre-scan cutoff。真实并发事务
 > 时序（持有事务入队→游标越过→窗口内提交→重叠补投）在 MySQL/PG 双真
-> 库回归覆盖。
+> 库回归覆盖。round-4 复审补最后一刀：页数预算与宽同刻 tie 组叠加会
+> 让组尾永久饿死（覆盖前缀每轮被取回 Go 里跳过、照烧预算）——扫描改
+> 为按持久**复合水位线**续扫（SQL 级排除 settled 前缀；DSL 无 OR，等
+> 价拆成「边界同刻余量按 id keyset」+「严格越过边界后回落 Gte+offset」
+> 两阶段），MySQL datetime(3) 宽 tie 真库回归压阵。
 
 ## Unreleased — join / append-only 表正门（arch-backlog #13）
 
