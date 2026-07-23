@@ -27,20 +27,30 @@ import (
 type Options struct {
 	Enabled bool `mapstructure:"enabled" default:"true"`
 
-	// PollInterval is each relay's sweep period — the upper bound on
-	// delivery latency for a healthy relay.
+	// PollInterval is each relay's sweep SCHEDULING period. It bounds
+	// delivery latency only while a relay is keeping up: one sweep
+	// processes at most 100 pages (maxSweepPages) × BatchSize rows, so
+	// a larger backlog drains across consecutive ticks at that
+	// per-tick throughput ceiling.
 	PollInterval time.Duration `mapstructure:"poll_interval" default:"1s"`
 
-	// BatchSize bounds one scan page (and one cleanup delete batch).
-	// Capped at 10000 (the where DSL's MaxPageSize).
+	// BatchSize bounds one scan page (and one cleanup delete batch);
+	// one sweep is capped at 100 pages, so BatchSize × 100 is the
+	// per-tick throughput ceiling per relay. Capped at 10000 (the
+	// where DSL's MaxPageSize).
 	BatchSize int `mapstructure:"batch_size" default:"100" reload:"hot"`
 
 	// SettleWindow is how long a row is considered unsettled: the
 	// persisted watermark never advances past rows younger than this,
 	// so a transaction that commits within SettleWindow of its Enqueue
 	// INSERT can never be skipped. Raise it if enqueueing transactions
-	// run longer (the cost is a wider crash-replay window, not higher
-	// delivery latency).
+	// run longer. The usual cost is only a wider crash-replay window;
+	// the one latency exception is a same-timestamp group wider than a
+	// sweep's page budget that is still unsettled — its tail cannot be
+	// reached until the group settles and the watermark enters it, a
+	// delay of up to roughly SettleWindow plus a few PollIntervals
+	// (accepted trade; the settled case resumes by composite keyset
+	// and has no such wait).
 	SettleWindow time.Duration `mapstructure:"settle_window" default:"30s"`
 
 	// Retention enables the cleanup sweep when positive: messages that

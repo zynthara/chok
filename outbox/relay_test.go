@@ -1154,3 +1154,55 @@ func wideSettledTie(t *testing.T, c *core) {
 		t.Fatalf("watermark = %+v, %v — want the n2 position", w, err)
 	}
 }
+
+// Round-5 review: pins the ACCEPTED latency trade the docs promise. A
+// same-timestamp group wider than one sweep's budget that is still
+// unsettled cannot reach its tail — mem-skips burn the budget and the
+// watermark cannot enter the group — until the timestamp settles;
+// then the composite-keyset resume (round-4) drains the tail within a
+// couple of sweeps. Total tail lag ≈ settle_window + a few
+// poll_intervals, and no message is lost.
+func TestRelay_Round5WideUnsettledTieTailLagsUntilSettle(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	s := time.Now().UTC().Truncate(time.Millisecond)
+	ts := s.Add(-time.Second) // recent: unsettled under a 30s window
+	const n = 7               // budget is maxPages(3) × batch(2) = 6
+	for i := 1; i <= n; i++ {
+		insertAt(t, c, ts, 0, "t", fmt.Sprintf("m%d", i))
+	}
+	cp := &capture{}
+	r := mkRelay(t, c, "wide-unsettled", cp, 30*time.Second, 2)
+	r.maxPages = 3
+	clock := s
+	r.now = func() time.Time { return clock }
+
+	// While the group is unsettled, extra sweeps re-skip the delivered
+	// prefix and never reach the tail — the documented, bounded lag.
+	for i := 0; i < 2; i++ {
+		if err := r.run(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(cp.payloads()) != 6 {
+		t.Fatalf("unsettled sweeps delivered %d, want 6 (budget-bounded prefix)", len(cp.payloads()))
+	}
+	if w, _ := c.states.load(ctx, "wide-unsettled"); w.ok {
+		t.Fatalf("watermark inside the settle window: %+v", w)
+	}
+
+	// Settle elapses: the watermark enters the group, and the boundary
+	// keyset reaches the tail on the following sweep.
+	clock = s.Add(time.Minute)
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"m1", "m2", "m3", "m4", "m5", "m6", "m7"}
+	wantPayloads(t, cp.payloads(), want)
+	if w, err := c.states.load(ctx, "wide-unsettled"); err != nil || !w.ok || w.ID != n {
+		t.Fatalf("watermark = %+v, %v — want the tail position", w, err)
+	}
+}

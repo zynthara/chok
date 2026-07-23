@@ -1269,10 +1269,13 @@ err := h.RunInTx(ctx, func(txCtx context.Context) error {
   写同事务）。
 - **投递异步**：relay 是 scheduler job（`poll_interval` 默认 1s 一扫），
   业务事务从不等待投递——投递目标故障不连坐业务写。
-- **扫描 = §3.5 的重叠水位线**：`created_at >= W`（Gte 重叠）+ 去重，
-  水位线持久化在 `outbox_relay_state`（每 relay 一行）。**投递成功先于
-  水位线推进**，两者之间崩溃 ⇒ 重启后重扫重投——这就是 at-least-once
-  的形状。§3.5 说的「保证不漏属 outbox 领域」即此处兑现。
+- **扫描 = §3.5 重叠水位线的复合键形态**：从持久化的 (created_at, 内
+  部 PK) 复合水位线续扫——先按 id keyset 排干水位线同刻余量，再严格
+  越过边界前进（settled 前缀在 SQL 层排除，不重复取回）；未 settle
+  窗口内仍是重叠重扫 + 去重。水位线持久化在 `outbox_relay_state`（每
+  relay 一行），**投递成功先于水位线推进**，两者之间崩溃 ⇒ 重启后重
+  扫重投——这就是 at-least-once 的形状。§3.5 说的「保证不漏属 outbox
+  领域」即此处兑现。
 - ⚠️ **at-least-once ≠ exactly-once，消费端必须幂等**：崩溃/重启会重放
   未 settle 窗口，Handler 一定会看到重复，按业务幂等键去重。框架不做
   exactly-once——那要求投递目标与 outbox 同一原子域（2PC 或目标侧事务
@@ -1280,9 +1283,17 @@ err := h.RunInTx(ctx, func(txCtx context.Context) error {
 - ⚠️ **`settle_window`（默认 30s）是正确性参数**：`created_at` 在
   INSERT 时赋值、行在 COMMIT 时可见，水位线只越过老于 settle 的行。
   **会入队的事务从 INSERT 到 COMMIT 必须短于 settle_window**，跑长事务
-  批量入队要调大它（代价只是崩溃重放窗口变宽，不增加投递延迟）。
+  批量入队要调大它（通常代价只是崩溃重放窗口变宽；唯一的延迟例外见
+  下条吞吐注记）。
   SQLite 形态天然豁免（唯一写连接串行化提交）。时钟大幅回拨同样能击穿
   该边界（§3.5 同款 caveat）。
+- **吞吐与延迟注记**：单轮扫描有页数预算（100 页 × `batch_size`，即
+  每 relay 每 tick 的吞吐上限），积压超过它时跨多个 tick 排干——
+  `poll_interval` 是**调度周期**，只在 relay 跟得上时才是延迟上界。
+  唯一的尾部延迟例外：**同刻组宽过单轮预算且尚未 settle** 时，组尾要
+  等该时间戳 settle、水位线进组后才可达（≈ settle_window + 数个
+  poll_interval，接受的取舍）；已 settle 的宽同刻组按复合键续扫、无此
+  等待。
 - **失败 = head-of-line**：Handler 报错即停本轮、水位线停在失败行之前，
   下个 tick 从头重试——不跳行，但毒丸消息会阻塞它所在的 relay（不影响
   其他 relay）。

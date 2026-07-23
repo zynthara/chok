@@ -50,7 +50,10 @@
 > 让组尾永久饿死（覆盖前缀每轮被取回 Go 里跳过、照烧预算）——扫描改
 > 为按持久**复合水位线**续扫（SQL 级排除 settled 前缀；DSL 无 OR，等
 > 价拆成「边界同刻余量按 id keyset」+「严格越过边界后回落 Gte+offset」
-> 两阶段），MySQL datetime(3) 宽 tie 真库回归压阵。
+> 两阶段），MySQL datetime(3) 宽 tie 真库回归压阵。round-5 把延迟契约
+> 写实：`poll_interval` 是调度周期（每 tick 吞吐上限 = 100×batch），
+> 唯一尾部延迟例外是宽 unsettled 同刻组（≈ settle + 数个 tick），并以
+> 回归钉死这项取舍。
 
 ## Unreleased — join / append-only 表正门（arch-backlog #13）
 
