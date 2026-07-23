@@ -35,6 +35,11 @@
 > 按 relay **名**核对（round-1 复审：裸计数/裸 min 让残留 state 行冒充
 > 未推进的 relay、让泛型表水位线授权删消息，两条都是丢消息路径；现在
 > 每个 Record relay 必须有自己的行，泛型 relay 既不授权也不阻塞）。
+> round-2 复审再收三口：settle cutoff 逐批刷新（追赶型长扫描不再抱着
+> 开扫时刻的旧 cutoff 让 mem 无界涨）、run 起手先按加载的水位线修剪
+> mem（多实例他方推进后本地旧条目不再永久滞留）、安静的 `OnTopics`
+> relay 扫净后水位线越过外部 topic 推进到 settled 前沿（不再永久卡住
+> retention）。
 
 ## Unreleased — join / append-only 表正门（arch-backlog #13）
 

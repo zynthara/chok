@@ -105,7 +105,10 @@ type relayCfg struct {
 // OnTopics narrows a WithRelay registration to the given topics (exact
 // match, SQL IN). Without it the relay sees every Record. Each relay
 // keeps its own watermark either way, so a slow topic-filtered relay
-// never holds back the others.
+// never holds back the others; and when its topics go quiet, each
+// drained sweep still advances the watermark over foreign-topic rows
+// to the settled frontier, so a rarely-matching relay never stalls
+// the retention sweep either.
 func OnTopics(topics ...string) RelayOption {
 	return func(cfg *relayCfg) { cfg.topics = append(cfg.topics, topics...) }
 }

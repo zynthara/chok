@@ -2,10 +2,13 @@ package outbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
 	"time"
+
+	"gorm.io/gorm"
 
 	"github.com/zynthara/chok/v2/db"
 	"github.com/zynthara/chok/v2/log"
@@ -40,11 +43,13 @@ type relay[T db.AppendModeler] struct {
 	handler HandlerFor[T]
 	scan    *store.AppendStore[T]
 	states  *stateStore
+	h       *db.DB // frontier probe (the one query the scan store cannot express)
 	logger  log.Logger
 
-	settle time.Duration
-	batch  func() int       // live snapshot (hot-reloadable option)
-	now    func() time.Time // injectable clock for settle tests
+	settle   time.Duration
+	batch    func() int       // live snapshot (hot-reloadable option)
+	now      func() time.Time // injectable clock for settle tests
+	filtered bool             // OnTopics relay: watermark may jump the settled frontier
 
 	base []int // FieldByIndex path to the embedded AppendOnlyModel
 
@@ -86,16 +91,18 @@ func newRelay[T db.AppendModeler](name string, handler HandlerFor[T], c *core, c
 		scanOpts = append(scanOpts, store.WithScope(topicScope(cfg.topics)))
 	}
 	return &relay[T]{
-		name:    name,
-		handler: handler,
-		scan:    store.NewAppend[T](c.h, c.logger, scanOpts...),
-		states:  c.states,
-		logger:  c.logger.With("relay", name),
-		settle:  settle,
-		batch:   batch,
-		now:     time.Now,
-		base:    base,
-		mem:     make(map[uint]time.Time),
+		name:     name,
+		handler:  handler,
+		scan:     store.NewAppend[T](c.h, c.logger, scanOpts...),
+		states:   c.states,
+		h:        c.h,
+		logger:   c.logger.With("relay", name),
+		settle:   settle,
+		batch:    batch,
+		now:      time.Now,
+		filtered: len(cfg.topics) > 0,
+		base:     base,
+		mem:      make(map[uint]time.Time),
 	}, nil
 }
 
@@ -114,12 +121,12 @@ func (r *relay[T]) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Rows younger than the cutoff are unsettled: a still-open
-	// transaction may yet commit a row with an earlier created_at, so
-	// the persisted watermark must not advance past them. Delivery is
-	// NOT delayed — unsettled rows are handed out immediately and
-	// remembered in mem; settle only gates watermark advancement.
-	cutoff := r.now().Add(-r.settle)
+	// Prune against the loaded watermark before scanning: another
+	// instance (the accepted last-write-wins degradation) may have
+	// advanced the shared state past entries this instance still holds
+	// in mem — without this they would outlive every local advance
+	// (round-2 review).
+	r.prune(w)
 	cand := w
 	pos := scanPos{ts: w.At}
 
@@ -128,6 +135,19 @@ func (r *relay[T]) run(ctx context.Context) error {
 			r.persist(ctx, &w, cand)
 			return err
 		}
+		// Rows younger than the cutoff are unsettled: a still-open
+		// transaction may yet commit a row with an earlier created_at,
+		// so the persisted watermark must not advance past them.
+		// Delivery is NOT delayed — unsettled rows are handed out
+		// immediately and remembered in mem; settle only gates
+		// watermark advancement. The cutoff is refreshed per batch
+		// (round-2 review): a catch-up sweep that never drains — the
+		// loop runs while producers keep pace — would otherwise hold a
+		// sweep-start cutoff forever, settling nothing and growing mem
+		// with every row it delivers. Refreshing is sound: the cutoff
+		// always predates the persist that relies on it, so cand still
+		// only covers positions older than persist-time − settle.
+		cutoff := r.now().Add(-r.settle)
 		batch := r.batch()
 		items, err := r.scanFrom(ctx, pos, batch)
 		if err != nil {
@@ -172,8 +192,47 @@ func (r *relay[T]) run(ctx context.Context) error {
 			break
 		}
 	}
+	// A topic-filtered relay only sees matching rows, so a quiet topic
+	// would never advance its watermark — leaving no state row (or a
+	// stale one) that blocks the retention sweep forever (round-2
+	// review). Once the filtered scan is drained, every matching row up
+	// to the settled frontier is delivered, so the watermark may jump
+	// over the foreign-topic rows to that frontier. Clean-exit only:
+	// handler failures returned above, keeping head-of-line intact.
+	if r.filtered {
+		f, err := r.frontier(ctx)
+		if err != nil {
+			r.logger.Warn("outbox: frontier probe failed — retention floor advances next sweep", "error", err)
+		} else if f.ok && cand.after(f.At, f.ID) {
+			cand = f
+		}
+	}
 	r.persist(ctx, &w, cand)
 	return nil
+}
+
+// frontier returns the newest settled (created_at, id) position across
+// the WHOLE table — the highest watermark any caught-up relay may
+// claim. It rides the sanctioned Unsafe hatch for the one shape the
+// where DSL cannot express (descending id tie-pick with LIMIT 1); the
+// probe only runs for topic-filtered relays, i.e. always against the
+// battery's own Record table with its default column names.
+func (r *relay[T]) frontier(ctx context.Context) (watermark, error) {
+	cutoff := r.now().Add(-r.settle)
+	var row T
+	err := r.h.Unsafe(ctx).Model(new(T)).
+		Where("created_at <= ?", cutoff).
+		Order("created_at DESC, id DESC").
+		Limit(1).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return watermark{}, nil
+	}
+	if err != nil {
+		return watermark{}, fmt.Errorf("outbox: relay %q: settled frontier: %w", r.name, err)
+	}
+	at, id := r.rowPos(&row)
+	return watermark{At: at, ID: id, ok: true}, nil
 }
 
 // scanFrom fetches one batch at the cursor: created_at >= pos.ts (the

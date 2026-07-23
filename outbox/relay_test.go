@@ -738,3 +738,134 @@ func TestRelay_Round1MemPrunedOnEveryAdvance(t *testing.T) {
 		t.Fatalf("watermark = %+v, %v", w, err)
 	}
 }
+
+// Round-2 review #1: the settle cutoff refreshes every batch. A
+// catch-up sweep whose loop keeps finding full pages would otherwise
+// hold the sweep-start cutoff forever — nothing settles no matter how
+// much wall time passes, and mem grows with every delivered row. The
+// injected clock advances between batches; rows older than the moving
+// cutoff must settle, persist and prune mid-sweep.
+func TestRelay_Round2CutoffRefreshesAcrossBatches(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	ts := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
+	const n = 25
+	for i := 1; i <= n; i++ {
+		insertAt(t, c, ts, 0, "t", fmt.Sprintf("m%02d", i))
+	}
+	cp := &capture{}
+	r := mkRelay(t, c, "moving-cutoff", cp, 10*time.Minute, 5)
+	calls := 0
+	base := ts.Add(time.Minute) // sweep starts with everything unsettled
+	r.now = func() time.Time {
+		calls++
+		return base.Add(time.Duration(calls-1) * 4 * time.Minute)
+	}
+
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(cp.payloads()) != n {
+		t.Fatalf("delivered %d rows, want %d", len(cp.payloads()), n)
+	}
+	// By the later batches the clock moved past ts+settle: the rows
+	// settled mid-sweep, the watermark persisted, and mem was pruned —
+	// none of which the frozen sweep-start cutoff would have allowed.
+	w, err := c.states.load(ctx, "moving-cutoff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !w.ok || !w.At.Equal(ts) || w.ID != n {
+		t.Fatalf("watermark = %+v, want settled at (%v, %d)", w, ts, n)
+	}
+	if len(r.mem) != 0 {
+		t.Fatalf("mem after sweep = %d entries, want 0 (pruned as the cutoff moved)", len(r.mem))
+	}
+}
+
+// Round-2 review #2: run prunes mem against the loaded watermark
+// before scanning. When another instance (last-write-wins degradation)
+// advances the shared state past rows this instance delivered but
+// never settled locally, those mem entries would otherwise outlive
+// every local advance.
+func TestRelay_Round2LoadedWatermarkPrunesForeignAdvance(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	for i := 1; i <= 3; i++ {
+		enqueue(t, c, "t", fmt.Sprintf("m%d", i))
+	}
+	cp := &capture{}
+	r := mkRelay(t, c, "shared", cp, time.Hour, 10) // unsettled: mem only
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.mem) != 3 {
+		t.Fatalf("mem after first sweep = %d, want 3 unsettled entries", len(r.mem))
+	}
+	// "Instance B" advances the shared state past everything.
+	page, err := c.records.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := page.Items[len(page.Items)-1]
+	if err := c.states.save(ctx, "shared", watermark{At: last.CreatedAt, ID: last.ID, ok: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wantPayloads(t, cp.payloads(), []string{"m1", "m2", "m3"}) // keyset skip, no redelivery
+	if len(r.mem) != 0 {
+		t.Fatalf("mem after foreign advance = %v, want empty (pruned on load)", r.mem)
+	}
+}
+
+// Round-2 review #3: a topic-filtered relay whose topic stays quiet
+// advances its watermark over foreign-topic rows to the settled
+// frontier — otherwise it never grows a state row and the per-name
+// retention guard (round-1 #1) blocks cleanup forever.
+func TestCleanup_Round2QuietFilteredRelayDoesNotBlockRetention(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	for i := 1; i <= 3; i++ {
+		enqueue(t, c, "hot", fmt.Sprintf("h%d", i))
+	}
+	cpHot := &capture{}
+	hot := mkRelay(t, c, "hot-consumer", cpHot, 0, 10)
+	if err := hot.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The cold relay's topic has never appeared; its sweep delivers
+	// nothing but must still claim the settled frontier.
+	cpCold := &capture{}
+	cold := mkRelay(t, c, "cold-consumer", cpCold, 0, 10, "cold")
+	if err := cold.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(cpCold.payloads()) != 0 {
+		t.Fatalf("cold relay delivered %v, want nothing", cpCold.payloads())
+	}
+	wc, err := c.states.load(ctx, "cold-consumer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wc.ok {
+		t.Fatal("quiet filtered relay has no watermark — it would block retention forever")
+	}
+	n, err := c.cleanupOnce(ctx, []string{"hot-consumer", "cold-consumer"}, nil, time.Nanosecond, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("cleanup deleted nothing — the quiet filtered relay stalled the floor")
+	}
+
+	// Correctness half: the jumped watermark must not skip topic rows
+	// that arrive later.
+	enqueue(t, c, "cold", "c1")
+	if err := cold.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wantPayloads(t, cpCold.payloads(), []string{"c1"})
+}

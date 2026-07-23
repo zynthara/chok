@@ -1296,9 +1296,11 @@ err := h.RunInTx(ctx, func(txCtx context.Context) error {
   按 **relay 名**逐一核对：每个注册的 Record relay 必须有自己的水位线
   行，缺一个就整轮不删；`WithRelayFor` 泛型 relay 的水位线跟踪的是用
   户自己的表，**既不授权也不阻塞**本清理（用户表的 retention 归表主
-  人，电池永不删它）。下线某个 Record relay 要手动删它的
-  `outbox_relay_state` 行，否则它的旧水位线会一直卡住清理（未知残留
-  行只会压低下界——宁可不删也不误删未消费消息）。
+  人，电池永不删它）。`OnTopics` 过滤 relay 在自己 topic 安静时也不会
+  卡清理：每轮扫净后其水位线会越过外部 topic 的行推进到 settled 前
+  沿。下线某个 Record relay 要手动删它的 `outbox_relay_state` 行，否
+  则它的旧水位线会一直卡住清理（未知残留行只会压低下界——宁可不删也
+  不误删未消费消息）。
 - 电池表 `outbox_messages` / `outbox_relay_state` 随迁移三模式走
   （auto / versioned 各自成套，off 不碰）；配置项见
   [`config.md`](config.md) 的 `outbox` 段。
