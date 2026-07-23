@@ -50,6 +50,7 @@ type relay[T db.AppendModeler] struct {
 	batch    func() int       // live snapshot (hot-reloadable option)
 	now      func() time.Time // injectable clock for settle tests
 	filtered bool             // OnTopics relay: watermark may jump the settled frontier
+	maxPages int              // one sweep's page budget (maxSweepPages; test-tunable)
 
 	base []int // FieldByIndex path to the embedded AppendOnlyModel
 
@@ -101,10 +102,21 @@ func newRelay[T db.AppendModeler](name string, handler HandlerFor[T], c *core, c
 		batch:    batch,
 		now:      time.Now,
 		filtered: len(cfg.topics) > 0,
+		maxPages: maxSweepPages,
 		base:     base,
 		mem:      make(map[uint]time.Time),
 	}, nil
 }
+
+// maxSweepPages bounds one sweep. The bound is what keeps the fixed
+// pre-scan cutoff compatible with sustained production: a sweep that
+// could loop forever would hold one cutoff forever (the round-2 #1
+// memory pathology); capped sweeps end, and the next tick rescans the
+// overlap from the persisted watermark under a fresh cutoff, so rows
+// settle and mem prunes across sweeps. With the default batch size
+// this is 10k rows per sweep per relay — delivery throughput is paced,
+// correctness is not affected (at-least-once holds at any budget).
+const maxSweepPages = 100
 
 func (r *relay[T]) relayName() string { return r.name }
 
@@ -130,24 +142,33 @@ func (r *relay[T]) run(ctx context.Context) error {
 	cand := w
 	pos := scanPos{ts: w.At}
 
-	for {
+	// Rows younger than the cutoff are unsettled: a still-open
+	// transaction may yet commit a row with an earlier created_at, so
+	// the persisted watermark must not advance past them. Delivery is
+	// NOT delayed — unsettled rows are handed out immediately and
+	// remembered in mem; settle only gates watermark advancement.
+	//
+	// The cutoff is taken ONCE, before the scan (round-3 review —
+	// restoring this closed a Critical): covering a position is safe
+	// only when its created_at predates the moment the CURSOR PASSED
+	// that position by settle — an invisible row there can otherwise
+	// still commit (within its own settle budget) after the pass, and
+	// the cursor never returns within this sweep. Sweep start lower-
+	// bounds every pass time, so the pre-scan cutoff is sound; the
+	// round-2 per-batch refresh was not ("cutoff predates persist"
+	// ignores pass times) — it could settle positions passed while a
+	// perfectly legal transaction was still invisible, skipping its
+	// row forever. The endless-sweep memory concern that refresh
+	// addressed is handled by maxSweepPages instead: the next tick
+	// takes a fresh cutoff and rescans the overlap from the persisted
+	// watermark, so entries settle and prune across sweeps.
+	cutoff := r.now().Add(-r.settle)
+	drained := false
+	for pages := 0; pages < r.maxPages; pages++ {
 		if err := ctx.Err(); err != nil {
 			r.persist(ctx, &w, cand)
 			return err
 		}
-		// Rows younger than the cutoff are unsettled: a still-open
-		// transaction may yet commit a row with an earlier created_at,
-		// so the persisted watermark must not advance past them.
-		// Delivery is NOT delayed — unsettled rows are handed out
-		// immediately and remembered in mem; settle only gates
-		// watermark advancement. The cutoff is refreshed per batch
-		// (round-2 review): a catch-up sweep that never drains — the
-		// loop runs while producers keep pace — would otherwise hold a
-		// sweep-start cutoff forever, settling nothing and growing mem
-		// with every row it delivers. Refreshing is sound: the cutoff
-		// always predates the persist that relies on it, so cand still
-		// only covers positions older than persist-time − settle.
-		cutoff := r.now().Add(-r.settle)
 		batch := r.batch()
 		items, err := r.scanFrom(ctx, pos, batch)
 		if err != nil {
@@ -155,6 +176,7 @@ func (r *relay[T]) run(ctx context.Context) error {
 			return err
 		}
 		if len(items) == 0 {
+			drained = true
 			break
 		}
 		for i := range items {
@@ -189,18 +211,23 @@ func (r *relay[T]) run(ctx context.Context) error {
 		// long catch-up sweeps.
 		r.persist(ctx, &w, cand)
 		if len(items) < batch {
+			drained = true
 			break
 		}
 	}
 	// A topic-filtered relay only sees matching rows, so a quiet topic
 	// would never advance its watermark — leaving no state row (or a
 	// stale one) that blocks the retention sweep forever (round-2
-	// review). Once the filtered scan is drained, every matching row up
+	// review). Once the filtered scan is DRAINED, every matching row up
 	// to the settled frontier is delivered, so the watermark may jump
-	// over the foreign-topic rows to that frontier. Clean-exit only:
-	// handler failures returned above, keeping head-of-line intact.
-	if r.filtered {
-		f, err := r.frontier(ctx)
+	// over the foreign-topic rows to that frontier. Drained clean exits
+	// only: handler failures returned above (head-of-line intact) and a
+	// budget-stopped sweep proves nothing about rows it never reached.
+	// The probe reuses the pre-scan cutoff for the same pass-time
+	// reason as the loop: a probe-time cutoff could settle a match
+	// that committed after the filtered cursor passed its position.
+	if drained && r.filtered {
+		f, err := r.frontier(ctx, cutoff)
 		if err != nil {
 			r.logger.Warn("outbox: frontier probe failed — retention floor advances next sweep", "error", err)
 		} else if f.ok && cand.after(f.At, f.ID) {
@@ -211,14 +238,14 @@ func (r *relay[T]) run(ctx context.Context) error {
 	return nil
 }
 
-// frontier returns the newest settled (created_at, id) position across
-// the WHOLE table — the highest watermark any caught-up relay may
-// claim. It rides the sanctioned Unsafe hatch for the one shape the
+// frontier returns the newest (created_at, id) position at or before
+// cutoff across the WHOLE table — the highest watermark a drained
+// relay may claim. cutoff MUST be the sweep's pre-scan cutoff (see
+// run). It rides the sanctioned Unsafe hatch for the one shape the
 // where DSL cannot express (descending id tie-pick with LIMIT 1); the
 // probe only runs for topic-filtered relays, i.e. always against the
 // battery's own Record table with its default column names.
-func (r *relay[T]) frontier(ctx context.Context) (watermark, error) {
-	cutoff := r.now().Add(-r.settle)
+func (r *relay[T]) frontier(ctx context.Context, cutoff time.Time) (watermark, error) {
 	var row T
 	err := r.h.Unsafe(ctx).Model(new(T)).
 		Where("created_at <= ?", cutoff).

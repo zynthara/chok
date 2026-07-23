@@ -66,3 +66,13 @@ func TestOutboxRelay_MySQLWatermarkRoundTrip(t *testing.T) {
 	}
 	wantPayloads(t, cp.payloads(), append(want, "after"))
 }
+
+// TestOutboxRelay_MySQLLateCommitRealTx is the MySQL twin of the
+// round-3 real-transaction late-commit shape (see lateCommitRealTx).
+func TestOutboxRelay_MySQLLateCommitRealTx(t *testing.T) {
+	h := dbtest.OpenMySQL(t)
+	if err := MigrateSchema(context.Background(), h); err != nil {
+		t.Fatal(err)
+	}
+	lateCommitRealTx(t, newCore(h, log.Empty()))
+}

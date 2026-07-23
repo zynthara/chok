@@ -739,13 +739,14 @@ func TestRelay_Round1MemPrunedOnEveryAdvance(t *testing.T) {
 	}
 }
 
-// Round-2 review #1: the settle cutoff refreshes every batch. A
-// catch-up sweep whose loop keeps finding full pages would otherwise
-// hold the sweep-start cutoff forever — nothing settles no matter how
-// much wall time passes, and mem grows with every delivered row. The
-// injected clock advances between batches; rows older than the moving
-// cutoff must settle, persist and prune mid-sweep.
-func TestRelay_Round2CutoffRefreshesAcrossBatches(t *testing.T) {
+// Round-2 review #1 (re-cut by round-3): the memory concern — mem
+// growing while nothing settles — is bounded ACROSS sweeps, not by
+// moving the cutoff inside one (round-3 found the per-batch refresh
+// unsound: it can cover positions the cursor passed while a legal
+// transaction was still invisible). Each sweep takes a fresh pre-scan
+// cutoff, so rows delivered unsettled in one sweep settle, persist
+// and prune on a later sweep once wall time passes.
+func TestRelay_Round2MemBoundedAcrossSweeps(t *testing.T) {
 	c := openCore(t)
 	ctx := context.Background()
 	ts := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
@@ -754,13 +755,9 @@ func TestRelay_Round2CutoffRefreshesAcrossBatches(t *testing.T) {
 		insertAt(t, c, ts, 0, "t", fmt.Sprintf("m%02d", i))
 	}
 	cp := &capture{}
-	r := mkRelay(t, c, "moving-cutoff", cp, 10*time.Minute, 5)
-	calls := 0
-	base := ts.Add(time.Minute) // sweep starts with everything unsettled
-	r.now = func() time.Time {
-		calls++
-		return base.Add(time.Duration(calls-1) * 4 * time.Minute)
-	}
+	r := mkRelay(t, c, "cross-sweep", cp, 10*time.Minute, 5)
+	clock := ts.Add(time.Minute) // sweep 1: everything unsettled
+	r.now = func() time.Time { return clock }
 
 	if err := r.run(ctx); err != nil {
 		t.Fatal(err)
@@ -768,10 +765,23 @@ func TestRelay_Round2CutoffRefreshesAcrossBatches(t *testing.T) {
 	if len(cp.payloads()) != n {
 		t.Fatalf("delivered %d rows, want %d", len(cp.payloads()), n)
 	}
-	// By the later batches the clock moved past ts+settle: the rows
-	// settled mid-sweep, the watermark persisted, and mem was pruned —
-	// none of which the frozen sweep-start cutoff would have allowed.
-	w, err := c.states.load(ctx, "moving-cutoff")
+	if len(r.mem) != n {
+		t.Fatalf("mem after unsettled sweep = %d, want %d", len(r.mem), n)
+	}
+	if w, _ := c.states.load(ctx, "cross-sweep"); w.ok {
+		t.Fatalf("watermark persisted inside the settle window: %+v", w)
+	}
+
+	// Sweep 2 under a later clock: the same rows are now settled — the
+	// rescan (mem-dedup, no redelivery) advances and prunes.
+	clock = ts.Add(15 * time.Minute)
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(cp.payloads()) != n {
+		t.Fatalf("redelivered on settle sweep: %d", len(cp.payloads()))
+	}
+	w, err := c.states.load(ctx, "cross-sweep")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -779,7 +789,7 @@ func TestRelay_Round2CutoffRefreshesAcrossBatches(t *testing.T) {
 		t.Fatalf("watermark = %+v, want settled at (%v, %d)", w, ts, n)
 	}
 	if len(r.mem) != 0 {
-		t.Fatalf("mem after sweep = %d entries, want 0 (pruned as the cutoff moved)", len(r.mem))
+		t.Fatalf("mem after settle sweep = %d entries, want 0", len(r.mem))
 	}
 }
 
@@ -868,4 +878,221 @@ func TestCleanup_Round2QuietFilteredRelayDoesNotBlockRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantPayloads(t, cpCold.payloads(), []string{"c1"})
+}
+
+// Round-3 review (Critical): the settle cutoff is taken once, before
+// the scan. A per-batch refresh could cover a position the cursor
+// passed while a perfectly legal transaction (commit within settle of
+// its INSERT) was still invisible there — the row commits after the
+// pass, later batches settle under the refreshed cutoff, and the
+// watermark jumps the row forever. Timeline: the cursor passes R's
+// position while R's transaction is open; mid-sweep R commits and the
+// wall clock crosses settle; the remaining rows must NOT settle under
+// this sweep's cutoff, so the next sweep's overlap rescan still finds
+// R.
+func TestRelay_Round3LateCommitDuringLongSweepNotSkipped(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	s := time.Now().UTC().Truncate(time.Millisecond)
+	for i := 1; i <= 4; i++ { // ids 1-4: settled at sweep start
+		insertAt(t, c, s.Add(-60*time.Second), 0, "t", fmt.Sprintf("a%d", i))
+	}
+	for i := 0; i < 4; i++ { // ids 6-9: unsettled, positions after the gap
+		insertAt(t, c, s.Add(-10*time.Second), uint(6+i), "t", fmt.Sprintf("b%d", i+1))
+	}
+	for i := 0; i < 4; i++ { // ids 10-13: unsettled tail
+		insertAt(t, c, s.Add(-5*time.Second), uint(10+i), "t", fmt.Sprintf("c%d", i+1))
+	}
+
+	clock := s
+	var mu sync.Mutex
+	var got []string
+	r, err := newRelay[Record]("long-sweep", func(_ context.Context, rec Record) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if string(rec.Payload) == "b1" {
+			// The cursor has passed the (s-20s, 5) position. Now the
+			// held transaction commits R there, and the sweep drags on
+			// past the settle window.
+			insertAt(t, c, s.Add(-20*time.Second), 5, "t", "late-R")
+			clock = s.Add(40 * time.Second)
+		}
+		got = append(got, string(rec.Payload))
+		return nil
+	}, c, relayCfg{}, 30*time.Second, func() int { return 4 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.now = func() time.Time { return clock }
+
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The next sweep's overlap rescan must deliver R — a refreshed
+	// cutoff would have settled the b/c rows and parked the watermark
+	// past R's position.
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	count := 0
+	for _, p := range got {
+		if p == "late-R" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("late-committed row delivered %d times, want exactly 1 (got %v)", count, got)
+	}
+	if len(got) != 13 {
+		t.Fatalf("delivered %d rows, want 13: %v", len(got), got)
+	}
+}
+
+// Round-3 review: one sweep is bounded by its page budget; the next
+// tick rescans the overlap from the persisted watermark under a fresh
+// cutoff. This is what reconciles the fixed pre-scan cutoff with
+// sustained production (the round-2 #1 memory concern).
+func TestRelay_Round3SweepBudgetBoundsOnePass(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	const n = 20
+	for i := 1; i <= n; i++ {
+		enqueue(t, c, "t", fmt.Sprintf("m%02d", i))
+	}
+	cp := &capture{}
+	r := mkRelay(t, c, "budgeted", cp, 0, 4)
+	r.maxPages = 3 // 3 pages × batch 4 = 12 rows per sweep
+
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(cp.payloads()) != 12 {
+		t.Fatalf("budgeted sweep delivered %d rows, want 12", len(cp.payloads()))
+	}
+	w, err := c.states.load(ctx, "budgeted")
+	if err != nil || !w.ok {
+		t.Fatalf("watermark after budgeted sweep = %+v, %v", w, err)
+	}
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := make([]string, n)
+	for i := range want {
+		want[i] = fmt.Sprintf("m%02d", i+1)
+	}
+	wantPayloads(t, cp.payloads(), want) // remainder delivered, in order, no dupes
+}
+
+// Round-3 review: the frontier probe reuses the sweep's pre-scan
+// cutoff. A probe-time cutoff could settle a matching row that
+// committed after the filtered cursor passed its position — the jump
+// would cover a message the scan never saw.
+func TestRelay_Round3FrontierUsesPreScanCutoff(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	s := time.Now().UTC().Truncate(time.Millisecond)
+	for i := 1; i <= 3; i++ { // foreign rows, unsettled at sweep start
+		insertAt(t, c, s.Add(-10*time.Second), 0, "hot", fmt.Sprintf("h%d", i))
+	}
+	cpCold := &capture{}
+	cold := mkRelay(t, c, "cold-frontier", cpCold, 30*time.Second, 10, "cold")
+	calls := 0
+	cold.now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return s
+		}
+		return s.Add(40 * time.Second)
+	}
+
+	// Sweep 1: nothing matches, nothing is settled under the pre-scan
+	// cutoff — the watermark must NOT appear (a probe recomputing "now"
+	// would see the foreign rows as settled and claim their position).
+	if err := cold.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := c.states.load(ctx, "cold-frontier"); w.ok {
+		t.Fatalf("frontier claimed inside the settle window: %+v", w)
+	}
+
+	// A cold message "ages in" at a position before the foreign rows —
+	// with the premature frontier above it would have been skipped.
+	insertAt(t, c, s.Add(-20*time.Second), 0, "cold", "c1")
+	if err := cold.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wantPayloads(t, cpCold.payloads(), []string{"c1"})
+	w, err := c.states.load(ctx, "cold-frontier")
+	if err != nil || !w.ok {
+		t.Fatalf("frontier after settled sweep = %+v, %v", w, err)
+	}
+}
+
+// lateCommitRealTx is the real-transaction shape of the round-3
+// Critical: a concurrently held transaction enqueues, the relay scans
+// past the invisible position, the transaction commits within its
+// settle budget — the overlap rescan must still deliver it. Real
+// database lanes (MySQL/Postgres) exercise true concurrent visibility;
+// the sqlite shape cannot race (single write connection).
+func lateCommitRealTx(t *testing.T, c *core) {
+	t.Helper()
+	ctx := context.Background()
+	const settle = 500 * time.Millisecond
+	cp := &capture{}
+	r := mkRelay(t, c, "late-real", cp, settle, 10)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- c.h.RunInTx(ctx, func(txCtx context.Context) error {
+			if err := c.Enqueue(txCtx, "t", []byte("late-tx")); err != nil {
+				return err
+			}
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	enqueue(t, c, "t", "visible") // later position, committed first
+
+	if err := r.run(ctx); err != nil { // passes the invisible position
+		t.Fatal(err)
+	}
+	wantPayloads(t, cp.payloads(), []string{"visible"})
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(settle + 200*time.Millisecond) // everything ages past settle
+
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]int{}
+	for _, p := range cp.payloads() {
+		seen[p]++
+	}
+	if seen["late-tx"] != 1 || seen["visible"] != 1 || len(seen) != 2 {
+		t.Fatalf("delivered = %v, want visible and late-tx exactly once each", cp.payloads())
+	}
+	w, err := c.states.load(ctx, "late-real")
+	if err != nil || !w.ok {
+		t.Fatalf("watermark = %+v, %v", w, err)
+	}
+}
+
+func TestOutboxRelay_LateCommitRealTx(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("real concurrent-commit visibility needs the postgres lane (sqlite serialises writes)")
+	}
+	c := openCore(t)
+	lateCommitRealTx(t, c)
 }

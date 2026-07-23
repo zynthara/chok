@@ -35,11 +35,18 @@
 > 按 relay **名**核对（round-1 复审：裸计数/裸 min 让残留 state 行冒充
 > 未推进的 relay、让泛型表水位线授权删消息，两条都是丢消息路径；现在
 > 每个 Record relay 必须有自己的行，泛型 relay 既不授权也不阻塞）。
-> round-2 复审再收三口：settle cutoff 逐批刷新（追赶型长扫描不再抱着
-> 开扫时刻的旧 cutoff 让 mem 无界涨）、run 起手先按加载的水位线修剪
-> mem（多实例他方推进后本地旧条目不再永久滞留）、安静的 `OnTopics`
-> relay 扫净后水位线越过外部 topic 推进到 settled 前沿（不再永久卡住
-> retention）。
+> round-2 复审再收三口：run 起手先按加载的水位线修剪 mem（多实例他方
+> 推进后本地旧条目不再永久滞留）、安静的 `OnTopics` relay 扫净后水位
+> 线越过外部 topic 推进到 settled 前沿（不再永久卡住 retention）、追
+> 赶型长扫描的 mem 无界问题初诊为逐批刷新 cutoff——round-3 复审证明
+> 该刷新**破坏不漏保证**（cutoff 的健全性锚点是「游标越过该位置的时
+> 刻」而非 persist 时刻：越过时不可见、随后在自身 settle 预算内合法提
+> 交的行会被后批的新 cutoff 结算越过、永久漏投）。终案：cutoff 恢复每
+> 轮扫描前一次性取定，内存上界改由**单轮页数预算**保证（sweep 到额即
+> 止，下一 tick 以新 cutoff 从持久水位线重叠续扫，条目跨轮结算修
+> 剪）；filtered 前沿 probe 复用同一个 pre-scan cutoff。真实并发事务
+> 时序（持有事务入队→游标越过→窗口内提交→重叠补投）在 MySQL/PG 双真
+> 库回归覆盖。
 
 ## Unreleased — join / append-only 表正门（arch-backlog #13）
 
