@@ -31,7 +31,10 @@
 > handler——可靠投递进 at-most-once 管道 = 端到端退化还自以为可靠。
 > 失败语义 head-of-line（不跳行，毒丸只阻塞本 relay）；多 relay 独立
 > 水位线 + `OnTopics` 过滤；`WithRelayFor[T]` 把同一引擎开放给自有
-> append-only 表。电池表全套三迁移模式；`retention` 清理默认关。
+> append-only 表。电池表全套三迁移模式；`retention` 清理默认关——授权
+> 按 relay **名**核对（round-1 复审：裸计数/裸 min 让残留 state 行冒充
+> 未推进的 relay、让泛型表水位线授权删消息，两条都是丢消息路径；现在
+> 每个 Record relay 必须有自己的行，泛型 relay 既不授权也不阻塞）。
 
 ## Unreleased — join / append-only 表正门（arch-backlog #13）
 

@@ -186,27 +186,59 @@ func (c *core) EnqueueJSON(ctx context.Context, topic string, v any) error {
 	return c.Enqueue(ctx, topic, raw)
 }
 
-// cleanupOnce removes rows below every relay's watermark AND older
-// than retention, in batches (two-step select-ids-then-delete keeps
-// the statement portable and the row locks short — audit's purge
-// shape). The watermark floor comes from ALL outbox_relay_state rows;
-// with zero registered relays, or any registered relay that has not
-// advanced yet, nothing is deleted — the safe direction is keeping
-// undelivered messages.
-func (c *core) cleanupOnce(ctx context.Context, registered int, retention time.Duration, batchSize int) (int64, error) {
-	if registered == 0 {
+// cleanupOnce removes outbox_messages rows below every Record relay's
+// watermark AND older than retention, in batches (two-step
+// select-ids-then-delete keeps the statement portable and the row
+// locks short — audit's purge shape).
+//
+// Which watermark may authorise deleting a message is decided per NAME
+// (round-1 review — both rules exist because their absence lost
+// messages):
+//
+//   - Every registered relay that scans outbox_messages (record) must
+//     have its OWN state row, or nothing is deleted — a bare row count
+//     let a residual row of a decommissioned relay stand in for a
+//     lagging relay that had not delivered anything yet.
+//   - Watermarks of registered WithRelayFor relays (generic) are
+//     excluded from the floor: they track a user-owned table, so their
+//     progress says nothing about outbox_messages — with only generic
+//     relays registered (record empty) nothing is deleted at all.
+//     Retention for generic tables belongs to the table's owner.
+//   - Residual rows of unknown names still participate in the floor:
+//     they can only LOWER it (block cleanup) until removed by hand —
+//     the safe direction is keeping undelivered messages.
+func (c *core) cleanupOnce(ctx context.Context, record, generic []string, retention time.Duration, batchSize int) (int64, error) {
+	if len(record) == 0 {
 		return 0, nil
 	}
-	minW, rows, err := c.states.minWatermark(ctx)
+	states, err := c.states.all(ctx)
 	if err != nil {
 		return 0, err
 	}
-	if rows < int64(registered) {
-		return 0, nil // some registered relay has no watermark yet
+	for _, name := range record {
+		if _, ok := states[name]; !ok {
+			return 0, nil // a message-scanning relay has no watermark yet
+		}
+	}
+	genericSet := make(map[string]struct{}, len(generic))
+	for _, name := range generic {
+		genericSet[name] = struct{}{}
+	}
+	floor := watermark{}
+	for name, w := range states {
+		if _, isGeneric := genericSet[name]; isGeneric {
+			continue
+		}
+		if !floor.ok || w.At.Before(floor.At) {
+			floor = w
+		}
+	}
+	if !floor.ok {
+		return 0, nil // defensive: record names verified above, so a floor must exist
 	}
 	cutoff := time.Now().Add(-retention)
-	if minW.Before(cutoff) {
-		cutoff = minW
+	if floor.At.Before(cutoff) {
+		cutoff = floor.At
 	}
 	gdb := c.h.Unsafe(ctx)
 	var total int64

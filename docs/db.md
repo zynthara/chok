@@ -1290,10 +1290,15 @@ err := h.RunInTx(ctx, func(txCtx context.Context) error {
   topic），各有各的水位线，慢消费者不拖累别人。
   `WithRelayFor[T db.AppendModeler]` 是泛型逃生门——同一套可靠扫描投递
   跑在你自己的 append-only 表上（表自己声明迁移、自己写入）。
-- **清理可选**：`retention > 0` 时 cleanup job 删除「已被**全部** relay
-  水位线越过 **且** 老于 retention」的行；默认 0 = 永不删。下线某个
-  relay 要手动删它的 `outbox_relay_state` 行，否则它的旧水位线会一直
-  卡住清理（宁可不删也不误删未消费消息）。
+- **清理可选**：`retention > 0` 时 cleanup job 删除「已被**全部
+  Record relay**（`WithRelay` 注册的、真正扫 `outbox_messages` 的那
+  些）水位线越过 **且** 老于 retention」的消息；默认 0 = 永不删。授权
+  按 **relay 名**逐一核对：每个注册的 Record relay 必须有自己的水位线
+  行，缺一个就整轮不删；`WithRelayFor` 泛型 relay 的水位线跟踪的是用
+  户自己的表，**既不授权也不阻塞**本清理（用户表的 retention 归表主
+  人，电池永不删它）。下线某个 Record relay 要手动删它的
+  `outbox_relay_state` 行，否则它的旧水位线会一直卡住清理（未知残留
+  行只会压低下界——宁可不删也不误删未消费消息）。
 - 电池表 `outbox_messages` / `outbox_relay_state` 随迁移三模式走
   （auto / versioned 各自成套，off 不碰）；配置项见
   [`config.md`](config.md) 的 `outbox` 段。

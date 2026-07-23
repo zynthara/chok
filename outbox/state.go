@@ -103,21 +103,19 @@ func (s *stateStore) save(ctx context.Context, name string, w watermark) error {
 	return nil
 }
 
-// minWatermark returns the oldest WatermarkAt across ALL state rows
-// and the row count. The cleanup sweep deletes only below this floor —
-// including rows of decommissioned relays, which therefore block
-// cleanup until their state row is removed by hand (documented; the
-// safe direction is to keep undelivered messages, not to guess).
-func (s *stateStore) minWatermark(ctx context.Context) (time.Time, int64, error) {
+// all returns every persisted watermark keyed by relay name. The
+// cleanup sweep decides per NAME what each row may authorise (round-1
+// review: a bare count/min over the table let residual rows stand in
+// for lagging relays and let generic-table watermarks authorise
+// deleting outbox_messages).
+func (s *stateStore) all(ctx context.Context) (map[string]watermark, error) {
 	var rows []relayState
 	if err := s.h.Unsafe(ctx).Find(&rows).Error; err != nil {
-		return time.Time{}, 0, fmt.Errorf("outbox: list relay state: %w", err)
+		return nil, fmt.Errorf("outbox: list relay state: %w", err)
 	}
-	var min time.Time
-	for i, r := range rows {
-		if i == 0 || r.WatermarkAt.Before(min) {
-			min = r.WatermarkAt
-		}
+	out := make(map[string]watermark, len(rows))
+	for _, r := range rows {
+		out[r.RelayName] = watermark{At: r.WatermarkAt, ID: r.WatermarkID, ok: true}
 	}
-	return min, int64(len(rows)), nil
+	return out, nil
 }

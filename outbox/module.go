@@ -43,9 +43,12 @@ type Options struct {
 	// delivery latency).
 	SettleWindow time.Duration `mapstructure:"settle_window" default:"30s"`
 
-	// Retention enables the cleanup sweep when positive: rows that are
-	// BOTH older than Retention AND behind every relay's watermark are
-	// deleted in batches. Zero (the default) keeps rows forever.
+	// Retention enables the cleanup sweep when positive: messages that
+	// are BOTH older than Retention AND behind every Record relay's
+	// watermark (WithRelay — the relays that actually scan
+	// outbox_messages; WithRelayFor watermarks track user tables and
+	// neither authorise nor block this sweep) are deleted in batches.
+	// Zero (the default) keeps rows forever.
 	Retention time.Duration `mapstructure:"retention" default:"0" reload:"hot"`
 
 	// CleanupInterval is the cleanup job's sweep period.
@@ -83,8 +86,13 @@ type moduleConfig struct {
 }
 
 type relayReg struct {
-	name  string
-	build func(c *core, settle time.Duration, batch func() int) (runner, error)
+	name string
+	// record marks relays that scan outbox_messages (WithRelay). Only
+	// their watermarks may authorise the retention sweep to delete
+	// messages; WithRelayFor relays track user-owned tables and are
+	// excluded from that floor (round-1 review).
+	record bool
+	build  func(c *core, settle time.Duration, batch func() int) (runner, error)
 }
 
 // RelayOption configures one WithRelay registration.
@@ -115,7 +123,8 @@ func WithRelay(name string, handler Handler, opts ...RelayOption) Option {
 			o(&cfg)
 		}
 		mc.relays = append(mc.relays, relayReg{
-			name: name,
+			name:   name,
+			record: true,
 			build: func(c *core, settle time.Duration, batch func() int) (runner, error) {
 				return newRelay[Record](name, HandlerFor[Record](handler), c, cfg, settle, batch)
 			},
@@ -130,7 +139,9 @@ func WithRelay(name string, handler Handler, opts ...RelayOption) Option {
 // caller's to declare (db.Table); the relay only ever reads it and
 // records progress in outbox_relay_state. Topic filtering does not
 // apply (it is a Record column); the model's created_at column must
-// keep its default name.
+// keep its default name. The relay's watermark plays no part in the
+// Retention sweep over outbox_messages — retention for the user table
+// stays with the table's owner (this battery never deletes from it).
 func WithRelayFor[T db.AppendModeler](name string, handler HandlerFor[T]) Option {
 	return func(mc *moduleConfig) {
 		mc.relays = append(mc.relays, relayReg{
@@ -165,9 +176,11 @@ type Component struct {
 		ApplyOwnedMigrations(context.Context, db.Sequence) (*db.ApplyReport, error)
 	}
 
-	core       *core
-	relays     []runner
-	relayWired bool // scheduler present, relay jobs registered
+	core         *core
+	relays       []runner
+	recordNames  []string // relays scanning outbox_messages — the only retention authority
+	genericNames []string // WithRelayFor relays — user tables, excluded from the floor
+	relayWired   bool     // scheduler present, relay jobs registered
 }
 
 // Describe implements kernel.Component.
@@ -235,6 +248,11 @@ func (c *Component) Init(ctx context.Context, k kernel.Kernel) error {
 			return err
 		}
 		c.relays = append(c.relays, r)
+		if reg.record {
+			c.recordNames = append(c.recordNames, reg.name)
+		} else {
+			c.genericNames = append(c.genericNames, reg.name)
+		}
 	}
 
 	// Delivery needs the scheduler. Registered relays with no
@@ -377,7 +395,7 @@ func (j *cleanupJob) Run(ctx context.Context) error {
 	if opts.Retention <= 0 {
 		return nil
 	}
-	deleted, err := j.c.core.cleanupOnce(ctx, len(j.c.relays), opts.Retention, opts.BatchSize)
+	deleted, err := j.c.core.cleanupOnce(ctx, j.c.recordNames, j.c.genericNames, opts.Retention, opts.BatchSize)
 	if err != nil {
 		return err
 	}

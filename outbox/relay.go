@@ -173,7 +173,6 @@ func (r *relay[T]) run(ctx context.Context) error {
 		}
 	}
 	r.persist(ctx, &w, cand)
-	r.prune(w)
 	return nil
 }
 
@@ -197,9 +196,18 @@ func (r *relay[T]) scanFrom(ctx context.Context, pos scanPos, batch int) ([]T, e
 	return page.Items, nil
 }
 
-// persist advances the stored watermark to cand when it moved. Errors
-// are logged, not returned: a failed save costs redelivery (the next
-// sweep rescans from the older watermark), never loss.
+// persist advances the stored watermark to cand when it moved, then
+// prunes mem entries the new watermark covers. Pruning rides every
+// advance — batch boundaries and the pre-return saves on failure paths
+// alike — so mem stays bounded by the unsettled window instead of the
+// whole backlog processed by a long catch-up sweep (round-1 review:
+// an end-of-sweep-only prune leaked every settled entry when a later
+// row's handler error returned early, and grew without bound while a
+// sweep never caught up).
+//
+// Save errors are logged, not returned: a failed save costs
+// redelivery (the next sweep rescans from the older watermark), never
+// loss.
 func (r *relay[T]) persist(ctx context.Context, w *watermark, cand watermark) {
 	if !cand.ok || !w.after(cand.At, cand.ID) {
 		return
@@ -209,6 +217,7 @@ func (r *relay[T]) persist(ctx context.Context, w *watermark, cand watermark) {
 		return
 	}
 	*w = cand
+	r.prune(*w)
 }
 
 // prune drops mem entries the persisted watermark now covers.

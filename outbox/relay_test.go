@@ -556,19 +556,19 @@ func TestCleanup_MinWatermarkFloorAndRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Zero registered relays: never delete.
-	if n, err := c.cleanupOnce(ctx, 0, time.Nanosecond, 10); err != nil || n != 0 {
-		t.Fatalf("cleanup with no relays = %d, %v", n, err)
+	// Zero registered record relays: never delete.
+	if n, err := c.cleanupOnce(ctx, nil, nil, time.Nanosecond, 10); err != nil || n != 0 {
+		t.Fatalf("cleanup with no record relays = %d, %v", n, err)
 	}
-	// More registered relays than state rows (one never advanced):
-	// never delete.
-	if n, err := c.cleanupOnce(ctx, 2, time.Nanosecond, 10); err != nil || n != 0 {
+	// A registered record relay without its own state row: never
+	// delete.
+	if n, err := c.cleanupOnce(ctx, []string{"sweeper", "lagging"}, nil, time.Nanosecond, 10); err != nil || n != 0 {
 		t.Fatalf("cleanup with lagging relay = %d, %v", n, err)
 	}
 
 	// One relay, fully settled: retention floor applies. Everything
 	// except the watermark row itself is deletable (strict <).
-	n, err := c.cleanupOnce(ctx, 1, time.Nanosecond, 2) // batch smaller than the sweep
+	n, err := c.cleanupOnce(ctx, []string{"sweeper"}, nil, time.Nanosecond, 2) // batch smaller than the sweep
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,8 +584,9 @@ func TestCleanup_MinWatermarkFloorAndRetention(t *testing.T) {
 		t.Fatal("cleanup must not delete the watermark row itself")
 	}
 
-	// A stale relay_state row (decommissioned relay, old watermark)
-	// blocks further cleanup — documented safe direction.
+	// A stale relay_state row of an UNKNOWN name (decommissioned
+	// relay, old watermark) lowers the floor and blocks further
+	// cleanup — documented safe direction.
 	old := watermark{At: time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Millisecond), ID: 1, ok: true}
 	if err := c.states.save(ctx, "stale-relay", old); err != nil {
 		t.Fatal(err)
@@ -594,7 +595,7 @@ func TestCleanup_MinWatermarkFloorAndRetention(t *testing.T) {
 	if err := r.run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := c.cleanupOnce(ctx, 2, time.Nanosecond, 10); err != nil || n != 0 {
+	if n, err := c.cleanupOnce(ctx, []string{"sweeper"}, nil, time.Nanosecond, 10); err != nil || n != 0 {
 		t.Fatalf("cleanup past a stale relay = %d, %v — the stale watermark must floor it", n, err)
 	}
 
@@ -602,7 +603,138 @@ func TestCleanup_MinWatermarkFloorAndRetention(t *testing.T) {
 	if err := c.h.Unsafe(ctx).Where("relay_name = ?", "stale-relay").Delete(&relayState{}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if n, err := c.cleanupOnce(ctx, 1, 24*time.Hour, 10); err != nil || n != 0 {
+	if n, err := c.cleanupOnce(ctx, []string{"sweeper"}, nil, 24*time.Hour, 10); err != nil || n != 0 {
 		t.Fatalf("cleanup with long retention = %d, %v — young rows must survive", n, err)
+	}
+}
+
+// Round-1 review #1: a residual state row (decommissioned relay) must
+// not stand in for a registered relay that has not advanced yet — the
+// old row-count guard passed with rows == registered even though the
+// lagging relay's row was missing, deleting messages it never saw.
+func TestCleanup_Round1ResidualStateCannotStandInForLaggingRelay(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	for i := 1; i <= 3; i++ {
+		enqueue(t, c, "t", fmt.Sprintf("m%d", i))
+	}
+	// Relay A delivered everything; relay B (registered) has failed
+	// since boot — no state row. A residual row of decommissioned X
+	// sits at a high watermark, making the row COUNT match the
+	// registered count.
+	cpA := &capture{}
+	ra := mkRelay(t, c, "A", cpA, 0, 10)
+	if err := ra.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wa, err := c.states.load(ctx, "A")
+	if err != nil || !wa.ok {
+		t.Fatalf("relay A watermark = %+v, %v", wa, err)
+	}
+	if err := c.states.save(ctx, "X", wa); err != nil {
+		t.Fatal(err)
+	}
+
+	if n, err := c.cleanupOnce(ctx, []string{"A", "B"}, nil, time.Nanosecond, 10); err != nil || n != 0 {
+		t.Fatalf("cleanup = %d, %v — X's residual row must not cover for lagging B", n, err)
+	}
+	var left int64
+	if err := c.h.Unsafe(ctx).Model(&Record{}).Count(&left).Error; err != nil {
+		t.Fatal(err)
+	}
+	if left != 3 {
+		t.Fatalf("rows left = %d, want all 3 kept for relay B", left)
+	}
+}
+
+// Round-1 review #2: a WithRelayFor watermark tracks a user-owned
+// table — it must neither authorise deleting outbox_messages (only
+// generic relays registered ⇒ no cleanup) nor block the Record-relay
+// floor (registered generic names are excluded from the min).
+func TestCleanup_Round1GenericRelayCannotAuthorizeMessageDeletion(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	if err := c.h.Migrate(ctx, db.Table(&outboxEvent{})); err != nil {
+		t.Fatal(err)
+	}
+	// Pending messages nobody consumes, and a generic relay over its
+	// own table that is fully caught up (fresh, high watermark).
+	for i := 1; i <= 3; i++ {
+		enqueue(t, c, "t", fmt.Sprintf("m%d", i))
+	}
+	events := store.NewAppend[outboxEvent](c.h, log.Empty(), store.WithQueryFields("created_at"))
+	if err := events.Create(ctx, &outboxEvent{Kind: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	rg, err := newRelay[outboxEvent]("G", func(context.Context, outboxEvent) error { return nil },
+		c, relayCfg{}, 0, func() int { return 10 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rg.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := c.cleanupOnce(ctx, nil, []string{"G"}, time.Nanosecond, 10); err != nil || n != 0 {
+		t.Fatalf("cleanup = %d, %v — a generic watermark must not delete outbox_messages", n, err)
+	}
+	var left int64
+	if err := c.h.Unsafe(ctx).Model(&Record{}).Count(&left).Error; err != nil {
+		t.Fatal(err)
+	}
+	if left != 3 {
+		t.Fatalf("rows left = %d, want all 3 messages kept", left)
+	}
+
+	// The flip side: a registered generic relay with an OLD watermark
+	// (its table is quiet) must not hold the Record floor down.
+	cp := &capture{}
+	rr := mkRelay(t, c, "R", cp, 0, 10)
+	if err := rr.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	oldW := watermark{At: time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Millisecond), ID: 1, ok: true}
+	if err := c.states.save(ctx, "G", oldW); err != nil {
+		t.Fatal(err)
+	}
+	n, err := c.cleanupOnce(ctx, []string{"R"}, []string{"G"}, time.Nanosecond, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("cleanup deleted nothing — G's generic watermark must be excluded from the floor")
+	}
+}
+
+// Round-1 review #3: mem is pruned on every watermark advance (batch
+// boundaries and failure-path saves), not only at the end of a fully
+// successful sweep — otherwise a long catch-up holds the entire
+// processed backlog in memory and an early error return leaks every
+// settled entry for the relay's lifetime.
+func TestRelay_Round1MemPrunedOnEveryAdvance(t *testing.T) {
+	c := openCore(t)
+	ctx := context.Background()
+	for i := 1; i <= 6; i++ {
+		enqueue(t, c, "t", fmt.Sprintf("m%d", i))
+	}
+	boom := errors.New("poison")
+	cp := &capture{fail: func(rec Record) error {
+		if string(rec.Payload) == "m5" {
+			return boom
+		}
+		return nil
+	}}
+	r := mkRelay(t, c, "pruned", cp, 0, 2) // settle 0: every delivered row settles
+	if err := r.run(ctx); !errors.Is(err, boom) {
+		t.Fatalf("sweep err = %v, want the poison error", err)
+	}
+	// m1..m4 delivered and settled across two batches; the failure
+	// path persisted the watermark at m4 — nothing settled may remain
+	// in mem.
+	if len(r.mem) != 0 {
+		t.Fatalf("mem after failed sweep = %v, want empty (settled entries pruned)", r.mem)
+	}
+	w, err := c.states.load(ctx, "pruned")
+	if err != nil || !w.ok {
+		t.Fatalf("watermark = %+v, %v", w, err)
 	}
 }
