@@ -51,11 +51,11 @@ test: ## Run the full unit test suite with the race detector
 
 .PHONY: test-pg
 test-pg: ## Run the data and battery schema packages against Postgres (set CHOK_TEST_PG_DSN)
-	CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 ./store/... ./db/... ./account/... ./audit/... ./authz/...
+	CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 ./store/... ./db/... ./account/... ./audit/... ./authz/... ./outbox/...
 
 .PHONY: test-mysql
 test-mysql: ## Run MySQL store, migration, battery-equivalence and read-only tests (set CHOK_TEST_MYSQL_DSN)
-	$(GO) test -race -count=1 ./store ./db ./account ./audit ./authz/... -run 'TestForeignTableGate_MySQL|TestBatchUpsert_MySQLIgnoresDeclaredConflictTarget|TestApplyMigrations_MySQLPartialDDL|TestSequenceManifest_MySQLClaimAndRepair|TestRepairHistory_MySQL|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent|TestMigrationBehavior_MySQL|TestGetForUpdate_MySQL|TestConstraintFields_MySQLDuplicateMapsToField|TestListIn_MySQLCrossChunkCaseInsensitiveDeduped|TestAggregate_MySQLTypeMapping|TestAggregate_Round2MySQLDatetimeStoresWallClocks|TestAggregate_Round3MySQLDSTFoldCollapsesInstants|TestAggregate_Round4MySQLConcurrentTimeAggregates|TestAggregate_Round6MySQLEnumColumn|TestAggregate_Round9MySQLQualifiedTable|TestMySQLUTCBaseline'
+	$(GO) test -race -count=1 ./store ./db ./account ./audit ./authz/... ./outbox -run 'TestOutboxRelay_MySQLWatermarkRoundTrip|TestForeignTableGate_MySQL|TestBatchUpsert_MySQLIgnoresDeclaredConflictTarget|TestApplyMigrations_MySQLPartialDDL|TestSequenceManifest_MySQLClaimAndRepair|TestRepairHistory_MySQL|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent|TestMigrationBehavior_MySQL|TestGetForUpdate_MySQL|TestConstraintFields_MySQLDuplicateMapsToField|TestListIn_MySQLCrossChunkCaseInsensitiveDeduped|TestAggregate_MySQLTypeMapping|TestAggregate_Round2MySQLDatetimeStoresWallClocks|TestAggregate_Round3MySQLDSTFoldCollapsesInstants|TestAggregate_Round4MySQLConcurrentTimeAggregates|TestAggregate_Round6MySQLEnumColumn|TestAggregate_Round9MySQLQualifiedTable|TestMySQLUTCBaseline'
 
 .PHONY: cover
 cover: ## Generate a coverage report at _output/coverage.html

@@ -10,6 +10,29 @@
 
 ---
 
+## Unreleased — transactional outbox 电池（arch-backlog #9）
+
+> `EntityChanged` bus 的传递保证是进程内 at-most-once（崩溃即丢、队列
+> 满 drop-oldest）——这对缓存失效够用，对「必须看到每一次已提交写」的
+> 审计流/物化投影/webhook 不够，而 bus 的舒适 API 恰会诱使下游把它当
+> 可靠管道。本次补上缺口的另一半：**outbox 电池**（决策稿
+> `.private/docs/specs/v2-outbox-battery-decision-claude.md`）。形态 =
+> 同事务入队 + scheduler 扫描投递：`Enqueue` 强制在 outbox 句柄的
+> `RunInTx` txCtx 内（脱离事务/他句柄事务报 `ErrOutsideTx`——失去原子
+> 性的入队是假电池，报错不降级），relay 复用 #13 钦定的重叠水位线扫描
+> （`created_at >= W` Gte + 去重，db.md §3.5 承诺的「保证不漏」在此兑
+> 现），进度持久化在 `outbox_relay_state`、**投递成功先于水位线推进**
+> ⇒ at-least-once。核心新概念 **settle_window**：`created_at` 在
+> INSERT 赋值、行在 COMMIT 可见，水位线只越过老于 settle 的行——正确
+> 性边界从「扫描时序碰运气」变成一条显式配置（入队事务须在窗口内提
+> 交，默认 30s；SQLite 单写连接天然豁免）。保证等级在 API 文档上焊
+> 死：**消费端必须幂等**，不做 exactly-once（那要求投递目标与 outbox
+> 同一原子域，是消费端的取舍）；也刻意不提供「投回 bus」的现成
+> handler——可靠投递进 at-most-once 管道 = 端到端退化还自以为可靠。
+> 失败语义 head-of-line（不跳行，毒丸只阻塞本 relay）；多 relay 独立
+> 水位线 + `OnTopics` 过滤；`WithRelayFor[T]` 把同一引擎开放给自有
+> append-only 表。电池表全套三迁移模式；`retention` 清理默认关。
+
 ## Unreleased — join / append-only 表正门（arch-backlog #13）
 
 > `Modeler` 强制 embed `db.Model` 曾让纯 join 表和 append-only 流水表

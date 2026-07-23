@@ -25,12 +25,14 @@ const (
 	chokAccountSequenceOwner = "github.com/zynthara/chok/v2/account"
 	chokAuditSequenceOwner   = "github.com/zynthara/chok/v2/audit"
 	chokAuthzSequenceOwner   = "github.com/zynthara/chok/v2/authz"
+	chokOutboxSequenceOwner  = "github.com/zynthara/chok/v2/outbox"
 )
 
 var reservedSequenceOwners = map[string]string{
 	"account": chokAccountSequenceOwner,
 	"audit":   chokAuditSequenceOwner,
 	"authz":   chokAuthzSequenceOwner,
+	"outbox":  chokOutboxSequenceOwner,
 }
 
 // Baseline describes the AutoMigrate-equivalent frontier of an owned

@@ -190,6 +190,17 @@ Named instances: sections marked *multi-instance* accept an
 | `purge_batch_size` | int | `1000` | hot | — |
 | `enable_admin_api` | bool | `true` | restart | — |
 
+## `outbox` — Transactional outbox: same-transaction enqueue + at-least-once relay delivery.
+
+| Key | Type | Default | Reload | Notes |
+|---|---|---|---|---|
+| `enabled` | bool | `true` | restart | — |
+| `poll_interval` | duration | `1s` | restart | — |
+| `batch_size` | int | `100` | hot | — |
+| `settle_window` | duration | `30s` | restart | — |
+| `retention` | duration | `0` | hot | — |
+| `cleanup_interval` | duration | `1h` | restart | — |
+
 ## `authz` — casbin RBAC engine: adapter, Redis watcher, bootstrap seeding, decision audit.
 
 | Key | Type | Default | Reload | Notes |

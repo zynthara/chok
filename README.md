@@ -159,6 +159,7 @@ generated from the source of truth — `chok docs gen` keeps it honest.
 | `cache.Module()` | `cache` | redis?, log? | — | true | Layered cache: otter memory + redis + circuit breaker. |
 | `scheduler.Module()` | `scheduler` | log? | health, serve | true | robfig cron with panic-safety, overlap policies and stats. |
 | `audit.Module()` | `audit` | db, scheduler?, account?, log? | reload, mount, migrate | false | Compliance audit log: async DB sink, purge cron, admin API (opt-in). |
+| `outbox.Module()` | `outbox` | db, scheduler?, log? | reload, health, migrate | true | Transactional outbox: same-transaction enqueue + at-least-once relay delivery. |
 | `authz.Module()` | `authz` | db, redis?, audit?, log? | migrate, ready | true | casbin RBAC engine: adapter, Redis watcher, bootstrap seeding, decision audit. |
 | `account.Module()` | `account` | db, log? | mount, migrate | true | User module: register/login/JWT/reset + login rate limit + OAuth providers. |
 <!-- /gen:components -->

@@ -158,7 +158,9 @@ event.Subscribe[T](bus, fn, opts...) (cancel func())
 
 订阅者默认异步 + 每订阅者有界队列（默认 64），溢出策略
 `Block | DropOldest`（默认 DropOldest + 限速 warn；Publish 永不
-反压生命周期）；订阅者 panic recover 后订阅存活。生命周期事件
+反压生命周期）；订阅者 panic recover 后订阅存活。传递保证是进程内
+at-most-once——「必须看到每一次已提交写」的消费走 outbox 电池
+（§8），不挂总线。生命周期事件
 （`ComponentInitialized` / `ReloadApplied` / ...）发布到总线，
 metrics、`/componentz` 从这里取数。关闭顺序：组件逆序 Close →
 发布最终事件 → bus drain（5s 预算）→ 根 logger 最后关。
@@ -646,6 +648,7 @@ Prometheus scrape 路径执行 SQL。`sequence` 为 `app` 或
 | **account** | 注册/登录/refresh/改密/忘记/重置 + 登录限速 + OAuth 四 provider（google/github/facebook/apple）。provider 显式装配：`account.Module(account.WithProviders(google.Provider()))`，yaml `providers.<name>.enabled` 是运行期开关，enabled 而未装配 ⇒ 启动失败。路由守卫 `account.Authn(k)`（Authn + ActiveCheck）。服务面 `Component.Service()`，类型 `account.Service` |
 | **authz** | casbin：自研 adapter、Redis Watcher、bootstrap 播种（Migrate 尾：建表 → NewEngine → watcher → audit hook → 播种 → 原子发布，任一步失败即启动失败）。`casbin.audit_enabled=true` ⇒ audit 硬前置真值表：未装配 / disabled / Init 失败 / Migrate 期同步探针写入失败任一 ⇒ authz 启动失败——「必须审计 policy mutation」绝不静默退化 |
 | **audit** | 异步 DB sink（单 worker 批量 insert，Block/DropOnFull 取舍显式）、purge cron（经 scheduler 软依赖；缺席 ⇒ purge 禁用 + 注记）、`GET /audit/logs` admin API（RequireAuthz("audit","read") fail-closed）。默认 `enabled: false`（合规组件显式 opt-in）。Needs = db + scheduler? + account?（authz/http 关系走 mount/request-time，避免三节点软依赖环） |
+| **outbox** | 事务性 outbox：`Enqueue` 强制在 outbox 句柄的 `RunInTx` 内（与业务写同事务，脱离事务报 `ErrOutsideTx`），relay 走 scheduler job 以重叠水位线（db.md §3.5 机制的兑现处）扫描投递，水位线持久化在 `outbox_relay_state`、投递成功先于推进 ⇒ **at-least-once**（消费端必须幂等）。`settle_window` 是正确性参数（入队事务 INSERT→COMMIT 必须短于它）；失败 head-of-line 停摆重试；多 relay 独立水位线 + `OnTopics` 过滤；`WithRelayFor[T]` 泛型逃生门跑自有 append-only 表；`retention` 清理可选（默认永不删）。注册了 relay 而 scheduler 缺席 ⇒ Init 失败（静默不投递是假电池）。是 bus at-most-once 的可靠补充，不替代 bus（db.md §7.3） |
 | **scheduler** | robfig cron，panic-safe、重叠策略、统计；实现 `Server`：ctx done 后停调度并有界等待 in-flight（`stop_budget`，默认 15s）再返回——job 收尾期间依赖全部存活 |
 | **cache** | otter 内存层 + redis 层 + Breaker（默认关）。显式层开关：redis 层 enabled 而 redis 模块缺席 ⇒ 启动失败（不再「在场即自动挂」） |
 | **redis** | go-redis + TLS/CA/username（`TLSConfigFor` 导出）；健康探针 |
@@ -705,6 +708,7 @@ Options 反射（与 conf 走查器同规则），枚举只收 SPEC 冻结的封
 | `cache.Module()` | `cache` | redis?, log? | — | true | 分层缓存：otter 内存层 + redis 层 + 熔断器。 |
 | `scheduler.Module()` | `scheduler` | log? | health, serve | true | robfig cron（panic 防护、重叠策略、统计）。 |
 | `audit.Module()` | `audit` | db, scheduler?, account?, log? | reload, mount, migrate | false | 合规审计日志：异步 DB sink、清理 cron、admin API（显式启用）。 |
+| `outbox.Module()` | `outbox` | db, scheduler?, log? | reload, health, migrate | true | 事务性 outbox：同事务入队 + at-least-once relay 投递。 |
 | `authz.Module()` | `authz` | db, redis?, audit?, log? | migrate, ready | true | casbin RBAC 引擎：adapter、Redis watcher、bootstrap 播种、决策审计。 |
 | `account.Module()` | `account` | db, log? | mount, migrate | true | 用户模块：注册/登录/JWT/重置 + 登录限速 + OAuth providers。 |
 <!-- /gen:components -->

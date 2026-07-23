@@ -1034,6 +1034,53 @@
       },
       "type": "object"
     },
+    "outbox": {
+      "additionalProperties": false,
+      "description": "Transactional outbox: same-transaction enqueue + at-least-once relay delivery.",
+      "properties": {
+        "batch_size": {
+          "default": 100,
+          "type": "integer"
+        },
+        "cleanup_interval": {
+          "default": "1h",
+          "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "poll_interval": {
+          "default": "1s",
+          "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "retention": {
+          "default": "0",
+          "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "settle_window": {
+          "default": "30s",
+          "description": "Go duration (e.g. 30s, 1h30m); bare integers are nanoseconds.",
+          "type": [
+            "string",
+            "integer"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "redis": {
       "additionalProperties": false,
       "description": "go-redis client with TLS/CA support; health probe.",

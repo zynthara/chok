@@ -25,6 +25,7 @@ import (
 	"github.com/zynthara/chok/v2/kernel"
 	"github.com/zynthara/chok/v2/log"
 	"github.com/zynthara/chok/v2/metrics"
+	"github.com/zynthara/chok/v2/outbox"
 	"github.com/zynthara/chok/v2/redis"
 	"github.com/zynthara/chok/v2/scheduler"
 	"github.com/zynthara/chok/v2/swagger"
@@ -155,6 +156,12 @@ func Modules() []Module {
 			DescZH: "合规审计日志：异步 DB sink、清理 cron、admin API（显式启用）。",
 		},
 		{
+			ImportPath: root + "outbox", Pkg: "outbox", Constructor: "outbox.Module()",
+			New:    func() kernel.Component { return outbox.Module() },
+			DescEN: "Transactional outbox: same-transaction enqueue + at-least-once relay delivery.",
+			DescZH: "事务性 outbox：同事务入队 + at-least-once relay 投递。",
+		},
+		{
 			ImportPath: root + "authz", Pkg: "authz", Constructor: "authz.Module()",
 			New:    authz.Module,
 			DescEN: "casbin RBAC engine: adapter, Redis watcher, bootstrap seeding, decision audit.",
@@ -188,6 +195,7 @@ func MigrationSequences() []db.Sequence {
 		account.MigrationSequence(),
 		audit.MigrationSequence(),
 		authz.MigrationSequence(),
+		outbox.MigrationSequence(),
 	}
 }
 

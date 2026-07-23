@@ -567,7 +567,8 @@ func WithBeforeDelete(fn func(ctx context.Context, loc Locator) error) StoreOpti
 // cache invalidation and other consumers that recover via TTL or
 // re-read; do NOT build audit trails, projections, or anything that
 // must observe every committed write on this — reliable delivery needs
-// a transactional outbox, which chok does not ship (yet).
+// a transactional outbox: use the outbox package (same-transaction
+// Enqueue + at-least-once relay delivery).
 //
 // The bus is injected explicitly — never discovered from ctx or the DB
 // handle — keeping this the store package's single kernel touch point:

@@ -46,7 +46,8 @@ import (
 // was already consumed. The watermark also assumes created_at moves
 // forward: a long transaction can commit a row dated before an
 // already-scanned window — consumers needing guaranteed delivery are
-// outbox territory, not a List loop.
+// outbox territory, not a List loop (the outbox package is that
+// pattern's batteries-included implementation).
 //
 // Transactions join via context propagation exactly like Store — pass
 // a db.RunInTx txCtx and every call rides that transaction. There is
