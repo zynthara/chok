@@ -1,8 +1,8 @@
 # Dependabot: dependency and GitHub Actions update PRs.
 #
-# gomod: weekly; minor+patch updates arrive grouped in a single PR to
-# keep the noise down, majors arrive individually so breaking upgrades
-# get their own review.
+# gomod: weekly, direct *and* indirect; minor+patch updates arrive
+# grouped in a single PR to keep the noise down, majors arrive
+# individually so breaking upgrades get their own review.
 #
 # github-actions: keeps the SHA-pinned `uses:` lines current —
 # dependabot understands the `<sha> # vX.Y.Z` convention and bumps the
@@ -11,6 +11,16 @@ version: 2
 updates:
   - package-ecosystem: gomod
     directory: "/"
+    # Indirect dependencies count too. The default (`direct` only) lifts
+    # an indirect module solely as a side effect of bumping the direct
+    # parent that requires it — so a disclosure against an indirect that
+    # no direct bump happens to pull forward sits there until someone
+    # notices. GO-2026-6061 did exactly that: grpc arrives indirectly
+    # via otlptracehttp, the weekly group PR left it on the vulnerable
+    # version, and the govulncheck gate stayed red until a hand-written
+    # bump (#15).
+    allow:
+      - dependency-type: "all"
     schedule:
       interval: weekly
     commit-message:
