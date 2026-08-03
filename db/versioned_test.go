@@ -360,11 +360,18 @@ func openMySQLMigrationTestHandle(t *testing.T, prefix string) *DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
 	if _, err := admin.Exec("CREATE DATABASE `" + dbName + "`"); err != nil {
+		_ = admin.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = admin.Exec("DROP DATABASE `" + dbName + "`") })
+	// admin must outlive the test: closing it here (defer) would leave the
+	// drop below running against a closed pool, silently leaking the database.
+	t.Cleanup(func() {
+		if _, err := admin.Exec("DROP DATABASE `" + dbName + "`"); err != nil {
+			t.Errorf("drop test database %s: %v", dbName, err)
+		}
+		_ = admin.Close()
+	})
 	cfg.DBName = dbName
 	cfg.ParseTime = true
 	gdb, err := gorm.Open(gormmysql.Open(cfg.FormatDSN()), &gorm.Config{})
