@@ -1520,6 +1520,17 @@ func acquireConnLock(
 	}
 	if err := lock(ctx, conn); err != nil {
 		_ = conn.Close()
+		// A driver interrupted mid-wait does not reliably surface the
+		// context error. pg_advisory_lock blocks inside the server, so
+		// ending the wait means killing the query, and the pinned
+		// session comes back as driver.ErrBadConn rather than as the
+		// deadline that actually ended it — which used to fall through
+		// to the unknown-failure branch below and hide the reason. The
+		// context is authoritative when it is already done, whatever
+		// shape the driver's error took.
+		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			err = fmt.Errorf("%w (driver reported %v)", ctxErr, err)
+		}
 		if errors.Is(err, context.Canceled) {
 			return nil, fmt.Errorf("db: cancelled while waiting for migration lock: %w", err)
 		}

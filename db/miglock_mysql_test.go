@@ -208,3 +208,57 @@ func TestAcquireConnLock_UnlockUsesCleanupDeadlineAndDiscardsOnFailure(t *testin
 		t.Fatalf("failed unlock returned the physical session to the pool: closes=%d before=%d", got, beforeClose)
 	}
 }
+
+// A blocked lock statement lives inside the server, so ending the wait
+// means killing the query and the pinned session comes back as
+// driver.ErrBadConn — not as the deadline that actually ended it. That
+// shape used to reach callers as "acquire migration lock: driver: bad
+// connection", and it is what made the Postgres lane's
+// TestRepairSequenceClaim_WaitsForTheMigrationLock flake. The context
+// is authoritative once it is done; the driver's error stays in the
+// message for diagnosis.
+func TestAcquireConnLock_DoneContextOutranksTheDriverError(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		newCtx  func() (context.Context, context.CancelFunc)
+		endWait func(context.CancelFunc)
+		want    error
+	}{
+		{
+			name: "deadline",
+			newCtx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 10*time.Millisecond)
+			},
+			endWait: func(context.CancelFunc) {}, // the timeout ends it
+			want:    context.DeadlineExceeded,
+		},
+		{
+			name: "cancel",
+			newCtx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			endWait: func(cancel context.CancelFunc) { cancel() },
+			want:    context.Canceled,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gdb := newFakeMySQLGorm(t, &fakeMySQLDriver{getLockResult: 1})
+			ctx, cancel := tc.newCtx()
+			defer cancel()
+			_, err := acquireConnLock(ctx, gdb,
+				func(lockCtx context.Context, _ *sql.Conn) error {
+					tc.endWait(cancel)
+					<-lockCtx.Done()
+					return driver.ErrBadConn
+				},
+				func(context.Context, *sql.Conn) error { return nil },
+			)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("want the context error %v to classify the failure, got %v", tc.want, err)
+			}
+			if !strings.Contains(err.Error(), "bad connection") {
+				t.Fatalf("driver error must survive in the message for diagnosis: %v", err)
+			}
+		})
+	}
+}
