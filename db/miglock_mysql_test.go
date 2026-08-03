@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -116,11 +118,22 @@ func (r *fakeRows) Next(dest []driver.Value) error {
 	return nil
 }
 
+// fakeDriverSeq keeps registered driver names unique per call. A name
+// derived from t.Name() alone is unique per test but not per call, and
+// database/sql has no Unregister to undo one — see newFakeMySQLGorm.
+var fakeDriverSeq atomic.Uint64
+
 // newFakeMySQLGorm builds a gorm handle whose dialect reports "mysql"
 // but whose wire protocol is the fake recorder.
+//
+// The registered name carries a sequence number because sql.Register
+// panics on a duplicate and offers no way to release one: keying on
+// t.Name() alone held only while each test called this once per
+// process, so `go test -count=N` (N>1) panicked on the second pass and
+// the package could not be stress-run at all.
 func newFakeMySQLGorm(t *testing.T, fake *fakeMySQLDriver) *gorm.DB {
 	t.Helper()
-	name := "fake-mysql-" + t.Name()
+	name := fmt.Sprintf("fake-mysql-%s-%d", t.Name(), fakeDriverSeq.Add(1))
 	sql.Register(name, fake)
 	sqlDB, err := sql.Open(name, "ignored")
 	if err != nil {
@@ -134,6 +147,20 @@ func newFakeMySQLGorm(t *testing.T, fake *fakeMySQLDriver) *gorm.DB {
 		t.Fatal(err)
 	}
 	return gdb
+}
+
+// Two handles inside one test reproduce what `go test -count=2` used
+// to do across passes: the same t.Name(), a second sql.Register, and a
+// panic that no amount of -count could get past.
+func TestNewFakeMySQLGorm_NamesEachRegistrationUniquely(t *testing.T) {
+	first := newFakeMySQLGorm(t, &fakeMySQLDriver{getLockResult: 1})
+	second := newFakeMySQLGorm(t, &fakeMySQLDriver{getLockResult: 1})
+	if first == nil || second == nil {
+		t.Fatal("fake gorm handle must build")
+	}
+	if first == second {
+		t.Fatal("each call must build its own handle")
+	}
 }
 
 func TestMigrationLock_MySQLStatementSequence(t *testing.T) {
