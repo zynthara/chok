@@ -6,7 +6,7 @@ toolchain go1.26.5
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
-	github.com/casbin/casbin/v3 v3.10.0
+	github.com/casbin/casbin/v3 v3.11.0
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/glebarez/sqlite v1.11.0
