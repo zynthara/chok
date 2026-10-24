@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zynthara/chok/v3/internal/reqinfo"
 )
 
 func TestRecover_PanicBecomes500Envelope(t *testing.T) {
@@ -188,5 +190,47 @@ func TestInstrumenter_SitsInsideRequestIDAndClientIP(t *testing.T) {
 	do(t, app.Handler(), call{method: http.MethodGet, path: "/x"})
 	if len(seen) != 1 || seen[0] != "true" {
 		t.Fatalf("instrumenters see the request id and client ip: %v", seen)
+	}
+}
+
+// routeSeen records the route pattern a request was served under, as
+// telemetry reads it.
+type routeSeen struct{ routes *[]string }
+
+func (i routeSeen) Middleware() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r)
+			route := "?"
+			if info := reqinfo.From(r.Context()); info != nil {
+				route = info.Route
+			}
+			*i.routes = append(*i.routes, route)
+		})
+	}
+}
+
+// TestBuiltins_CarryTheirRoute: the probes, the OpenAPI document and UI and
+// the pprof endpoints are named by their pattern in the access log and to
+// instrumenters, like any route; only a request no pattern matched has
+// none (the access log's "unmatched").
+func TestBuiltins_CarryTheirRoute(t *testing.T) {
+	var buf bytes.Buffer
+	base := testBase(t)
+	base.App.Debug = true
+	app := New(base, Logger(slog.New(slog.NewJSONHandler(&buf, nil))))
+	var routes []string
+	app.Use(routeSeen{routes: &routes})
+	paths := []string{"/healthz", "/livez", "/readyz", "/openapi.json", "/docs", "/debug/pprof/cmdline", "/debug/pprof/heap", "/nowhere"}
+	for _, p := range paths {
+		do(t, app.Handler(), call{method: http.MethodGet, path: p})
+	}
+	want := []string{"/healthz", "/livez", "/readyz", "/openapi.json", "/docs", "/debug/pprof/cmdline", "/debug/pprof/", ""}
+	if fmt.Sprint(routes) != fmt.Sprint(want) {
+		t.Fatalf("routes %q, want %q", routes, want)
+	}
+	if !strings.Contains(buf.String(), `"path":"/openapi.json","route":"/openapi.json"`) ||
+		!strings.Contains(buf.String(), `"path":"/nowhere","route":"unmatched"`) {
+		t.Fatalf("the access log names the built-in route: %s", buf.String())
 	}
 }

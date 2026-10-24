@@ -112,7 +112,7 @@ func (a *App) mountBuiltins() {
 	if path == "" {
 		path = "/healthz"
 	}
-	a.mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+	a.handleBuiltin(http.MethodGet, path, func(w http.ResponseWriter, r *http.Request) {
 		report := a.checkHealth(r.Context(), a.snapshot())
 		code := http.StatusOK
 		if report.Status != statusUp {
@@ -120,16 +120,22 @@ func (a *App) mountBuiltins() {
 		}
 		writeJSON(w, r, code, report)
 	})
-	a.mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) {
+	a.handleBuiltin(http.MethodGet, "/livez", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, r, http.StatusOK, map[string]string{"status": statusUp})
 	})
-	a.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+	a.handleBuiltin(http.MethodGet, "/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if !a.ready.Load() || a.draining.Load() {
 			writeJSON(w, r, http.StatusServiceUnavailable, map[string]string{"status": statusDown})
 			return
 		}
 		writeJSON(w, r, http.StatusOK, map[string]string{"status": statusUp})
 	})
+}
+
+// handleBuiltin registers one of the App's own endpoints, marked with its
+// pattern as a route is, so the access log and telemetry name it.
+func (a *App) handleBuiltin(method, pattern string, h http.HandlerFunc) {
+	a.mux.Handle(method+" "+pattern, routeMarker(pattern, h))
 }
 
 // probePaths are the endpoints the access log leaves out.

@@ -40,7 +40,7 @@ func (a *App) mountOpenAPI() {
 	if path == "" {
 		path = "/openapi.json"
 	}
-	a.mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+	a.handleBuiltin(http.MethodGet, path, func(w http.ResponseWriter, r *http.Request) {
 		doc, err := a.openAPIDocument()
 		if err != nil {
 			a.writeError(w, r, ErrInternal.Wrap(err))
@@ -57,7 +57,7 @@ func (a *App) mountOpenAPI() {
 		title = "API"
 	}
 	page := openapi.UI(title, path)
-	a.mux.HandleFunc("GET "+c.DocsPath, func(w http.ResponseWriter, r *http.Request) {
+	a.handleBuiltin(http.MethodGet, c.DocsPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(page))
 	})
@@ -69,11 +69,11 @@ func (a *App) mountDebug() {
 	if !a.base.App.Debug {
 		return
 	}
-	a.mux.HandleFunc("GET /debug/pprof/", pprof.Index)
-	a.mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
-	a.mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
-	a.mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
-	a.mux.HandleFunc("POST /debug/pprof/symbol", pprof.Symbol)
-	a.mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
-	a.mux.Handle("GET /debug/pprof/goroutineleak", pprof.Handler("goroutineleak"))
+	a.handleBuiltin(http.MethodGet, "/debug/pprof/", pprof.Index)
+	a.handleBuiltin(http.MethodGet, "/debug/pprof/cmdline", pprof.Cmdline)
+	a.handleBuiltin(http.MethodGet, "/debug/pprof/profile", pprof.Profile)
+	a.handleBuiltin(http.MethodGet, "/debug/pprof/symbol", pprof.Symbol)
+	a.handleBuiltin(http.MethodPost, "/debug/pprof/symbol", pprof.Symbol)
+	a.handleBuiltin(http.MethodGet, "/debug/pprof/trace", pprof.Trace)
+	a.handleBuiltin(http.MethodGet, "/debug/pprof/goroutineleak", pprof.Handler("goroutineleak").ServeHTTP)
 }
