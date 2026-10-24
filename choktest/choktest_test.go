@@ -14,6 +14,7 @@ import (
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/choktest"
 	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/v3/internal/apptest"
 	"github.com/zynthara/chok/v3/internal/dbtest"
 	"github.com/zynthara/chok/v3/store"
 	"github.com/zynthara/chok/v3/store/where"
@@ -301,5 +302,11 @@ func TestStoreBehindApp(t *testing.T) {
 	}
 	if n, _ := items.Count(ctx, where.Eq("name", "a")); n != 1 {
 		t.Fatal(n)
+	}
+}
+
+func TestPackage_LowersThePasswordCost(t *testing.T) {
+	if got := apptest.PasswordCost.Load(); got != 4 { // bcrypt.MinCost
+		t.Fatalf("a test binary importing choktest hashes at cost %d, want bcrypt's minimum, 4", got)
 	}
 }

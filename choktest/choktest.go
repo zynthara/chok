@@ -16,6 +16,10 @@
 // The database follows CHOK_TEST_DRIVER: SQLite in a temporary file by
 // default, or a database of its own on the server CHOK_TEST_PG_DSN or
 // CHOK_TEST_MYSQL_DSN names, dropped when the test ends.
+//
+// A test binary that imports choktest hashes identity's passwords at
+// bcrypt's minimum cost, so tests that register users stay fast;
+// production binaries never import it.
 package choktest
 
 import (
@@ -39,6 +43,11 @@ import (
 	"github.com/zynthara/chok/v3/internal/jsonx"
 	"github.com/zynthara/chok/v3/store"
 )
+
+// testPasswordCost is bcrypt.MinCost.
+const testPasswordCost = 4
+
+func init() { apptest.PasswordCost.Store(testPasswordCost) }
 
 // DB opens a fresh database with the given tables, migrated, and closes
 // and drops it when the test ends. It follows CHOK_TEST_DRIVER (sqlite,

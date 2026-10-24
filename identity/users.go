@@ -1,0 +1,128 @@
+package identity
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	"gorm.io/gorm"
+
+	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/store"
+)
+
+// UserService is the administration of accounts — what an operator does
+// to a user, as opposed to what users do through the routes. A missing
+// user is a 404 error; every change that affects the user's tokens
+// (password, roles, active flag) revokes them, so the next request logs
+// in again and picks the change up.
+type UserService struct{ idn *Identity }
+
+// bumpVersion moves password_version on, atomically in the database, so
+// concurrent revocations each count.
+var bumpVersion = gorm.Expr("password_version + 1")
+
+// The limits of a role: Roles is stored comma-separated in 500 bytes.
+const (
+	roleMaxLen    = 32
+	rolesMaxCSV   = 500
+	roleForbidden = ","
+)
+
+var errNoUserID = chok.ErrBadRequest.Msgf("a user id is required")
+
+func notFoundUser(err error) error {
+	if errors.Is(err, chok.ErrNotFound) {
+		return chok.ErrNotFound.Msgf("user not found")
+	}
+	return err
+}
+
+// Create makes an active account with a password, as register does: for
+// a deployment that turns registration off and provisions accounts.
+func (s *UserService) Create(ctx context.Context, email, password, name string) (*User, error) {
+	return s.idn.createUser(ctx, email, password, name)
+}
+
+// Get returns the user with id (usr_…).
+func (s *UserService) Get(ctx context.Context, id string) (*User, error) {
+	if id == "" {
+		return nil, errNoUserID
+	}
+	u, err := s.idn.users.Get(ctx, store.RID(id))
+	if err != nil {
+		return nil, notFoundUser(err)
+	}
+	return u, nil
+}
+
+// SetActive enables or disables the account. Either way its tokens stop
+// working: a disabled user is out at once, a re-enabled one logs in anew.
+func (s *UserService) SetActive(ctx context.Context, id string, active bool) error {
+	return s.update(ctx, id, map[string]any{"active": active, "password_version": bumpVersion})
+}
+
+// SetRoles replaces the user's roles — nil or empty clears them — and
+// revokes the user's tokens, so the next login carries the new roles. A
+// role is at most 32 characters and has no comma; together they fit in
+// 500 bytes.
+func (s *UserService) SetRoles(ctx context.Context, id string, roles []string) error {
+	if err := checkRoles(roles); err != nil {
+		return err
+	}
+	return s.update(ctx, id, map[string]any{"roles": strings.Join(roles, ","), "password_version": bumpVersion})
+}
+
+// ResetPassword sets a new password, held to the register route's rules,
+// and revokes the user's tokens.
+func (s *UserService) ResetPassword(ctx context.Context, id, password string) error {
+	if id == "" {
+		return errNoUserID
+	}
+	if len(password) < 8 || len(password) > 72 {
+		return chok.ErrValidation.Msgf("password must be 8 to 72 bytes").With("fields", map[string]string{"password": "length"})
+	}
+	return notFoundUser(s.idn.setPassword(ctx, id, "password", password))
+}
+
+// RevokeTokens makes every token issued to the user stop working, and
+// changes nothing else: for a leaked token, or a log-out everywhere.
+func (s *UserService) RevokeTokens(ctx context.Context, id string) error {
+	return s.update(ctx, id, map[string]any{"password_version": bumpVersion})
+}
+
+// MarkEmailVerified records that the user proved the email address, after
+// the application's own verification (a link, a code). Tokens stay
+// valid; calling it again is a no-op.
+func (s *UserService) MarkEmailVerified(ctx context.Context, id string) error {
+	return s.update(ctx, id, map[string]any{"email_verified": true})
+}
+
+func (s *UserService) update(ctx context.Context, id string, set map[string]any) error {
+	if id == "" {
+		return errNoUserID
+	}
+	return notFoundUser(s.idn.users.Update(ctx, store.RID(id), store.Set(set)))
+}
+
+func checkRoles(roles []string) error {
+	total := 0
+	for i, r := range roles {
+		switch {
+		case r == "":
+			return chok.ErrBadRequest.Msgf("a role cannot be empty")
+		case strings.ContainsAny(r, roleForbidden):
+			return chok.ErrBadRequest.Msgf("role %q contains a comma", r)
+		case len(r) > roleMaxLen:
+			return chok.ErrBadRequest.Msgf("role %q is longer than %d characters", r, roleMaxLen)
+		}
+		if i > 0 {
+			total++
+		}
+		total += len(r)
+	}
+	if total > rolesMaxCSV {
+		return chok.ErrBadRequest.Msgf("the roles take %d bytes together; the limit is %d", total, rolesMaxCSV)
+	}
+	return nil
+}

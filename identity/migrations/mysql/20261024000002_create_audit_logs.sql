@@ -1,0 +1,25 @@
+-- identity: the append-only audit log.
+CREATE TABLE `audit_logs` (
+  `id` varchar(24) NOT NULL,
+  `occurred_at` datetime(3) NOT NULL,
+  `actor_id` varchar(128) DEFAULT NULL,
+  `actor_type` varchar(16) DEFAULT NULL,
+  `actor_ip` varchar(45) DEFAULT NULL,
+  `action` varchar(64) NOT NULL,
+  `result` varchar(16) NOT NULL,
+  `resource` varchar(64) DEFAULT NULL,
+  `resource_id` varchar(128) DEFAULT NULL,
+  `before_data` json DEFAULT NULL,
+  `after_data` json DEFAULT NULL,
+  `trace_id` varchar(32) DEFAULT NULL,
+  `request_id` varchar(128) DEFAULT NULL,
+  `metadata` json DEFAULT NULL,
+  `reason` varchar(512) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_audit_logs_occurred_at` (`occurred_at`),
+  KEY `idx_audit_actor_time` (`actor_id`,`occurred_at`),
+  KEY `idx_audit_action_time` (`action`,`occurred_at`),
+  KEY `idx_audit_resource_time` (`resource`,`resource_id`,`occurred_at`),
+  KEY `idx_audit_logs_trace_id` (`trace_id`),
+  KEY `idx_audit_logs_request_id` (`request_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
