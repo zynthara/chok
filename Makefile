@@ -86,8 +86,8 @@ budget: ## API surface and config key budgets (limits in hack/budget.txt)
 	@bash hack/configkeys.sh
 
 .PHONY: smoke
-smoke: ## Boot examples/blog, probe /healthz, SIGINT it (enabled in WP5)
-	@echo "smoke: enabled in WP5 (boots examples/blog); nothing to run yet"
+smoke: ## Boot examples/blog on a random port, probe /healthz, SIGINT it, expect exit 0 within 3s
+	@bash hack/smoke.sh
 
 ##@ Helpers
 
