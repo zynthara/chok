@@ -1,28 +1,19 @@
 package cache
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 
 	"github.com/redis/go-redis/v9"
+
+	// go-redis's own log lines (a dial that failed, a connection it
+	// dropped) go to slog.Default at warn, process-wide, as everywhere
+	// chok links go-redis.
+	_ "github.com/zynthara/chok/v3/internal/redislog"
 )
-
-// go-redis reports its own trouble (a dial that failed, a connection it
-// dropped) through a process-wide logger that writes to stderr; it is set
-// once, before any client exists, to log through slog instead.
-func init() { redis.SetLogger(redisLog{}) }
-
-// redisLog passes go-redis's messages to slog.Default at warn.
-type redisLog struct{}
-
-func (redisLog) Printf(ctx context.Context, format string, v ...any) {
-	slog.Default().WarnContext(ctx, fmt.Sprintf(format, v...), "logger", "go-redis")
-}
 
 // newClient builds the redis layer's client; it connects on first use.
 func newClient(cfg Config) (*redis.Client, error) {

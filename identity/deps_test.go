@@ -43,3 +43,24 @@ func TestDeps_CasbinOnlyWithRBAC(t *testing.T) {
 		t.Fatal("the check is blind: identity/rbac must link casbin")
 	}
 }
+
+// TestDeps_GoRedisLogsBridgedWhereverLinked: every chok package that links
+// go-redis also links internal/redislog, so go-redis's own log lines reach
+// slog in any binary built from them.
+func TestDeps_GoRedisLogsBridgedWhereverLinked(t *testing.T) {
+	const mod = "github.com/zynthara/chok/v3"
+	for _, pkg := range []string{mod + "/identity/rbac", mod + "/cache"} {
+		deps := goListDeps(t, pkg)
+		var redis, bridge bool
+		for _, d := range deps {
+			redis = redis || strings.HasPrefix(d, "github.com/redis/go-redis/")
+			bridge = bridge || d == mod+"/internal/redislog"
+		}
+		if !redis {
+			t.Fatalf("the check is blind: %s must link go-redis", pkg)
+		}
+		if !bridge {
+			t.Fatalf("%s links go-redis without internal/redislog", pkg)
+		}
+	}
+}

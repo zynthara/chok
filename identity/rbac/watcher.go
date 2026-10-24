@@ -143,8 +143,9 @@ type watcherOption func(*redisWatcher)
 
 // withWatcherLogger threads chok's per-component Logger into the
 // watcher so publish failures and (eventually) overflow drops are
-// visible in the operator's log stream rather than printed to
-// go-redis' internal.Logger which no chok subsystem captures.
+// visible in the operator's log stream, next to the request logs, rather
+// than only through go-redis's own logger (which internal/redislog routes
+// to slog.Default).
 func withWatcherLogger(l *slog.Logger) watcherOption {
 	return func(w *redisWatcher) {
 		if l != nil {

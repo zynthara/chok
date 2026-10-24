@@ -30,5 +30,6 @@
 //
 // Importing the package sends go-redis's own log lines (a dial that
 // failed, a connection dropped), process-wide, to slog.Default at warn
-// instead of to stderr.
+// instead of to stderr; identity/rbac, the other chok package on
+// go-redis, does the same.
 package cache
