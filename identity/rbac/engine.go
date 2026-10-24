@@ -39,13 +39,10 @@ func newEngine(modelText string, adapter persist.Adapter, logger *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("rbac: parse the model: %w", err)
 	}
-	// NewSyncedEnforcer loads the policies already: a missing table fails
-	// here.
+	// NewSyncedEnforcer loads the policies, once, through the adapter: a
+	// missing table fails here.
 	enf, err := casbinv3.NewSyncedEnforcer(m, adapter)
 	if err != nil {
-		return nil, fmt.Errorf("rbac: load the policies: %w", err)
-	}
-	if err := enf.LoadPolicy(); err != nil {
 		return nil, fmt.Errorf("rbac: load the policies: %w", err)
 	}
 	if logger == nil {

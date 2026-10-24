@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/casbin/casbin/v3/model"
+	"github.com/casbin/casbin/v3/persist"
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
@@ -53,6 +56,50 @@ func TestEngine_RedisWatcherStatsCountFailures(t *testing.T) {
 func TestEngine_NoStatsWithoutWatcher(t *testing.T) {
 	if got := newTestEngine(t).watcherStats(); got != (watcherStats{}) {
 		t.Fatalf("no watcher, no counters: %+v", got)
+	}
+}
+
+// countingAdapter counts the full policy loads of the adapter it wraps.
+type countingAdapter struct {
+	persist.Adapter
+	loads atomic.Int32
+}
+
+func (a *countingAdapter) LoadPolicy(m model.Model) error {
+	a.loads.Add(1)
+	return a.Adapter.LoadPolicy(m)
+}
+
+// TestNewEngine_LoadsThePoliciesOnce: building the engine reads the
+// policy table once — casbin's constructor already loads it — and the
+// policies stored before are in force.
+func TestNewEngine_LoadsThePoliciesOnce(t *testing.T) {
+	gdb := newAdapterDB(t)
+	adapter, err := newGormAdapter(gdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := newEngine(rbacWithDomainsModel, adapter, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := (&PolicyService{e: first}).GrantUser(ctx, "usr_1", "task", "read"); err != nil {
+		t.Fatal(err)
+	}
+	first.close()
+
+	counting := &countingAdapter{Adapter: adapter}
+	e, err := newEngine(rbacWithDomainsModel, counting, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.close)
+	if n := counting.loads.Load(); n != 1 {
+		t.Fatalf("newEngine loaded the policies %d times, want 1", n)
+	}
+	if ok, err := (&PolicyService{e: e}).HasPermission(ctx, "usr_1", "task", "read"); err != nil || !ok {
+		t.Fatalf("the stored grant is in force after one load: %v, %v", ok, err)
 	}
 }
 
