@@ -83,15 +83,25 @@ func TestGetForUpdate_SerializesLockers(t *testing.T) {
 	if err := <-first; err != nil {
 		t.Fatal(err)
 	}
+	// The second transaction sends its read before it returns, so once its
+	// error has arrived the read is there too. Selecting on both at once
+	// let a nil error win the race and fail the test for nothing (seen on
+	// the MySQL lane in CI).
+	select {
+	case err := <-secondErr:
+		if err != nil {
+			t.Fatalf("second locker: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second locker never ran")
+	}
 	select {
 	case v := <-second:
 		if v != 1 {
 			t.Fatalf("the second locker read views=%d, want the committed 1", v)
 		}
-	case err := <-secondErr:
-		t.Fatalf("second locker: %v", err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("the second locker never ran")
+	default:
+		t.Fatal("the second locker returned without reading")
 	}
 }
 
