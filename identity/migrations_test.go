@@ -71,6 +71,13 @@ func TestMigrations_VersionedMatchesAuto(t *testing.T) {
 	if !strings.Contains(want, "uk_user_email [delete_token email] unique=true") || !strings.Contains(want, "uk_identity_provider [delete_token provider provider_account_id] unique=true") {
 		t.Fatalf("the SoftUnique indexes:\n%s", want)
 	}
+	// Auto migrating over the versioned schema finds nothing to change.
+	if err := versioned.Unsafe(t.Context()).AutoMigrate(&User{}, &linkedIdentity{}, &auditRow{}); err != nil {
+		t.Fatal(err)
+	}
+	if again := describeSchema(t, versioned, identityTables...); again != got {
+		t.Fatalf("auto migrate changed the versioned schema:\n%s", again)
+	}
 }
 
 func TestMigrations_VersionedUsesTheLedger(t *testing.T) {
