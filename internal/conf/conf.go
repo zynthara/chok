@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -37,6 +38,12 @@ type Options struct {
 	Flags *pflag.FlagSet
 	// Environ is the environment, os.Environ() unless a test sets it.
 	Environ []string
+	// Only, when set, loads just these top-level sections of the file:
+	// the others are skipped rather than reported as unknown, and only
+	// environment variables inside them can warn. The chok command reads
+	// the db section of an application's chok.yaml this way, with a type
+	// that has nothing else.
+	Only []string
 }
 
 // Result reports what Load read.
@@ -105,6 +112,9 @@ func Load(dst any, o Options) (Result, error) {
 			if err != nil {
 				return res, &Error{File: path, Problems: []string{err.Error()}}
 			}
+			if len(o.Only) > 0 {
+				maps.DeleteFunc(ft, func(k string, _ any) bool { return !slices.Contains(o.Only, k) })
+			}
 			merge(tree, ft)
 		case explicit || !errors.Is(err, fs.ErrNotExist):
 			return res, &Error{File: path, Problems: []string{err.Error()}}
@@ -115,6 +125,13 @@ func Load(dst any, o Options) (Result, error) {
 	paths := map[string]string{}
 	leaves(t, prefix, "", tree, paths)
 	envTree, warnings := envLayer(paths, prefix, environ)
+	if len(o.Only) > 0 {
+		warnings = slices.DeleteFunc(warnings, func(w string) bool {
+			return !slices.ContainsFunc(o.Only, func(section string) bool {
+				return strings.HasPrefix(w, "environment variable "+EnvName(prefix, section)+"_")
+			})
+		})
+	}
 	res.Warnings = warnings
 	merge(tree, envTree)
 	merge(tree, flagLayer(o.Flags, paths))

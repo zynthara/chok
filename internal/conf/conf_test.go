@@ -301,6 +301,32 @@ func TestLoad_UnknownKeySuggests(t *testing.T) {
 	}
 }
 
+// TestLoad_OnlySections: with Only, the file's other sections are not
+// unknown, the loaded ones are as strict as ever, and an environment
+// variable outside them does not warn.
+func TestLoad_OnlySections(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "c.yaml", "db:\n  port: 5432\nhttp:\n  addr: \":1\"\nauth:\n  signing_key: x\n")
+	var c struct {
+		DB dbSection `yaml:"db"`
+	}
+	res, err := load(t, &c, Options{File: p, Only: []string{"db"}, Environ: []string{"APP_DB_DRIVER=mysql", "APP_HTTP_ADDR=:2", "APP_DB_PORTT=1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DB.Port != 5432 || c.DB.Driver != "mysql" {
+		t.Fatalf("the db section from the file and the environment: %+v", c.DB)
+	}
+	if len(res.Warnings) != 1 || !strings.HasPrefix(res.Warnings[0], "environment variable APP_DB_PORTT matches no config key") {
+		t.Fatalf("only the db section's variables warn: %q", res.Warnings)
+	}
+	bad := writeFile(t, dir, "bad.yaml", "db:\n  prot: 1\nhttp:\n  adr: x\n")
+	_, err = load(t, &c, Options{File: bad, Only: []string{"db"}})
+	if ps := problems(t, err); len(ps) != 1 || !strings.HasPrefix(ps[0], "unknown key db.prot (did you mean port?)") {
+		t.Fatalf("the loaded section stays strict, the others are skipped: %q", ps)
+	}
+}
+
 func TestLoad_EnvTypoWarns(t *testing.T) {
 	t.Chdir(t.TempDir())
 	var c appConfig
