@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/natefinch/lumberjack.v2"
+
+	"github.com/zynthara/chok/v3/internal/logtap"
 )
 
 // loggers is what New builds from LogConfig.
@@ -18,6 +20,9 @@ type loggers struct {
 	closers []io.Closer
 }
 
+// buildLoggers builds the root and access loggers. Their handlers are
+// wrapped by logtap, so telemetry's logs.otel bridge sees every record
+// they write.
 func buildLoggers(c LogConfig) loggers {
 	var l loggers
 	l.level = new(slog.LevelVar)
@@ -26,13 +31,13 @@ func buildLoggers(c LogConfig) loggers {
 	}
 	w, closers := logWriter(c.Output, c.Files)
 	l.closers = closers
-	l.root = slog.New(logHandler(c.Format, w, l.level))
+	l.root = slog.New(logtap.Wrap(logHandler(c.Format, w, l.level)))
 	if c.Access {
 		l.access = l.root
 		if hasPath(c.AccessFiles) {
 			aw, ac := logWriter(nil, c.AccessFiles)
 			l.closers = append(l.closers, ac...)
-			l.access = slog.New(logHandler(c.Format, aw, slog.LevelInfo))
+			l.access = slog.New(logtap.Wrap(logHandler(c.Format, aw, slog.LevelInfo)))
 		}
 	}
 	return l

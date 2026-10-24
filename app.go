@@ -55,8 +55,8 @@ type component struct {
 type Option func(*App)
 
 // Logger injects the root logger; without it New builds one from
-// base.Log. An injected logger is never closed by the App, and SIGHUP
-// cannot change its level.
+// base.Log. An injected logger is never closed by the App, SIGHUP cannot
+// change its level, and telemetry's logs.otel bridge does not see it.
 func Logger(l *slog.Logger) Option { return func(a *App) { a.logger = l } }
 
 // Wrap adds application middleware, run after the default stack and
