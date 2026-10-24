@@ -7,9 +7,11 @@
 // It reads, from auth.providers.facebook: client_id and client_secret
 // (the app's id and secret), redirect_url (a valid OAuth redirect URI of
 // the app: https://api.example.com/auth/facebook/callback), scopes (email
-// and public_profile by default) and endpoint (the Graph API base with
-// its version, https://graph.facebook.com/v18.0 unless set — set it to
-// move to a newer version). It refuses hosted_domain, team_id and key_id.
+// and public_profile by default) and endpoint (required: the Graph API
+// base with its version, https://graph.facebook.com/v<N>.0 — Meta retires
+// a version about two years after it ships, so there is no default to go
+// stale; the current one is in the Graph API changelog). It refuses
+// hosted_domain, team_id and key_id.
 //
 // Facebook returns an email only when the user granted it, and only a
 // confirmed one: an email present is taken as verified.
@@ -21,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"golang.org/x/oauth2"
@@ -29,7 +32,9 @@ import (
 	"github.com/zynthara/chok/v3/identity/internal/oauth"
 )
 
-const defaultGraph = "https://graph.facebook.com/v18.0"
+// graphVersion is the version segment an endpoint on graph.facebook.com
+// carries: /v21.0.
+var graphVersion = regexp.MustCompile(`^/v\d+\.\d+$`)
 
 type provider struct {
 	cfg   *oauth2.Config
@@ -43,9 +48,6 @@ func New(pc identity.ProviderConfig) identity.Provider {
 		return oauth.Broken{ProviderName: "facebook", Err: err}
 	}
 	graph := strings.TrimRight(pc.Endpoint, "/")
-	if graph == "" {
-		graph = defaultGraph
-	}
 	scopes := pc.Scopes
 	if len(scopes) == 0 {
 		scopes = []string{"email", "public_profile"}
@@ -77,14 +79,17 @@ func check(pc identity.ProviderConfig) error {
 		return errors.New("facebook: client_secret is required")
 	case pc.RedirectURL == "":
 		return errors.New("facebook: redirect_url is required")
+	case pc.Endpoint == "":
+		return errors.New("facebook: endpoint is required: the Graph API base with its version, https://graph.facebook.com/v<N>.0 (Meta retires a version about two years after it ships, so there is no default)")
 	}
 	if err := oauth.AbsoluteURL("facebook: redirect_url", pc.RedirectURL); err != nil {
 		return err
 	}
-	if pc.Endpoint != "" {
-		if err := oauth.AbsoluteURL("facebook: endpoint", pc.Endpoint); err != nil {
-			return err
-		}
+	if err := oauth.AbsoluteURL("facebook: endpoint", pc.Endpoint); err != nil {
+		return err
+	}
+	if u, _ := url.Parse(pc.Endpoint); u != nil && u.Host == "graph.facebook.com" && !graphVersion.MatchString(strings.TrimRight(u.Path, "/")) {
+		return fmt.Errorf("facebook: endpoint %q must carry the Graph API version: https://graph.facebook.com/v<N>.0", pc.Endpoint)
 	}
 	return oauth.Unused("facebook", map[string]bool{"hosted_domain": pc.HostedDomain != "", "team_id": pc.TeamID != "", "key_id": pc.KeyID != ""})
 }

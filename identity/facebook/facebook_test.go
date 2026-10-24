@@ -74,17 +74,20 @@ func provider(t *testing.T, endpoint string) identity.Provider {
 }
 
 func TestNew_RefusesBadConfig(t *testing.T) {
-	ok := identity.ProviderConfig{ClientID: "x", ClientSecret: "x", RedirectURL: "https://a.test/cb"}
+	ok := identity.ProviderConfig{ClientID: "x", ClientSecret: "x", RedirectURL: "https://a.test/cb", Endpoint: "https://graph.facebook.com/v21.0"}
 	if err := facebook.New(ok).Check(); err != nil {
 		t.Fatalf("the minimal config: %v", err)
 	}
 	for name, mutate := range map[string]func(*identity.ProviderConfig){
-		"no client_id":        func(pc *identity.ProviderConfig) { pc.ClientID = "" },
-		"no client_secret":    func(pc *identity.ProviderConfig) { pc.ClientSecret = "" },
-		"no redirect_url":     func(pc *identity.ProviderConfig) { pc.RedirectURL = "" },
-		"a relative redirect": func(pc *identity.ProviderConfig) { pc.RedirectURL = "/cb" },
-		"a bad endpoint":      func(pc *identity.ProviderConfig) { pc.Endpoint = "graph" },
-		"apple's key":         func(pc *identity.ProviderConfig) { pc.KeyID = "1234567890" },
+		"no client_id":                  func(pc *identity.ProviderConfig) { pc.ClientID = "" },
+		"no client_secret":              func(pc *identity.ProviderConfig) { pc.ClientSecret = "" },
+		"no redirect_url":               func(pc *identity.ProviderConfig) { pc.RedirectURL = "" },
+		"a relative redirect":           func(pc *identity.ProviderConfig) { pc.RedirectURL = "/cb" },
+		"no endpoint":                   func(pc *identity.ProviderConfig) { pc.Endpoint = "" },
+		"a bad endpoint":                func(pc *identity.ProviderConfig) { pc.Endpoint = "graph" },
+		"an unversioned Graph endpoint": func(pc *identity.ProviderConfig) { pc.Endpoint = "https://graph.facebook.com" },
+		"a Graph path, not a version":   func(pc *identity.ProviderConfig) { pc.Endpoint = "https://graph.facebook.com/me" },
+		"apple's key":                   func(pc *identity.ProviderConfig) { pc.KeyID = "1234567890" },
 	} {
 		pc := ok
 		mutate(&pc)
@@ -95,7 +98,7 @@ func TestNew_RefusesBadConfig(t *testing.T) {
 }
 
 func TestProvider_NameAndCapabilities(t *testing.T) {
-	p := provider(t, "")
+	p := provider(t, "https://graph.facebook.com/v21.0")
 	c := p.Capabilities()
 	if p.Name() != "facebook" || c.CallbackMethod != http.MethodGet || c.RequiresNonce || !c.SupportsPKCE || c.RedirectURL == "" {
 		t.Fatalf("%s %+v", p.Name(), c)
@@ -115,9 +118,9 @@ func TestBeginAuth_BuildsAuthorizeURL(t *testing.T) {
 		t.Fatalf("dialog URL: %s", raw)
 	}
 	// The real Graph API's dialog lives on www.facebook.com, same version.
-	raw, _ = provider(t, "").BeginAuth(context.Background(), &oauth.BeginRequest{State: "s"})
-	if !strings.HasPrefix(raw, "https://www.facebook.com/v18.0/dialog/oauth?") {
-		t.Fatalf("the default dialog: %s", raw)
+	raw, _ = provider(t, "https://graph.facebook.com/v21.0").BeginAuth(context.Background(), &oauth.BeginRequest{State: "s"})
+	if !strings.HasPrefix(raw, "https://www.facebook.com/v21.0/dialog/oauth?") {
+		t.Fatalf("the real Graph dialog: %s", raw)
 	}
 }
 
