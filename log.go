@@ -48,7 +48,19 @@ func logHandler(format string, w io.Writer, level slog.Leveler) slog.Handler {
 	if strings.EqualFold(format, "text") {
 		return slog.NewTextHandler(w, opts)
 	}
+	opts.ReplaceAttr = durationAsString
 	return slog.NewJSONHandler(w, opts)
+}
+
+// durationAsString writes a time.Duration attribute as its String form
+// ("1.5ms"), the way the text format shows it, rather than the integer
+// nanoseconds slog's JSON handler writes: chok's JSON spells a duration as
+// a string everywhere, request and response bodies included.
+func durationAsString(_ []string, a slog.Attr) slog.Attr {
+	if a.Value.Kind() == slog.KindDuration {
+		a.Value = slog.StringValue(a.Value.Duration().String())
+	}
+	return a
 }
 
 func parseLevel(s string) (slog.Level, bool) {

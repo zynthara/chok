@@ -3,11 +3,14 @@ package chok
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zynthara/chok/v3/internal/logtap"
 )
@@ -87,5 +90,62 @@ func TestBuildLoggers_TappedForTelemetry(t *testing.T) {
 	}
 	if strings.Contains(got, "below log.level") {
 		t.Fatalf("log.level applies to the tap too: %s", got)
+	}
+}
+
+// TestAccessLog_DurationIsAString: in the json format the access log's
+// duration is a string such as "1.5ms", as chok writes durations in JSON
+// everywhere, not slog's integer nanoseconds; the text format is
+// unchanged. The App builds its own loggers here, as it does in
+// production, so the line comes from the real access middleware.
+func TestAccessLog_DurationIsAString(t *testing.T) {
+	before := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(before) })
+	serve := func(format string) string {
+		t.Helper()
+		base := testBase(t)
+		path := filepath.Join(t.TempDir(), "app.log")
+		base.Log.Format, base.Log.Output, base.Log.Access = format, []string{path}, true
+		app := New(base)
+		t.Cleanup(func() {
+			for _, c := range app.closers {
+				_ = c.Close()
+			}
+		})
+		app.Router().Handle(http.MethodGet, "/x", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(time.Millisecond)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		app.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+		for line := range strings.Lines(readLog(t, path)) {
+			if strings.Contains(line, "access") && strings.Contains(line, "/x") {
+				return line
+			}
+		}
+		t.Fatalf("no access line for /x in %s", readLog(t, path))
+		return ""
+	}
+
+	var entry map[string]any
+	line := serve("json")
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("access line %q: %v", line, err)
+	}
+	s, ok := entry["duration"].(string)
+	if !ok {
+		t.Fatalf("json duration is %T %v, want a string: %s", entry["duration"], entry["duration"], line)
+	}
+	if d, err := time.ParseDuration(s); err != nil || d < time.Millisecond {
+		t.Fatalf("json duration %q: %v, %v", s, d, err)
+	}
+
+	line = serve("text")
+	_, val, found := strings.Cut(line, " duration=")
+	if !found {
+		t.Fatalf("text access line without a duration: %s", line)
+	}
+	val, _, _ = strings.Cut(val, " ")
+	if d, err := time.ParseDuration(val); err != nil || d < time.Millisecond {
+		t.Fatalf("text duration %q: %v, %v", val, d, err)
 	}
 }
