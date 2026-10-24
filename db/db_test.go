@@ -13,6 +13,7 @@ import (
 
 	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/v3/internal/dbx"
 )
 
 type note struct {
@@ -440,5 +441,44 @@ func TestCreate_StampsUTC(t *testing.T) {
 		if !strings.HasSuffix(raw, "+00:00") {
 			t.Fatalf("stored %q", raw)
 		}
+	}
+}
+
+// entry is an append-only row with no model base, the shape of the
+// batteries' audit log.
+type entry struct {
+	ID     string `gorm:"primaryKey;size:24"`
+	Action string `gorm:"size:64;not null;index"`
+}
+
+type noKey struct {
+	Action string `gorm:"size:64"`
+}
+
+func TestPlainTable_DeclaresABaselessTable(t *testing.T) {
+	spec, ok := dbx.PlainTable(&entry{}).(db.TableSpec)
+	if !ok {
+		t.Fatalf("dbx.PlainTable returns a db.TableSpec, got %T", dbx.PlainTable(&entry{}))
+	}
+	d := dbtest.Open(t)
+	if err := d.RegisterSchema("battery", []db.TableSpec{spec}, nil); err != nil {
+		t.Fatal(err)
+	}
+	gdb := d.Unsafe(t.Context())
+	if !gdb.Migrator().HasTable(&entry{}) || gdb.Migrator().HasColumn(&entry{}, "rid") {
+		t.Fatal("auto mode creates the table with only its own columns")
+	}
+	if err := gdb.Create(&entry{ID: db.NewRID("ent"), Action: "login"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for name, model := range map[string]any{"a model": &note{}, "no primary key": &noKey{}, "not a struct": new(int)} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: dbx.PlainTable must panic", name)
+				}
+			}()
+			dbx.PlainTable(model)
+		}()
 	}
 }

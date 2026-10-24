@@ -9,6 +9,8 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
+
+	"github.com/zynthara/chok/v3/internal/dbx"
 )
 
 // TableSpec declares a model's table for auto migration.
@@ -66,6 +68,36 @@ func Table(model any, indexes ...SoftIndex) TableSpec {
 		}
 	}
 	return spec
+}
+
+func init() {
+	dbx.PlainTable = func(model any) any { return plainTable(model) }
+}
+
+// plainTable declares the table of a model without a model base: no RID,
+// version or timestamps, only the columns it declares. Batteries reach it
+// through dbx.PlainTable for an append-only log or a schema another
+// library owns; applications declare tables with Table.
+func plainTable(model any) TableSpec {
+	t := reflect.TypeOf(model)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		panic(fmt.Sprintf("dbx.PlainTable: the model must be a struct, got %T", model))
+	}
+	ptr := reflect.New(t).Interface()
+	if _, ok := ptr.(Modeler); ok {
+		panic(fmt.Sprintf("dbx.PlainTable: %s embeds a model base; declare it with db.Table", t.Name()))
+	}
+	s, err := parseSchema(ptr)
+	if err != nil {
+		panic(fmt.Sprintf("dbx.PlainTable: %s: %v", t.Name(), err))
+	}
+	if len(s.PrimaryFields) == 0 {
+		panic(fmt.Sprintf("dbx.PlainTable: %s has no primary key", t.Name()))
+	}
+	return TableSpec{model: ptr, typ: t}
 }
 
 // SoftUnique is a unique index over columns among live rows:
