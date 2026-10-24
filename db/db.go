@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
@@ -28,6 +29,7 @@ type DB struct {
 	cfg     Config
 	logger  *slog.Logger
 	maint   *maintenance
+	obs     atomic.Pointer[observer] // telemetry's, through dbx.Observe
 
 	mu      sync.Mutex
 	schemas []*ownerSchema
@@ -102,6 +104,10 @@ func Open(cfg Config, opts ...Option) (*DB, error) {
 		return nil, err
 	}
 	d.gdb, d.readers = gdb, readers
+	if err := d.installObserver(gdb); err != nil {
+		_ = d.closePools()
+		return nil, err
+	}
 	app := &ownerSchema{owner: oc.owner, tables: oc.tables, migrations: oc.migrations}
 	if err := d.migrate(context.Background(), app); err != nil {
 		_ = d.closePools()
