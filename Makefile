@@ -1,140 +1,104 @@
-.DEFAULT_GOAL := all
+# chok v3 — the gates every change must pass. CI runs `make verify` and
+# nothing else, so a green local `make verify` predicts a green CI run.
+#
+# The database lanes read their DSNs from the environment; this Makefile
+# never loads .env on its own:
+#
+#   set -a; source .env; set +a
+#   make verify            # or just: make test-pg test-mysql
 
-# ==============================================================================
-# Variables
-# ==============================================================================
+.DEFAULT_GOAL := help
+.NOTPARALLEL:
 
-ROOT_DIR   := $(shell pwd)
-OUTPUT_DIR := $(ROOT_DIR)/_output
-BIN_DIR    := $(OUTPUT_DIR)/bin
+GO            ?= go
+GOFMT         ?= gofmt
+GOLANGCI_LINT ?= golangci-lint
+# Keep in step with the golangci-lint-action pin in .github/workflows/ci.yml.
+GOLANGCI_LINT_VERSION := 2.15.0
 
-GO         := go
-GOFLAGS    := -trimpath
+# Packages that open a real database rerun on Postgres and MySQL. A
+# directory joins both lanes as soon as it exists (db: WP4, store: WP5,
+# identity: WP6, jobs: WP7); there is no per-test selection.
+DB_PKG_DIRS := db store identity jobs
+DB_PKGS     := $(strip $(foreach d,$(DB_PKG_DIRS),$(if $(wildcard $(d)),./$(d)/...)))
 
-# Version metadata. `git describe` falls back to "dev" outside a git
-# checkout. The same VERSION/GIT_HASH/BUILD_TIME variables are read by
-# version.go via ldflags — keep the path in sync with version package.
-VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-GIT_HASH   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+# Tracked plus untracked-but-not-ignored Go files, so ignored scratch
+# space (.private/ and friends) never reaches gofmt.
+GO_FILES = $(shell git ls-files --cached --others --exclude-standard -- '*.go')
 
-LDFLAGS    := -s -w \
-	-X github.com/zynthara/chok/v2/version.version=$(VERSION) \
-	-X github.com/zynthara/chok/v2/version.gitHash=$(GIT_HASH) \
-	-X github.com/zynthara/chok/v2/version.buildTime=$(BUILD_TIME)
+##@ Gates (make verify runs them in this order)
 
-# ==============================================================================
-# Targets
-# ==============================================================================
+.PHONY: verify
+verify: tidy-check fmt-check vet lint fix-check test test-pg test-mysql budget smoke ## Run every gate below
+	@echo "==> verify: all gates passed"
 
-all: tidy lint test build ## tidy + lint + test + build
+.PHONY: tidy-check
+tidy-check: ## go.mod and go.sum are tidy (go mod tidy -diff is empty)
+	$(GO) mod tidy -diff
 
-##@ Build
-
-.PHONY: build
-build: ## Build the chok CLI into _output/bin/chok
-	@echo "==> Building chok ($(VERSION))..."
-	@mkdir -p $(BIN_DIR)
-	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/chok ./cmd/chok
-	@echo "==> Binary: $(BIN_DIR)/chok"
-
-.PHONY: install
-install: ## Install the chok CLI into GOPATH/bin
-	@echo "==> Installing chok ($(VERSION)) to $$(go env GOPATH)/bin..."
-	$(GO) install $(GOFLAGS) -ldflags '$(LDFLAGS)' ./cmd/chok
-
-##@ Test
-
-.PHONY: test
-test: ## Run the full unit test suite with the race detector
-	$(GO) test -race -count=1 ./...
-
-.PHONY: test-pg
-test-pg: ## Run the data and battery schema packages against Postgres (set CHOK_TEST_PG_DSN)
-	CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 ./store/... ./db/... ./account/... ./audit/... ./authz/... ./outbox/...
-
-.PHONY: test-mysql
-test-mysql: ## Run MySQL store, migration, battery-equivalence and read-only tests (set CHOK_TEST_MYSQL_DSN)
-	$(GO) test -race -count=1 ./store ./db ./account ./audit ./authz/... ./outbox -run 'TestOutboxRelay_MySQL|TestForeignTableGate_MySQL|TestBatchUpsert_MySQLIgnoresDeclaredConflictTarget|TestApplyMigrations_MySQLPartialDDL|TestSequenceManifest_MySQLClaimAndRepair|TestRepairHistory_MySQL|TestReadOnly_MySQLDriverBackstop|TestMigrationSequence_MySQLSchemaEquivalent|TestMigrationBehavior_MySQL|TestGetForUpdate_MySQL|TestConstraintFields_MySQLDuplicateMapsToField|TestListIn_MySQLCrossChunkCaseInsensitiveDeduped|TestAggregate_MySQLTypeMapping|TestAggregate_Round2MySQLDatetimeStoresWallClocks|TestAggregate_Round3MySQLDSTFoldCollapsesInstants|TestAggregate_Round4MySQLConcurrentTimeAggregates|TestAggregate_Round6MySQLEnumColumn|TestAggregate_Round9MySQLQualifiedTable|TestMySQLUTCBaseline'
-
-.PHONY: cover
-cover: ## Generate a coverage report at _output/coverage.html
-	@mkdir -p $(OUTPUT_DIR)
-	$(GO) test -race -coverprofile=$(OUTPUT_DIR)/coverage.out ./...
-	$(GO) tool cover -html=$(OUTPUT_DIR)/coverage.out -o $(OUTPUT_DIR)/coverage.html
-	@echo "==> Coverage report: $(OUTPUT_DIR)/coverage.html"
-
-# Build first, then signal the binary directly: `go run ... & kill -INT $$!`
-# signals the go-run wrapper and orphans the app (M4 verification bite).
-.PHONY: smoke
-smoke: ## Boot examples/blog briefly as a self-check
-	@echo "==> Smoke testing examples/blog..."
-	@mkdir -p $(BIN_DIR)
-	@$(GO) build $(GOFLAGS) -o $(BIN_DIR)/blog-smoke ./examples/blog
-	@( BLOG_CONFIG=examples/blog/chok.yaml \
-	   BLOG_HTTP_ADDR=127.0.0.1:18080 \
-	   BLOG_HTTP_DRAIN_DELAY=100ms \
-	   BLOG_DB_SQLITE_PATH=$(OUTPUT_DIR)/blog-smoke.db \
-	   $(BIN_DIR)/blog-smoke & \
-	   PID=$$!; ok=0; \
-	   for i in $$(seq 1 30); do \
-	     curl -sf -m 1 http://127.0.0.1:18080/healthz >/dev/null 2>&1 && { ok=1; break; }; \
-	     sleep 0.5; \
-	   done; \
-	   kill -INT $$PID 2>/dev/null; wait $$PID; rc=$$?; \
-	   rm -f $(OUTPUT_DIR)/blog-smoke.db; \
-	   if [ $$ok -eq 1 ] && [ $$rc -eq 0 ]; then \
-	     echo "==> blog smoke OK (healthz 200, clean SIGINT exit)"; \
-	   else \
-	     echo "==> blog smoke FAILED (healthz_ok=$$ok exit=$$rc)"; exit 1; \
-	   fi )
-
-##@ Lint & Format
-
-.PHONY: lint
-lint: ## Run golangci-lint over the whole tree
-	@which golangci-lint > /dev/null || (echo "golangci-lint not installed; skipping" && exit 0)
-	golangci-lint run ./...
+.PHONY: fmt-check
+fmt-check: ## Every Go file is gofmt -s clean
+	@files='$(GO_FILES)'; [ -z "$$files" ] && exit 0; \
+	out=$$($(GOFMT) -s -l $$files); \
+	if [ -n "$$out" ]; then echo "gofmt -s needed (make fmt):"; echo "$$out"; exit 1; fi
 
 .PHONY: vet
-vet: ## Run go vet
+vet: ## go vet
 	$(GO) vet ./...
 
+.PHONY: lint
+lint: ## golangci-lint (blocking)
+	@command -v $(GOLANGCI_LINT) >/dev/null 2>&1 || { echo "golangci-lint not found; install it with:"; \
+	  echo "  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION)"; exit 1; }
+	@v=$$($(GOLANGCI_LINT) version --short 2>/dev/null); [ "$$v" = "$(GOLANGCI_LINT_VERSION)" ] || \
+	  echo "warning: golangci-lint $$v here, CI pins $(GOLANGCI_LINT_VERSION)"
+	$(GOLANGCI_LINT) run ./...
+
+.PHONY: fix-check
+fix-check: ## go fix has nothing to rewrite (go fix -diff is empty)
+	@out=$$($(GO) fix -diff ./... 2>&1); rc=$$?; \
+	if [ $$rc -ne 0 ] || [ -n "$$out" ]; then echo "go fix -diff is not empty (go fix ./...):"; echo "$$out"; exit 1; fi
+
+# The SQLite lane is hermetic: the driver and both DSNs are blanked so an
+# exported .env cannot pull Postgres or MySQL into it.
+.PHONY: test
+test: ## Full suite on SQLite with the race detector
+	CHOK_TEST_DRIVER= CHOK_TEST_PG_DSN= CHOK_TEST_MYSQL_DSN= $(GO) test -race -count=1 ./...
+
+.PHONY: test-pg
+test-pg: ## DB-backed packages on Postgres (needs CHOK_TEST_PG_DSN)
+	@[ -n "$$CHOK_TEST_PG_DSN" ] || { echo "test-pg: CHOK_TEST_PG_DSN is not set (set -a; source .env; set +a)"; exit 1; }
+	@if [ -z "$(DB_PKGS)" ]; then echo "test-pg: no DB-backed packages yet ($(DB_PKG_DIRS)); nothing to run"; \
+	else echo "CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 $(DB_PKGS)"; \
+	  CHOK_TEST_DRIVER=postgres $(GO) test -race -count=1 $(DB_PKGS); fi
+
+.PHONY: test-mysql
+test-mysql: ## DB-backed packages on MySQL (needs CHOK_TEST_MYSQL_DSN)
+	@[ -n "$$CHOK_TEST_MYSQL_DSN" ] || { echo "test-mysql: CHOK_TEST_MYSQL_DSN is not set (set -a; source .env; set +a)"; exit 1; }
+	@if [ -z "$(DB_PKGS)" ]; then echo "test-mysql: no DB-backed packages yet ($(DB_PKG_DIRS)); nothing to run"; \
+	else echo "CHOK_TEST_DRIVER=mysql $(GO) test -race -count=1 $(DB_PKGS)"; \
+	  CHOK_TEST_DRIVER=mysql $(GO) test -race -count=1 $(DB_PKGS); fi
+
+.PHONY: budget
+budget: ## API surface budget (hack/apibudget.sh, limits in hack/budget.txt)
+	@bash hack/apibudget.sh
+
+.PHONY: smoke
+smoke: ## Boot examples/blog, probe /healthz, SIGINT it (enabled in WP5)
+	@echo "smoke: enabled in WP5 (boots examples/blog); nothing to run yet"
+
+##@ Helpers
+
 .PHONY: tidy
-tidy: ## Run go mod tidy
+tidy: ## go mod tidy
 	$(GO) mod tidy
 
 .PHONY: fmt
-fmt: ## Format code (gofmt + go mod tidy)
-	gofmt -s -w .
-	$(GO) mod tidy
-
-##@ Release
-
-.PHONY: snapshot
-snapshot: ## Run goreleaser locally without publishing (output under dist/)
-	@which goreleaser > /dev/null || (echo "goreleaser not installed: brew install goreleaser" && exit 1)
-	@which syft > /dev/null || (echo "syft not installed (SBOM generation): brew install syft" && exit 1)
-	goreleaser release --snapshot --clean --skip=publish
-
-.PHONY: tag
-tag: ## Print the manual release workflow
-	@echo "Release workflow (manual since v2) — canonical runbook: CONTRIBUTING.md, 'Releasing':"
-	@echo "  1. full suite green: make test && go vet ./..."
-	@echo "  2. one release commit 'chore(release): vX.Y.Z — <punchline>': promote the"
-	@echo "     CHANGELOG.md Unreleased entry, add the docs/changelog.md note, bump .apidiff-baseline"
-	@echo "  3. git tag vX.Y.Z[-pre.N] && git push origin main vX.Y.Z"
-	@echo "  4. the tag push triggers goreleaser (binaries + SBOMs + checksums -> GitHub Release)"
-
-##@ Clean
-
-.PHONY: clean
-clean: ## Remove build outputs
-	@echo "==> Cleaning..."
-	@rm -rf $(OUTPUT_DIR) dist/
-
-##@ Help
+fmt: ## gofmt -s -w every Go file
+	@files='$(GO_FILES)'; [ -z "$$files" ] || $(GOFMT) -s -w $$files
 
 .PHONY: help
-help: ## Show this help
-	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+help: ## List the targets
+	@awk 'BEGIN { FS = ":.*## " } \
+	  /^[a-zA-Z_-]+:.*## / { printf "  \033[36m%-11s\033[0m %s\n", $$1, $$2 } \
+	  /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
