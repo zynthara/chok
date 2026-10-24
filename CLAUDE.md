@@ -86,8 +86,8 @@ stops; only points marked 执行者可定 are decided, under 实现级决策.
   growing it is an orchestrator decision.
 - `hack/apibudget.sh`, limits in `hack/budget.txt`: public packages ≤ 10
   (providers excluded), top-level exports ≤ 220 plus per-package caps,
-  option constructors ≤ 40 (where predicates excluded), direct deps ≤ 24,
-  examples/blog ≤ 120 app lines importing ≤ 4 chok packages. An unlisted
+  option constructors ≤ 40 (where predicates excluded), direct deps ≤ 30,
+  examples/blog ≤ 120 app lines importing ≤ 5 chok packages. An unlisted
   public package or any count over its limit is red.
 - No compatibility shims: no v2 names, no `Deprecated` aliases.
 

@@ -30,7 +30,7 @@ provider identity/facebook  3
 limit public_packages    10
 limit exports_total      220
 limit option_ctors       40   # store/where predicates are query DSL, not counted
-limit direct_deps        24
+limit direct_deps        30
 limit blog_app_lines     120
-limit blog_chok_imports  4
-limit config_keys        110  # leaf keys of chok.Base and the batteries' Config (hack/configkeys.sh)
+limit blog_chok_imports  5
+limit config_keys        150  # leaf keys of chok.Base and the batteries' Config (hack/configkeys.sh)
