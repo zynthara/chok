@@ -211,7 +211,11 @@ func (d *DB) migrate(ctx context.Context, s *ownerSchema) error {
 			}
 		}
 		if len(behind) > 0 {
-			return fmt.Errorf("%w: %s %s; apply them (chok migrate up) before starting with migrate: off", ErrNotMigrated, s.owner, strings.Join(behind, ", "))
+			hint := "chok migrate up"
+			if _, battery := dbx.Migrations[s.owner]; battery {
+				hint += " --battery " + s.owner
+			}
+			return fmt.Errorf("%w: %s %s; apply them (%s) before starting with migrate: off", ErrNotMigrated, s.owner, strings.Join(behind, ", "), hint)
 		}
 		return nil
 	}

@@ -1,18 +1,28 @@
 // Package dbx carries what db knows about a model's tables to store and
 // the batteries without widening db's public API: the SoftUnique indexes,
 // which store uses to name the field of a duplicate-key error, the plain
-// tables a battery declares for its own schema, and the statement
-// observer telemetry attaches to a handle.
+// tables a battery declares for its own schema, the statement observer
+// telemetry attaches to a handle, and the batteries' migration files the
+// chok command applies.
 package dbx
 
 import (
 	"database/sql"
+	"io/fs"
 	"reflect"
 	"sync"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+// Migrations maps the ledger owner of each battery schema — identity,
+// rbac, jobs — to the versioned SQL files the battery registers with
+// RegisterSchema. Each battery package adds its entry when it
+// initializes, so the chok command, which links them, can report and
+// apply a battery's migrations without the battery exporting them. It is
+// written only during package initialization.
+var Migrations = map[string]fs.FS{}
 
 // Index is one SoftUnique index.
 type Index struct {

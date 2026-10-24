@@ -79,6 +79,16 @@ var migrationFiles embed.FS
 
 func migrationsFS() (fs.FS, error) { return fs.Sub(migrationFiles, "migrations") }
 
+// The chok command reports and applies rbac's migration through dbx, for
+// an application that runs with migrate: off.
+func init() {
+	sub, err := migrationsFS()
+	if err != nil {
+		panic(err) // the embedded tree is fixed at build time
+	}
+	dbx.Migrations["rbac"] = sub
+}
+
 // casbinTable declares casbin_rule: a plain table, the layout casbin's.
 func casbinTable() db.TableSpec { return dbx.PlainTable(&casbinRule{}).(db.TableSpec) }
 

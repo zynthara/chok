@@ -18,14 +18,19 @@ func setStamp(t *testing.T, v, c, d string) {
 	t.Cleanup(func() { version, commit, date = ov, oc, od })
 }
 
+// run executes the chok command with args and returns what it printed on
+// stdout; its stderr goes to the test log.
 func run(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	root := newRootCmd()
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	root.SetOut(&out)
-	root.SetErr(&out)
+	root.SetErr(&errOut)
 	root.SetArgs(args)
 	err := root.Execute()
+	if errOut.Len() > 0 {
+		t.Logf("chok %s, stderr:\n%s", strings.Join(args, " "), errOut.String())
+	}
 	return out.String(), err
 }
 

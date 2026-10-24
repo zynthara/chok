@@ -94,3 +94,7 @@ func migrations() fs.FS {
 	}
 	return sub
 }
+
+// The chok command reports and applies the jobs' migrations through dbx,
+// for an application that runs with migrate: off.
+func init() { dbx.Migrations["jobs"] = migrations() }

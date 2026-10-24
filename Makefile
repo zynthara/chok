@@ -19,8 +19,8 @@ GOLANGCI_LINT_VERSION := 2.15.0
 # Packages that open a real database rerun on Postgres and MySQL. A
 # directory joins both lanes as soon as it exists (db: WP4, store and
 # choktest: WP5, identity: WP6, jobs: WP7, telemetry: WP8, for its
-# Instrument tests; cmd/chok: WP9, whose scaffold test boots on the
-# lane's database); there is no per-test selection.
+# Instrument tests; cmd/chok: WP9, whose scaffold and migrate tests run
+# on the lane's database); there is no per-test selection.
 DB_PKG_DIRS := db store choktest identity jobs telemetry cmd/chok
 DB_PKGS     := $(strip $(foreach d,$(DB_PKG_DIRS),$(if $(wildcard $(d)),./$(d)/...)))
 

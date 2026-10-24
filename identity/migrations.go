@@ -1,6 +1,10 @@
 package identity
 
-import "embed"
+import (
+	"embed"
+
+	"github.com/zynthara/chok/v3/internal/dbx"
+)
 
 // migrationFiles are identity's SQL migrations for migrate: versioned,
 // under migrations/{sqlite,mysql,postgres}: the users, identities and
@@ -8,3 +12,7 @@ import "embed"
 //
 //go:embed migrations
 var migrationFiles embed.FS
+
+// The chok command reports and applies identity's migrations through
+// dbx, for an application that runs with migrate: off.
+func init() { dbx.Migrations["identity"] = migrations() }
