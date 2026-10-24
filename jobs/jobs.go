@@ -149,7 +149,11 @@ type JobStats struct {
 	// flight: every one of them under OverlapSkip, those folded into the
 	// queued run under OverlapQueue.
 	Skipped int64 `json:"skipped"`
-	// AvgDuration is the mean duration of the finished runs.
+	// AvgDuration is the mean duration of the finished runs. Returned
+	// from a chok handler it is written as a string ("1.5s"), as chok's
+	// JSON writes every time.Duration; encoding/json writes integer
+	// nanoseconds, and encoding/json/v2 refuses it unless told how, having
+	// no default representation for a Duration.
 	AvgDuration time.Duration `json:"avg_duration"`
 	// Messages counts, for a worker, the messages its function took
 	// (returned nil for) since New; for the cleanup, the messages it
