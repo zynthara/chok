@@ -14,6 +14,7 @@ import (
 	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/identity"
 	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok/v3/jobs"
 )
 
 // sections are the configuration types counted; each battery adds its
@@ -25,6 +26,7 @@ var sections = []struct {
 	{"chok.Base", reflect.TypeFor[chok.Base]()},
 	{"db.Config", reflect.TypeFor[db.Config]()},
 	{"identity.Config", reflect.TypeFor[identity.Config]()},
+	{"jobs.Config", reflect.TypeFor[jobs.Config]()},
 }
 
 func main() {
