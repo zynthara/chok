@@ -34,6 +34,6 @@ func newRootCmd() *cobra.Command {
 	// --version prints the same line as chok version.
 	root.SetVersionTemplate("{{.Version}}\n")
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newInitCmd(), newMigrateCmd(), newVersionCmd())
+	root.AddCommand(newInitCmd(), newMigrateCmd(), newOpenAPICmd(), newVersionCmd())
 	return root
 }
