@@ -29,7 +29,7 @@ type Message struct {
 const maxTopicLen = 200
 
 // errBadTopic is an empty topic or one longer than maxTopicLen.
-var errBadTopic = errors.New("jobs: a topic must be 1 to 200 bytes")
+var errBadTopic = errors.New("a topic must be 1 to 200 bytes")
 
 func checkTopic(topic string) error {
 	if topic == "" || len(topic) > maxTopicLen {

@@ -46,26 +46,41 @@ func newCore(d *db.DB, logger *slog.Logger) *core {
 // not atomic with the business writes — which is exactly what
 // ErrOutsideTx exists to reject.
 func (c *core) enqueue(ctx context.Context, topic string, payload []byte) error {
-	if err := checkTopic(topic); err != nil {
+	if err := c.gate(ctx, topic); err != nil {
 		return err
 	}
-	if !c.d.InTx(ctx) {
-		return ErrOutsideTx
-	}
-	if err := c.d.Unsafe(ctx).Create(&message{Topic: topic, Payload: payload}).Error; err != nil {
-		return fmt.Errorf("jobs: enqueue to %q: %w", topic, err)
-	}
-	return nil
+	return c.insert(ctx, topic, payload)
 }
 
 // enqueueJSON encodes v with encoding/json/v2 and enqueues it under
-// topic: the same transactional contract as enqueue.
+// topic: the same transactional contract as enqueue, checked before the
+// encoding.
 func (c *core) enqueueJSON(ctx context.Context, topic string, v any) error {
+	if err := c.gate(ctx, topic); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("jobs: encode the payload for %q: %w", topic, err)
 	}
-	return c.enqueue(ctx, topic, raw)
+	return c.insert(ctx, topic, raw)
+}
+
+func (c *core) gate(ctx context.Context, topic string) error {
+	if err := checkTopic(topic); err != nil {
+		return fmt.Errorf("jobs: enqueue: %w", err)
+	}
+	if !c.d.InTx(ctx) {
+		return ErrOutsideTx
+	}
+	return nil
+}
+
+func (c *core) insert(ctx context.Context, topic string, payload []byte) error {
+	if err := c.d.Unsafe(ctx).Create(&message{Topic: topic, Payload: payload}).Error; err != nil {
+		return fmt.Errorf("jobs: enqueue to %q: %w", topic, err)
+	}
+	return nil
 }
 
 // cleanupOnce removes chok_jobs_messages rows below every watermark AND
