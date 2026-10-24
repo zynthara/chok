@@ -64,12 +64,6 @@ func (s *Store[T]) apply(ctx context.Context, tx *gorm.DB, cfg *where.Config, op
 	return tx, nil
 }
 
-// owner is what the Owned bases add to a model.
-type owner interface {
-	GetOwnerID() string
-	SetOwnerID(string)
-}
-
 var ownerType = reflect.TypeFor[owner]()
 
 // preload loads relation, a path of associations such as "Author" or

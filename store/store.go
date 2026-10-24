@@ -216,10 +216,7 @@ func New[T db.Modeler](d *db.DB, opts ...Option) *Store[T] {
 		s.constraints[name] = field
 	}
 	s.soft = stmt.Schema.LookUpField("DeleteToken") != nil && stmt.Schema.LookUpField("DeletedAt") != nil
-	_, s.owned = any(model).(interface {
-		GetOwnerID() string
-		SetOwnerID(string)
-	})
+	_, s.owned = any(model).(owner)
 	s.policy = d.StorePolicy()
 	if cfg.policy != nil {
 		s.policy = *cfg.policy
@@ -383,6 +380,12 @@ func (s *Store[T]) scoped(ctx context.Context, tx *gorm.DB) (*gorm.DB, error) {
 	return tx, nil
 }
 
+// owner is what the Owned bases add to a model.
+type owner interface {
+	GetOwnerID() string
+	SetOwnerID(string)
+}
+
 // errNoOwner is what the owner scope returns for a write without a
 // principal; reads turn it into an empty result.
 var errNoOwner = &NoPrincipalError{}
@@ -418,10 +421,7 @@ func (s *Store[T]) readScoped(ctx context.Context, tx *gorm.DB) (*gorm.DB, error
 // whose OwnerID the code set is written as is unless the policy requires
 // a principal; a row without an owner is refused.
 func (s *Store[T]) fillOwner(ctx context.Context, obj *T) error {
-	o, ok := any(obj).(interface {
-		GetOwnerID() string
-		SetOwnerID(string)
-	})
+	o, ok := any(obj).(owner)
 	if !ok || !s.owned {
 		return nil
 	}
