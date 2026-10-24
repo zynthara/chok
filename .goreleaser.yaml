@@ -12,11 +12,11 @@ version: 2
 
 project_name: chok
 
-# No `before.hooks` here. `go mod tidy` is already part of the `ci`
-# workflow (and `make tidy` for local dev), so re-running it inside
-# the release pipeline only risks rewriting go.sum and tripping
-# debug.ReadBuildInfo's `vcs.modified=true` flag — which would surface
-# as a `+dirty` suffix in `chok version` for tagged release binaries.
+# No `before.hooks` here. `go mod tidy -diff` is already a gate of
+# `make verify` (CI's verify job), so re-running tidy inside the release
+# pipeline could only rewrite go.sum. The release binary reports the tag
+# stamped below, never the runner's working tree: `chok version` ignores
+# vcs.modified once main.version is set.
 
 builds:
   - id: chok
@@ -36,8 +36,16 @@ builds:
         goarch: arm64
     flags:
       - -trimpath
+    # cmd/chok's own variables (v3 has no version package): `chok version`
+    # and `chok init`, which requires the tag in the go.mod it writes,
+    # read them. The tag keeps its v; the date is the commit's, so a
+    # rebuild of the same tag is the same binary.
     ldflags:
       - -s -w
+      - -X main.version={{ .Tag }}
+      - -X main.commit={{ .FullCommit }}
+      - -X main.date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
   - id: chok
@@ -49,6 +57,7 @@ archives:
         formats: [zip]
     files:
       - LICENSE
+      - NOTICE
       - README.md
       - CHANGELOG.md
 
