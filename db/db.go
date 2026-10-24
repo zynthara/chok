@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -87,7 +88,12 @@ func Open(cfg Config, opts ...Option) (*DB, error) {
 		return nil, fmt.Errorf("db: owner %q must be lower-case letters, digits, - or _", oc.owner)
 	}
 	d := &DB{cfg: cfg, logger: oc.logger}
-	gcfg := &gorm.Config{Logger: &gormLogger{d: d, slow: cfg.SlowThreshold}}
+	gcfg := &gorm.Config{
+		Logger: &gormLogger{d: d, slow: cfg.SlowThreshold},
+		// Timestamps gorm stamps are UTC on every dialect, so SQLite, which
+		// keeps them as text with their offset, orders them by instant.
+		NowFunc: func() time.Time { return time.Now().UTC() },
+	}
 	gdb, readers, err := openGorm(&cfg, gcfg)
 	if err != nil {
 		return nil, err

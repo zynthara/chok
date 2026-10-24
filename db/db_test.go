@@ -404,3 +404,32 @@ func TestOpen_UTCSession(t *testing.T) {
 	}
 	_ = time.UTC
 }
+
+// TestCreate_StampsUTC pins gorm's clock to UTC: SQLite keeps timestamps
+// as text with their offset and compares them as text, so stamps taken in
+// the local zone would misorder across a DST change. The location check
+// holds on any host: time.Now() carries time.Local, never the time.UTC
+// pointer, even where the local zone is UTC.
+func TestCreate_StampsUTC(t *testing.T) {
+	d := dbtest.Open(t, db.Tables(db.Table(&note{})))
+	gdb := d.Unsafe(t.Context())
+	if loc := gdb.NowFunc().Location(); loc != time.UTC {
+		t.Fatalf("gorm's clock runs in %v", loc)
+	}
+	n := &note{Title: "a"}
+	if err := gdb.Create(n).Error; err != nil {
+		t.Fatal(err)
+	}
+	if n.CreatedAt.Location() != time.UTC || n.UpdatedAt.Location() != time.UTC {
+		t.Fatalf("stamped in %v / %v", n.CreatedAt.Location(), n.UpdatedAt.Location())
+	}
+	if dbtest.Driver() == "sqlite" {
+		var raw string
+		if err := gdb.Raw("SELECT CAST(created_at AS TEXT) FROM notes").Row().Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(raw, "+00:00") {
+			t.Fatalf("stored %q", raw)
+		}
+	}
+}
