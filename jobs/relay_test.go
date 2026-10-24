@@ -1124,3 +1124,36 @@ func TestRelay_Round5WideUnsettledTieTailLagsUntilSettle(t *testing.T) {
 		t.Fatalf("watermark = %+v, %v — want the tail position", w, err)
 	}
 }
+
+// TestRelay_ClockZoneDoesNotMatter: the relay compares times by instant
+// whatever zone its clock reports. SQLite keeps times as text, so a
+// cutoff sent in another zone than the stored UTC would compare as text
+// and settle — or skip — the wrong rows; the relay sends UTC.
+func TestRelay_ClockZoneDoesNotMatter(t *testing.T) {
+	c := openCore(t)
+	ctx := t.Context()
+	enqueue(t, c, "zoned", "m1")
+	enqueue(t, c, "zoned", "m2")
+
+	cp := &capture{}
+	r := mkRelay(t, c, "zoned", cp, 30*time.Second, 10)
+	east := time.FixedZone("UTC+8", 8*60*60)
+	base := time.Now().In(east)
+	r.now = func() time.Time { return base } // rows are younger than settle
+
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wantPayloads(t, cp.payloads(), []string{"m1", "m2"})
+	if w, _ := c.states.load(ctx, "zoned"); w.ok {
+		t.Fatalf("watermark %+v inside the settle window: the cutoff compared by zone, not by instant", w)
+	}
+	r.now = func() time.Time { return base.Add(time.Minute) }
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := c.states.load(ctx, "zoned"); err != nil || !w.ok {
+		t.Fatalf("watermark = %+v, %v after the window", w, err)
+	}
+	wantPayloads(t, cp.payloads(), []string{"m1", "m2"})
+}
