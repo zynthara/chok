@@ -482,7 +482,10 @@ func TestCleanup_RunsUnderStart(t *testing.T) {
 	d := dbtest.Open(t)
 	in := &inbox{}
 	cfg := fastConfig()
-	cfg.SettleWindow, cfg.Retention, cfg.CleanupInterval = time.Millisecond, time.Millisecond, 20*time.Millisecond
+	// Contract §5's delivery guarantee assumes every enqueueing transaction
+	// commits within settle_window. 1ms does not hold under -race at high
+	// load: on 2026-10-25 the MySQL lane once saw no delivery within 15s.
+	cfg.SettleWindow, cfg.Retention, cfg.CleanupInterval = 50*time.Millisecond, time.Millisecond, 20*time.Millisecond
 	j := newJobs(t, d, cfg, Worker("clean", in.handle))
 	run(t, j)
 	for i := range 3 {
