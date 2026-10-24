@@ -501,9 +501,9 @@ func newMigrateMarkAppliedCmd() *cobra.Command {
 the one manual intervention, for a schema repaired by hand — after a
 MySQL migration stopped halfway and its remaining statements were run
 manually, say, or for tables a v2 database already has. The version is
-looked up among the application's files and every battery's; when two
-schemas share it, as identity's and rbac's first migrations do, --owner
-names the one: app, or the battery.`,
+looked up among the application's files and every battery's; only when
+an application file shares its version with a battery's does --owner have
+to name the one: app, or the battery.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, version := cmd.Context(), args[0]

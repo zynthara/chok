@@ -363,35 +363,53 @@ func TestMigrate_BatteryOwners(t *testing.T) {
 		t.Fatalf("an unknown battery: %v", err)
 	}
 
-	// identity's and rbac's first migrations share their version: marking
-	// it needs the owner, and then records rbac's without running it.
-	if _, err := run(t, "migrate", "mark-applied", "20261024000001"); err == nil || !strings.Contains(err.Error(), "belongs to identity and rbac; name one with --owner") {
+	// An application migration that happens to share rbac's version:
+	// marking that version needs the owner, and --owner rbac records
+	// rbac's without running it while the application's stays pending.
+	for _, d := range dialects {
+		dir := filepath.Join("migrations", d)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "20261024000003_same_version.sql"), []byte(ddl(d, "cli_clash")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := run(t, "migrate", "mark-applied", "20261024000003"); err == nil || !strings.Contains(err.Error(), "belongs to app and rbac; name one with --owner") {
 		t.Fatalf("mark-applied of a shared version: %v", err)
 	}
-	out, err = run(t, "migrate", "mark-applied", "20261024000001", "--owner", "rbac")
-	if err != nil || out != "marked  rbac  20261024000001_create_casbin_rule  applied, without running it (it was pending)\n" {
+	out, err = run(t, "migrate", "mark-applied", "20261024000003", "--owner", "rbac")
+	if err != nil || out != "marked  rbac  20261024000003_create_casbin_rule  applied, without running it (it was pending)\n" {
 		t.Fatalf("mark-applied --owner rbac: %v\n%s", err, out)
 	}
 	if hasTable(t, cfg, "casbin_rule") {
 		t.Fatal("mark-applied created casbin_rule")
 	}
-	if _, err := run(t, "migrate", "mark-applied", "20261024000001", "--owner", "billing"); err == nil || !strings.Contains(err.Error(), "want app or one of identity, jobs, rbac") {
+	if _, err := run(t, "migrate", "mark-applied", "20261024000003", "--owner", "billing"); err == nil || !strings.Contains(err.Error(), "want app or one of identity, jobs, rbac") {
 		t.Fatalf("an unknown owner: %v", err)
 	}
 	out, _ = run(t, "migrate", "status")
-	if got := stateOf(t, out, "rbac", "20261024000001"); !strings.HasPrefix(got, "applied ") {
+	if got := stateOf(t, out, "rbac", "20261024000003"); !strings.HasPrefix(got, "applied ") {
 		t.Fatalf("rbac once marked, listed from the ledger: %s\n%s", got, out)
+	}
+	if got := stateOf(t, out, "app", "20261024000003"); got != "pending" {
+		t.Fatalf("the application's migration of the same version: %s\n%s", got, out)
+	}
+	if hasTable(t, cfg, "cli_clash") {
+		t.Fatal("mark-applied --owner rbac ran the application's migration")
 	}
 }
 
 // TestMigrate_KnowsEveryBatterySchema: the command carries the migrations
 // of exactly the batteries that register a schema, each with files for
-// every dialect, named as package db reads them.
+// every dialect, named as package db reads them, and no two battery
+// migrations share a version.
 func TestMigrate_KnowsEveryBatterySchema(t *testing.T) {
 	if got := knownBatteries(); !slices.Equal(got, []string{"identity", "jobs", "rbac"}) {
 		t.Fatalf("batteries %q", got)
 	}
 	name := regexp.MustCompile(`^\d{14}_[A-Za-z0-9_-]+\.sql$`)
+	versions := map[string]string{} // version → battery
 	for _, b := range knownBatteries() {
 		var per [][]string
 		for _, d := range dialects {
@@ -410,6 +428,15 @@ func TestMigrate_KnowsEveryBatterySchema(t *testing.T) {
 		}
 		if len(per[0]) == 0 || !slices.Equal(per[0], per[1]) || !slices.Equal(per[0], per[2]) {
 			t.Errorf("%s: the dialects have different migrations: %q", b, per)
+		}
+		// Every battery migration has a version of its own, so
+		// db.MarkApplied finds exactly one without --owner.
+		for _, f := range per[0] {
+			v := f[:14]
+			if other, dup := versions[v]; dup {
+				t.Errorf("version %s belongs to both %s and %s", v, other, b)
+			}
+			versions[v] = b
 		}
 	}
 }

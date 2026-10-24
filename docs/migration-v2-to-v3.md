@@ -380,16 +380,16 @@ identities 的索引与 audit_logs 的列改到一致，再登记电池的版本
 SQL）：
 
 ```sh
-chok migrate mark-applied 20261024000001 --owner identity   # users、identities
-chok migrate mark-applied 20261024000002 --owner identity   # audit_logs
-chok migrate mark-applied 20261024000001 --owner rbac       # casbin_rule
-chok migrate status --battery identity --battery rbac       # 全部 applied
+chok migrate mark-applied 20261024000001   # identity：users、identities
+chok migrate mark-applied 20261024000002   # identity：audit_logs
+chok migrate mark-applied 20261024000003   # rbac：casbin_rule
+chok migrate status --battery identity --battery rbac   # 全部 applied
 ```
 
-identity 与 rbac 的第一个迁移版本号相同，所以要用 `--owner` 指明；不指明时
-`mark-applied` 会报出共享这个版本的 owner。`db.migrate: auto` 的库不用登记：
-auto 模式下电池不写账本，AutoMigrate 会补上缺的列与索引，但不会改名列——
-`before` / `after` 两列仍要手工改名。
+版本被多个 schema 共享时用 `--owner` 指明。
+
+`db.migrate: auto` 的库不用登记：auto 模式下电池不写账本，AutoMigrate 会补上缺的列
+与索引，但不会改名列——`before` / `after` 两列仍要手工改名。
 
 ## 6. jobs（scheduler + outbox）
 

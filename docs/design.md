@@ -401,7 +401,7 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   `chok_migrations`：应用的 owner 加上账本里已有或 `--battery` 指定的电池。
   `create` 在每个方言目录写一个空文件，版本是当前 UTC 时间；`status` 不改任何
   东西；`up` 与 `mark-applied` 拒绝 `migrate: auto` 的库；几个 schema 共享一个
-  版本号时（identity 与 rbac 的第一个迁移），`mark-applied --owner` 指明哪一个。
+  版本号时，`mark-applied --owner` 指明哪一个。
 - `chok openapi export <url> [--out file]`：保存运行中应用的 OpenAPI 文档，
   JSON 或 YAML。
 - `chok version`：本命令构建自的 chok 版本、VCS 修订与工具链。
