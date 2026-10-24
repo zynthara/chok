@@ -87,8 +87,9 @@ func (s *Store[T]) write(ctx context.Context, loc Locator, opts []where.Option) 
 // Update writes ch to the row loc names and advances its version. The
 // lock is where.Version, else the version Patch(...).Onto carried: when
 // the row has moved past it, Update fails with VersionConflictError, and
-// on success the object given to Onto holds the new version. A row the
-// caller may not see is a NotFoundError.
+// on success the object given to Onto holds the new values, version and
+// updated_at, ready to return. A row the caller may not see is a
+// NotFoundError.
 func (s *Store[T]) Update(ctx context.Context, loc Locator, ch *Changes, opts ...where.Option) error {
 	b, err := ch.build(ctx, s.updateFields, s.schema)
 	if err != nil {
@@ -110,16 +111,21 @@ func (s *Store[T]) Update(ctx context.Context, loc Locator, ch *Changes, opts ..
 	if lock > 0 {
 		tx = tx.Where(s.table()+".version = ?", lock)
 	}
+	now := tx.NowFunc()
 	b.payload["version"] = gorm.Expr("version + 1")
-	res := tx.Select(append(b.columns, "version")).Updates(b.payload)
+	b.payload["updated_at"] = now
+	res := tx.Select(append(b.columns, "version", "updated_at")).Updates(b.payload)
 	if res.Error != nil {
 		return s.mapError(res.Error)
 	}
 	if res.RowsAffected == 0 {
 		return s.missed(ctx, loc, lock)
 	}
-	if b.model != nil && lock > 0 {
-		b.model.Version = lock + 1
+	if b.model != nil {
+		b.model.UpdatedAt = now
+		if lock > 0 {
+			b.model.Version = lock + 1
+		}
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/db"
@@ -111,16 +112,22 @@ func TestPatch_IsEmpty(t *testing.T) {
 func TestPatch_OntoAppliesAndAdvances(t *testing.T) {
 	s, p := patchStore(t)
 	ctx := t.Context()
+	created := p.UpdatedAt
+	time.Sleep(5 * time.Millisecond)
 	ch := store.Patch(&patchReq{ID: p.RID, Title: new("changed"), Kind: new(patchKind("published"))}).Onto(p)
 	if err := s.Update(ctx, store.RID(p.RID), ch); err != nil {
 		t.Fatal(err)
 	}
-	if p.Title != "changed" || p.Kind != "published" || p.Version != 2 {
+	if p.Title != "changed" || p.Kind != "published" || p.Version != 2 || !p.UpdatedAt.After(created) {
 		t.Fatalf("Onto's object: %+v", p)
 	}
 	got, _ := s.Get(ctx, store.RID(p.RID))
 	if got.Title != "changed" || got.Kind != "published" || got.Version != 2 || got.Extra != "x" {
 		t.Fatalf("stored %+v", got)
+	}
+	// The object is what was stored, to the column's precision.
+	if d := got.UpdatedAt.Sub(p.UpdatedAt); d < -time.Millisecond || d > time.Millisecond {
+		t.Fatalf("updated_at %v in the object, %v stored", p.UpdatedAt, got.UpdatedAt)
 	}
 }
 
