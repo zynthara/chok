@@ -1,0 +1,25 @@
+# blog — the chok v3 quickstart.
+#
+# Every key is checked: a misspelled one fails startup with a suggestion.
+# Every key can also be set from the environment, named after its path:
+# BLOG_HTTP_ADDR, BLOG_DB_SQLITE_PATH, BLOG_AUTH_SIGNING_KEY, ...
+log:
+  level: info
+
+http:
+  addr: ":8080"
+  openapi:
+    title: Blog API
+
+db:
+  driver: sqlite
+  sqlite:
+    path: blog.db
+  store:
+    # Writing an owned row without a logged-in user fails closed.
+    require_principal: true
+
+auth:
+  # signing_key is a secret of at least 32 bytes: set it through
+  # BLOG_AUTH_SIGNING_KEY instead of writing it here.
+  token_ttl: 2h
