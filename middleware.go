@@ -29,6 +29,7 @@ type ctxKey int
 const (
 	requestIDKey ctxKey = iota
 	clientIPKey
+	appKey // the *App serving the request, for WriteError
 )
 
 // RequestID returns the request's ID: the X-Request-Id it arrived with
@@ -172,6 +173,7 @@ func (a *App) requestID(next http.Handler) http.Handler {
 		w.Header().Set(requestIDHeader, id)
 		ctx, _ := reqinfo.New(r.Context())
 		ctx = context.WithValue(ctx, requestIDKey, id)
+		ctx = context.WithValue(ctx, appKey, a)
 		ctx = withLogger(ctx, a.logger.With("request_id", id))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

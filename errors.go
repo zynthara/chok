@@ -137,7 +137,20 @@ func (a *App) resolve(ctx context.Context, err error) *Error {
 	return ErrInternal.Wrap(err)
 }
 
-// writeError renders err as the envelope; a 5xx logs its cause.
+// WriteError renders err as the error envelope, the way a handler's
+// returned error is rendered: the App's ErrorHook first, then *Error,
+// Coder, validation errors and expired deadlines, anything else a 500;
+// request_id in the body and, when the metadata carries retry_after, a
+// Retry-After header. It is for middleware, which has no error to
+// return: a handler returns its error instead. Inside an App's handler
+// chain it uses that App's ErrorHook; elsewhere it renders without one.
+func WriteError(w http.ResponseWriter, r *http.Request, err error) {
+	a, _ := r.Context().Value(appKey).(*App)
+	a.writeError(w, r, err)
+}
+
+// writeError renders err as the envelope; a 5xx logs its cause. A nil
+// App renders without an ErrorHook.
 func (a *App) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	e := a.resolve(ctx, err)

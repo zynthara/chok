@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 
@@ -68,4 +69,25 @@ func ExampleCoder() {
 		fmt.Println(e.Code, e.Reason, e.Message, e.Metadata["sku"])
 	}
 	// Output: 409 Conflict A-1 is out of stock A-1
+}
+
+// Middleware has no error to return; WriteError renders one as the
+// envelope a handler's error would get.
+func ExampleWriteError() {
+	requireKey := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("X-Api-Key") == "" {
+				chok.WriteError(w, r, chok.ErrUnauthorized.Msgf("X-Api-Key is required"))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	app := chok.New(chok.MustLoad[chok.Base]("example", chok.Args(nil)), chok.Logger(slog.New(slog.DiscardHandler)))
+	chok.GET(app.Group("/api", requireKey), "/ping", func(context.Context, *chok.None) (string, error) { return "pong", nil })
+
+	rec := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/ping", nil))
+	fmt.Println(rec.Code)
+	// Output: 401
 }
