@@ -1,0 +1,29 @@
+# migrations/
+
+SQL migrations for `db.migrate: versioned`. While chok.yaml says
+`migrate: auto` (the default) these files are not used: the app creates
+its tables from the models it passes to `db.Tables`.
+
+main.go embeds this directory, so the binary carries its migrations.
+A file is named `<14-digit version>_<name>.sql` and sits in the
+directory of its dialect — `sqlite/`, `mysql/` or `postgres/` — since
+the SQL differs between them:
+
+    go tool chok migrate create create_notes   # one empty file per dialect
+    # write the SQL into each file
+    go tool chok migrate status                # what is applied, what is pending
+    go tool chok migrate up                    # apply the pending ones
+
+`migrate: versioned` applies the pending files when the app starts;
+`migrate: off` applies nothing and refuses to start while any is
+pending, so `chok migrate up` (or your own tooling) runs them first.
+
+Migrations only move forward. Every applied file is recorded in the
+`chok_migrations` table with a checksum: changing an applied file stops
+the app from starting, so a fix is a new migration. On MySQL, whose DDL
+commits as it goes, a file that fails halfway resumes after its last
+applied statement on the next run. When a schema was repaired by hand,
+
+    go tool chok migrate mark-applied <version>
+
+records the migration as applied without running it.

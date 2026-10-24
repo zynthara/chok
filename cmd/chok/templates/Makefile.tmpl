@@ -1,0 +1,29 @@
+.DEFAULT_GOAL := run
+
+.PHONY: run
+run: ## Serve with chok.yaml
+	go run .
+
+.PHONY: check-config
+check-config: ## Validate chok.yaml (and {{.EnvPrefix}}_* variables) and print it
+	go run . --check-config
+
+.PHONY: build
+build: ## Build the {{.Name}} binary
+	go build -o {{.Name}} .
+
+.PHONY: test
+test: ## Run the tests
+	go test ./...
+
+.PHONY: tidy
+tidy: ## Tidy go.mod and go.sum
+	go mod tidy
+
+.PHONY: migrate-status
+migrate-status: ## Versioned migrations: applied and pending
+	go tool chok migrate status
+
+.PHONY: migrate-up
+migrate-up: ## Apply the pending versioned migrations
+	go tool chok migrate up

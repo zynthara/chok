@@ -1,0 +1,76 @@
+// Command {{.Name}} is a chok v3 application: one strict configuration in
+// chok.yaml, a database, and a JSON API over one resource.
+//
+//	go run .                    # serves :8080
+//	go run . --check-config     # validates the configuration and exits
+//
+// Every configuration key is listed in
+// https://github.com/zynthara/chok/blob/main/docs/config.md.
+package main
+
+import (
+	"context"
+	"embed"
+	"io/fs"
+
+	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/v3/store"
+)
+
+// Config is chok.yaml: chok.Base brings the app, http and log sections.
+type Config struct {
+	chok.Base
+	DB db.Config `yaml:"db"`
+}
+
+// Note is the example resource. SoftDeleteModel gives it a prefixed public
+// id, a version for optimistic locking and soft delete; store tags name
+// the fields the API may filter on (query) and change (update).
+type Note struct {
+	db.SoftDeleteModel
+	Title string `json:"title" store:"query,update" gorm:"size:200;not null"`
+	Body  string `json:"body"  store:"update"       gorm:"type:text"`
+}
+
+// RIDPrefix makes the public ids read note_….
+func (Note) RIDPrefix() string { return "note" }
+
+type createNote struct {
+	Title string `json:"title" validate:"required,max=200"`
+	Body  string `json:"body"`
+}
+
+type noteID struct {
+	ID string `path:"id" validate:"required"`
+}
+
+// migrations holds the SQL files of db.migrate: versioned (see
+// migrations/README.md); migrate: auto creates the tables from the models.
+//
+//go:embed migrations
+var migrations embed.FS
+
+func main() {
+	cfg := chok.MustLoad[Config]("{{.Name}}")
+	app := chok.New(cfg.Base)
+
+	files, _ := fs.Sub(migrations, "migrations")
+	d := db.MustOpen(cfg.DB, db.Tables(db.Table(&Note{})), db.Migrations(files))
+	app.Use(d) // health on /healthz, closed when the app stops
+
+	notes := store.New[Note](d)
+	api := app.Group("/api/v1")
+	chok.POST(api, "/notes", func(ctx context.Context, req *createNote) (*Note, error) {
+		n := &Note{Title: req.Title, Body: req.Body}
+		return n, notes.Create(ctx, n)
+	}, chok.Created())
+	chok.List(api, "/notes", notes) // ?page=&size=&order=title:asc&title=
+	chok.GET(api, "/notes/{id}", func(ctx context.Context, req *noteID) (*Note, error) {
+		return notes.Get(ctx, store.RID(req.ID))
+	})
+	chok.DELETE(api, "/notes/{id}", func(ctx context.Context, req *noteID) (chok.None, error) {
+		return chok.None{}, notes.Delete(ctx, store.RID(req.ID))
+	})
+	app.Execute()
+}

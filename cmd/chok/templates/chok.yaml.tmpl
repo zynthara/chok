@@ -1,0 +1,23 @@
+# {{.Name}} — chok configuration.
+#
+# Every key is checked: a misspelled one fails startup with a suggestion.
+# Every key can also be set from the environment, named after its path:
+# {{.EnvPrefix}}_HTTP_ADDR, {{.EnvPrefix}}_DB_DRIVER, {{.EnvPrefix}}_DB_SQLITE_PATH, ...
+# `go run . --check-config` prints the configuration in effect.
+log:
+  level: info        # debug | info | warn | error; SIGHUP re-reads it
+  format: json       # json | text
+
+http:
+  addr: ":8080"
+  openapi:
+    title: {{.Name}} API
+    # Nothing here logs users in yet, so no route asks for a bearer token
+    # in /openapi.json. Turn it back on with an authenticating battery.
+    bearer_auth: false
+
+db:
+  driver: sqlite     # sqlite | mysql | postgres
+  migrate: auto      # auto | versioned | off — see migrations/README.md
+  sqlite:
+    path: {{.Name}}.db
