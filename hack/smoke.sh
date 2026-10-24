@@ -24,8 +24,11 @@ fail() {
 go build -o "$work/blog" ./examples/blog
 
 # The binary reads examples/blog/chok.yaml; the environment overrides it.
+# The signing key is a fixed development key: a smoke test is not
+# production, and a real deployment generates its own.
 (cd examples/blog && exec env BLOG_HTTP_ADDR=127.0.0.1:0 BLOG_HTTP_DRAIN_DELAY=0s \
-	BLOG_DB_SQLITE_PATH="$work/blog.db" "$work/blog" >"$work/log" 2>&1) &
+	BLOG_DB_SQLITE_PATH="$work/blog.db" BLOG_AUTH_SIGNING_KEY=smoke-test-signing-key-not-a-secret-32b \
+	"$work/blog" >"$work/log" 2>&1) &
 pid=$!
 
 # The App logs the address it bound: {"msg":"chok: http listening","addr":"127.0.0.1:NNNNN"}.

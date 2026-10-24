@@ -1,17 +1,16 @@
-// Command blog is the chok v3 quickstart: a blog API where every post
-// belongs to the user who wrote it.
+// Command blog is the chok v3 quickstart: a JWT-guarded blog API where
+// every post belongs to the user who wrote it.
 //
 //	cd examples/blog
-//	go run .
+//	BLOG_AUTH_SIGNING_KEY=$(openssl rand -hex 32) go run .
 //
-// Until the identity battery arrives (WP6), devauthn.go stands in for
-// login. The walkthrough with curl commands is README.md next to this
-// file.
+// The walkthrough with curl commands is README.md next to this file.
 package main
 
 import (
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/v3/identity"
 	"github.com/zynthara/chok/v3/store"
 )
 
@@ -20,7 +19,8 @@ import (
 // or in a BLOG_* variable fails startup with a suggestion.
 type Config struct {
 	chok.Base
-	DB db.Config `yaml:"db"`
+	DB   db.Config       `yaml:"db"`
+	Auth identity.Config `yaml:"auth"`
 }
 
 // Post is the blog's one resource. OwnedSoftDeleteModel gives it a
@@ -43,17 +43,18 @@ func main() {
 	app.Execute()
 }
 
-// setup wires the database and the routes; blog_test.go reuses it.
+// setup wires the batteries and the routes; blog_test.go reuses it.
 func setup(app *chok.App, cfg Config) {
 	// Titles are unique per author among live posts; deleting a post
 	// frees its title.
 	d := db.MustOpen(cfg.DB, db.Tables(
 		db.Table(&Post{}, db.SoftUnique("uk_post_title_owner", "title", "owner_id")),
 	))
-	app.Use(d)
+	auth := identity.MustNew(cfg.Auth, d)
+	app.Use(d, auth)
 
 	posts := store.New[Post](d)
-	api := app.Group("/api/v1", devAuthn)
+	api := app.Group("/api/v1", auth.Authn())
 	chok.POST(api, "/posts", createPost(posts), chok.Created(), chok.Summary("Create a post"))
 	chok.List(api, "/posts", posts, chok.Summary("List my posts"))
 	chok.GET(api, "/posts/{id}", getPost(posts))
