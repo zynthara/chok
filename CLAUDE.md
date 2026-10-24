@@ -41,8 +41,8 @@ no battery and no gorm. A new public package is an orchestrator decision.
 
 It runs tidy-check, fmt-check (gofmt -s), vet, golangci-lint (blocking),
 fix-check (`go fix -diff` empty), test (SQLite, `-race -count=1`), test-pg,
-test-mysql, budget and smoke (from WP5) in that order — exactly what CI runs.
-All three dialect lanes must be green; MySQL is not optional.
+test-mysql, budget and smoke in that order: CI's verify job (its apidiff
+job only reports until v3.0.0). All dialect lanes must be green, MySQL too.
 
 ### Database lanes
 

@@ -1,7 +1,8 @@
-# CI runs exactly what a local `make verify` runs: tidy / gofmt / vet /
-# golangci-lint / go fix, the SQLite suite, the Postgres and MySQL lanes,
-# the API budget and (from WP5) the examples/blog smoke test. Every gate
-# blocks; nothing here is advisory.
+# The verify job runs exactly what a local `make verify` runs: tidy /
+# gofmt / vet / golangci-lint / go fix, the SQLite suite, the Postgres and
+# MySQL lanes, the API budget and the examples/blog smoke test. Every gate
+# in it blocks. The apidiff job reports incompatible public API changes
+# since the last v3 release and is advisory while v3 is in alpha.
 
 name: ci
 
@@ -73,3 +74,23 @@ jobs:
           CHOK_TEST_PG_DSN: postgres://chok:chok@localhost:5432/choktest?sslmode=disable
           CHOK_TEST_MYSQL_DSN: root:root@tcp(localhost:3306)/?parseTime=true
         run: make verify
+
+  # Incompatible changes to the public API since the last v3 release
+  # (hack/apidiff.sh; it passes when CHANGELOG.md changed alongside them).
+  # Advisory during the alpha: continue-on-error keeps a red apidiff from
+  # failing the run. Drop continue-on-error before tagging v3.0.0.
+  apidiff:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the baseline tag and its commit
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: apidiff
+        run: make apidiff

@@ -93,6 +93,10 @@ smoke: ## Boot examples/blog on a random port, probe /healthz, SIGINT it, expect
 
 ##@ Helpers
 
+.PHONY: apidiff
+apidiff: ## Incompatible public API changes since the last v3 release (advisory in CI until v3.0.0)
+	@bash hack/apidiff.sh
+
 .PHONY: tidy
 tidy: ## go mod tidy
 	$(GO) mod tidy
