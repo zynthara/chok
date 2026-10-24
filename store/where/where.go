@@ -295,9 +295,10 @@ func Count() Option {
 	}
 }
 
-// Preload loads relation, a gorm association of the model, with the
-// rows. The rows were fenced by the store; the association query is not
-// fenced again, so preload only what the rows' readers may see.
+// Preload loads relation, a gorm association of the model ("Author", a
+// path such as "Comments.Author", or "*" for every direct association),
+// with the rows. An association whose model has an owner is fenced the
+// way a store of that model would fence it: the caller's rows only.
 func Preload(relation string) Option {
 	return func(tx *gorm.DB, cfg *Config, _ map[string]string) (*gorm.DB, error) {
 		cfg.Preloads = append(cfg.Preloads, relation)
