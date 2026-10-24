@@ -87,6 +87,9 @@ func Open(cfg Config, opts ...Option) (*DB, error) {
 	if !ownerName.MatchString(oc.owner) {
 		return nil, fmt.Errorf("db: owner %q must be lower-case letters, digits, - or _", oc.owner)
 	}
+	// The caller keeps its slices: the handle's policy must not change
+	// when they do.
+	cfg.Store = cfg.Store.clone()
 	d := &DB{cfg: cfg, logger: oc.logger}
 	gcfg := &gorm.Config{
 		Logger: &gormLogger{d: d, slow: cfg.SlowThreshold},

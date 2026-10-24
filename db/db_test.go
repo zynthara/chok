@@ -369,12 +369,21 @@ func TestHealthCloseNameLogger(t *testing.T) {
 
 func TestStorePolicy_IsACopy(t *testing.T) {
 	cfg := dbtest.Config(t)
+	on := true
 	cfg.Store.AdminRoles = []string{"admin"}
+	cfg.Store.OwnerScope = &on
 	d := dbtest.OpenConfig(t, cfg)
 	p := d.StorePolicy()
 	p.AdminRoles[0] = "changed"
-	if d.StorePolicy().AdminRoles[0] != "admin" {
+	*p.OwnerScope = false
+	if got := d.StorePolicy(); got.AdminRoles[0] != "admin" || !*got.OwnerScope {
 		t.Fatal("the policy handed out must not alias the handle's")
+	}
+	// Nor does the handle alias the configuration it was opened with.
+	cfg.Store.AdminRoles[0] = "mallory"
+	on = false
+	if got := d.StorePolicy(); got.AdminRoles[0] != "admin" || !*got.OwnerScope {
+		t.Fatalf("editing the config after Open changed the handle: %+v", got)
 	}
 }
 
