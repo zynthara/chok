@@ -146,6 +146,21 @@ func Defaults(dst any) error {
 	return nil
 }
 
+// Check runs the validate tags and Validate methods on the struct v points
+// to, as Load does, for configuration built in code.
+func Check(v any) error {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("config: Check needs a pointer to a struct, got %T", v)
+	}
+	d := &decoder{}
+	d.validateTree(rv.Elem())
+	if len(d.problems) > 0 {
+		return &Error{Problems: dedupe(d.problems)}
+	}
+	return nil
+}
+
 // locate picks the file: --config, then {PREFIX}_CONFIG, then the code's,
 // then the first of chok.yaml, {name}.yaml and configs/{name}.yaml that
 // exists.

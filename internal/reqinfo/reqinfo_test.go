@@ -5,11 +5,13 @@ import (
 	"testing"
 )
 
+type otherKey struct{}
+
 // The router writes the route into the Info an outer layer created; the
 // outer layer reads it after the handler, through its own context.
 func TestInfo_OuterContextSeesInnerWrite(t *testing.T) {
 	outer, info := New(context.Background())
-	inner := context.WithValue(outer, struct{}{}, "derived")
+	inner := context.WithValue(outer, otherKey{}, "derived")
 	From(inner).Route = "/posts/{id}"
 	if info.Route != "/posts/{id}" || From(outer).Route != "/posts/{id}" {
 		t.Fatalf("got %q", info.Route)
