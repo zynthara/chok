@@ -80,8 +80,10 @@ test-mysql: ## DB-backed packages on MySQL (needs CHOK_TEST_MYSQL_DSN)
 	  CHOK_TEST_DRIVER=mysql $(GO) test -race -count=1 $(DB_PKGS); fi
 
 .PHONY: budget
-budget: ## API surface budget (hack/apibudget.sh, limits in hack/budget.txt)
+budget: ## API surface and config key budgets (limits in hack/budget.txt)
 	@bash hack/apibudget.sh
+	@echo
+	@bash hack/configkeys.sh
 
 .PHONY: smoke
 smoke: ## Boot examples/blog, probe /healthz, SIGINT it (enabled in WP5)

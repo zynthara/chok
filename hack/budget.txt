@@ -33,6 +33,4 @@ limit option_ctors       40   # store/where predicates are query DSL, not counte
 limit direct_deps        24
 limit blog_app_lines     120
 limit blog_chok_imports  4
-
-# Not measured here: config leaf keys <= 110 (plan §6 names
-# hack/configkeys.sh, due once the first Config types land).
+limit config_keys        110  # leaf keys of chok.Base and the batteries' Config (hack/configkeys.sh)
