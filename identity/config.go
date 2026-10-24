@@ -22,8 +22,10 @@ import (
 //
 // SigningKey is a secret: set it from the environment
 // (BLOG_AUTH_SIGNING_KEY for an app loaded as "blog"), never in a file.
-// Zero durations and an empty Prefix in a Config built in code take the
-// defaults below.
+// New gives an empty Prefix and a zero TokenTTL, RefreshTTL, ResetTTL or
+// Audit.AsyncBuffer the defaults below, whether the Config comes from a
+// file or from code; a zero login throttle is off and a zero
+// Audit.Retention keeps records forever.
 type Config struct {
 	// Prefix is where the routes mount: {prefix}/register, {prefix}/login, ...
 	Prefix string `yaml:"prefix" default:"/auth"`
@@ -34,7 +36,7 @@ type Config struct {
 	TokenTTL time.Duration `yaml:"token_ttl" default:"2h"`
 	// RefreshTTL bounds a session: refresh-token issues fresh tokens until
 	// RefreshTTL after the login that started the session, then the user
-	// logs in again. 0 lets a session be refreshed forever.
+	// logs in again. Every session ends: 0 takes the default.
 	RefreshTTL time.Duration `yaml:"refresh_ttl" default:"168h"`
 	// ResetTTL is how long a password-reset token is valid.
 	ResetTTL time.Duration `yaml:"reset_ttl" default:"15m"`
