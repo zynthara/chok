@@ -446,3 +446,16 @@ func readLog(t *testing.T, path string) string {
 	}
 	return string(raw)
 }
+
+func TestHealth_PathFromConfig(t *testing.T) {
+	base := testBase(t)
+	base.HTTP.Health.Path = "/status"
+	app := New(base, Logger(quiet()))
+	for path, want := range map[string]int{"/status": http.StatusOK, "/healthz": http.StatusNotFound, "/livez": http.StatusOK} {
+		rec := httptest.NewRecorder()
+		app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != want {
+			t.Fatalf("%s = %d, want %d", path, rec.Code, want)
+		}
+	}
+}

@@ -49,7 +49,7 @@ func ClientIP(ctx context.Context) string {
 // the Instrumenters, AccessLog, Timeout, CORS, CSRF, the Wrap middleware,
 // then the routes.
 func (a *App) buildHandler() http.Handler {
-	var h http.Handler = a.mux
+	var h http.Handler = http.HandlerFunc(a.serveMux)
 	for _, mw := range slices.Backward(a.wrap) {
 		h = mw(h)
 	}
@@ -83,10 +83,17 @@ type statusWriter struct {
 	bytes  int64
 }
 
+// WriteHeader passes informational codes through and drops a second
+// final status, which net/http would only log as superfluous.
 func (w *statusWriter) WriteHeader(code int) {
-	if w.status == 0 {
-		w.status = code
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(code)
+		return
 	}
+	if w.status != 0 {
+		return
+	}
+	w.status = code
 	w.ResponseWriter.WriteHeader(code)
 }
 
@@ -144,10 +151,13 @@ func (a *App) recover(next http.Handler) http.Handler {
 			if len(stack) > 8<<10 {
 				stack = stack[:8<<10]
 			}
-			ctx := r.Context()
-			LoggerFrom(ctx).ErrorContext(ctx, "chok: panic in handler", "panic", fmt.Sprint(p), "stack", string(stack))
+			// The request this layer holds predates the request id; the
+			// response header carries it.
+			id := sw.Header().Get(requestIDHeader)
+			ctx := context.WithValue(r.Context(), requestIDKey, id)
+			a.logger.ErrorContext(ctx, "chok: panic in handler", "request_id", id, "panic", fmt.Sprint(p), "stack", string(stack))
 			if sw.status == 0 {
-				a.writeError(sw, r, ErrInternal)
+				a.writeError(sw, r.WithContext(ctx), ErrInternal)
 			}
 		}()
 		next.ServeHTTP(sw, r)

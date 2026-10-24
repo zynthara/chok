@@ -109,8 +109,8 @@ type ErrorHook func(ctx context.Context, err error) *Error
 func OnError(h ErrorHook) Option { return func(a *App) { a.onError = h } }
 
 // resolve maps any error to its response: the ErrorHook, then *Error,
-// then Coder, then validator errors; anything else is a 500 whose cause
-// is only logged.
+// then Coder, then validator errors, then an expired deadline (504);
+// anything else is a 500 whose cause is only logged.
 func (a *App) resolve(ctx context.Context, err error) *Error {
 	if a != nil && a.onError != nil {
 		if e := a.onError(ctx, err); e != nil {
@@ -130,6 +130,9 @@ func (a *App) resolve(ctx context.Context, err error) *Error {
 	}
 	if ve, ok := errors.AsType[validator.ValidationErrors](err); ok {
 		return validationError(ve, nil)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errTimeout.Wrap(err)
 	}
 	return ErrInternal.Wrap(err)
 }

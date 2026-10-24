@@ -28,7 +28,8 @@ type App struct {
 	onError ErrorHook
 	reload  *loaded
 
-	mux *http.ServeMux
+	mux    *http.ServeMux
+	routes routeTable
 
 	handlerOnce sync.Once
 	handler     http.Handler

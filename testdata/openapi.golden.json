@@ -1,0 +1,500 @@
+{
+	"openapi": "3.1.0",
+	"info": {
+		"title": "Golden API",
+		"version": "1.2.3"
+	},
+	"paths": {
+		"/api/v1/articles": {
+			"get": {
+				"summary": "List articles",
+				"operationId": "listArticles",
+				"tags": [
+					"articles"
+				],
+				"parameters": [
+					{
+						"name": "page",
+						"in": "query",
+						"description": "page number, from 1",
+						"schema": {
+							"type": "integer",
+							"minimum": 1
+						}
+					},
+					{
+						"name": "size",
+						"in": "query",
+						"description": "items per page",
+						"schema": {
+							"type": "integer",
+							"minimum": 1
+						}
+					},
+					{
+						"name": "order",
+						"in": "query",
+						"description": "field:asc or field:desc",
+						"schema": {
+							"type": "string",
+							"enum": [
+								"status:asc",
+								"status:desc",
+								"words:asc",
+								"words:desc"
+							]
+						}
+					},
+					{
+						"name": "status",
+						"in": "query",
+						"description": "equals",
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"name": "words",
+						"in": "query",
+						"description": "equals",
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/Page_article"
+								}
+							}
+						}
+					},
+					"default": {
+						"description": "Error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/Error"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearerAuth": []
+					}
+				]
+			},
+			"post": {
+				"summary": "Create article",
+				"operationId": "createArticle",
+				"tags": [
+					"articles"
+				],
+				"parameters": [
+					{
+						"name": "draft",
+						"in": "query",
+						"schema": {
+							"type": "boolean"
+						}
+					},
+					{
+						"name": "X-Trace-Id",
+						"in": "header",
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"author": {
+										"$ref": "#/components/schemas/author"
+									},
+									"meta": {
+										"type": "object",
+										"properties": {
+											"source": {
+												"type": "string"
+											}
+										}
+									},
+									"status": {
+										"type": "string",
+										"enum": [
+											"draft",
+											"published"
+										]
+									},
+									"tags": {
+										"type": "array",
+										"items": {
+											"type": "string",
+											"maxLength": 20
+										},
+										"maxItems": 5
+									},
+									"title": {
+										"type": "string",
+										"minLength": 3,
+										"maxLength": 200
+									},
+									"words": {
+										"type": "integer",
+										"minimum": 0,
+										"exclusiveMaximum": 100000
+									}
+								},
+								"required": [
+									"title"
+								]
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "Created",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/article"
+								}
+							}
+						}
+					},
+					"default": {
+						"description": "Error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/Error"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearerAuth": []
+					}
+				]
+			}
+		},
+		"/api/v1/articles/{id}": {
+			"get": {
+				"summary": "Get article",
+				"operationId": "getArticle",
+				"tags": [
+					"articles"
+				],
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/article"
+								}
+							}
+						}
+					},
+					"default": {
+						"description": "Error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/Error"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearerAuth": []
+					}
+				]
+			},
+			"delete": {
+				"summary": "Delete article",
+				"operationId": "deleteArticle",
+				"tags": [
+					"admin"
+				],
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "No Content"
+					},
+					"default": {
+						"description": "Error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/Error"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearerAuth": []
+					}
+				]
+			},
+			"patch": {
+				"summary": "Update article",
+				"operationId": "updateArticle",
+				"tags": [
+					"articles"
+				],
+				"deprecated": true,
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"status": {
+										"type": [
+											"string",
+											"null"
+										],
+										"enum": [
+											"draft",
+											"published"
+										]
+									},
+									"title": {
+										"type": [
+											"string",
+											"null"
+										],
+										"maxLength": 200
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "OK",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/article"
+								}
+							}
+						}
+					},
+					"default": {
+						"description": "Error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/Error"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearerAuth": []
+					}
+				]
+			}
+		},
+		"/auth/refresh-token": {
+			"post": {
+				"summary": "Refresh the access token",
+				"operationId": "refreshTheAccessToken",
+				"tags": [
+					"refresh-token"
+				],
+				"responses": {
+					"200": {
+						"description": "OK",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "object",
+									"additionalProperties": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					},
+					"default": {
+						"description": "Error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/Error"
+								}
+							}
+						}
+					}
+				},
+				"security": []
+			}
+		}
+	},
+	"components": {
+		"schemas": {
+			"Error": {
+				"type": "object",
+				"properties": {
+					"code": {
+						"type": "integer",
+						"description": "the HTTP status code"
+					},
+					"message": {
+						"type": "string"
+					},
+					"metadata": {
+						"type": "object",
+						"description": "details, such as fields for a validation failure"
+					},
+					"reason": {
+						"type": "string",
+						"description": "machine-readable, such as NotFound or Validation"
+					},
+					"request_id": {
+						"type": "string"
+					}
+				},
+				"required": [
+					"code",
+					"message",
+					"reason"
+				]
+			},
+			"Page_article": {
+				"type": "object",
+				"properties": {
+					"cursor": {
+						"type": "string"
+					},
+					"has_more": {
+						"type": "boolean"
+					},
+					"items": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/article"
+						}
+					},
+					"page": {
+						"type": "integer"
+					},
+					"size": {
+						"type": "integer"
+					},
+					"total": {
+						"type": "integer"
+					}
+				}
+			},
+			"article": {
+				"type": "object",
+				"properties": {
+					"author": {
+						"$ref": "#/components/schemas/author"
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"id": {
+						"type": "string"
+					},
+					"published": {
+						"type": [
+							"boolean",
+							"null"
+						]
+					},
+					"status": {
+						"type": "string"
+					},
+					"tags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"title": {
+						"type": "string"
+					},
+					"words": {
+						"type": "integer"
+					}
+				}
+			},
+			"author": {
+				"type": "object",
+				"properties": {
+					"email": {
+						"type": "string",
+						"format": "email"
+					},
+					"name": {
+						"type": "string"
+					}
+				}
+			}
+		},
+		"securitySchemes": {
+			"bearerAuth": {
+				"type": "http",
+				"scheme": "bearer",
+				"bearerFormat": "JWT"
+			}
+		}
+	}
+}

@@ -1,9 +1,12 @@
 package chok
 
 import (
+	"bytes"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/zynthara/chok/v3/internal/reqinfo"
 )
@@ -34,26 +37,30 @@ func (a *App) Router() Router { return &router{app: a} }
 func (a *App) Group(prefix string, mw ...Middleware) Router { return a.Router().Group(prefix, mw...) }
 
 func (r *router) Handle(method, pattern string, h http.Handler, mw ...Middleware) {
-	r.register(method, pattern, h, mw)
+	r.register(method, pattern, h, mw, nil)
 }
 
 func (r *router) Group(prefix string, mw ...Middleware) Router {
 	return &router{app: r.app, prefix: joinPath(r.prefix, prefix), mw: append(slices.Clone(r.mw), mw...)}
 }
 
-// register adds a route to the mux.
-func (r *router) register(method, pattern string, h http.Handler, mw []Middleware) {
+// register adds a route to the mux and, for the typed routes, to the
+// table the OpenAPI document is built from.
+func (r *router) register(method, pattern string, h http.Handler, mw []Middleware, doc *routeDoc) {
 	full := joinPath(r.prefix, pattern)
 	chain := append(slices.Clone(r.mw), mw...)
-	for _, c := range slices.Backward(chain) {
-		h = c(h)
+	for _, m := range slices.Backward(chain) {
+		h = m(h)
 	}
 	key := full
 	if method != "" {
 		key = method + " " + full
 	}
-	h = routeMarker(full, h)
-	r.app.mux.Handle(key, h)
+	r.app.mux.Handle(key, routeMarker(full, h))
+	if doc != nil {
+		doc.method, doc.path = method, full
+		r.app.routes.add(doc)
+	}
 }
 
 func joinPath(prefix, pattern string) string {
@@ -76,6 +83,70 @@ func routeMarker(pattern string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// routeTable is the documented routes in registration order.
+type routeTable struct {
+	mu   sync.Mutex
+	docs []*routeDoc
+}
+
+func (t *routeTable) add(d *routeDoc) {
+	t.mu.Lock()
+	t.docs = append(t.docs, d)
+	t.mu.Unlock()
+}
+
+func (t *routeTable) all() []*routeDoc {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.docs)
+}
+
+var errMethodNotAllowed = NewError(http.StatusMethodNotAllowed, "MethodNotAllowed", "method not allowed")
+
+// serveMux answers unmatched requests with the JSON envelope: 404, or
+// 405 with the Allow header; ServeMux's redirects pass through.
+func (a *App) serveMux(w http.ResponseWriter, r *http.Request) {
+	if _, pattern := a.mux.Handler(r); pattern != "" {
+		a.mux.ServeHTTP(w, r)
+		return
+	}
+	rec := &muxRecorder{header: http.Header{}}
+	a.mux.ServeHTTP(rec, r)
+	switch rec.code {
+	case http.StatusNotFound:
+		a.writeError(w, r, ErrNotFound)
+	case http.StatusMethodNotAllowed:
+		w.Header().Set("Allow", rec.header.Get("Allow"))
+		a.writeError(w, r, errMethodNotAllowed)
+	default:
+		maps.Copy(w.Header(), rec.header)
+		w.WriteHeader(rec.code)
+		_, _ = w.Write(rec.body.Bytes())
+	}
+}
+
+// muxRecorder captures what ServeMux answers an unmatched request with.
+type muxRecorder struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+func (r *muxRecorder) Header() http.Header { return r.header }
+
+func (r *muxRecorder) WriteHeader(code int) {
+	if r.code == 0 {
+		r.code = code
+	}
+}
+
+func (r *muxRecorder) Write(b []byte) (int, error) {
+	if r.code == 0 {
+		r.code = http.StatusOK
+	}
+	return r.body.Write(b)
 }
 
 // Handler returns the App's complete handler — the default middleware,

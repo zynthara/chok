@@ -99,9 +99,11 @@ func (a *App) snapshot() []*component {
 	return slices.Clone(a.components)
 }
 
-// mountBuiltins registers the probes; WP3 adds the OpenAPI document and
-// the debug endpoints.
+// mountBuiltins registers the probes, the OpenAPI document and its UI,
+// and the debug endpoints. They are not part of the document.
 func (a *App) mountBuiltins() {
+	a.mountOpenAPI()
+	a.mountDebug()
 	h := a.base.HTTP.Health
 	if !h.Enabled {
 		return
