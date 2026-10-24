@@ -16,6 +16,7 @@ import (
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/v3/internal/tracectx"
 )
 
 // The results and actor types an Event records. The values are stored and
@@ -33,8 +34,9 @@ const (
 // Event is one audit record: who did what to which resource, and how it
 // ended. Log takes one — Action is required, the rest optional — and fills
 // the blanks it can: the actor from the request's principal, its address
-// and request id, Result "success", OccurredAt now. ListFromQuery returns
-// events with ID and OccurredAt set.
+// and request id, the trace id when the binary links telemetry, Result
+// "success", OccurredAt now. ListFromQuery returns events with ID and
+// OccurredAt set.
 type Event struct {
 	// ID is the record's id (aud_…), set when it is written.
 	ID         string    `json:"id"`
@@ -187,8 +189,9 @@ func (a *Audit) LogSync(ctx context.Context, e Event) error {
 	return nil
 }
 
-// mergeContext fills the actor, its address and the request id from ctx
-// where e leaves them blank; what the caller set stays.
+// mergeContext fills the actor, its address, the request id and, when
+// telemetry is linked, the trace id from ctx where e leaves them blank;
+// what the caller set stays.
 func mergeContext(ctx context.Context, e Event) Event {
 	if e.ActorID == "" {
 		if p, ok := chok.PrincipalFrom(ctx); ok && p.UserID != "" {
@@ -203,6 +206,9 @@ func mergeContext(ctx context.Context, e Event) Event {
 	}
 	if e.RequestID == "" {
 		e.RequestID = chok.RequestID(ctx)
+	}
+	if e.TraceID == "" && tracectx.TraceID != nil {
+		e.TraceID = tracectx.TraceID(ctx)
 	}
 	return e
 }

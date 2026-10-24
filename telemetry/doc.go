@@ -46,5 +46,6 @@
 // them, and the spans go to stdout or, over OTLP/HTTP, to the collector
 // at tracing.endpoint. The tracer provider and the propagator become the
 // OpenTelemetry globals, so a client instrumented with otel's defaults
-// joins the request's trace.
+// joins the request's trace. A binary that links telemetry records the
+// trace id in identity's audit events.
 package telemetry

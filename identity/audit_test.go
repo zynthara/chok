@@ -12,6 +12,7 @@ import (
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/choktest"
+	"github.com/zynthara/chok/v3/internal/tracectx"
 )
 
 // auditOn returns an Identity with the audit log on.
@@ -414,5 +415,43 @@ func TestAudit_AdminAPI(t *testing.T) {
 	c2 := choktest.App(t, chok.Base{}, func(app *chok.App) { app.Use(auditOn(t, AuditConfig{AdminAPI: false})) })
 	if code := c2.GetJSON("/audit/logs", nil); code != http.StatusNotFound {
 		t.Fatalf("admin_api off = %d", code)
+	}
+}
+
+// TestAudit_FillsTheTraceIDFromTheContext: with the trace hook set, as
+// package telemetry sets it when the binary links it, Log and LogSync take
+// the trace id of the context; an explicit TraceID stays; without the
+// hook nothing is filled.
+func TestAudit_FillsTheTraceIDFromTheContext(t *testing.T) {
+	before := tracectx.TraceID
+	t.Cleanup(func() { tracectx.TraceID = before })
+	type traceKey struct{}
+	ctx := context.WithValue(t.Context(), traceKey{}, "4bf92f3577b34da6a3ce929d0e0e4736")
+
+	tracectx.TraceID = nil
+	if got := mergeContext(ctx, Event{Action: "x"}); got.TraceID != "" {
+		t.Fatalf("without the hook: %q", got.TraceID)
+	}
+	tracectx.TraceID = func(ctx context.Context) string {
+		id, _ := ctx.Value(traceKey{}).(string)
+		return id
+	}
+	if got := mergeContext(ctx, Event{Action: "x", TraceID: "explicit"}); got.TraceID != "explicit" {
+		t.Fatalf("an explicit trace id stays: %q", got.TraceID)
+	}
+	idn := auditOn(t, AuditConfig{})
+	if err := idn.Audit().LogSync(ctx, Event{Action: "post.publish"}); err != nil {
+		t.Fatal(err)
+	}
+	idn.Audit().Log(ctx, Event{Action: "post.archive"})
+	waitRows(t, idn, 2, 5*time.Second)
+	page, err := idn.Audit().ListFromQuery(t.Context(), url.Values{})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("%+v %v", page, err)
+	}
+	for _, e := range page.Items {
+		if e.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+			t.Fatalf("%s: trace id %q", e.Action, e.TraceID)
+		}
 	}
 }

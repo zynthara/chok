@@ -452,12 +452,3 @@ func TestLogs_OTelCarriesTheAppLogs(t *testing.T) {
 		t.Fatal("Close stops copying the logs")
 	}
 }
-
-// traceIDOf is the trace id of the span in ctx, "" without one.
-func traceIDOf(ctx context.Context) string {
-	sc := trace.SpanContextFromContext(ctx)
-	if !sc.HasTraceID() {
-		return ""
-	}
-	return sc.TraceID().String()
-}

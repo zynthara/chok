@@ -15,6 +15,7 @@ import (
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/choktest"
+	"github.com/zynthara/chok/v3/internal/tracectx"
 )
 
 type postRequest struct {
@@ -102,12 +103,13 @@ func TestMiddleware_SpanNamedAfterTheRoute(t *testing.T) {
 
 // TestMiddleware_ContinuesTheIncomingTrace: a W3C traceparent makes the
 // request's span a child of the caller's, in the caller's trace, and the
-// handler sees that span in its context.
+// handler sees that span in its context (through the hook identity's
+// audit reads).
 func TestMiddleware_ContinuesTheIncomingTrace(t *testing.T) {
 	tel, spans := tracing(t, Config{})
 	var inHandler string
 	h := tel.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		inHandler = traceIDOf(r.Context())
+		inHandler = tracectx.TraceID(r.Context())
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")

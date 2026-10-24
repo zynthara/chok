@@ -30,10 +30,24 @@ import (
 	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/internal/conf"
 	"github.com/zynthara/chok/v3/internal/logtap"
+	"github.com/zynthara/chok/v3/internal/tracectx"
 )
 
 // scope names the instrumentation in spans and log records.
 const scope = "github.com/zynthara/chok/v3/telemetry"
+
+// identity's audit events take the trace id of their context through
+// internal/tracectx, without importing OpenTelemetry.
+func init() { tracectx.TraceID = traceID }
+
+// traceID is the id of the trace ctx belongs to, "" when none.
+func traceID(ctx context.Context) string {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.HasTraceID() {
+		return ""
+	}
+	return sc.TraceID().String()
+}
 
 // Telemetry is the observability battery: a Prometheus registry, an
 // OpenTelemetry tracer provider and, with logs.otel, a bridge from the
