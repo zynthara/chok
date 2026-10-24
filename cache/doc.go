@@ -27,4 +27,8 @@
 // Redis entirely, so a request costs a database read rather than a
 // timeout, and Health stays nil. Without the breaker Health pings Redis,
 // and the App waits for it at start.
+//
+// Importing the package sends go-redis's own log lines (a dial that
+// failed, a connection dropped), process-wide, to slog.Default at warn
+// instead of to stderr.
 package cache

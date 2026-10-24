@@ -89,8 +89,9 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// Validate checks the parts of the section that are switched on. It runs
-// when chok.Load reads the configuration and again in New.
+// Validate checks the parts of the section that are switched on; the
+// exporter's name, a validate tag, is checked either way. It runs when
+// chok.Load reads the configuration and again in New.
 func (c *Config) Validate() error {
 	var errs []error
 	if c.Metrics.Enabled && !strings.HasPrefix(c.Metrics.Path, "/") {
