@@ -1,196 +1,120 @@
-# CLAUDE.md — Working on the chok framework
+# CLAUDE.md — working on chok v3
 
-> Loaded automatically by Claude Code on every session in this repo.
-> Keep under 200 lines or it gets truncated.
+> Loaded by Claude Code on every session in this repo; AGENTS.md points here.
+> Keep it under 120 lines.
 
-## What chok is
+## What chok v3 is
 
-A Go web framework that bundles HTTP + DB + cache + auth + scheduler +
-observability into one repository. Think "Rails for Go": single
-blessed implementation per capability, configuration over code.
+chok is an opinionated Go application toolkit that an app imports and wires
+with plain Go code — no kernel, no registry, no generated files. One strict
+typed config, typed HTTP handlers with runtime OpenAPI and a gorm-backed
+store with owner scoping cover a CRUD resource with four imports. Batteries
+(identity, jobs, telemetry, cache) are values you construct and hand to
+`app.Use`, never services you look up.
 
-- Module path: `github.com/zynthara/chok/v2` — **main is the v2
-  rewrite (in progress)**. v1 is sealed at tag `v0.1.4` (v1 module
-  path, security fixes only). Implementation SPEC lives in
-  `.private/docs/specs/v2-claude.md`; milestones M0-M5 in its §10.
-- Three immutable adjectives: **config-driven**, **single blessed
-  implementation**, **internally complex / externally trivial**
+- Module `github.com/zynthara/chok/v3`, Go 1.27 (toolchain go1.27.3), built on
+  `main`. v3 is a rewrite: v2 code is a porting source, not a base.
+- v2 is sealed on branch `v2` at `65651d4` (tags `v2.0.0-beta.N`); its source
+  is checked out read-only at `~/go/src/chok-v2` (a git worktree). Port by
+  copy + rewrite, never `git mv` across trees; never commit to `v2` or move a tag.
 
-## Three rules that matter most
+## Public packages (plan §1 D3) — everything else is internal/
 
-1. **Config drives behaviour.** `enabled: true/false` in `chok.yaml`
-   is the primary on/off switch — prefer it over Go code changes.
-2. **Every subsystem is a Component.** `Init` / `Close` mandatory;
-   `Reload` / `Health` / `Router` / `Migrate` optional via type
-   assertion. New built-in subsystems must follow this shape.
-3. **One official implementation per capability.** Do not add parallel
-   choices (no alternative routers, no "switch to sqlc"). The
-   blessed stack is stdlib ServeMux / gorm / otter+redis /
-   robfig-cron / golang-jwt / Prometheus / OpenTelemetry.
+`chok` (root) · `db` · `store` · `store/where` · `identity` · `identity/rbac` ·
+`identity/{google,github,apple,facebook}` · `jobs` · `telemetry` · `cache` ·
+`choktest`; the CLI is `cmd/chok`. Batteries import the root; the root imports
+no battery and no gorm. A new public package is an orchestrator decision.
 
-## Architecture invariants — do not violate
+## Three rules
 
-> Since M1 the control plane is the v2 kernel (`kernel/` + `conf/`):
-> single-actor lifecycle, RCU config snapshots, Descriptor-declared
-> components. Since M4 every battery lives on it — the v1 residue
-> (`component/` + `parts/`) is deleted.
+1. **Config is strict.** One typed struct loaded by `chok.Load[T]`: defaults <
+   `chok.yaml` < env < flags. Unknown keys fail startup with a suggestion; only
+   `log.level` hot-reloads (SIGHUP); nothing watches files.
+2. **Errors describe themselves.** An error implementing `chok.Coder` maps to
+   the HTTP envelope (`code / reason / message / request_id / metadata`); there
+   is no mapper registry. Wrap with `fmt.Errorf("...: %w", err)`.
+3. **Assembly is code.** Dependencies are values: `db.Open` returns a handle
+   that `store.New[T](d)` and `identity.New(cfg, d)` take. `app.Use` only
+   registers lifecycle (Start / Close / Health / Mount) — no lookups.
 
-- `App` is single-use: `Run` / `Execute` may be called at most once
-- v2 kernel: all lifecycle transitions go through the control
-  goroutine; reads (`Lookup`/`Health`/`Ready`) use the atomic view —
-  never add locks or a second lifecycle writer
-- Reload coalesces: overlapping triggers get `ErrReloadInProgress`
-  (CAS gate in v2) — do not queue
-- Reload does **NOT** trigger `Migrate`. Schema changes require a
-  restart. Document this if you add migration-adjacent features.
-- Shutdown contexts use `context.WithoutCancel(parent)` so trace_id /
-  request_id stay correlated; never `context.Background()` directly
-- Components close in reverse-topo order, same-level in parallel
-- web `Serve` wind-down bounds `Shutdown` by `http.shutdown_timeout`
-  then force-`Close`s so hung handlers can't outlive registry teardown
+## Before every commit: `make verify`
 
-## Coding conventions when modifying chok itself
+It runs tidy-check, fmt-check (gofmt -s), vet, golangci-lint (blocking),
+fix-check (`go fix -diff` empty), test (SQLite, `-race -count=1`), test-pg,
+test-mysql, budget and smoke (from WP5) in that order — exactly what CI runs.
+All three dialect lanes must be green; MySQL is not optional.
 
-- New `*Options` types implement `conf.Validatable`; discriminator
-  types (one of N branches selected by a field) also implement
-  `conf.SelfValidating` so the recursive walker stops descending
-- New modules declare `Descriptor.Needs` (soft deps `Optional: true`)
-  and discover peers via `kernel.Get[roleInterface]` at Init; never
-  reach for peers inside `Close` (the kernel view has already shrunk)
-- Optional capabilities are the kernel behaviour interfaces
-  (`Reloader`, `Healther`, `Mounter`, `Migrator`, `Readier`, `Server`,
-  `Drainer`) — the Registry discovers them by type assertion. Add new
-  ones in `kernel/component.go` only when there's a clear need;
-  prefer composition.
-- Use `rid.New(prefix)` for any externally-exposed ID; never leak the
-  internal `uint` primary key in API responses
-- Errors: wrap with `fmt.Errorf("...: %w", err)` or build via
-  `apierr.New(...)` — never return plain strings
-- Logging on the request path: `middleware.LoggerFrom(ctx)`; reserve
-  `app.Logger()` for startup / shutdown / cron contexts
-- Tests open a real database via `db/dbtest.Open(t)` — SQLite by
-  default, Postgres when `CHOK_TEST_DRIVER=postgres` +
-  `CHOK_TEST_PG_DSN` are set (M3 dual-run; store/db test setups all
-  ride it). The MySQL migration audit lane uses `CHOK_TEST_MYSQL_DSN`
-  for its real implicit-DDL regression. `choktest` is the exported
-  harness for downstream apps
-  (`NewTestDB` returns `*db.DB`); in-repo it also backs db module
-  tests. In-package registry tests use the `mkReg()` helper
+### Database lanes
 
-## Common pitfalls — observed in 14 rounds of review
+The DSNs live in the git-ignored `.env`, identical to CI; the Makefile never
+reads it, so load it per shell (not in `~/.zshrc`):
 
-- **DON'T** call `k.Get` inside `Component.Close` — peers in the same
-  topo level may already have `markUnavailable`'d themselves
-- **DON'T** bypass the store with raw `*gorm.DB` unless going through
-  the `s.Unsafe(ctx)` escape hatch (tx-aware, scopes applied,
-  fail-closed on scope errors) or the handle-level `h.Unsafe(ctx)`
-- **DON'T** rely on store auto-discovery in production — declare
-  fields with `store:"query,update"` tags on the model (preferred) or
-  `WithQueryFields` / `WithUpdateFields` at the call site (which
-  override tags, e.g. to narrow a privileged surface). Auto-discovery
-  emits a warn log because the implicit set is fragile.
-- **DON'T** use `store.Set(map)` when optimistic locking matters —
-  prefer `store.Fields(&obj)`, which extracts `obj.Version` automatically
-- **DON'T** use `store.Where(...)` without at least one filter — the
-  framework returns `ErrMissingConditions` to prevent
-  `Delete(Where())` from clearing the table
-- **DON'T** use `context.Background()` in shutdown paths — lose trace
-  correlation. Use `context.WithoutCancel(ctx)` instead.
-- **DON'T** put pointer fields in `*Options` types — Reload's `Set()`
-  copies values onto the live config and pointer fields end up stale
-- **DON'T** mock the database in store tests — use a real in-memory
-  SQLite; mocked tests miss real schema interactions
+    set -a; source .env; set +a
+    make test-pg test-mysql      # or: make verify
 
-## Testing requirements
+- Postgres: `postgres://chok:chok@localhost:5432/choktest?sslmode=disable` —
+  role chok owns choktest; each test works in a throwaway schema.
+- MySQL 8.4: `root:root@tcp(localhost:3306)/?parseTime=true` — each test
+  creates and drops its own `chok_test_<rand>` database.
+- CI provides `postgres:16` and `mysql:8.4` services; the Macs run
+  `postgresql@17` and `mysql@8.4` under brew services.
+- The lanes rerun `./db/... ./store/... ./identity/... ./jobs/...` (whichever
+  exist) in full with `CHOK_TEST_DRIVER` set; never pick tests with `-run`.
+  A missing DSN fails its lane; `make test` blanks the driver and both DSNs.
 
-- Every bug fix ships with a regression test in the same commit
-- Run `go test ./... && go vet ./...` before committing
-- For review-driven fixes, name tests after the issue:
-  `TestX_RoundNDescription` or `TestFix_RoundNX_<issue>`
-- The full suite must pass, and **`examples/blog` must start cleanly**
-  after framework-level changes — `make smoke` boots it, waits for
-  `/healthz` and SIGINTs (the blog acceptance test walks the full
-  README path in CI too). store/db changes also run the Postgres lane
-  (`make test-pg` with `CHOK_TEST_PG_DSN`); migration-engine changes run
-  `make test-mysql` with `CHOK_TEST_MYSQL_DSN` (CI provides both services).
-  `internal/fixture/m1-m4` stay as milestone regression tests; they
-  are no longer the smoke vehicle.
+## Docs map (`.private/` is gitignored — never commit it)
 
-## Formatting
-
-- The tree is kept gofmt-clean under the pinned toolchain (`go.mod`
-  `toolchain`); `make fmt` (`gofmt -s -w .`) is safe to run. CI does
-  **not** enforce gofmt (golangci-lint runs its default linters, no
-  formatter), so a stray unformatted file won't fail CI — keep it clean
-  anyway.
-- **Don't write a bare `''` or `""` quote-pair in a doc comment**
-  (the comment immediately before a declaration). gofmt's doc-comment
-  formatter smart-quotes them (`''` → `”`), which silently corrupts
-  prose that meant a SQL empty-string / doubled-quote literal. Describe
-  it in words ("the empty delete_token", "a contained quote is
-  doubled") — inline comments inside function bodies are exempt. This
-  bit `db/migrate.go` and `db/sqlsplit.go` before.
-
-## Where things live
-
-| Path | Purpose |
+| File under `.private/docs/specs/` | Role |
 |---|---|
-| `chok.go` | v2 App thin shell: New / Use / Routes / Section / Run |
-| `options.go` | `WithXxx` constructors |
-| `kernel/` + `conf/` | v2 control plane: Descriptor / actor Registry / RCU config (`SelfValidating` recursion stop lives in `conf/validate.go`) |
-| `db/` | v2 data module: Module/From + `*db.DB` thin handle + versioned migration engine |
-| `store/` | generic CRUD; locator + changes + scopes; opt-in `WithBus` events |
-| `store/where/` | query DSL (`resolveField` does identifier validation) |
-| `handler/` | generic `HandleRequest[T,R]` — stdlib http.Handler + Meta |
-| `middleware/` | stdlib middleware set (`func(http.Handler) http.Handler`) |
-| `web/` | v2 HTTP module: Server + Router + default middleware stack |
-| `swagger/` `tracing/` `health/` `metrics/` `debug/` | v2 observability / docs modules |
-| `account/` | ready-to-use user module (Module/Service/Authn) + login rate limiter |
-| `authz/` `audit/` `scheduler/` `redis/` | v2 battery modules (casbin engine room under `authz/casbin/`) |
-| `cache/` | memory + redis Chain + circuit Breaker |
-| `examples/blog/` | v2 quickstart (acceptance test = README path); smoke vehicle |
-| `examples/tasker/` | (planned) full-coverage example |
-| `cmd/chok/` + `internal/blessed/` | CLI (init/sync/migrate/docs/openapi) + the module inventory its generators consume |
-| `docs/design.md` | architecture source of truth |
+| `v3-plan-claude.md` | the plan: decisions D1–D17, WPs, MySQL rules, budgets, workflow |
+| `v3-contract-claude.md` | the API contract, frozen at signature level |
+| `v3-prompts-claude.md` | the kick-off prompt of each work package |
+| `v3-reports/wp<N>-report.md` | executor close-out reports (plan §7.3 template) |
 
-## Documentation conventions
+An executor does one WP on branch `wp<N>-<slug>`, writes its report, pushes
+the branch and does not merge. The plan and the contract are never edited by
+an executor: a mismatch goes under 契约出入 in the report, and work on it
+stops; only points marked 执行者可定 are decided, under 实现级决策.
 
-- `design.md` is the canonical architecture doc — keep it in
-  sync when changing public contracts
-- This project uses **plain filenames for public docs** (no
-  `-claude.md` suffix). Tool-protocol files like `CLAUDE.md` and
-  `AGENTS.md` keep their fixed names because their loaders demand
-  the exact spelling.
-- Internal planning / scratch / agent SPEC drafts that should not
-  ship to the public repo live under `.private/` (gitignored).
-  When in doubt about whether something belongs in `docs/`, ask:
-  *"Does an external user reading this learn something they can
-  act on?"* If no, it goes in `.private/`.
-- Code comments are English; design docs are Chinese (team preference)
-- New public APIs must have godoc and, when they touch the quickstart
-  surface, coverage in `examples/blog` (advanced surface goes to
-  `examples/tasker` once it exists)
+## Naming and budget (both are gates)
 
-## Commit message style
+- Functional options carry no `With` prefix and their types are named only
+  `Option`, `RouteOption` or `LoadOption`; yaml structs are named `*Config`;
+  constructors start with `New`, `MustNew`, `Open` or `MustOpen`.
+  `internal/lint/naming_test.go` checks every public package; its exemption
+  list holds the frozen contract names that break a rule on purpose, and
+  growing it is an orchestrator decision.
+- `hack/apibudget.sh`, limits in `hack/budget.txt`: public packages ≤ 10
+  (providers excluded), top-level exports ≤ 200 in total plus per-package
+  caps, option constructors ≤ 30, direct dependencies ≤ 24, examples/blog
+  ≤ 120 app lines importing ≤ 4 chok packages. An unlisted public package or
+  any count over its limit is red.
+- No compatibility shims: no v2 names, no `Deprecated` aliases.
 
-- Prefix with `fix:` / `feat:` / `docs:` / `refactor:` / `chore:`
-- Review-driven fixes use `fix: round-N review — <punchline>` and
-  group the body by issue ID (`#1`, `#2`, ...) so reviewers can map
-  commit lines back to the original report
-- One coherent change per commit; never batch unrelated fixes
-- Never use `--no-verify`, never amend a published commit, never
-  force-push to `main`
+## Code conventions
 
-## Workflow when reviewing chok code
+- New public symbols get godoc; godoc examples compile (`example_test.go`).
+- Logging is `*slog.Logger` only; on the request path use `chok.LoggerFrom(ctx)`.
+- `*gorm.DB` leaves `db` / `store` only through `Unsafe(ctx)`.
+- Shutdown paths derive from `context.WithoutCancel(ctx)`, never
+  `context.Background()`, so trace and request IDs stay correlated.
+- Code comments are English; design docs are Chinese.
+- Commits: `feat:` / `refactor:` / `test:` / `docs:` / `chore:`, one change
+  per commit; never `--no-verify`, never force-push.
 
-- Spawn parallel `Explore` agents for big-picture sweeps across
-  unrelated subsystems (lifecycle / data / middleware)
-- **Verify every agent finding against current code** — agent reports
-  carry ~50% false positives (race claims that are actually under a
-  lock, "missing recover" where one already exists, etc.)
-- Categorise by impact: Critical (breaks quickstart / corrupts data /
-  leaks resources) vs High (request DoS / security bypass) vs Medium
-  (defence-in-depth) vs Low (doc drift / cosmetic)
-- In the final report, document false positives explicitly so the
-  user understands what was rejected and why — silent rejection looks
-  like missed analysis
+## Testing
+
+- Every bug fix ships with a regression test in the same commit.
+- Real databases, never mocks: `choktest.DB(t)` (WP5) follows `CHOK_TEST_DRIVER`.
+- Tests never bind a fixed port (no 8080): use `httptest` / `app.Handler()`,
+  or a random port plus `t.Cleanup`. Prefer `testing/synctest` for timing
+  logic that does not touch a database.
+
+## Pitfalls seen before
+
+- gofmt turns a bare `''` or `""` pair inside a doc comment into a curly
+  quote; describe SQL empty strings or doubled quotes in words instead.
+- MySQL reserved words (`key`, `order`, `group`, …) are not quoted by the
+  `store/where` identifiers: test models must not use them as column names.
+- zsh: `status` is a read-only variable; quote globs such as
+  `--include='*.go'`; a word starting with `=` (like `===`) gets expanded.
