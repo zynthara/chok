@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,8 +25,8 @@ type envelope struct {
 // TestBlog_QuickstartPath walks README.md's five-minute path in process,
 // from chok.yaml: health, register and log in, the post CRUD as alice
 // with the optimistic lock and the error envelopes, the owner fence
-// against bob, the anonymous caller turned away, and finally the OpenAPI
-// document.
+// against bob, the anonymous caller turned away, the OpenAPI document,
+// and finally the metrics.
 func TestBlog_QuickstartPath(t *testing.T) {
 	t.Setenv("BLOG_DB_SQLITE_PATH", filepath.Join(t.TempDir(), "blog.db"))
 	t.Setenv("BLOG_AUTH_SIGNING_KEY", strings.Repeat("k", 32))
@@ -42,8 +44,8 @@ func TestBlog_QuickstartPath(t *testing.T) {
 			Status    string `json:"status"`
 		} `json:"components"`
 	}
-	if code := c.GetJSON("/healthz", &health); code != http.StatusOK || health.Status != "up" || len(health.Components) != 2 ||
-		health.Components[0].Component != "db" || health.Components[1].Component != "identity" {
+	if code := c.GetJSON("/healthz", &health); code != http.StatusOK || health.Status != "up" || len(health.Components) != 3 ||
+		health.Components[0].Component != "db" || health.Components[1].Component != "identity" || health.Components[2].Component != "telemetry" {
 		t.Fatalf("healthz = %d %+v", code, health)
 	}
 
@@ -204,6 +206,21 @@ func TestBlog_QuickstartPath(t *testing.T) {
 	}
 	if list.Summary != "List my posts" || spec.Paths["/api/v1/posts/{id}"]["patch"].Summary == "" {
 		t.Errorf("summaries: %+v", spec.Paths)
+	}
+
+	// 9. The metrics: every request above is in the histogram under its
+	// route, every statement under its operation and table.
+	resp := c.Do(httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{
+		"# TYPE http_server_request_duration_seconds histogram",
+		`http_server_request_duration_seconds_count{http_request_method="GET",http_response_status_code="404",http_route="/api/v1/posts/{id}"}`,
+		`http_server_request_duration_seconds_count{http_request_method="POST",http_response_status_code="201",http_route="/api/v1/posts"}`,
+		`db_client_operation_duration_seconds_count{db_collection_name="posts",db_operation_name="INSERT",db_system_name="sqlite",error_type=""}`,
+	} {
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), want) {
+			t.Fatalf("/metrics = %d, lacking %q:\n%s", resp.StatusCode, want, body)
+		}
 	}
 }
 

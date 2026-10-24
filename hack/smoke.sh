@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # smoke.sh — examples/blog as a real process (`make smoke`): build the
-# binary, start it on a random port, wait for /healthz, send SIGINT and
-# expect a clean exit within 3 seconds. The drain delay is set to zero:
-# it is a pause for load balancers, which a smoke test has none of.
+# binary, start it on a random port, wait for /healthz, find that request
+# in /metrics, send SIGINT and expect a clean exit within 3 seconds. The
+# drain delay is set to zero: it is a pause for load balancers, which a
+# smoke test has none of.
 # Portable to the bash 3.2 that macOS ships.
 set -euo pipefail
 
@@ -49,6 +50,12 @@ for _ in $(seq 1 50); do
 done
 [ "$code" = 200 ] || fail "GET /healthz = $code"
 
+# telemetry counted that request, under the probe's own route.
+code=$(curl -s -o "$work/metrics" -w '%{http_code}' "http://$addr/metrics" || true)
+[ "$code" = 200 ] || fail "GET /metrics = $code"
+grep -q '^http_server_request_duration_seconds_count{http_request_method="GET",http_response_status_code="200",http_route="/healthz"} ' "$work/metrics" ||
+	fail "/metrics does not count the /healthz request"
+
 kill -INT "$pid"
 start=$(date +%s)
 for _ in $(seq 1 30); do
@@ -61,4 +68,4 @@ wait "$pid" || status=$?
 pid=""
 [ "$status" -eq 0 ] || fail "exit status $status after SIGINT"
 grep -q '"msg":"chok: stopped"' "$work/log" || fail "no stop log line"
-echo "smoke: examples/blog listened on $addr, /healthz 200 $(cat "$work/health"), stopped on SIGINT in $(($(date +%s) - start))s with status 0"
+echo "smoke: examples/blog listened on $addr, /healthz 200 $(cat "$work/health"), /metrics 200, stopped on SIGINT in $(($(date +%s) - start))s with status 0"

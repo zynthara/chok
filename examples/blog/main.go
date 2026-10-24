@@ -12,6 +12,7 @@ import (
 	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/identity"
 	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok/v3/telemetry"
 )
 
 // Config is the whole configuration: the standard app / http / log
@@ -19,8 +20,9 @@ import (
 // or in a BLOG_* variable fails startup with a suggestion.
 type Config struct {
 	chok.Base
-	DB   db.Config       `yaml:"db"`
-	Auth identity.Config `yaml:"auth"`
+	DB        db.Config        `yaml:"db"`
+	Auth      identity.Config  `yaml:"auth"`
+	Telemetry telemetry.Config `yaml:"telemetry"`
 }
 
 // Post is the blog's one resource. OwnedSoftDeleteModel gives it a
@@ -45,13 +47,17 @@ func main() {
 
 // setup wires the batteries and the routes; blog_test.go reuses it.
 func setup(app *chok.App, cfg Config) {
+	// Request and SQL metrics on /metrics; spans once tracing is on.
+	tel := telemetry.MustNew(cfg.Telemetry)
 	// Titles are unique per author among live posts; deleting a post
 	// frees its title.
 	d := db.MustOpen(cfg.DB, db.Tables(
 		db.Table(&Post{}, db.SoftUnique("uk_post_title_owner", "title", "owner_id")),
 	))
+	tel.Instrument(d)
 	auth := identity.MustNew(cfg.Auth, d)
-	app.Use(d, auth)
+	// Close runs in reverse: telemetry, first in, flushes last.
+	app.Use(tel, d, auth)
 
 	posts := store.New[Post](d)
 	api := app.Group("/api/v1", auth.Authn())

@@ -27,3 +27,13 @@ auth:
   # 429 until the window slides.
   login_rate_window: 15m
   login_rate_limit: 10
+
+telemetry:
+  # Request and SQL metrics, served on GET /metrics for Prometheus.
+  metrics:
+    enabled: true
+  # Spans for every request and statement: turn them on with a collector
+  # to receive them (exporter: otlp, endpoint: http://localhost:4318),
+  # or with exporter: stdout to watch them in the terminal.
+  tracing:
+    enabled: false

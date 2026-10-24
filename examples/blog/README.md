@@ -2,8 +2,8 @@
 
 A JWT-guarded blog API — register, log in, own your posts — in under a
 hundred lines of application code. `main.go` assembles it with plain Go:
-open the database, construct the identity battery, register both with
-the app, declare five routes. Nothing is generated.
+open the database, construct the identity and telemetry batteries,
+register them with the app, declare five routes. Nothing is generated.
 
 ## The five-minute path
 
@@ -21,7 +21,7 @@ The app logs the address it listens on (`:8080` by default; set
 ```sh
 # 1. Health — every component reports in:
 curl -s localhost:8080/healthz
-# {"status":"up","components":[{"component":"db","status":"up",...},{"component":"identity",...}]}
+# {"status":"up","components":[{"component":"db","status":"up",...},{"component":"identity",...},{"component":"telemetry",...}]}
 
 # 2. Register, then log in (the identity battery mounts /auth/*). Without
 #    the token every /api route is a 401 envelope — try it:
@@ -66,6 +66,10 @@ curl -s localhost:8080/api/v1/posts/$RID -H "Authorization: Bearer $TOKEN"
 
 # 8. The OpenAPI 3.1 document the route table produced (UI at /docs):
 curl -s localhost:8080/openapi.json
+
+# 9. Prometheus metrics: every request above by method, route and status,
+#    every SQL statement by operation and table:
+curl -s localhost:8080/metrics | grep -E '^(http_server_request|db_client_operation)_duration_seconds_count'
 ```
 
 Stop the server with Ctrl-C: `/readyz` turns 503, in-flight requests
@@ -78,7 +82,7 @@ secrets masked, without starting anything.
 | File | Lesson |
 |---|---|
 | `chok.yaml` | One strict config. A typo such as `htpp:` fails startup with "did you mean http?"; every key is `BLOG_*` overridable, and the signing key only comes from the environment. |
-| `main.go` | `Config` embeds `chok.Base` and adds a section per battery; `setup` is the whole assembly — values passed to constructors, lifecycle registered with `app.Use`, `auth.Authn()` guarding `/api/v1`. |
+| `main.go` | `Config` embeds `chok.Base` and adds a section per battery; `setup` is the whole assembly — values passed to constructors, `tel.Instrument(d)` adding the SQL metrics, lifecycle registered with `app.Use`, `auth.Authn()` guarding `/api/v1`. |
 | `posts.go` | Typed handlers: request structs bind `path` / `json` and validate; `store.Patch` turns a partial update into a locked change set. |
 | `blog_test.go` | The acceptance test that walks this path in process with `choktest.App`. |
 
@@ -86,4 +90,6 @@ Without writing them you get: owner isolation (`Post` embeds
 `db.OwnedSoftDeleteModel`, and the owner is the token's user id), 404 /
 409 / 401 error envelopes (store and identity errors describe
 themselves), request IDs on every log line, `/readyz` and `/livez`,
-login rate limiting and the OpenAPI document.
+login rate limiting, the OpenAPI document and `/metrics`. Set
+`telemetry.tracing.enabled: true` (with `exporter: stdout` to watch in
+the terminal) for a span per request and per SQL statement.
