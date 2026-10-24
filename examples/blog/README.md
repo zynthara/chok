@@ -41,7 +41,7 @@ RID=pst_...   # the id from the response
 
 # 4. List your posts — owner-scoped, filterable by the query fields:
 curl -s "localhost:8080/api/v1/posts?status=draft&order=created_at:desc" -H 'X-User-Id: alice'
-# {"items":[...],"total":1,"page":0,"size":20,"has_more":false}
+# {"items":[...],"total":1,"page":1,"size":20,"has_more":false}
 
 # 5. Read one — bob gets a 404, as if it did not exist:
 curl -s localhost:8080/api/v1/posts/$RID -H 'X-User-Id: alice'

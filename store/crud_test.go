@@ -172,7 +172,7 @@ func TestList_PagesOrdersAndCounts(t *testing.T) {
 		mustCreate(t, ctx, s, &post{Title: title})
 	}
 	page, err := s.List(ctx)
-	if err != nil || page.Size != 3 || len(page.Items) != 3 || !page.HasMore || page.Total != 0 {
+	if err != nil || page.Page != 1 || page.Size != 3 || len(page.Items) != 3 || !page.HasMore || page.Total != 0 {
 		t.Fatalf("default page: %+v %v", page, err)
 	}
 	if got := titles(page.Items); !slices.Equal(got, []string{"e", "b", "d"}) {

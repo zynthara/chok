@@ -79,7 +79,7 @@ func TestBlog_QuickstartPath(t *testing.T) {
 	// 4. List: owner-scoped, filtered by a query field, ordered.
 	page = chok.Page[Post]{}
 	if code := c.GetJSON("/api/v1/posts?status=draft&order=created_at:desc", &page, alice...); code != http.StatusOK ||
-		page.Total != 1 || len(page.Items) != 1 || page.Items[0].RID != p.RID {
+		page.Total != 1 || page.Page != 1 || len(page.Items) != 1 || page.Items[0].RID != p.RID {
 		t.Fatalf("list = %d %+v", code, page)
 	}
 	e = envelope{}
