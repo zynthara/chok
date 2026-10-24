@@ -7,7 +7,8 @@
 #                 under their type, methods are not listed, and a grouped
 #                 var/const block is one line
 #   option ctors  those func lines whose result type is Option, RouteOption
-#                 or LoadOption
+#                 or LoadOption; store/where is skipped, its predicates are
+#                 a query DSL rather than options (plan §6)
 # plus the module's direct dependencies and, once examples/blog has Go
 # files, its application lines (non-test files; blank and // lines not
 # counted) and the distinct chok packages it imports.
@@ -60,7 +61,7 @@ for ip in $(printf '%s\n' "$listed" | keep -v '(^|/)internal(/|$)'); do
 	n=$(printf '%s\n' "$doc" | keep '^(func|type|var|const) ' | count)
 	o=$(printf '%s\n' "$doc" | keep '^func .*\) (Option|RouteOption|LoadOption)$' | count)
 	exports_total=$((exports_total + n))
-	options_total=$((options_total + o))
+	[ "$rel" = store/where ] || options_total=$((options_total + o))
 	counts="$counts$rel $n
 "
 done
@@ -73,7 +74,7 @@ row "public packages (providers excluded)" "$public" "$(limit_of public_packages
 while read -r kind path cap; do
 	case "$kind" in
 	pkg) row "exports $path" "$(exports_of "$path")" "$cap" ;;
-	provider) row "exports $path (provider)" "$(exports_of "$path")" - ;;
+	provider) row "exports $path (provider)" "$(exports_of "$path")" "${cap:--}" ;;
 	esac
 done <"$budget"
 for rel in $unlisted; do

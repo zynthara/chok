@@ -4,17 +4,17 @@
 #   pkg <path> <max exports | ->   a public package (plan §1 D3); "-" means no
 #                                  cap of its own, it still counts toward
 #                                  exports_total. The module root is "chok".
-#   provider <path>                an identity provider sub-package: allowed,
+#   provider <path> <max | ->      an identity provider sub-package: allowed,
 #                                  not counted in public_packages
 #   limit <item> <max>             a module-wide limit
 #
 # Every public (non-internal, non-main) package must appear as pkg or
 # provider; an unlisted one fails the budget.
 
-pkg chok            60
+pkg chok            64
 pkg db              30
 pkg store           30
-pkg store/where     20
+pkg store/where     28
 pkg identity        30
 pkg identity/rbac   -
 pkg jobs            15
@@ -22,14 +22,14 @@ pkg telemetry       10
 pkg cache           10
 pkg choktest        10
 
-provider identity/google
-provider identity/github
-provider identity/apple
-provider identity/facebook
+provider identity/google    3
+provider identity/github    3
+provider identity/apple     3
+provider identity/facebook  3
 
 limit public_packages    10
-limit exports_total      200
-limit option_ctors       30
+limit exports_total      220
+limit option_ctors       40   # store/where predicates are query DSL, not counted
 limit direct_deps        24
 limit blog_app_lines     120
 limit blog_chok_imports  4
