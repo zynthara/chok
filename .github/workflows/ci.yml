@@ -1,6 +1,7 @@
-# Run on every push to main and every PR. Catches the things that
-# would otherwise force a release-please-followed-by-revert cycle:
-# build breakage, vet warnings, test regressions.
+# CI runs exactly what a local `make verify` runs: tidy / gofmt / vet /
+# golangci-lint / go fix, the SQLite suite, the Postgres and MySQL lanes,
+# the API budget and (from WP5) the examples/blog smoke test. Every gate
+# blocks; nothing here is advisory.
 
 name: ci
 
@@ -8,6 +9,8 @@ on:
   push:
     branches:
       - main
+      # Work-package branches get CI before they are fast-forwarded onto main.
+      - "wp*"
   pull_request:
     branches:
       - main
@@ -16,10 +19,10 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
-    # The full suite runs once on SQLite; store/db rerun against Postgres,
-    # and targeted store/migration semantics run against MySQL.
+    # The three dialects are peers: the SQLite suite runs in-process, and the
+    # DB-backed packages rerun in full against both services below.
     services:
       postgres:
         image: postgres:16
@@ -48,71 +51,25 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Full history: the apidiff gate resolves the release
-          # baseline tag and diffs CHANGELOG.md against it.
-          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          # Honour the minimum version declared in go.mod so we never
-          # silently regress to an older toolchain than the module
-          # itself requires.
+          # Honour the go / toolchain directives in go.mod so CI never
+          # silently runs an older toolchain than the module declares.
           go-version-file: go.mod
           cache: true
 
-      - name: vet
-        run: go vet ./...
-
-      - name: test
-        run: go test -race -count=1 ./...
-
-      - name: test (data and battery schemas on Postgres)
-        env:
-          CHOK_TEST_DRIVER: postgres
-          CHOK_TEST_PG_DSN: postgres://chok:chok@localhost:5432/choktest?sslmode=disable
-        run: make test-pg
-
-      - name: test (store semantics, migration audit and battery schemas on MySQL)
-        env:
-          CHOK_TEST_MYSQL_DSN: root:root@tcp(localhost:3306)/?parseTime=true
-        run: make test-mysql
-
-      - name: build
-        run: go build ./...
-
-      # SPEC §7.4 gates: generated surfaces must be current (drift is
-      # red), the public API may only change alongside a changelog
-      # entry, and the quickstart must actually boot. The JSON Schema
-      # validation of example yamls rides the test step
-      # (internal/docgen TestJSONSchema_ValidatesExampleYAMLs).
-      - name: generated docs are current (docs gen --check)
-        run: go run ./cmd/chok docs gen --check
-
-      - name: blog assembly is current (sync --check)
-        run: go run ./cmd/chok sync --check --config examples/blog/chok.yaml --dir examples/blog
-
-      - name: blog field references are current (gen fields --check)
-        run: go run ./cmd/chok gen fields --check --dir examples/blog
-
-      - name: apidiff vs release baseline
-        run: ./hack/apidiff.sh
-
-      - name: examples smoke (boot blog, SIGINT, clean exit)
-        run: make smoke
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
-
+      # Built from source with the toolchain above, because a prebuilt
+      # binary compiled with an older Go refuses to lint a go 1.27 module.
+      # Keep the version in step with GOLANGCI_LINT_VERSION in the Makefile.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
-          args: --timeout=5m
-        continue-on-error: true   # treat lint as advisory until rules stabilise
+          version: v2.15.0
+          install-mode: goinstall
+          install-only: true
+
+      - name: make verify
+        env:
+          CHOK_TEST_PG_DSN: postgres://chok:chok@localhost:5432/choktest?sslmode=disable
+          CHOK_TEST_MYSQL_DSN: root:root@tcp(localhost:3306)/?parseTime=true
+        run: make verify
