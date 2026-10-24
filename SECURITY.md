@@ -4,7 +4,8 @@
 
 | Line | Module path | Status |
 |---|---|---|
-| v2 (`main`, current `v2.0.0-beta.N` series) | `github.com/zynthara/chok/v2` | Actively developed — security fixes land here first |
+| v3 (`main`, unreleased) | `github.com/zynthara/chok/v3` | In development — no release yet |
+| v2 (branch `v2`, `v2.0.0-beta.N` series) | `github.com/zynthara/chok/v2` | **Security fixes only** |
 | v1 (sealed at `v0.1.4`) | `github.com/zynthara/chok` | **Security fixes only** |
 | Anything older | — | Not supported |
 
