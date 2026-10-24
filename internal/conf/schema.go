@@ -28,6 +28,8 @@ type field struct {
 	def    string
 	hasDef bool
 	secret bool
+	rules  string       // the validate tag
+	decl   reflect.Type // the struct type whose declaration lists the field
 }
 
 var fieldCache sync.Map // reflect.Type → []field
@@ -72,6 +74,8 @@ func collectFields(t reflect.Type, index []int, out *[]field) {
 			def:    def,
 			hasDef: hasDef,
 			secret: sf.Tag.Get("secret") == "true",
+			rules:  sf.Tag.Get("validate"),
+			decl:   t,
 		})
 	}
 }
@@ -142,31 +146,50 @@ type Key struct {
 	Type    string
 	Default string
 	Secret  bool
+	// Rules is the field's validate tag.
+	Rules string
+	// Decl is the named struct type whose declaration holds the field and
+	// Field the Go field names leading from it to the field: one name, or
+	// more when the field sits in an anonymous struct, as the sections of
+	// telemetry.Config and cache.Config do. chok docs gen reads the
+	// field's comment through them.
+	Decl  reflect.Type
+	Field []string
 }
 
 // Keys lists the leaf keys of struct type t, sorted by path.
 func Keys(t reflect.Type) []Key {
 	var out []Key
-	collectKeys(deref(t), "", &out)
+	t = deref(t)
+	collectKeys(t, "", t, nil, &out)
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
 }
 
-func collectKeys(t reflect.Type, path string, out *[]Key) {
+// collectKeys walks t, whose fields are declared in decl after the Go
+// field names chain (none when t is decl itself).
+func collectKeys(t reflect.Type, path string, decl reflect.Type, chain []string, out *[]Key) {
 	for _, f := range fieldsOf(t) {
 		p := join(path, f.key)
 		ft := deref(f.typ)
+		fdecl, fchain := f.decl, []string{f.name}
+		if f.decl.Name() == "" { // a field of an anonymous struct
+			fdecl, fchain = decl, append(slices.Clone(chain), f.name)
+		}
+		key := Key{Path: p, Type: typeName(f.typ), Default: f.def, Secret: f.secret, Rules: f.rules, Decl: fdecl, Field: fchain}
 		switch {
 		case isLeaf(ft):
-			*out = append(*out, Key{Path: p, Type: typeName(f.typ), Default: f.def, Secret: f.secret})
+			*out = append(*out, key)
 		case isSection(ft):
-			collectKeys(ft, p, out)
+			collectKeys(ft, p, fdecl, fchain, out)
 		case ft.Kind() == reflect.Map && isSection(ft.Elem()):
-			collectKeys(deref(ft.Elem()), p+".<name>", out)
+			et := deref(ft.Elem())
+			collectKeys(et, p+".<name>", et, nil, out)
 		case ft.Kind() == reflect.Slice && isSection(ft.Elem()):
-			collectKeys(deref(ft.Elem()), p+"[]", out)
+			et := deref(ft.Elem())
+			collectKeys(et, p+"[]", et, nil, out)
 		default:
-			*out = append(*out, Key{Path: p, Type: typeName(f.typ), Default: f.def, Secret: f.secret})
+			*out = append(*out, key)
 		}
 	}
 }
