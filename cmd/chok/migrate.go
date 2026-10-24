@@ -43,11 +43,14 @@ type migrateFlags struct {
 	batteries []string
 }
 
-func (f *migrateFlags) add(cmd *cobra.Command) {
+// add registers the flags; up and status take --battery too.
+func (f *migrateFlags) add(cmd *cobra.Command, battery bool) {
 	cmd.Flags().StringVar(&f.config, "config", "", "configuration file (default: chok.yaml, <name>.yaml or configs/<name>.yaml, as the app finds it)")
 	cmd.Flags().StringVar(&f.name, "name", "", "the app name given to chok.Load, for its <NAME>_* variables (default: the last element of ./go.mod's module path)")
 	cmd.Flags().StringVar(&f.dir, "dir", "migrations", "the application's migration directory")
-	cmd.Flags().StringSliceVar(&f.batteries, "battery", nil, "also handle this battery's migrations: identity, rbac or jobs (repeatable); those already in the ledger always are")
+	if battery {
+		cmd.Flags().StringSliceVar(&f.batteries, "battery", nil, "also handle this battery's migrations: identity, rbac or jobs (repeatable); those already in the ledger always are")
+	}
 }
 
 func newMigrateCmd() *cobra.Command {
@@ -253,22 +256,30 @@ type session struct {
 	unknown []string // ledger owners the command has no files for
 }
 
+// Which schemas a session registers, besides what the ledger says.
+const (
+	inUse       = ""  // the application's files, the batteries in the ledger and those --battery names
+	everySchema = "*" // the application's files and every battery the command knows
+)
+
 // openSession connects to the database cfg describes, in mode, and
-// registers the application's migrations and the batteries': those in the
-// ledger, those named, and, with all, every battery the command knows. It
-// declares no table, so mode auto creates nothing; versioned applies what
-// is pending.
-func openSession(ctx context.Context, f *migrateFlags, cfg db.Config, file, mode string, all bool, stderr io.Writer) (*session, error) {
+// registers schemas by which: inUse, everySchema, or one owner — "app"
+// for the application's files alone, or a battery's name for that
+// battery alone. It declares no table, so mode auto creates nothing;
+// versioned applies what is pending.
+func openSession(ctx context.Context, f *migrateFlags, cfg db.Config, file, mode, which string, stderr io.Writer) (*session, error) {
 	for _, b := range f.batteries {
 		if _, ok := dbx.Migrations[b]; !ok {
 			return nil, fmt.Errorf("migrate: --battery %s: want one of %s", b, strings.Join(knownBatteries(), ", "))
 		}
 	}
 	var app fs.FS
-	if fi, err := os.Stat(f.dir); err == nil && fi.IsDir() {
-		app = os.DirFS(f.dir)
-	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("migrate: %w", err)
+	if which == inUse || which == everySchema || which == "app" {
+		if fi, err := os.Stat(f.dir); err == nil && fi.IsDir() {
+			app = os.DirFS(f.dir)
+		} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
 	}
 	s := &session{cfg: cfg, file: file}
 	cfg.Migrate = mode
@@ -284,11 +295,14 @@ func openSession(ctx context.Context, f *migrateFlags, cfg db.Config, file, mode
 		return nil, err
 	}
 	for _, b := range knownBatteries() {
-		if all || slices.Contains(owners, b) || slices.Contains(f.batteries, b) {
-			if err := d.RegisterSchema(b, nil, dbx.Migrations[b]); err != nil {
-				s.close(ctx)
-				return nil, err
-			}
+		register := b == which || which == everySchema ||
+			(which == inUse && (slices.Contains(owners, b) || slices.Contains(f.batteries, b)))
+		if !register {
+			continue
+		}
+		if err := d.RegisterSchema(b, nil, dbx.Migrations[b]); err != nil {
+			s.close(ctx)
+			return nil, err
 		}
 	}
 	for _, o := range owners {
@@ -373,7 +387,7 @@ the file is gone). It changes nothing.`,
 			if err != nil {
 				return err
 			}
-			s, err := openSession(ctx, f, cfg, file, "auto", false, cmd.ErrOrStderr())
+			s, err := openSession(ctx, f, cfg, file, "auto", inUse, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -385,7 +399,7 @@ the file is gone). It changes nothing.`,
 			return printStatus(cmd.OutOrStdout(), s, f.dir, sts)
 		},
 	}
-	f.add(cmd)
+	f.add(cmd, true)
 	return cmd
 }
 
@@ -441,7 +455,7 @@ before it starts; with migrate: auto there is nothing to apply.`,
 			if err := refuseAuto(f, cfg, file, "up"); err != nil {
 				return err
 			}
-			before, err := openSession(ctx, f, cfg, file, "auto", false, stderr)
+			before, err := openSession(ctx, f, cfg, file, "auto", inUse, stderr)
 			if err != nil {
 				return err
 			}
@@ -450,7 +464,7 @@ before it starts; with migrate: auto there is nothing to apply.`,
 			if err != nil {
 				return err
 			}
-			after, err := openSession(ctx, f, cfg, file, "versioned", false, stderr)
+			after, err := openSession(ctx, f, cfg, file, "versioned", inUse, stderr)
 			if err != nil {
 				return err
 			}
@@ -473,23 +487,26 @@ before it starts; with migrate: auto there is nothing to apply.`,
 			return nil
 		},
 	}
-	f.add(cmd)
+	f.add(cmd, true)
 	return cmd
 }
 
 func newMigrateMarkAppliedCmd() *cobra.Command {
 	f := &migrateFlags{}
+	var owner string
 	cmd := &cobra.Command{
 		Use:   "mark-applied <version>",
 		Short: "Record a migration as applied without running it",
 		Long: `Record the migration with this version as applied, without running it:
 the one manual intervention, for a schema repaired by hand — after a
 MySQL migration stopped halfway and its remaining statements were run
-manually, say. The version is looked up among the application's files
-and every battery's.`,
+manually, say, or for tables a v2 database already has. The version is
+looked up among the application's files and every battery's; when two
+schemas share it, as identity's and rbac's first migrations do, --owner
+names the one: app, or the battery.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
+			ctx, version := cmd.Context(), args[0]
 			cfg, file, err := f.loadDB(cmd.ErrOrStderr())
 			if err != nil {
 				return err
@@ -497,7 +514,14 @@ and every battery's.`,
 			if err := refuseAuto(f, cfg, file, "mark-applied"); err != nil {
 				return err
 			}
-			s, err := openSession(ctx, f, cfg, file, "auto", true, cmd.ErrOrStderr())
+			which := everySchema
+			if owner != "" {
+				if _, ok := dbx.Migrations[owner]; !ok && owner != "app" {
+					return fmt.Errorf("migrate mark-applied: --owner %s: want app or one of %s", owner, strings.Join(knownBatteries(), ", "))
+				}
+				which = owner
+			}
+			s, err := openSession(ctx, f, cfg, file, "auto", which, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -506,17 +530,29 @@ and every battery's.`,
 			if err != nil {
 				return err
 			}
-			if err := s.d.MarkApplied(ctx, args[0]); err != nil {
+			var match []db.MigrationStatus
+			for _, st := range sts {
+				if st.Version == version {
+					match = append(match, st)
+				}
+			}
+			if len(match) > 1 {
+				var owners []string
+				for _, m := range match {
+					owners = append(owners, m.Owner)
+				}
+				return fmt.Errorf("migrate mark-applied: version %s belongs to %s; name one with --owner", version, strings.Join(owners, " and "))
+			}
+			if err := s.d.MarkApplied(ctx, version); err != nil {
 				return err
 			}
-			for _, st := range sts {
-				if st.Version == args[0] {
-					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "marked  %s  %s_%s  applied, without running it (it was %s)\n", st.Owner, st.Version, st.Name, st.State)
-				}
+			for _, st := range match {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "marked  %s  %s_%s  applied, without running it (it was %s)\n", st.Owner, st.Version, st.Name, st.State)
 			}
 			return nil
 		},
 	}
-	f.add(cmd)
+	f.add(cmd, false)
+	cmd.Flags().StringVar(&owner, "owner", "", "the schema the version belongs to, when more than one has it: app, identity, rbac or jobs")
 	return cmd
 }

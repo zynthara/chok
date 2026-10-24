@@ -362,6 +362,26 @@ func TestMigrate_BatteryOwners(t *testing.T) {
 	if _, err := run(t, "migrate", "up", "--battery", "billing"); err == nil || !strings.Contains(err.Error(), "want one of identity, jobs, rbac") {
 		t.Fatalf("an unknown battery: %v", err)
 	}
+
+	// identity's and rbac's first migrations share their version: marking
+	// it needs the owner, and then records rbac's without running it.
+	if _, err := run(t, "migrate", "mark-applied", "20261024000001"); err == nil || !strings.Contains(err.Error(), "belongs to identity and rbac; name one with --owner") {
+		t.Fatalf("mark-applied of a shared version: %v", err)
+	}
+	out, err = run(t, "migrate", "mark-applied", "20261024000001", "--owner", "rbac")
+	if err != nil || out != "marked  rbac  20261024000001_create_casbin_rule  applied, without running it (it was pending)\n" {
+		t.Fatalf("mark-applied --owner rbac: %v\n%s", err, out)
+	}
+	if hasTable(t, cfg, "casbin_rule") {
+		t.Fatal("mark-applied created casbin_rule")
+	}
+	if _, err := run(t, "migrate", "mark-applied", "20261024000001", "--owner", "billing"); err == nil || !strings.Contains(err.Error(), "want app or one of identity, jobs, rbac") {
+		t.Fatalf("an unknown owner: %v", err)
+	}
+	out, _ = run(t, "migrate", "status")
+	if got := stateOf(t, out, "rbac", "20261024000001"); !strings.HasPrefix(got, "applied ") {
+		t.Fatalf("rbac once marked, listed from the ledger: %s\n%s", got, out)
+	}
 }
 
 // TestMigrate_KnowsEveryBatterySchema: the command carries the migrations
