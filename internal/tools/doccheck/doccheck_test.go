@@ -5,12 +5,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
 // The documents whose go blocks readers copy whole.
-var documents = []string{"docs/quickstart.md"}
+var documents = []string{"docs/quickstart.md", "README.md", "README_zh.md"}
+
+// appName finds the name a program gives chok.MustLoad, whose upper case
+// prefixes its environment variables.
+var appName = regexp.MustCompile(`chok\.MustLoad\[\w+(?:\.\w+)?\]\("([\w-]+)"\)`)
 
 // block is one fenced code block.
 type block struct {
@@ -93,8 +98,8 @@ func TestDocs_GoProgramsBuild(t *testing.T) {
 			programs = append(programs, p)
 		}
 	}
-	if len(programs) < 3 {
-		t.Fatalf("found %d programs; the quickstart alone has three", len(programs))
+	if len(programs) < 5 {
+		t.Fatalf("found %d programs; the quickstart has three and each README one", len(programs))
 	}
 	gomod := "module example.com/docs\n\ngo 1.27\n\nrequire github.com/zynthara/chok/v3 v3.0.0\n\nreplace github.com/zynthara/chok/v3 => " + root + "\n"
 	if err := os.WriteFile(filepath.Join(mod, "go.mod"), []byte(gomod), 0o644); err != nil {
@@ -121,9 +126,15 @@ func TestDocs_GoProgramsBuild(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "chok.yaml"), []byte(p.yaml), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		m := appName.FindStringSubmatch(p.b.text)
+		if m == nil {
+			t.Errorf("%s:%d: the program has a chok.yaml block but no chok.MustLoad name", p.b.doc, p.b.line)
+			continue
+		}
+		prefix := strings.ToUpper(strings.ReplaceAll(m[1], "-", "_"))
 		c := exec.Command(filepath.Join(mod, "bin", p.dir), "--check-config")
 		c.Dir = dir
-		c.Env = append(os.Environ(), "HELLO_AUTH_SIGNING_KEY=doccheck-signing-key-of-at-least-32-bytes")
+		c.Env = append(os.Environ(), prefix+"_AUTH_SIGNING_KEY=doccheck-signing-key-of-at-least-32-bytes")
 		out, err := c.CombinedOutput()
 		if err != nil || !strings.Contains(string(out), "configuration is valid (file chok.yaml") {
 			t.Errorf("%s:%d (%s): --check-config with the section's chok.yaml: %v\n%s", p.b.doc, p.b.line, p.b.section, err, out)
