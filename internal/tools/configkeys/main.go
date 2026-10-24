@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/internal/conf"
 )
 
@@ -21,6 +22,7 @@ var sections = []struct {
 	typ  reflect.Type
 }{
 	{"chok.Base", reflect.TypeFor[chok.Base]()},
+	{"db.Config", reflect.TypeFor[db.Config]()},
 }
 
 func main() {
