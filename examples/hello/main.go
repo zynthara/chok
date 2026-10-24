@@ -1,11 +1,25 @@
-// Command hello is the smallest chok application: health probes, strict
-// configuration from chok.yaml and HELLO_* variables, graceful stop.
+// Command hello is the smallest chok application with a route: strict
+// configuration from chok.yaml and HELLO_* variables, health probes,
+// an OpenAPI document at /openapi.json, graceful stop.
 //
-//	HELLO_HTTP_ADDR=127.0.0.1:9090 go run ./examples/hello
+//	go run ./examples/hello
+//	curl 'localhost:8080/hello?name=chok'
 package main
 
-import "github.com/zynthara/chok/v3"
+import (
+	"context"
+
+	"github.com/zynthara/chok/v3"
+)
+
+type greeting struct {
+	Name string `query:"name" validate:"required"`
+}
 
 func main() {
-	chok.New(chok.MustLoad[chok.Base]("hello")).Execute()
+	app := chok.New(chok.MustLoad[chok.Base]("hello"))
+	chok.GET(app.Router(), "/hello", func(_ context.Context, req *greeting) (map[string]string, error) {
+		return map[string]string{"hello": req.Name}, nil
+	}, chok.Public())
+	app.Execute()
 }
