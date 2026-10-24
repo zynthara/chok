@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/zynthara/chok/v3/internal/apptest"
 )
 
 // App is one application: its configuration, the components registered
@@ -176,6 +178,13 @@ func (a *App) Addr() string {
 }
 
 var errFastStop = errors.New("chok: fast stop")
+
+func init() {
+	apptest.Ready = func(app any) bool {
+		a := app.(*App)
+		return a.ready.Load() && !a.draining.Load()
+	}
+}
 
 // Run starts the App and blocks until ctx is done or a component fails.
 //

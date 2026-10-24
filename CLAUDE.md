@@ -58,8 +58,8 @@ reads it, so load it per shell (not in `~/.zshrc`):
   creates and drops its own `chok_test_<rand>` database.
 - CI provides `postgres:16` and `mysql:8.4` services; the Macs run
   `postgresql@17` and `mysql@8.4` under brew services.
-- The lanes rerun `./db/... ./store/... ./identity/... ./jobs/...` (whichever
-  exist) in full with `CHOK_TEST_DRIVER` set; never pick tests with `-run`.
+- The lanes rerun every DB-backed package (`DB_PKG_DIRS` in the Makefile)
+  in full with `CHOK_TEST_DRIVER` set; never pick tests with `-run`.
   A missing DSN fails its lane; `make test` blanks the driver and both DSNs.
 
 ## Docs map (`.private/` is gitignored — never commit it)
