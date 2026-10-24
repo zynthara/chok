@@ -16,7 +16,7 @@ pkg db              30
 pkg store           30
 pkg store/where     28
 pkg identity        30
-pkg identity/rbac   -
+pkg identity/rbac   8
 pkg jobs            15
 pkg telemetry       10
 pkg cache           10
