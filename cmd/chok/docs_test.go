@@ -32,7 +32,7 @@ func TestDocsGen_ConfigReferenceIsCurrent(t *testing.T) {
 	}
 }
 
-// TestDocsGen_MarksSecretsAndRules: every key of the six sections is a row
+// TestDocsGen_MarksSecretsAndRules: every key of the seven sections is a row
 // exactly once under its section's path, secrets are marked, validate
 // rules and defaults shown, and comments come from the field — in an
 // anonymous struct too, or shared with the field above.
@@ -55,8 +55,8 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 	for _, s := range configSections {
 		total += len(conf.Keys(s.typ))
 	}
-	if len(rows) != total || total != 134 {
-		t.Fatalf("%d rows for %d keys; the budget counts 134", len(rows), total)
+	if len(rows) != total || total != 142 {
+		t.Fatalf("%d rows for %d keys; the budget counts 142", len(rows), total)
 	}
 	for key, want := range map[string][]string{
 		"auth.signing_key":                    {"| **secret** |", "at least 32 bytes"},
@@ -74,6 +74,11 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 		"cache.breaker.probe_timeout":         {"| duration | `2s` |"},
 		"auth.providers.<name>.hosted_domain": {"Google Workspace"},
 		"db.store.owner_scope":                {"nil means true"},
+		"realtime.path":                       {"| string | `/realtime` |", "{Path}/ticket"},
+		"realtime.allowed_origins":            {"| list of string |", "path.Match"},
+		"realtime.ping_interval":              {"| duration | `25s` |"},
+		"realtime.replay":                     {"| int | `256` |", "0 turns resuming off"},
+		"realtime.channel":                    {"| string | `chok:realtime` |"},
 	} {
 		row, ok := rows[key]
 		if !ok {
@@ -97,7 +102,7 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 // docs/config.md, from the checkout into dst.
 func copyTree(t *testing.T, src, dst string) {
 	t.Helper()
-	for _, dir := range []string{".", "db", "identity", "jobs", "telemetry", "cache", "docs"} {
+	for _, dir := range []string{".", "db", "identity", "jobs", "telemetry", "cache", "realtime", "docs"} {
 		entries, err := os.ReadDir(filepath.Join(src, dir))
 		if err != nil {
 			t.Fatal(err)

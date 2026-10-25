@@ -7,7 +7,7 @@ configuration types: `chok.Base`, which every application's Config embeds,
 and the Config of `db` and of each battery. An application names a
 battery's section in its own Config struct; the keys below carry the
 names examples/blog and `chok init` use: `db`, `auth` for identity, `jobs`,
-`telemetry` and `cache`.
+`telemetry`, `cache` and `realtime`.
 
 `chok.Load` reads, lowest to highest: the defaults below, the file
 (`chok.yaml`, `<name>.yaml`, `configs/<name>.yaml` or `--config`), environment
@@ -198,3 +198,18 @@ The in-memory and Redis cache layers and the circuit breaker in front of Redis; 
 | `cache.redis.ttl` | duration | `10m` |  | TTL is how long an entry lives when Set is given no TTL. |
 | `cache.redis.username` | string |  |  | a Redis 6 ACL user; empty is the default user |
 | `cache.redis.write_timeout` | duration | `500ms` |  |  |
+
+## `realtime.Config` — section `realtime`
+
+The hub that pushes events to browsers over WebSocket and server-sent events, its one-time tickets and its Redis backplane; `realtime.New` takes it.
+
+| Key | Type | Default | Rules | Description |
+|---|---|---|---|---|
+| `realtime.allowed_origins` | list of string |  |  | AllowedOrigins admits browser WebSockets from these origins besides the server's own host: host patterns in path.Match syntax, such as app.example.com or \*.example.com, matched against the Origin's host (against scheme://host when a pattern has a scheme); "\*" admits any origin. Empty admits the same host only. Server-sent event streams are ordinary requests that CORS governs. |
+| `realtime.channel` | string | `chok:realtime` |  | Channel is the Redis channel of the backplane and the prefix of the tickets' keys; deployments sharing one Redis each need their own. |
+| `realtime.max_subscriptions` | int | `64` |  | MaxSubscriptions caps the topics of one connection: beyond it a WebSocket is closed with 1008 and a stream request answers 400. |
+| `realtime.path` | string | `/realtime` |  | Path prefixes the three endpoints: {Path}/ticket, {Path}/ws and {Path}/sse. It starts with a slash and does not end with one. |
+| `realtime.ping_interval` | duration | `25s` |  | PingInterval paces the heartbeats: a WebSocket ping, which the client must answer within two intervals or be disconnected, and an SSE comment line. |
+| `realtime.replay` | int | `256` |  | Replay is how many recent events the hub keeps, across all topics, for clients that resume after an event they saw; 0 turns resuming off, so every resume gets a reset event. |
+| `realtime.send_buffer` | int | `64` |  | SendBuffer is how many events may wait for one connection. A connection that falls further behind is a slow consumer: the hub drops it (a WebSocket with close code 4408) and counts it in Stats.Dropped. |
+| `realtime.ticket_ttl` | duration | `60s` |  | TicketTTL is how long a ticket from {Path}/ticket can be redeemed. |

@@ -21,6 +21,7 @@ import (
 	"github.com/zynthara/chok/v3/identity"
 	"github.com/zynthara/chok/v3/internal/conf"
 	"github.com/zynthara/chok/v3/jobs"
+	"github.com/zynthara/chok/v3/realtime"
 	"github.com/zynthara/chok/v3/telemetry"
 )
 
@@ -41,6 +42,7 @@ var configSections = []struct {
 	{"jobs.Config", "jobs", reflect.TypeFor[jobs.Config](), "Periodic jobs and transactional-outbox workers; `jobs.New` takes it."},
 	{"telemetry.Config", "telemetry", reflect.TypeFor[telemetry.Config](), "Prometheus metrics, OpenTelemetry traces and the slog bridge to OpenTelemetry logs; `telemetry.New` takes it."},
 	{"cache.Config", "cache", reflect.TypeFor[cache.Config](), "The in-memory and Redis cache layers and the circuit breaker in front of Redis; `cache.New` takes it."},
+	{"realtime.Config", "realtime", reflect.TypeFor[realtime.Config](), "The hub that pushes events to browsers over WebSocket and server-sent events, its one-time tickets and its Redis backplane; `realtime.New` takes it."},
 }
 
 func newDocsCmd() *cobra.Command {
@@ -131,7 +133,7 @@ configuration types: ` + "`chok.Base`" + `, which every application's Config emb
 and the Config of ` + "`db`" + ` and of each battery. An application names a
 battery's section in its own Config struct; the keys below carry the
 names examples/blog and ` + "`chok init`" + ` use: ` + "`db`" + `, ` + "`auth`" + ` for identity, ` + "`jobs`" + `,
-` + "`telemetry`" + ` and ` + "`cache`" + `.
+` + "`telemetry`" + `, ` + "`cache`" + ` and ` + "`realtime`" + `.
 
 ` + "`chok.Load`" + ` reads, lowest to highest: the defaults below, the file
 (` + "`chok.yaml`" + `, ` + "`<name>.yaml`" + `, ` + "`configs/<name>.yaml`" + ` or ` + "`--config`" + `), environment

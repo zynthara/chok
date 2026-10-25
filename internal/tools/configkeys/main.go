@@ -16,6 +16,7 @@ import (
 	"github.com/zynthara/chok/v3/identity"
 	"github.com/zynthara/chok/v3/internal/conf"
 	"github.com/zynthara/chok/v3/jobs"
+	"github.com/zynthara/chok/v3/realtime"
 	"github.com/zynthara/chok/v3/telemetry"
 )
 
@@ -31,6 +32,7 @@ var sections = []struct {
 	{"jobs.Config", reflect.TypeFor[jobs.Config]()},
 	{"telemetry.Config", reflect.TypeFor[telemetry.Config]()},
 	{"cache.Config", reflect.TypeFor[cache.Config]()},
+	{"realtime.Config", reflect.TypeFor[realtime.Config]()},
 }
 
 func main() {
