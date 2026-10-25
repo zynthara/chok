@@ -14,34 +14,6 @@ The v1 and v2 histories are in the `CHANGELOG.md` of the
 
 <!-- When tagging: replace 未发布 (unreleased) with the release date, YYYY-MM-DD. -->
 
-## [Unreleased]
-
-### Added
-
-- **`realtime`**, a battery that pushes events to browsers as they happen:
-  one `Hub`, registered with `app.Use`, serves topics over a WebSocket
-  (`github.com/coder/websocket`) and over server-sent events. A page trades
-  its token for a one-time ticket at `POST /realtime/ticket`, so no
-  long-lived token travels in a URL; `realtime.Authorize` decides every
-  subscription, and `user:<UserID>` topics are their user's alone
-  (`hub.Send`). `hub.Publish` never waits on a slow connection — one that
-  falls `send_buffer` events behind is dropped — and the last `replay`
-  events stay in memory, so a reconnecting page resumes after the last
-  event it saw (`after`, `Last-Event-ID`) or gets a `reset`. With
-  `realtime.Redis`, tickets and events span every replica. See
-  [docs/realtime.md](docs/realtime.md).
-- **`jobs`**: `jobs.Observe` streams every run of the periodic jobs, the
-  workers and the cleanup — started, finished, failed, skipped — as a
-  `jobs.Event`, for a live jobs panel through `realtime`.
-- **`examples/chatter`**: chat rooms over a WebSocket, a bot answering
-  from a jobs worker, and a jobs panel over server-sent events, in about
-  230 lines of Go and one HTML page without a build step.
-
-### Changed
-
-- **Budgets in CI**: at most eleven public packages (`realtime` is the
-  eleventh), 240 exported declarations, 45 option constructors.
-
 ## [v3.0.0-alpha.1] - 未发布
 
 The first release of v3, a rewrite: chok becomes a toolkit an application
@@ -86,7 +58,9 @@ package, configuration key, API, table and metric to its v3 form.
   with a Redis watcher.
 - **`jobs`**: cron-scheduled periodic jobs with skip, queue or allow
   overlap (a robfig/cron parser built in; see NOTICE), and transactional
-  outbox workers that deliver at least once in order.
+  outbox workers that deliver at least once in order; `jobs.Observe`
+  streams every run — started, finished, failed, skipped — as a
+  `jobs.Event`, for a live jobs panel through `realtime`.
 - **`telemetry`**: Prometheus metrics named after the OpenTelemetry
   semantic conventions (`http_server_request_duration_seconds`,
   `db_client_operation_duration_seconds`, …) on `/metrics`, OpenTelemetry
@@ -94,6 +68,19 @@ package, configuration key, API, table and metric to its v3 form.
   OpenTelemetry logs.
 - **`cache`**: an in-memory and a Redis layer behind one `Config`, with a
   circuit breaker and coalesced loads.
+- **`realtime`**, a battery that pushes events to browsers as they happen:
+  one `Hub`, registered with `app.Use`, serves topics over a WebSocket
+  (`github.com/coder/websocket`) and over server-sent events. A page trades
+  its token for a one-time ticket at `POST /realtime/ticket`, so no
+  long-lived token travels in a URL; `realtime.Authorize` decides every
+  subscription — a refused one is a `refused` event, never a closed
+  connection — and `user:<UserID>` topics are their user's alone
+  (`hub.Send`). `hub.Publish` never waits on a slow connection — one that
+  falls `send_buffer` events behind is dropped — and the last `replay`
+  events stay in memory, so a reconnecting page resumes after the last
+  event it saw (`after`, `Last-Event-ID`) or gets a `reset`. With
+  `realtime.Redis`, tickets and events span every replica. See
+  [docs/realtime.md](docs/realtime.md).
 - **`choktest`**: a throwaway database per test on the lane's dialect and
   an in-process App client.
 - **The `chok` command**: `init` scaffolds a project that serves on
@@ -102,12 +89,16 @@ package, configuration key, API, table and metric to its v3 form.
   the application's own configuration; `openapi export` saves a running
   application's document as JSON or YAML; `version` reports the build.
 - **Documentation**: [quickstart](docs/quickstart.md), whose programs are
-  compiled by a test; a generated [configuration reference](docs/config.md)
+  compiled by a test; [realtime](docs/realtime.md), the browser's side of
+  the realtime battery; a generated [configuration reference](docs/config.md)
   and [API map](docs/api.md), both kept current by tests;
   [design](docs/design.md) and the [v2 migration guide](docs/migration-v2-to-v3.md),
   in Chinese; English and Chinese READMEs.
-- **Budgets in CI**: at most ten public packages, 220 exported
-  declarations (with per-package caps), 40 option constructors, 30 direct
+- **`examples/chatter`**: chat rooms over a WebSocket, a bot answering
+  from a jobs worker, and a jobs panel over server-sent events, in about
+  230 lines of Go and one HTML page without a build step.
+- **Budgets in CI**: at most eleven public packages, 240 exported
+  declarations (with per-package caps), 45 option constructors, 30 direct
   dependencies, 150 configuration keys, and an `examples/blog` of 120
   application lines — `make budget`, part of `make verify`.
 
@@ -140,5 +131,4 @@ package, configuration key, API, table and metric to its v3 form.
   manifests, repair history, fences and baseline adoption.
 - The error mapper registry; viper; fsnotify; the robfig/cron dependency.
 
-[Unreleased]: https://github.com/zynthara/chok/compare/v3.0.0-alpha.1...HEAD
 [v3.0.0-alpha.1]: https://github.com/zynthara/chok/releases/tag/v3.0.0-alpha.1
