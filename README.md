@@ -213,8 +213,9 @@ alone — through an SMTP relay, into `.eml` files during development, or
 into the log — from `html/template` and `text/template` files. Given a
 way to mail, `identity` signs people in with a code instead of a
 password: `POST /auth/passwordless/start {"email"}` answers 202 and mails
-a code and a one-click link; `POST /auth/passwordless/verify` with the
-code (or the link's token) signs in, creating the account on first use.
+a code (and, with `magic_link_url` set, a one-click link);
+`POST /auth/passwordless/verify` with the code (or the link's token) signs
+in, creating the account on first use.
 In cookie mode the session is an HttpOnly cookie the page's scripts never
 see, guarded by `http.csrf`.
 

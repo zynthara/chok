@@ -201,8 +201,9 @@ news.addEventListener("story.posted", (e) => console.log(JSON.parse(e.data).data
 `mail` 电池只用标准库发事务邮件——经 SMTP 中继、开发时写成 `.eml` 文件、或者只记
 日志——模板是 `html/template` 与 `text/template` 文件。有了发信的办法，`identity`
 就能用验证码代替密码登录：`POST /auth/passwordless/start {"email"}` 一律回 202，
-并寄出验证码与一键登录链接；`POST /auth/passwordless/verify` 交上验证码（或链接里的
-token）即登录，第一次登录时建号。cookie 模式下会话是页面脚本碰不到的 HttpOnly
+并寄出验证码（配了 `magic_link_url` 时还有一键登录链接）；
+`POST /auth/passwordless/verify` 交上验证码（或链接里的 token）即登录，第一次登录时
+建号。cookie 模式下会话是页面脚本碰不到的 HttpOnly
 cookie，由 `http.csrf` 把守。
 
 ```go
