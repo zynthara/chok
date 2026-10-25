@@ -353,7 +353,7 @@ func (f *oauthFlow) handleExchange(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, flowCookie(bindingCookie, "", -1, f.devMode))
 	resp := &exchangeResponse{Token: tok.Token, ExpiresAt: tok.ExpiresAt, RedirectBack: data.RedirectBack}
 	if c := f.idn.cfg.Cookie; c.Enabled {
-		http.SetCookie(w, f.idn.sessionCookie(tok.Token))
+		http.SetCookie(w, f.idn.tokenCookie(tok.Token))
 		if c.Only {
 			resp.Token = ""
 		}

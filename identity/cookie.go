@@ -44,7 +44,7 @@ func tokenRoute[T any](idn *Identity, r chok.Router, pattern string, fn chok.Han
 		tok, err := fn(ctx, req)
 		if err == nil {
 			if w := responseFrom(ctx); w != nil {
-				http.SetCookie(w, idn.sessionCookie(tok.Token))
+				http.SetCookie(w, idn.tokenCookie(tok.Token))
 			}
 		}
 		return tok, err
@@ -62,10 +62,10 @@ func tokenRoute[T any](idn *Identity, r chok.Router, pattern string, fn chok.Han
 	}, opts...)
 }
 
-// sessionCookie is the cookie that carries token for as long as a token
-// lives: HttpOnly, with the configured name, path, domain, Secure and
-// SameSite.
-func (idn *Identity) sessionCookie(token string) *http.Cookie {
+// tokenCookie is the session cookie: it carries token for as long as a
+// token lives, HttpOnly, with the configured name, path, domain, Secure
+// and SameSite.
+func (idn *Identity) tokenCookie(token string) *http.Cookie {
 	c := idn.newCookie(token)
 	c.MaxAge = max(int(idn.cfg.TokenTTL/time.Second), 1)
 	return c
