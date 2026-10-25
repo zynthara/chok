@@ -168,6 +168,11 @@ connect();
 
 - The client sends `{"subscribe":["a","b"],"after":"<event id>"}` and
   `{"unsubscribe":["a"]}`; `?topics=a,b` on the URL subscribes at once.
+- A subscription takes effect when the hub has handled its frame, and
+  nothing acknowledges it (a refusal is an `error` event; the frames of a
+  connection are handled in order). So subscribe first, then read the
+  current state from the API, and skip the events you already have — the
+  other order can miss what happens in between.
 - The hub pings every `ping_interval`; browsers answer by themselves. A
   client that does not answer within two intervals is cut off.
 - Close codes: **1001** the server is stopping; **1008** a frame the

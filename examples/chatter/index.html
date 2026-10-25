@@ -78,6 +78,7 @@ let room = null;          // the open room: {id, name}
 let ws = null;            // the chat socket
 let lastMessageEvent = ""; // resume point of the chat
 let lastRunEvent = "";     // resume point of the jobs panel
+let shown = new Set();     // the ids of the messages on screen
 
 // api calls the JSON API with the bearer token; errors carry chok's envelope message.
 async function api(method, path, body) {
@@ -157,20 +158,29 @@ async function openRoom(r) {
   lastMessageEvent = "";
   $("#roomName").textContent = "# " + r.name;
   $("#say").hidden = false;
-  await loadHistory();
+  // Follow first, then read: a message posted in between arrives live
+  // and is not shown twice.
+  $("#messages").replaceChildren();
+  shown = new Set();
   subscribe();
+  await loadHistory();
   loadRooms();
 }
 
-// loadHistory shows the room's last messages: on open, and after a reset.
+// loadHistory shows the room's last messages, followed by those that came
+// live while it was reading: on open, and after a reset.
 async function loadHistory() {
   const msgs = await api("GET", `/api/rooms/${room.id}/messages`);
-  $("#messages").replaceChildren(...msgs.map(messageItem));
+  const live = [...$("#messages").children].filter((li) => !msgs.some((m) => m.id === li.dataset.id));
+  shown = new Set(msgs.map((m) => m.id));
+  live.forEach((li) => shown.add(li.dataset.id));
+  $("#messages").replaceChildren(...msgs.map(messageItem), ...live);
   $("#messages").scrollTop = 1e9;
 }
 
 function messageItem(m) {
   const li = document.createElement("li");
+  li.dataset.id = m.id;
   li.className = m.user_id === "bot" ? "bot" : "";
   const who = document.createElement("b");
   who.textContent = m.author;
@@ -198,10 +208,15 @@ async function connectChat() {
     if (!room || ev.topic !== "room:" + room.id) return;
     if (ev.type === "message.created") {
       lastMessageEvent = ev.id;
+      if (shown.has(ev.data.id)) return;
+      shown.add(ev.data.id);
       $("#messages").append(messageItem(ev.data));
       $("#messages").scrollTop = 1e9;
     } else if (ev.type === "reset") {
-      loadHistory(); // too long away for the hub's replay: read the state anew
+      // Too long away for the hub's replay: read the room anew.
+      $("#messages").replaceChildren();
+      shown = new Set();
+      loadHistory();
     } else if (ev.type === "error") {
       $("#chatError").textContent = ev.data.message;
     }
