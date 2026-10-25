@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/zynthara/chok/v3/internal/openapi"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
@@ -163,6 +165,20 @@ func TestOpenAPI_WithoutBearerAuthHasNoSecurity(t *testing.T) {
 	GET(app.Router(), "/x", func(context.Context, *None) (None, error) { return None{}, nil })
 	if op := spec(t, app).Paths["/x"]["get"]; op.Security != nil {
 		t.Fatalf("got %+v", op.Security)
+	}
+}
+
+// TestOpenAPI_CookieAuthHook: the internal hook identity calls in cookie
+// mode adds the cookie scheme to the App behind a router, a group's
+// included; a foreign router is ignored.
+func TestOpenAPI_CookieAuthHook(t *testing.T) {
+	app := New(testBase(t), Logger(quiet()))
+	GET(app.Router(), "/x", func(context.Context, *None) (None, error) { return None{}, nil })
+	openapi.UseCookieAuth(app.Group("/auth"), "sid")
+	openapi.UseCookieAuth(http.NewServeMux(), "ignored")
+	op := spec(t, app).Paths["/x"]["get"]
+	if op.Security == nil || len(*op.Security) != 2 || (*op.Security)[1]["cookieAuth"] == nil {
+		t.Fatalf("security %+v", op.Security)
 	}
 }
 

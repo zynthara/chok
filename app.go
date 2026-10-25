@@ -44,6 +44,10 @@ type App struct {
 	ready    atomic.Bool
 	draining atomic.Bool
 	addr     atomic.Pointer[string]
+
+	// cookieAuth names the session cookie the OpenAPI document lists
+	// next to the bearer token; identity sets it in cookie mode.
+	cookieAuth atomic.Pointer[string]
 }
 
 type component struct {

@@ -35,6 +35,16 @@
 // account of an unknown address unless auto_register is off. Codes are
 // kept as HMACs in auth_login_codes, tried at most max_attempts times.
 //
+// # Cookie mode
+//
+// With auth.cookie.enabled, every route that issues a token also sets it
+// in an HttpOnly session cookie — with auth.cookie.only, in the cookie
+// alone — Authn reads that cookie from a request without an
+// Authorization header, and POST {prefix}/logout clears it. A browser
+// sends the cookie with every request to the API, so serve the front end
+// from the same origin and turn on http.csrf; SameSite lax, the default,
+// keeps it off other sites' POSTs.
+//
 // # Tokens and the principal
 //
 // A token is an HS256 JWT signed with auth.signing_key, valid for

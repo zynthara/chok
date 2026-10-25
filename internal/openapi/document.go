@@ -37,7 +37,19 @@ type Info struct {
 	Title      string
 	Version    string
 	BearerAuth bool
+	// CookieAuth, when set, names a cookie that authenticates as the bearer
+	// token does: the document gains the scheme cookieAuth, an apiKey in
+	// that cookie, and the routes not declared Public list it next to
+	// bearerAuth, either one sufficing.
+	CookieAuth string
 }
+
+// UseCookieAuth makes the OpenAPI document of the App behind router (a
+// chok.Router) document the session cookie named cookie, as
+// Info.CookieAuth does. Package chok sets it when it initializes, and
+// identity calls it from Mount in cookie mode: neither exports anything
+// for it.
+var UseCookieAuth func(router any, cookie string)
 
 type document struct {
 	OpenAPI    string               `json:"openapi"`
@@ -58,8 +70,10 @@ type components struct {
 
 type securityScheme struct {
 	Type         string `json:"type"`
-	Scheme       string `json:"scheme"`
+	Scheme       string `json:"scheme,omitzero"`
 	BearerFormat string `json:"bearerFormat,omitzero"`
+	In           string `json:"in,omitzero"`
+	Name         string `json:"name,omitzero"`
 }
 
 type pathItem struct {
@@ -78,8 +92,8 @@ type operation struct {
 	Parameters  []*parameter         `json:"parameters,omitzero"`
 	RequestBody *requestBody         `json:"requestBody,omitzero"`
 	Responses   map[string]*response `json:"responses"`
-	// Security is nil without bearer auth, and points to an empty list
-	// for a public route so the document says "security": [].
+	// Security is nil without bearer or cookie auth, and points to an
+	// empty list for a public route so the document says "security": [].
 	Security *[]map[string][]string `json:"security,omitzero"`
 }
 
@@ -114,15 +128,25 @@ func Build(in Info, ops []Operation) ([]byte, error) {
 		Info:    info{Title: or(in.Title, "API"), Version: or(in.Version, "0.0.0")},
 		Paths:   map[string]*pathItem{},
 	}
+	// The schemes a route not declared Public accepts, any one of them.
+	var schemes []string
+	if in.BearerAuth {
+		schemes = append(schemes, "bearerAuth")
+	}
+	if in.CookieAuth != "" {
+		schemes = append(schemes, "cookieAuth")
+	}
 	ids := map[string]int{}
 	for _, op := range ops {
 		path := oaPath(op.Path)
 		o := buildOperation(g, op, path)
 		o.OperationID = uniqueID(ids, operationID(op.Method, o.Summary))
-		if in.BearerAuth {
+		if len(schemes) > 0 {
 			sec := []map[string][]string{}
 			if !op.Public {
-				sec = append(sec, map[string][]string{"bearerAuth": {}})
+				for _, name := range schemes {
+					sec = append(sec, map[string][]string{name: {}})
+				}
 			}
 			o.Security = &sec
 		}
@@ -145,10 +169,14 @@ func Build(in Info, ops []Operation) ([]byte, error) {
 		}
 	}
 	doc.Components.Schemas = g.schemas
+	if len(schemes) > 0 {
+		doc.Components.SecuritySchemes = map[string]*securityScheme{}
+	}
 	if in.BearerAuth {
-		doc.Components.SecuritySchemes = map[string]*securityScheme{
-			"bearerAuth": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
-		}
+		doc.Components.SecuritySchemes["bearerAuth"] = &securityScheme{Type: "http", Scheme: "bearer", BearerFormat: "JWT"}
+	}
+	if in.CookieAuth != "" {
+		doc.Components.SecuritySchemes["cookieAuth"] = &securityScheme{Type: "apiKey", In: "cookie", Name: in.CookieAuth}
 	}
 	return json.Marshal(doc, json.Deterministic(true))
 }

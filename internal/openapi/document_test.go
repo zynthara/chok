@@ -209,6 +209,34 @@ func TestBuild_DocumentShape(t *testing.T) {
 	}
 }
 
+// TestBuild_CookieAuth: a session cookie is a second scheme, apiKey in
+// the cookie, that every route not declared Public accepts next to the
+// bearer token — or alone, without bearer auth.
+func TestBuild_CookieAuth(t *testing.T) {
+	ops := []Operation{{Method: "GET", Path: "/me"}, {Method: "POST", Path: "/login", Public: true}}
+	doc, err := Build(Info{BearerAuth: true, CookieAuth: "chok_token"}, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(doc)
+	for _, want := range []string{
+		`"securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer","bearerFormat":"JWT"},"cookieAuth":{"type":"apiKey","in":"cookie","name":"chok_token"}}`,
+		`"security":[{"bearerAuth":[]},{"cookieAuth":[]}]`, `"security":[]`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("document lacks %s:\n%s", want, s)
+		}
+	}
+	doc, err = Build(Info{CookieAuth: "sid"}, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(doc); !strings.Contains(s, `"securitySchemes":{"cookieAuth":{"type":"apiKey","in":"cookie","name":"sid"}}`) ||
+		!strings.Contains(s, `"security":[{"cookieAuth":[]}]`) || strings.Contains(s, "bearerAuth") {
+		t.Errorf("cookie only:\n%s", s)
+	}
+}
+
 func TestUI_EscapesTitle(t *testing.T) {
 	page := UI(`<b>"x"</b>`, "/openapi.json")
 	if strings.Contains(page, "<b>") || !strings.Contains(page, `url: "/openapi.json"`) {

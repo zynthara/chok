@@ -124,6 +124,13 @@ Accounts, tokens, OAuth providers and the audit log; `identity.New` takes it. Th
 | `auth.audit.drop_on_full` | bool |  |  | DropOnFull drops a record when the queue is full, instead of making Log wait for room (or for the caller's context to end). |
 | `auth.audit.enabled` | bool |  |  | Enabled turns the audit log on; off, Log does nothing. |
 | `auth.audit.retention` | duration | `4320h` |  | Retention is how long a record is kept; older ones are purged every hour. 0 keeps records forever. |
+| `auth.cookie.domain` | string |  |  | Domain shares the cookie with the domain's subdomains; empty, it is the API host's alone. |
+| `auth.cookie.enabled` | bool |  |  | Enabled turns cookie mode on. |
+| `auth.cookie.name` | string | `chok_token` |  | Name is the cookie's name. |
+| `auth.cookie.only` | bool |  |  | Only leaves the token out of the response bodies: {expires_at} alone, the cookie the whole session, out of the page's scripts' reach. |
+| `auth.cookie.path` | string | `/` |  | Path is where the browser sends the cookie. |
+| `auth.cookie.same_site` | string | `lax` | `omitempty,oneof=lax strict none` | SameSite is lax (the cookie stays home on another site's POST), strict or none; none needs Secure. |
+| `auth.cookie.secure` | bool |  |  | Secure sends the cookie over https only; nil means true. Turn it off for plain http on localhost alone. |
 | `auth.disable_register` | bool |  |  | DisableRegister drops the register route: accounts come from Users().Create. |
 | `auth.link_by_email` | bool |  |  | LinkByEmail lets a first OAuth sign-in join the local account with the same email, when that account's email is verified and the provider vouches for the address and does not alias it. |
 | `auth.login_rate_limit` | int | `10` |  | LoginRateWindow and LoginRateLimit throttle failed logins: once an email, or a client IP, has failed LoginRateLimit times within the window, login answers 429 until the window slides. Both 0 turn the throttle off. |

@@ -28,7 +28,24 @@ func (a *App) openAPIDocument() ([]byte, error) {
 	if version == "" {
 		version = a.version
 	}
-	return openapi.Build(openapi.Info{Title: c.Title, Version: version, BearerAuth: c.BearerAuth}, ops)
+	cookie := ""
+	if p := a.cookieAuth.Load(); p != nil {
+		cookie = *p
+	}
+	return openapi.Build(openapi.Info{Title: c.Title, Version: version, BearerAuth: c.BearerAuth, CookieAuth: cookie}, ops)
+}
+
+// identity documents its session cookie through the internal hook: a
+// battery cannot reach the App, and the document has no public option
+// for it.
+func init() {
+	openapi.UseCookieAuth = func(router any, cookie string) {
+		if r, ok := router.(Router); ok {
+			if a := appOf(r); a != nil {
+				a.cookieAuth.Store(&cookie)
+			}
+		}
+	}
 }
 
 func (a *App) mountOpenAPI() {

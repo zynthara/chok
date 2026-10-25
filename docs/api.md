@@ -15,7 +15,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`db`](#db) | 28 |
 | [`store`](#store) | 29 |
 | [`store/where`](#storewhere) | 27 |
-| [`identity`](#identity) | 19 |
+| [`identity`](#identity) | 20 |
 | [`identity/rbac`](#identityrbac) | 7 |
 | [`jobs`](#jobs) | 16 |
 | [`telemetry`](#telemetry) | 6 |
@@ -27,7 +27,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 230 |
+| total | 231 |
 
 ## chok
 
@@ -212,6 +212,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `type Audit struct{ ... }` | Audit is the audit log: records are written in the background and only ever added — the log has no update or delete, and the records older than auth.audit.retention are purged every hour. |
 | `type AuditConfig struct{ ... }` | AuditConfig is auth.audit: the audit log of who did what, written in the background and kept for Retention. |
 | `type Config struct{ ... }` | Config is the auth section of an application's configuration: |
+| `type CookieConfig struct{ ... }` | CookieConfig is auth.cookie: the session in an HttpOnly cookie. |
 | `type Event struct{ ... }` | Event is one audit record: who did what to which resource, and how it ended. |
 | `type Identity struct{ ... }` | Identity is the identity battery: accounts with passwords and OAuth sign-in, the tokens that prove them, the middleware that checks those tokens, and the audit log. |
 | ↳ `func MustNew(cfg Config, d *db.DB, opts ...Option) *Identity` | MustNew is New that panics on error. |

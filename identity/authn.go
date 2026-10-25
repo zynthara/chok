@@ -16,17 +16,23 @@ import (
 const maxAuthorizationLen = 8 << 10
 
 // Authn is the middleware that admits a request with a valid access
-// token: a Bearer JWT this Identity signed, whose user still exists, is
-// active and has not had its tokens revoked since (a password change, a
-// role change, a disable, Users().RevokeTokens). It reads the user on
-// every request, so a revocation takes effect at once. The request then
-// carries the chok.Principal — UserID is the user's id (usr_…), which a
-// store's owner scope writes to owner_id — and anything else is a 401
-// envelope.
+// token: a Bearer JWT this Identity signed — in cookie mode, the session
+// cookie's, when the request has no Authorization header — whose user
+// still exists, is active and has not had its tokens revoked since (a
+// password change, a role change, a disable, Users().RevokeTokens). It
+// reads the user on every request, so a revocation takes effect at once.
+// The request then carries the chok.Principal — UserID is the user's id
+// (usr_…), which a store's owner scope writes to owner_id — and anything
+// else is a 401 envelope.
 func (idn *Identity) Authn() chok.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx, err := idn.authenticate(r.Context(), r.Header.Get("Authorization"))
+			raw, err := idn.credential(r)
+			if err != nil {
+				chok.WriteError(w, r, err)
+				return
+			}
+			ctx, err := idn.authenticate(r.Context(), raw)
 			if err != nil {
 				chok.WriteError(w, r, err)
 				return
@@ -34,6 +40,29 @@ func (idn *Identity) Authn() chok.Middleware {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// credential is the request's access token: the Authorization header's
+// bearer token, or — in cookie mode, and only without that header — the
+// session cookie's value. The header wins even when it is not a valid
+// bearer token.
+func (idn *Identity) credential(r *http.Request) (string, error) {
+	header := r.Header.Get("Authorization")
+	if header != "" || !idn.cfg.Cookie.Enabled {
+		raw := bearer(header)
+		if raw == "" {
+			return "", errNoToken
+		}
+		return raw, nil
+	}
+	ck, err := r.Cookie(idn.cfg.Cookie.Name)
+	if err != nil || ck.Value == "" {
+		return "", errNoCredential
+	}
+	if len(ck.Value) > maxAuthorizationLen {
+		return "", errBadBearer
+	}
+	return ck.Value, nil
 }
 
 // session is what Authn learned from the token, kept for the handlers
@@ -52,6 +81,7 @@ func sessionFrom(ctx context.Context) (*session, bool) {
 
 var (
 	errNoToken      = chok.ErrUnauthorized.Msgf("a bearer token is required")
+	errNoCredential = chok.ErrUnauthorized.Msgf("a bearer token or the session cookie is required")
 	errBadBearer    = chok.ErrUnauthorized.Msgf("the token is invalid or expired")
 	errNoAccount    = chok.ErrUnauthorized.Msgf("account not found")
 	errDisabled     = chok.ErrUnauthorized.Msgf("account is disabled")
@@ -59,13 +89,9 @@ var (
 	errSessionEnded = chok.ErrUnauthorized.Msgf("the session ended, please log in again")
 )
 
-// authenticate checks the Authorization header and returns ctx carrying
-// the principal and the session.
-func (idn *Identity) authenticate(ctx context.Context, header string) (context.Context, error) {
-	raw := bearer(header)
-	if raw == "" {
-		return nil, errNoToken
-	}
+// authenticate checks an access token and returns ctx carrying the
+// principal and the session.
+func (idn *Identity) authenticate(ctx context.Context, raw string) (context.Context, error) {
 	sub, claims, err := idn.access.parse(raw)
 	if err != nil {
 		return nil, errBadBearer

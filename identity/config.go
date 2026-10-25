@@ -3,6 +3,7 @@ package identity
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
@@ -71,6 +72,9 @@ type Config struct {
 	Providers map[string]ProviderConfig `yaml:"providers"`
 	// Passwordless signs users in with a code mailed to them.
 	Passwordless PasswordlessConfig `yaml:"passwordless"`
+	// Cookie carries the access token in an HttpOnly cookie as well, for
+	// browsers.
+	Cookie CookieConfig `yaml:"cookie"`
 	// Audit configures the audit log.
 	Audit AuditConfig `yaml:"audit"`
 }
@@ -132,6 +136,36 @@ type PasswordlessConfig struct {
 // autoRegister reports whether a sign-in may create the account.
 func (c PasswordlessConfig) autoRegister() bool { return c.AutoRegister == nil || *c.AutoRegister }
 
+// CookieConfig is auth.cookie: the session in an HttpOnly cookie. Every
+// route that issues a token — register, login, refresh-token, passwordless
+// verify, the OAuth exchange — sets the cookie too, Authn reads it from a
+// request without an Authorization header, and POST {prefix}/logout clears
+// it. A cookie rides along with every request the browser makes: serve
+// the front end from the same origin and turn on http.csrf.
+type CookieConfig struct {
+	// Enabled turns cookie mode on.
+	Enabled bool `yaml:"enabled"`
+	// Name is the cookie's name.
+	Name string `yaml:"name" default:"chok_token"`
+	// Domain shares the cookie with the domain's subdomains; empty, it is
+	// the API host's alone.
+	Domain string `yaml:"domain"`
+	// Path is where the browser sends the cookie.
+	Path string `yaml:"path" default:"/"`
+	// Secure sends the cookie over https only; nil means true. Turn it off
+	// for plain http on localhost alone.
+	Secure *bool `yaml:"secure"`
+	// SameSite is lax (the cookie stays home on another site's POST),
+	// strict or none; none needs Secure.
+	SameSite string `yaml:"same_site" default:"lax" validate:"omitempty,oneof=lax strict none"`
+	// Only leaves the token out of the response bodies: {expires_at} alone,
+	// the cookie the whole session, out of the page's scripts' reach.
+	Only bool `yaml:"only"`
+}
+
+// secure reports whether the cookie is Secure.
+func (c CookieConfig) secure() bool { return c.Secure == nil || *c.Secure }
+
 // AuditConfig is auth.audit: the audit log of who did what, written in
 // the background and kept for Retention.
 type AuditConfig struct {
@@ -163,6 +197,10 @@ const (
 	defaultCodeLength  = 6
 	defaultMaxAttempts = 5
 	defaultResendAfter = time.Minute
+
+	defaultCookieName     = "chok_token"
+	defaultCookiePath     = "/"
+	defaultCookieSameSite = "lax"
 )
 
 // withDefaults fills what a Config built in code leaves at zero; one from
@@ -195,6 +233,16 @@ func (c Config) withDefaults() Config {
 	}
 	if p.ResendAfter == 0 {
 		p.ResendAfter = defaultResendAfter
+	}
+	k := &c.Cookie
+	if k.Name == "" {
+		k.Name = defaultCookieName
+	}
+	if k.Path == "" {
+		k.Path = defaultCookiePath
+	}
+	if k.SameSite == "" {
+		k.SameSite = defaultCookieSameSite
 	}
 	return c
 }
@@ -231,6 +279,7 @@ func (c *Config) Validate() error {
 	if c.Passwordless.MagicLinkURL != "" && !absoluteURL(c.Passwordless.MagicLinkURL) {
 		errs = append(errs, errors.New("passwordless.magic_link_url must be an absolute http or https URL"))
 	}
+	errs = append(errs, c.Cookie.check()...)
 	if (c.LoginRateWindow > 0) != (c.LoginRateLimit > 0) {
 		errs = append(errs, errors.New("login_rate_window and login_rate_limit are both set or both 0"))
 	}
@@ -276,4 +325,24 @@ func (c *Config) Validate() error {
 func absoluteURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// check finds the cookie settings a browser would refuse: a name, a path
+// or a domain it cannot carry, and SameSite none without Secure, which
+// browsers drop.
+func (c CookieConfig) check() []error {
+	var errs []error
+	if c.Name != "" && (&http.Cookie{Name: c.Name, Value: "x"}).Valid() != nil {
+		errs = append(errs, fmt.Errorf("cookie.name %q is not a cookie name", c.Name))
+	}
+	if c.Path != "" && (!strings.HasPrefix(c.Path, "/") || (&http.Cookie{Name: "n", Value: "x", Path: c.Path}).Valid() != nil) {
+		errs = append(errs, fmt.Errorf("cookie.path %q must be a path such as /", c.Path))
+	}
+	if c.Domain != "" && (&http.Cookie{Name: "n", Value: "x", Domain: c.Domain}).Valid() != nil {
+		errs = append(errs, fmt.Errorf("cookie.domain %q is not a domain", c.Domain))
+	}
+	if c.SameSite == "none" && !c.secure() {
+		errs = append(errs, errors.New("cookie.same_site none needs cookie.secure: browsers drop such a cookie without it"))
+	}
+	return errs
 }

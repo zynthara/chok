@@ -292,8 +292,10 @@ type exchangeRequest struct {
 	Code string `json:"code"`
 }
 
+// exchangeResponse is the token of an OAuth sign-in; with cookie.only it
+// travels in the session cookie alone, and Token is empty.
 type exchangeResponse struct {
-	Token        string    `json:"token"`
+	Token        string    `json:"token,omitempty"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	RedirectBack string    `json:"redirect_back,omitempty"`
 }
@@ -349,7 +351,14 @@ func (f *oauthFlow) handleExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, flowCookie(bindingCookie, "", -1, f.devMode))
-	writeJSON(w, http.StatusOK, &exchangeResponse{Token: tok.Token, ExpiresAt: tok.ExpiresAt, RedirectBack: data.RedirectBack})
+	resp := &exchangeResponse{Token: tok.Token, ExpiresAt: tok.ExpiresAt, RedirectBack: data.RedirectBack}
+	if c := f.idn.cfg.Cookie; c.Enabled {
+		http.SetCookie(w, f.idn.sessionCookie(tok.Token))
+		if c.Only {
+			resp.Token = ""
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type linkRequest struct {
