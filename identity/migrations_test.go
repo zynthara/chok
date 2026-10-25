@@ -11,7 +11,7 @@ import (
 	"github.com/zynthara/chok/v3/internal/dbtest"
 )
 
-var identityTables = []string{"users", "identities", "audit_logs"}
+var identityTables = []string{"users", "identities", "audit_logs", "auth_login_codes"}
 
 // describeSchema renders tables as the database reports them: each
 // column's type, length, nullability, default and key, and each index's
@@ -71,8 +71,12 @@ func TestMigrations_VersionedMatchesAuto(t *testing.T) {
 	if !strings.Contains(want, "uk_user_email [delete_token email] unique=true") || !strings.Contains(want, "uk_identity_provider [delete_token provider provider_account_id] unique=true") {
 		t.Fatalf("the SoftUnique indexes:\n%s", want)
 	}
+	if !strings.Contains(want, "uk_login_code_email [email] unique=true") || !strings.Contains(want, "uk_login_code_token [token_hash] unique=true") ||
+		!strings.Contains(want, "idx_auth_login_codes_expires_at [expires_at] unique=false") {
+		t.Fatalf("the login code indexes:\n%s", want)
+	}
 	// Auto migrating over the versioned schema finds nothing to change.
-	if err := versioned.Unsafe(t.Context()).AutoMigrate(&User{}, &linkedIdentity{}, &auditRow{}); err != nil {
+	if err := versioned.Unsafe(t.Context()).AutoMigrate(&User{}, &linkedIdentity{}, &auditRow{}, &loginCode{}); err != nil {
 		t.Fatal(err)
 	}
 	if again := describeSchema(t, versioned, identityTables...); again != got {
@@ -94,6 +98,7 @@ func TestMigrations_VersionedUsesTheLedger(t *testing.T) {
 	want := []string{
 		"identity 20261024000001_create_users_and_identities applied",
 		"identity 20261024000002_create_audit_logs applied",
+		"identity 20261025000002_create_auth_login_codes applied",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("ledger:\n%s", strings.Join(got, "\n"))
@@ -147,7 +152,7 @@ func TestMigrations_AutoCreatesTheTables(t *testing.T) {
 		t.Fatal("the SoftUnique indexes")
 	}
 	// auto mode records nothing in the ledger: the tables follow the models.
-	if sts, err := d.MigrationStatus(t.Context()); err != nil || len(sts) != 2 || sts[0].State != "pending" {
+	if sts, err := d.MigrationStatus(t.Context()); err != nil || len(sts) != 3 || sts[0].State != "pending" {
 		t.Fatalf("status in auto mode: %+v %v", sts, err)
 	}
 	// Registering twice on one database is refused.

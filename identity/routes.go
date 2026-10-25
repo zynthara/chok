@@ -21,6 +21,11 @@ import (
 //	PUT    {prefix}/change-password   bearer
 //	GET    {prefix}/me                bearer
 //
+// With auth.passwordless.enabled, sign-in by a mailed code:
+//
+//	POST   {prefix}/passwordless/start    public: mail a code, 202
+//	POST   {prefix}/passwordless/verify   public: the code or token for a token
+//
 // With providers, the OAuth routes too:
 //
 //	GET    {prefix}/{name}/start      public; GET or POST /{name}/callback after it
@@ -41,6 +46,10 @@ func (idn *Identity) Mount(r chok.Router) {
 	if idn.sender != nil {
 		chok.POST(g, "/forgot-password", idn.forgotPassword, chok.Public(), tag, chok.Summary("Mail a password-reset token"))
 		chok.POST(g, "/reset-password", idn.resetPassword, chok.Public(), tag, chok.Summary("Reset the password with a token"))
+	}
+	if idn.cfg.Passwordless.Enabled {
+		chok.POST(g, "/passwordless/start", idn.passwordlessStart, chok.Status(http.StatusAccepted), chok.Public(), tag, chok.Summary("Mail a sign-in code"))
+		chok.POST(g, "/passwordless/verify", idn.passwordlessVerify, chok.Public(), tag, chok.Summary("Sign in with a mailed code"))
 	}
 	authed := g.Group("", idn.Authn())
 	chok.POST(authed, "/refresh-token", idn.refreshToken, tag, chok.Summary("Refresh the access token"))

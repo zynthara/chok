@@ -55,8 +55,8 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 	for _, s := range configSections {
 		total += len(conf.Keys(s.typ))
 	}
-	if len(rows) != total || total != 153 {
-		t.Fatalf("%d rows for %d keys; the budget counts 153", len(rows), total)
+	if len(rows) != total || total != 160 {
+		t.Fatalf("%d rows for %d keys; the budget counts 160", len(rows), total)
 	}
 	for key, want := range map[string][]string{
 		"auth.signing_key":                    {"| **secret** |", "at least 32 bytes"},
@@ -79,6 +79,9 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 		"realtime.ping_interval":              {"| duration | `25s` |"},
 		"realtime.replay":                     {"| int | `256` |", "0 turns resuming off"},
 		"realtime.channel":                    {"| string | `chok:realtime` |"},
+		"auth.passwordless.code_length":       {"| int | `6` |", "`omitempty,min=6,max=10`"},
+		"auth.passwordless.auto_register":     {"| bool |", "nil means true"},
+		"auth.reset_url":                      {"| string |", "{prefix}/reset-password"},
 		"mail.transport":                      {"| string | `smtp` |", "`omitempty,oneof=smtp dir log`", ".eml file"},
 		"mail.timeout":                        {"| duration | `15s` |"},
 		"mail.smtp.port":                      {"| int | `587` |"},

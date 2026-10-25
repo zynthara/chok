@@ -22,6 +22,19 @@
 // response bodies are v2's: register takes {email, password, name} and
 // answers 201 {token, expires_at}; login takes {email, password}.
 //
+// # Mail and passwordless sign-in
+//
+// With Sender(s), identity asks the application to send mail: a
+// password-reset token from forgot-password, and — with
+// auth.passwordless.enabled — a sign-in code. Each is a Mail whose Kind
+// picks the application's template; the send runs in the background and
+// Close waits for it. POST {prefix}/passwordless/start {email} always
+// answers 202 and mails a code and a magic-link token, unless one went out
+// within auth.passwordless.resend_after; POST {prefix}/passwordless/verify
+// with {email, code} or {token} answers what login does, creating the
+// account of an unknown address unless auto_register is off. Codes are
+// kept as HMACs in auth_login_codes, tried at most max_attempts times.
+//
 // # Tokens and the principal
 //
 // A token is an HS256 JWT signed with auth.signing_key, valid for
@@ -34,10 +47,10 @@
 //
 // # Tables
 //
-// New registers users, identities and audit_logs under the owner
-// "identity": migrate auto creates them from the models, versioned
-// applies the SQL files embedded in this package (one directory per
-// dialect), off checks they were applied.
+// New registers users, identities, audit_logs and auth_login_codes under
+// the owner "identity": migrate auto creates them from the models,
+// versioned applies the SQL files embedded in this package (one directory
+// per dialect), off checks they were applied.
 //
 // # OAuth
 //

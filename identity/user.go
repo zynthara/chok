@@ -91,12 +91,14 @@ type auditRow struct {
 
 func (auditRow) TableName() string { return "audit_logs" }
 
-// tables are identity's schema: users, identities and audit_logs.
+// tables are identity's schema: users, identities, audit_logs and
+// auth_login_codes.
 func tables() []db.TableSpec {
 	return []db.TableSpec{
 		db.Table(&User{}, db.SoftUnique("uk_user_email", "email")),
 		db.Table(&linkedIdentity{}, db.SoftUnique("uk_identity_provider", "provider", "provider_account_id")),
 		dbx.PlainTable(&auditRow{}).(db.TableSpec),
+		dbx.PlainTable(&loginCode{}).(db.TableSpec),
 	}
 }
 

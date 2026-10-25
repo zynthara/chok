@@ -14,9 +14,10 @@ import (
 )
 
 type operation struct {
-	Summary  string                `json:"summary"`
-	Tags     []string              `json:"tags"`
-	Security []map[string][]string `json:"security"`
+	Summary   string                `json:"summary"`
+	Tags      []string              `json:"tags"`
+	Security  []map[string][]string `json:"security"`
+	Responses map[string]any        `json:"responses"`
 }
 
 type spec struct {
@@ -24,7 +25,7 @@ type spec struct {
 }
 
 func TestOpenAPI_AuthRoutes(t *testing.T) {
-	idn := newIdentity(t, Config{}, Sender(newMockSender()))
+	idn := newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true}}, Sender(newMockSender()))
 	c := serve(t, idn)
 	var s spec
 	if code := c.GetJSON("/openapi.json", &s); code != http.StatusOK {
@@ -39,10 +40,12 @@ func TestOpenAPI_AuthRoutes(t *testing.T) {
 		return o
 	}
 	public := map[[2]string]string{
-		{"post", "/auth/register"}:        "Register an account",
-		{"post", "/auth/login"}:           "Log in",
-		{"post", "/auth/forgot-password"}: "Mail a password-reset token",
-		{"post", "/auth/reset-password"}:  "Reset the password with a token",
+		{"post", "/auth/register"}:            "Register an account",
+		{"post", "/auth/login"}:               "Log in",
+		{"post", "/auth/forgot-password"}:     "Mail a password-reset token",
+		{"post", "/auth/reset-password"}:      "Reset the password with a token",
+		{"post", "/auth/passwordless/start"}:  "Mail a sign-in code",
+		{"post", "/auth/passwordless/verify"}: "Sign in with a mailed code",
 	}
 	for route, summary := range public {
 		o := op(route[0], route[1])
@@ -50,6 +53,9 @@ func TestOpenAPI_AuthRoutes(t *testing.T) {
 		if o.Security == nil || len(o.Security) != 0 || o.Summary != summary || !slices.Equal(o.Tags, []string{"auth"}) {
 			t.Errorf("%v: %+v", route, o)
 		}
+	}
+	if _, ok := op("post", "/auth/passwordless/start").Responses["202"]; !ok {
+		t.Errorf("start answers 202: %v", op("post", "/auth/passwordless/start").Responses)
 	}
 	bearer := map[[2]string]string{
 		{"get", "/auth/me"}:              "Get the signed-in user",

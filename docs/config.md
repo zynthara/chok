@@ -129,6 +129,13 @@ Accounts, tokens, OAuth providers and the audit log; `identity.New` takes it. Th
 | `auth.login_rate_limit` | int | `10` |  | LoginRateWindow and LoginRateLimit throttle failed logins: once an email, or a client IP, has failed LoginRateLimit times within the window, login answers 429 until the window slides. Both 0 turn the throttle off. |
 | `auth.login_rate_window` | duration | `15m` |  | LoginRateWindow and LoginRateLimit throttle failed logins: once an email, or a client IP, has failed LoginRateLimit times within the window, login answers 429 until the window slides. Both 0 turn the throttle off. |
 | `auth.oauth_callback_frontend_url` | string |  |  | OAuthCallbackFrontendURL is the front-end page an OAuth callback sends the browser to with a one-time ?code, which the page trades for a token at {prefix}/exchange. Required with providers. |
+| `auth.passwordless.auto_register` | bool |  |  | AutoRegister lets the first sign-in of an unknown address create its account, email verified, without a password; nil means true. False, only existing accounts sign in. |
+| `auth.passwordless.code_length` | int | `6` | `omitempty,min=6,max=10` | CodeLength is how many digits a code has, 6 to 10. |
+| `auth.passwordless.code_ttl` | duration | `10m` |  | CodeTTL is how long a code, and its magic-link token, is valid. |
+| `auth.passwordless.enabled` | bool |  |  | Enabled mounts the two routes; it needs a Sender to mail the codes. |
+| `auth.passwordless.magic_link_url` | string |  |  | MagicLinkURL is the front end's sign-in page, an absolute URL: given, the login-code Mail's Link is MagicLinkURL?token=&lt;token&gt;, for the page to post to {prefix}/passwordless/verify. |
+| `auth.passwordless.max_attempts` | int | `5` |  | MaxAttempts is how many wrong codes a code survives; after them the user asks for a new one. |
+| `auth.passwordless.resend_after` | duration | `60s` |  | ResendAfter is the least time between two codes for one address: a start within it answers the same 202 and mails nothing. |
 | `auth.prefix` | string | `/auth` |  | Prefix is where the routes mount: {prefix}/register, {prefix}/login, ... |
 | `auth.providers.<name>.client_id` | string |  |  | ClientID is the OAuth client: Google's client ID, GitHub's and Facebook's app ID, Apple's Services ID. |
 | `auth.providers.<name>.client_secret` | string |  | **secret** | ClientSecret is the client's secret; for Apple, the PEM contents of the .p8 signing key. |

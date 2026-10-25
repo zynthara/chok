@@ -69,6 +69,8 @@ type Config struct {
 	// Providers configures the OAuth providers by name; the code decides
 	// which ones run: identity.Providers(google.New(cfg.Providers["google"])).
 	Providers map[string]ProviderConfig `yaml:"providers"`
+	// Passwordless signs users in with a code mailed to them.
+	Passwordless PasswordlessConfig `yaml:"passwordless"`
 	// Audit configures the audit log.
 	Audit AuditConfig `yaml:"audit"`
 }
@@ -99,6 +101,37 @@ type ProviderConfig struct {
 	KeyID  string `yaml:"key_id"`
 }
 
+// PasswordlessConfig is auth.passwordless: signing in with a code mailed
+// to the address, no password. POST {prefix}/passwordless/start mails a
+// code, and a magic-link token; POST {prefix}/passwordless/verify trades
+// either for a session. New gives the zero durations and counts the
+// defaults below.
+type PasswordlessConfig struct {
+	// Enabled mounts the two routes; it needs a Sender to mail the codes.
+	Enabled bool `yaml:"enabled"`
+	// CodeTTL is how long a code, and its magic-link token, is valid.
+	CodeTTL time.Duration `yaml:"code_ttl" default:"10m"`
+	// CodeLength is how many digits a code has, 6 to 10.
+	CodeLength int `yaml:"code_length" default:"6" validate:"omitempty,min=6,max=10"`
+	// MaxAttempts is how many wrong codes a code survives; after them the
+	// user asks for a new one.
+	MaxAttempts int `yaml:"max_attempts" default:"5"`
+	// ResendAfter is the least time between two codes for one address: a
+	// start within it answers the same 202 and mails nothing.
+	ResendAfter time.Duration `yaml:"resend_after" default:"60s"`
+	// MagicLinkURL is the front end's sign-in page, an absolute URL:
+	// given, the login-code Mail's Link is MagicLinkURL?token=<token>, for
+	// the page to post to {prefix}/passwordless/verify.
+	MagicLinkURL string `yaml:"magic_link_url"`
+	// AutoRegister lets the first sign-in of an unknown address create its
+	// account, email verified, without a password; nil means true. False,
+	// only existing accounts sign in.
+	AutoRegister *bool `yaml:"auto_register"`
+}
+
+// autoRegister reports whether a sign-in may create the account.
+func (c PasswordlessConfig) autoRegister() bool { return c.AutoRegister == nil || *c.AutoRegister }
+
 // AuditConfig is auth.audit: the audit log of who did what, written in
 // the background and kept for Retention.
 type AuditConfig struct {
@@ -125,6 +158,11 @@ const (
 	defaultRefreshTTL  = 7 * 24 * time.Hour
 	defaultResetTTL    = 15 * time.Minute
 	defaultAuditBuffer = 1024
+
+	defaultCodeTTL     = 10 * time.Minute
+	defaultCodeLength  = 6
+	defaultMaxAttempts = 5
+	defaultResendAfter = time.Minute
 )
 
 // withDefaults fills what a Config built in code leaves at zero; one from
@@ -144,6 +182,19 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Audit.AsyncBuffer == 0 {
 		c.Audit.AsyncBuffer = defaultAuditBuffer
+	}
+	p := &c.Passwordless
+	if p.CodeTTL == 0 {
+		p.CodeTTL = defaultCodeTTL
+	}
+	if p.CodeLength == 0 {
+		p.CodeLength = defaultCodeLength
+	}
+	if p.MaxAttempts == 0 {
+		p.MaxAttempts = defaultMaxAttempts
+	}
+	if p.ResendAfter == 0 {
+		p.ResendAfter = defaultResendAfter
 	}
 	return c
 }
@@ -165,6 +216,7 @@ func (c *Config) Validate() error {
 	}
 	for name, d := range map[string]time.Duration{
 		"token_ttl": c.TokenTTL, "refresh_ttl": c.RefreshTTL, "reset_ttl": c.ResetTTL, "login_rate_window": c.LoginRateWindow,
+		"passwordless.code_ttl": c.Passwordless.CodeTTL, "passwordless.resend_after": c.Passwordless.ResendAfter,
 	} {
 		if d < 0 {
 			errs = append(errs, fmt.Errorf("%s must not be negative", name))
@@ -172,6 +224,12 @@ func (c *Config) Validate() error {
 	}
 	if c.LoginRateLimit < 0 {
 		errs = append(errs, errors.New("login_rate_limit must not be negative"))
+	}
+	if c.Passwordless.MaxAttempts < 0 {
+		errs = append(errs, errors.New("passwordless.max_attempts must not be negative"))
+	}
+	if c.Passwordless.MagicLinkURL != "" && !absoluteURL(c.Passwordless.MagicLinkURL) {
+		errs = append(errs, errors.New("passwordless.magic_link_url must be an absolute http or https URL"))
 	}
 	if (c.LoginRateWindow > 0) != (c.LoginRateLimit > 0) {
 		errs = append(errs, errors.New("login_rate_window and login_rate_limit are both set or both 0"))

@@ -52,6 +52,8 @@ type Identity struct {
 	mailCtx    context.Context
 	stopMail   context.CancelFunc
 
+	stopSweep func() // ends the login code sweep and waits; nil without passwordless
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -76,7 +78,8 @@ func Providers(p ...Provider) Option {
 }
 
 // Sender gives identity a way to mail: it enables the forgot-password and
-// reset-password routes, which are not mounted without it.
+// reset-password routes, which are not mounted without it, and
+// passwordless sign-in needs it.
 func Sender(s MailSender) Option { return func(o *options) { o.sender = s } }
 
 // Logger is where identity logs outside requests; the default is
@@ -94,28 +97,32 @@ type MailSender interface {
 // Mail is a mail identity asks the application to send; the application's
 // MailSender picks the template by Kind.
 type Mail struct {
-	// Kind is what the mail is for: "password-reset".
+	// Kind is what the mail is for: "password-reset" or "login-code".
 	Kind string
 	// To is the address to send it to.
 	To string
 	// Token is the password-reset token, which the reset page posts to
-	// {prefix}/reset-password with the new password.
+	// {prefix}/reset-password with the new password, or the login code's
+	// magic-link token, which the sign-in page posts to
+	// {prefix}/passwordless/verify.
 	Token string
-	// Code is empty for a password reset.
+	// Code is the login code, auth.passwordless.code_length digits; empty
+	// for a password reset.
 	Code string
-	// Link is the page that takes Token, auth.reset_url with ?token=
-	// added; empty without it, and the application builds its own from
-	// Token.
+	// Link is the page that takes Token: auth.reset_url or
+	// auth.passwordless.magic_link_url with ?token= added. Empty without
+	// them, and the application builds its own from Token.
 	Link string
-	// ExpiresAt is when Token stops working, in UTC.
+	// ExpiresAt is when Token, and Code, stop working, in UTC.
 	ExpiresAt time.Time
 }
 
 // New builds the identity battery on d: it registers the users,
-// identities and audit_logs tables under the owner "identity" (created
-// now in migrate: auto; from its embedded SQL files in migrate:
-// versioned) and checks cfg and every provider. A Config from chok.Load
-// carries the defaults; one built in code gets them for its zero fields.
+// identities, audit_logs and auth_login_codes tables under the owner
+// "identity" (created now in migrate: auto; from its embedded SQL files in
+// migrate: versioned) and checks cfg and every provider. A Config from
+// chok.Load carries the defaults; one built in code gets them for its
+// zero fields.
 func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 	if d == nil {
 		return nil, errors.New("identity: nil *db.DB")
@@ -143,6 +150,9 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 		if !linked[name] {
 			return nil, fmt.Errorf("identity: auth.providers.%s is configured but not linked: pass %s.New(cfg.Providers[%q]) to identity.Providers", name, name, name)
 		}
+	}
+	if cfg.Passwordless.Enabled && o.sender == nil {
+		return nil, errors.New("identity: auth.passwordless.enabled needs a Sender to mail the codes: pass identity.Sender(...)")
 	}
 	idn := &Identity{cfg: cfg, d: d, logger: o.logger, sender: o.sender, cost: costOf()}
 	// The mails outlive the requests that ask for them; Close ends them.
@@ -177,6 +187,9 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 		idn.limiter = newLoginLimiter(cfg.LoginRateWindow, cfg.LoginRateLimit)
 	}
 	idn.audit = newAudit(d, cfg.Audit, o.logger)
+	if cfg.Passwordless.Enabled {
+		idn.startSweep()
+	}
 	return idn, nil
 }
 
@@ -213,11 +226,14 @@ func (idn *Identity) Name() string { return "identity" }
 func (idn *Identity) Health(context.Context) error { return idn.audit.health() }
 
 // Close waits, within ctx, for the mails in flight and writes the queued
-// audit events, and stops the background work: the login throttle's
-// sweeps and the OAuth session store's.
+// audit events, and stops the background work: the login code sweep, the
+// login throttle's sweeps and the OAuth session store's.
 func (idn *Identity) Close(ctx context.Context) error {
 	idn.closeOnce.Do(func() {
 		errs := []error{idn.waitForMail(ctx)}
+		if idn.stopSweep != nil {
+			idn.stopSweep()
+		}
 		if idn.limiter != nil {
 			idn.limiter.Close()
 		}

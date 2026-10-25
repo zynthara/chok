@@ -7,8 +7,8 @@ import (
 )
 
 // migrationFiles are identity's SQL migrations for migrate: versioned,
-// under migrations/{sqlite,mysql,postgres}: the users, identities and
-// audit_logs tables as migrate: auto creates them.
+// under migrations/{sqlite,mysql,postgres}: the users, identities,
+// audit_logs and auth_login_codes tables as migrate: auto creates them.
 //
 //go:embed migrations
 var migrationFiles embed.FS

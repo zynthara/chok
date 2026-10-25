@@ -341,7 +341,7 @@ func TestMigrate_BatteryOwners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up --battery identity: %v\n%s", err, out)
 	}
-	if out != "applied  identity  20261024000001_create_users_and_identities\napplied  identity  20261024000002_create_audit_logs\n" {
+	if out != "applied  identity  20261024000001_create_users_and_identities\napplied  identity  20261024000002_create_audit_logs\napplied  identity  20261025000002_create_auth_login_codes\n" {
 		t.Fatalf("up --battery identity:\n%s", out)
 	}
 	if err := dbtest.OpenConfig(t, off).RegisterSchema("identity", nil, dbx.Migrations["identity"]); err != nil {
@@ -351,7 +351,7 @@ func TestMigrate_BatteryOwners(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, v := range []string{"20261024000001", "20261024000002"} {
+	for _, v := range []string{"20261024000001", "20261024000002", "20261025000002"} {
 		if got := stateOf(t, out, "identity", v); !strings.HasPrefix(got, "applied ") {
 			t.Fatalf("identity %s without --battery: %s\n%s", v, got, out)
 		}
