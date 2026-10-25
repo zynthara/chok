@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"slices"
@@ -336,5 +337,37 @@ func TestSMTP_Timeout(t *testing.T) {
 	m.cfg.SMTP.Port = port
 	if err := m.Send(t.Context(), bcc); err == nil || !strings.Contains(err.Error(), "127.0.0.1:"+strconv.Itoa(port)) {
 		t.Fatalf("no relay: %v", err)
+	}
+}
+
+// lateContext has a deadline that passed, which it has not noticed yet:
+// a context's timer can run after the connection's deadline, set to the
+// same instant, has failed a read.
+type lateContext struct{ context.Context }
+
+func (lateContext) Deadline() (time.Time, bool) { return time.Now().Add(-time.Millisecond), true }
+
+// TestWithContext_NamesWhyTheSendEnded: a failure after ctx's deadline is
+// context.DeadlineExceeded even before ctx says so, a canceled ctx's is
+// context.Canceled, and a failure of a live ctx stays as it is.
+func TestWithContext_NamesWhyTheSendEnded(t *testing.T) {
+	timeout := errors.New("read tcp 127.0.0.1:1: i/o timeout")
+	if err := withContext(lateContext{context.Background()}, timeout); !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, timeout) {
+		t.Fatalf("past the deadline: %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := withContext(canceled, timeout); !errors.Is(err, context.Canceled) || !errors.Is(err, timeout) {
+		t.Fatalf("canceled: %v", err)
+	}
+	if err := withContext(t.Context(), timeout); err != timeout {
+		t.Fatalf("a live context: %v", err)
+	}
+	if err := withContext(canceled, nil); err != nil {
+		t.Fatalf("no error: %v", err)
+	}
+	// Already named: not twice.
+	if err := withContext(canceled, fmt.Errorf("dial: %w", context.Canceled)); strings.Count(err.Error(), "canceled") != 1 {
+		t.Fatalf("named twice: %v", err)
 	}
 }

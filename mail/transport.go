@@ -40,8 +40,32 @@ func isLoopback(host string) bool {
 
 // sendSMTP delivers raw through the relay on a connection of its own:
 // dial, EHLO, STARTTLS (or TLS from the start), AUTH PLAIN, MAIL, a RCPT
-// per recipient (Bcc included), DATA, QUIT — all within ctx.
-func (m *Mailer) sendSMTP(ctx context.Context, msg *Message, raw []byte) (err error) {
+// per recipient (Bcc included), DATA, QUIT — all within ctx. A send that
+// ctx ended fails with ctx's error as well as the connection's.
+func (m *Mailer) sendSMTP(ctx context.Context, msg *Message, raw []byte) error {
+	return withContext(ctx, m.smtpSession(ctx, msg, raw))
+}
+
+// withContext adds to err the reason ctx ended, when it did: its deadline
+// passed — which the connection's deadline, set to the same instant, may
+// report before ctx's own timer has marked it done — or it was canceled.
+func withContext(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	cause := ctx.Err()
+	if cause == nil {
+		if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+			cause = context.DeadlineExceeded
+		}
+	}
+	if cause == nil || errors.Is(err, cause) {
+		return err
+	}
+	return fmt.Errorf("%w (%w)", cause, err)
+}
+
+func (m *Mailer) smtpSession(ctx context.Context, msg *Message, raw []byte) error {
 	rcpt, err := recipients(msg)
 	if err != nil {
 		return err
@@ -59,11 +83,6 @@ func (m *Mailer) sendSMTP(ctx context.Context, msg *Message, raw []byte) (err er
 	}
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	defer stop()
-	defer func() {
-		if err != nil && ctx.Err() != nil {
-			err = fmt.Errorf("%w (%w)", ctx.Err(), err)
-		}
-	}()
 	if c.TLS == "implicit" {
 		tc := tls.Client(conn, m.tls)
 		if err := tc.HandshakeContext(ctx); err != nil {
