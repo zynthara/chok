@@ -20,8 +20,9 @@ GOLANGCI_LINT_VERSION := 2.15.0
 # directory joins both lanes as soon as it exists (db: WP4, store and
 # choktest: WP5, identity: WP6, jobs: WP7, telemetry: WP8, for its
 # Instrument tests; cmd/chok: WP9, whose scaffold and migrate tests run
-# on the lane's database); there is no per-test selection.
-DB_PKG_DIRS := db store choktest identity jobs telemetry cmd/chok
+# on the lane's database; examples/chatter: WP10, whose acceptance test
+# runs the app on choktest.DB); there is no per-test selection.
+DB_PKG_DIRS := db store choktest identity jobs telemetry cmd/chok examples/chatter
 DB_PKGS     := $(strip $(foreach d,$(DB_PKG_DIRS),$(if $(wildcard $(d)),./$(d)/...)))
 
 # Tracked plus untracked-but-not-ignored Go files, so ignored scratch

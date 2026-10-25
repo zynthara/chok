@@ -1,0 +1,32 @@
+# chatter — chok's realtime example.
+#
+# Every key is checked: a misspelled one fails startup with a suggestion.
+# Every key can also be set from the environment, named after its path:
+# CHATTER_HTTP_ADDR, CHATTER_DB_SQLITE_PATH, CHATTER_AUTH_SIGNING_KEY, ...
+log:
+  level: info
+
+http:
+  addr: ":8080"
+  openapi:
+    title: Chatter API
+
+db:
+  driver: sqlite
+  sqlite:
+    path: chatter.db
+
+auth:
+  # signing_key is a secret of at least 32 bytes: set it through
+  # CHATTER_AUTH_SIGNING_KEY instead of writing it here.
+  token_ttl: 2h
+
+jobs:
+  # The bot's worker looks for new messages twice a second.
+  poll_interval: 500ms
+
+realtime:
+  # The endpoints: POST /realtime/ticket, GET /realtime/ws, GET /realtime/sse.
+  path: /realtime
+  # The last 256 events stay in memory for browsers that reconnect.
+  replay: 256
