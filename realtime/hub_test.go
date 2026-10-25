@@ -196,7 +196,9 @@ func TestStats_Counts(t *testing.T) {
 	a1 := s.dialWS("topics=public.x", "X-User", "usr_a")
 	a2 := s.dialWS("topics=public.x,public.y", "X-User", "usr_a")
 	s.dialWS("topics=user:usr_b", "X-User", "usr_b")
-	eventually(t, "the subscriptions", func() bool { return h.Stats().Topics == 3 })
+	eventually(t, "the subscriptions", func() bool {
+		return subscribers(h, "public.x") == 2 && subscribers(h, "public.y") == 1 && subscribers(h, "user:usr_b") == 1
+	})
 	publish(t, h, "public.x", "one", nil)
 	publish(t, h, "public.y", "two", nil)
 	if err := h.Send(t.Context(), "usr_c", "nobody", nil); err != nil {

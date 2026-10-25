@@ -402,6 +402,15 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+// subscribers counts the connections subscribed to topic. A WebSocket
+// subscribes after its upgrade, so a test that publishes right after
+// dialing waits for it.
+func subscribers(h *Hub, topic string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.topics[topic])
+}
+
 // eventually polls cond until it holds or the deadline passes.
 func eventually(t testing.TB, what string, cond func() bool) {
 	t.Helper()

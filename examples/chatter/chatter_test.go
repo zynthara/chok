@@ -92,26 +92,36 @@ func TestChatter_FullPath(t *testing.T) {
 
 	// The jobs panel: alice's stream; the chat: bob's and carol's sockets.
 	panel := c.stream("/realtime/sse?topics=jobs&ticket=" + c.ticket(alice))
-	bobWS := c.dial(bob, "room:"+lobby.RID, "")
-	carolWS := c.dial(carol, "room:"+lobby.RID, "")
-	if ev := read(t, carolWS); ev.Type != "error" || ev.Topic != "room:"+lobby.RID || !strings.Contains(string(ev.Data), "join the room first") {
-		t.Fatalf("carol's subscription: %+v", ev)
+	bobWS, _ := c.dial(bob, "room:"+lobby.RID, "")
+	carolWS, refused := c.dial(carol, "room:"+lobby.RID, "")
+	if len(refused) != 1 || refused[0].Type != "error" || refused[0].Topic != "room:"+lobby.RID || !strings.Contains(string(refused[0].Data), "join the room first") {
+		t.Fatalf("carol's subscription: %+v", refused)
 	}
 	_ = carolWS.CloseNow() // a socket nobody reads would hold the stop for its close handshake
 
-	// alice speaks: bob gets her message at once, then the bot's answer.
+	// alice speaks: bob gets her message, published once it commits, and
+	// the bot's answer, which the worker writes and publishes after that
+	// commit — almost always second, but nothing orders the two.
 	var said Message
 	if code := c.call(http.MethodPost, "/api/rooms/"+lobby.RID+"/messages", alice, map[string]string{"text": "hello @bot, how are you"}, &said); code != http.StatusCreated {
 		t.Fatalf("alice posts = %d", code)
 	}
-	first := read(t, bobWS)
-	var got Message
-	if err := json.Unmarshal(first.Data, &got); err != nil || first.Type != "message.created" || got.RID != said.RID || got.Author != "alice" || got.Text != "hello @bot, how are you" {
-		t.Fatalf("bob got %+v (%v)", first, err)
+	first, second := read(t, bobWS), read(t, bobWS)
+	var fromAlice, fromBot bool
+	for _, ev := range []realtime.Event{first, second} {
+		var m Message
+		if err := json.Unmarshal(ev.Data, &m); err != nil || ev.Type != "message.created" || ev.Topic != "room:"+lobby.RID {
+			t.Fatalf("bob got %+v (%v)", ev, err)
+		}
+		switch {
+		case m.RID == said.RID && m.Author == "alice" && m.Text == "hello @bot, how are you":
+			fromAlice = true
+		case m.ReplyTo == said.RID && m.Author == "bot" && m.Text == "alice, that was 5 words. Noted.":
+			fromBot = true
+		}
 	}
-	answer := read(t, bobWS)
-	if err := json.Unmarshal(answer.Data, &got); err != nil || got.ReplyTo != said.RID || got.Author != "bot" || got.Text != "alice, that was 5 words. Noted." {
-		t.Fatalf("the bot's answer: %+v (%v)", answer, err)
+	if !fromAlice || !fromBot {
+		t.Fatalf("bob got %+v and %+v, want alice's message and the bot's answer", first, second)
 	}
 
 	// alice's panel shows the worker's run that answered.
@@ -140,11 +150,11 @@ func TestChatter_FullPath(t *testing.T) {
 	}
 
 	// bob's connection drops; he comes back with a new ticket, resuming
-	// after alice's message: the bot's answer is replayed.
+	// after the first event he saw: the second is replayed.
 	_ = bobWS.CloseNow()
-	bobWS = c.dial(bob, "room:"+lobby.RID, first.ID)
-	if ev := read(t, bobWS); ev.ID != answer.ID {
-		t.Fatalf("resumed with %+v, want the answer %s", ev, answer.ID)
+	bobWS, replayed := c.dial(bob, "room:"+lobby.RID, first.ID)
+	if len(replayed) != 1 || replayed[0].ID != second.ID {
+		t.Fatalf("resumed with %+v, want %s again", replayed, second.ID)
 	}
 
 	// The stop: the WebSocket hears 1001, the stream ends, Run returns nil.
@@ -282,8 +292,12 @@ func (c *client) ticket(token string) string {
 }
 
 // dial opens a WebSocket as the token's user and subscribes to topic,
-// resuming after the event after when it is set.
-func (c *client) dial(token, topic, after string) *websocket.Conn {
+// resuming after the event after when it is set. The hub does not
+// acknowledge a subscription, but it handles a connection's frames in
+// order: dial follows with a subscription the app refuses, and once its
+// error event is in, the first frame has been handled. It returns the
+// events that came before that error: the first subscription's own.
+func (c *client) dial(token, topic, after string) (*websocket.Conn, []realtime.Event) {
 	c.t.Helper()
 	url := "ws" + strings.TrimPrefix(c.base, "http") + "/realtime/ws?ticket=" + c.ticket(token)
 	ws, _, err := websocket.Dial(c.t.Context(), url, nil)
@@ -295,11 +309,20 @@ func (c *client) dial(token, topic, after string) *websocket.Conn {
 	if after != "" {
 		frame["after"] = after
 	}
-	b, _ := json.Marshal(frame)
-	if err := ws.Write(c.t.Context(), websocket.MessageText, b); err != nil {
-		c.t.Fatal(err)
+	for _, f := range []any{frame, map[string]any{"subscribe": []string{"barrier"}}} {
+		b, _ := json.Marshal(f)
+		if err := ws.Write(c.t.Context(), websocket.MessageText, b); err != nil {
+			c.t.Fatal(err)
+		}
 	}
-	return ws
+	var before []realtime.Event
+	for {
+		ev := read(c.t, ws)
+		if ev.Topic == "barrier" && ev.Type == "error" {
+			return ws, before
+		}
+		before = append(before, ev)
+	}
 }
 
 func read(t *testing.T, ws *websocket.Conn) realtime.Event {
@@ -325,7 +348,9 @@ type sse struct {
 
 func (c *client) stream(path string) *sse {
 	c.t.Helper()
-	req, err := http.NewRequestWithContext(c.t.Context(), http.MethodGet, c.base+path, nil)
+	// A stream that stops delivering fails the test instead of hanging it.
+	ctx, cancel := context.WithTimeout(c.t.Context(), time.Minute)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -333,7 +358,7 @@ func (c *client) stream(path string) *sse {
 	if err != nil || resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
 		c.t.Fatalf("open %s: %v %v", path, err, resp)
 	}
-	c.t.Cleanup(func() { _ = resp.Body.Close() })
+	c.t.Cleanup(func() { cancel(); _ = resp.Body.Close() })
 	return &sse{resp: resp, r: bufio.NewReader(resp.Body)}
 }
 

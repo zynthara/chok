@@ -144,18 +144,19 @@ func TestBackplane_HealthAndReconnect(t *testing.T) {
 		err := h.Health(t.Context())
 		return err != nil && strings.Contains(err.Error(), "disconnected") && h.Stats().Backplane == "disconnected"
 	})
-	if !strings.Contains(logs.String(), "level=WARN msg=\"realtime: the Redis backplane is disconnected; reconnecting\"") {
-		t.Fatalf("log:\n%s", logs.String())
-	}
+	// The state changes first, the line follows.
+	eventually(t, "the Warn about the loss", func() bool {
+		return strings.Contains(logs.String(), "level=WARN msg=\"realtime: the Redis backplane is disconnected; reconnecting\"")
+	})
 	if err := mr.Restart(); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "reconnected", func() bool {
 		return h.Health(t.Context()) == nil && other.hub.Health(t.Context()) == nil
 	})
-	if !strings.Contains(logs.String(), "realtime: the Redis backplane is connected again") {
-		t.Fatalf("log:\n%s", logs.String())
-	}
+	eventually(t, "the line about the reconnect", func() bool {
+		return strings.Contains(logs.String(), "realtime: the Redis backplane is connected again")
+	})
 	publish(t, other.hub, "public.a", "after.restart", nil)
 	if ev := readEvent(t, ws); ev.Type != "after.restart" {
 		t.Fatalf("%+v", ev)

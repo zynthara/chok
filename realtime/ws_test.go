@@ -404,6 +404,7 @@ func TestWS_PolicyViolationsClose1008(t *testing.T) {
 	// Re-subscribing to a topic held does not count twice.
 	ws := s.dialWS("topics=public.a,public.b")
 	send(t, ws, `{"subscribe":["public.a","public.b"]}`)
+	eventually(t, "the subscriptions", func() bool { return subscribers(h, "public.b") == 1 })
 	publish(t, h, "public.b", "fine", nil)
 	if ev := readEvent(t, ws); ev.Type != "fine" {
 		t.Fatalf("%+v", ev)

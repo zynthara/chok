@@ -239,6 +239,7 @@ func TestHTTP_RequestTimeout(t *testing.T) {
 	h := newHub(t, testConfig(t), Authorize(openTopics))
 	s := serveHub(t, h, func(b *chok.Base) { b.HTTP.RequestTimeout = 300 * time.Millisecond })
 	ws := s.dialWS("topics=public.a")
+	eventually(t, "the WebSocket's subscription", func() bool { return subscribers(h, "public.a") == 1 })
 	stream, code, body := s.openSSE("ticket=" + s.ticket() + "&topics=public.a")
 	if stream == nil {
 		t.Fatalf("%d %s", code, body)
@@ -276,7 +277,7 @@ func TestSSE_EndsWhenTheServerShutsDown(t *testing.T) {
 	if stream == nil {
 		t.Fatalf("%d %s", code, body)
 	}
-	eventually(t, "both connections", func() bool { return h.Stats().Connections == 2 })
+	eventually(t, "both subscribed", func() bool { return subscribers(h, "public.a") == 2 })
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	begin := time.Now()
