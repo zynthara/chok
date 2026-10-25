@@ -10,7 +10,12 @@ import (
 	"go/token"
 	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/http/cookiejar"
+	"net/mail"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,12 +33,13 @@ import (
 // TestChatter_FullPath runs the app the way main does — chok.yaml, a real
 // HTTP server on a free port, the start and stop phases — on the lane's
 // database, and walks README.md's path through HTTP, a WebSocket and a
-// server-sent event stream: three users sign up, alice opens a room that
-// bob joins and carol does not; bob's WebSocket follows the room while
-// carol's is refused; alice's message reaches bob at once and, since it
-// mentions @bot, the bot's answer follows from the worker; alice's event
-// stream shows the worker's run; bob resumes after a reconnect; the stop
-// says goodbye to both connections.
+// server-sent event stream: three people sign in with codes mailed to a
+// directory (carol with the mail's link), each session a cookie; alice
+// opens a room that bob joins and carol does not; bob's WebSocket follows
+// the room while carol's is refused; alice's message reaches bob at once
+// and, since it mentions @bot, the bot's answer follows from the worker;
+// alice's event stream shows the worker's run; bob resumes after a
+// reconnect; alice logs out; the stop says goodbye to both connections.
 func TestChatter_FullPath(t *testing.T) {
 	t.Setenv("CHATTER_AUTH_SIGNING_KEY", strings.Repeat("k", 32))
 	cfg, err := chok.Load[Config]("chatter", chok.ConfigFile("chok.yaml"), chok.Args(nil))
@@ -42,15 +48,16 @@ func TestChatter_FullPath(t *testing.T) {
 	}
 	cfg.HTTP.Addr, cfg.HTTP.DrainDelay = "127.0.0.1:0", 0
 	cfg.Jobs.PollInterval = 20 * time.Millisecond
+	cfg.Mail.Dir = t.TempDir()
 	app := chok.New(cfg.Base, chok.Logger(slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelWarn}))))
 	setup(app, cfg, choktest.DB(t, tables()...))
 	ctx, stop := context.WithCancel(context.WithoutCancel(t.Context()))
 	defer stop()
 	done := make(chan error, 1)
 	go func() { done <- app.Run(ctx) }()
-	c := &client{t: t}
+	c := &client{t: t, mailDir: cfg.Mail.Dir}
 	deadline := time.Now().Add(20 * time.Second)
-	for c.base = ""; c.base == "" || c.call(http.MethodGet, "/readyz", "", nil, nil) != http.StatusOK; {
+	for c.base = ""; c.base == "" || c.call(http.MethodGet, "/readyz", nil, nil, nil) != http.StatusOK; {
 		if time.Now().After(deadline) {
 			t.Fatal("the app did not start")
 		}
@@ -60,8 +67,8 @@ func TestChatter_FullPath(t *testing.T) {
 		}
 	}
 
-	// The page and the health of every component.
-	if code, body := c.get("/"); code != http.StatusOK || !strings.Contains(body, "<title>chatter") {
+	// The page, with its sign-in form, and the health of every component.
+	if code, body := c.get("/"); code != http.StatusOK || !strings.Contains(body, "<title>chatter") || !strings.Contains(body, "/auth/passwordless/start") {
 		t.Fatalf("GET / = %d", code)
 	}
 	var health struct {
@@ -70,12 +77,25 @@ func TestChatter_FullPath(t *testing.T) {
 			Component string `json:"component"`
 		} `json:"components"`
 	}
-	if code := c.call(http.MethodGet, "/healthz", "", nil, &health); code != http.StatusOK || health.Status != "up" || len(health.Components) != 4 {
+	if code := c.call(http.MethodGet, "/healthz", nil, nil, &health); code != http.StatusOK || health.Status != "up" || len(health.Components) != 4 {
 		t.Fatalf("healthz = %d %+v", code, health)
 	}
 
-	// Three users; alice opens a room, bob joins it, carol does not.
-	alice, bob, carol := c.signUp("alice"), c.signUp("bob"), c.signUp("carol")
+	// Three people sign in with mailed codes — carol with the link — and
+	// each first sign-in makes the account. The sessions are cookies.
+	alice, bob, carol := c.signIn("alice", false), c.signIn("bob", false), c.signIn("carol", true)
+	var me struct {
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+	}
+	if code := c.call(http.MethodGet, "/auth/me", carol, nil, &me); code != http.StatusOK || me.Email != "carol@example.com" || !me.EmailVerified {
+		t.Fatalf("carol's me = %d %+v", code, me)
+	}
+	if code := c.call(http.MethodGet, "/api/rooms", nil, nil, nil); code != http.StatusUnauthorized {
+		t.Fatalf("no session = %d", code)
+	}
+
+	// alice opens a room, bob joins it, carol does not.
 	var lobby Room
 	if code := c.call(http.MethodPost, "/api/rooms", alice, map[string]string{"name": "lobby"}, &lobby); code != http.StatusCreated || !strings.HasPrefix(lobby.RID, "room_") {
 		t.Fatalf("create a room = %d %+v", code, lobby)
@@ -157,6 +177,14 @@ func TestChatter_FullPath(t *testing.T) {
 		t.Fatalf("resumed with %+v, want %s again", replayed, second.ID)
 	}
 
+	// alice logs out: the cookie goes, and with it her session here.
+	if code := c.call(http.MethodPost, "/auth/logout", alice, nil, nil); code != http.StatusNoContent {
+		t.Fatalf("logout = %d", code)
+	}
+	if code := c.call(http.MethodGet, "/auth/me", alice, nil, nil); code != http.StatusUnauthorized {
+		t.Fatalf("alice after logout = %d", code)
+	}
+
 	// The stop: the WebSocket hears 1001, the stream ends, Run returns nil.
 	stop()
 	if _, _, err := bobWS.Read(t.Context()); websocket.CloseStatus(err) != websocket.StatusGoingAway {
@@ -176,12 +204,14 @@ func TestChatter_FullPath(t *testing.T) {
 // TestChatter_StaysSmall holds the example to its size (contract §10):
 // at most 400 lines of application code — the non-test Go files without
 // blank and comment lines, counted as hack/apibudget.sh counts
-// examples/blog — importing at most 7 chok packages.
+// examples/blog — importing at most 7 chok packages, a package's
+// sub-packages counted with it (store/where with store).
 func TestChatter_StaysSmall(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	const module = "github.com/zynthara/chok/v3"
 	lines, pkgs := 0, map[string]bool{}
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -202,12 +232,15 @@ func TestChatter_StaysSmall(t *testing.T) {
 		}
 		for _, imp := range f.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if path == "github.com/zynthara/chok/v3" || strings.HasPrefix(path, "github.com/zynthara/chok/v3/") {
-				pkgs[path] = true
+			if path == module {
+				pkgs["chok"] = true
+			} else if rest, ok := strings.CutPrefix(path, module+"/"); ok {
+				top, _, _ := strings.Cut(rest, "/")
+				pkgs[top] = true
 			}
 		}
 	}
-	t.Logf("%d lines of application code, %d chok packages", lines, len(pkgs))
+	t.Logf("%d lines of application code, %d chok packages: %v", lines, len(pkgs), pkgs)
 	if lines > 400 || len(pkgs) > 7 {
 		t.Fatalf("%d lines (at most 400) importing %d chok packages (at most 7): %v", lines, len(pkgs), pkgs)
 	}
@@ -215,13 +248,20 @@ func TestChatter_StaysSmall(t *testing.T) {
 
 // client speaks to the running app.
 type client struct {
-	t    *testing.T
-	base string
+	t       *testing.T
+	base    string
+	mailDir string // where the mail battery writes the sign-in codes
 }
 
-// call sends a JSON request with a bearer token, decodes the response
-// into out, and returns the status.
-func (c *client) call(method, path, token string, in, out any) int {
+// user is one person's browser: a cookie jar that holds the session.
+type user struct {
+	name string
+	http *http.Client
+}
+
+// call sends a JSON request, as u (with u's cookies) or with no session
+// when u is nil, decodes the response into out, and returns the status.
+func (c *client) call(method, path string, u *user, in, out any) int {
 	c.t.Helper()
 	var body io.Reader
 	if in != nil {
@@ -238,10 +278,11 @@ func (c *client) call(method, path, token string, in, out any) int {
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	hc := http.DefaultClient
+	if u != nil {
+		hc = u.http
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return 0
 	}
@@ -266,41 +307,122 @@ func (c *client) get(path string) (int, string) {
 	return resp.StatusCode, string(b)
 }
 
-// signUp registers name and returns its token.
-func (c *client) signUp(name string) string {
+// signIn walks the page's sign-in: name@example.com asks for a code, the
+// mail lands in the mail directory, and the code — or, byLink, the token
+// of the mail's link — goes to verify, which answers {expires_at} and
+// sets the session cookie.
+func (c *client) signIn(name string, byLink bool) *user {
 	c.t.Helper()
-	var tok struct {
-		Token string `json:"token"`
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		c.t.Fatal(err)
 	}
-	in := map[string]string{"email": name + "@example.com", "password": "password123", "name": name}
-	if code := c.call(http.MethodPost, "/auth/register", "", in, &tok); code != http.StatusCreated || tok.Token == "" {
-		c.t.Fatalf("register %s = %d", name, code)
+	u := &user{name: name, http: &http.Client{Jar: jar}}
+	address := name + "@example.com"
+	if code := c.call(http.MethodPost, "/auth/passwordless/start", nil, map[string]string{"email": address}, nil); code != http.StatusAccepted {
+		c.t.Fatalf("start for %s = %d", name, code)
 	}
-	return tok.Token
+	code, link := c.mailFor(address)
+	body := map[string]string{"email": address, "code": code}
+	if byLink {
+		parsed, err := url.Parse(link)
+		if err != nil || parsed.Query().Get("token") == "" {
+			c.t.Fatalf("the link of %s's mail: %q", name, link)
+		}
+		body = map[string]string{"token": parsed.Query().Get("token")}
+	}
+	var session map[string]any
+	if status := c.call(http.MethodPost, "/auth/passwordless/verify", u, body, &session); status != http.StatusOK || len(session) != 1 || session["expires_at"] == nil {
+		c.t.Fatalf("verify for %s = %d %v", name, status, session)
+	}
+	base, _ := url.Parse(c.base)
+	if cookies := jar.Cookies(base); len(cookies) != 1 || cookies[0].Name != "chok_token" {
+		c.t.Fatalf("%s's session cookie: %v", name, cookies)
+	}
+	return u
 }
 
-// ticket asks the hub for a ticket as the token's user.
-func (c *client) ticket(token string) string {
+// mailFor waits for the mail to address in the mail directory, an .eml
+// file per mail, and returns its code, from the subject, and its link,
+// from the plain-text part.
+func (c *client) mailFor(address string) (code, link string) {
+	c.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		files, _ := filepath.Glob(filepath.Join(c.mailDir, "*.eml"))
+		for _, f := range files {
+			raw, err := os.ReadFile(f)
+			if err != nil {
+				c.t.Fatal(err)
+			}
+			msg, err := mail.ReadMessage(bytes.NewReader(raw))
+			if err != nil {
+				c.t.Fatalf("%s: %v", f, err)
+			}
+			if msg.Header.Get("To") != "<"+address+">" {
+				continue
+			}
+			code, ok := strings.CutPrefix(msg.Header.Get("Subject"), "Your chatter code is ")
+			if !ok {
+				c.t.Fatalf("subject %q", msg.Header.Get("Subject"))
+			}
+			return code, textLink(c.t, msg)
+		}
+		if time.Now().After(deadline) {
+			c.t.Fatalf("no mail to %s in %s", address, c.mailDir)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// textLink is the sign-in link of the mail's plain-text part.
+func textLink(t *testing.T, msg *mail.Message) string {
+	t.Helper()
+	_, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := multipart.NewReader(msg.Body, params["boundary"])
+	for {
+		p, err := r.NextPart() // decodes quoted-printable
+		if err != nil {
+			t.Fatalf("no plain-text part: %v", err)
+		}
+		if !strings.HasPrefix(p.Header.Get("Content-Type"), "text/plain") {
+			continue
+		}
+		text, _ := io.ReadAll(p)
+		for line := range strings.Lines(string(text)) {
+			if link, ok := strings.CutPrefix(strings.TrimSpace(line), "Or open this link to sign in: "); ok {
+				return link
+			}
+		}
+		t.Fatalf("no link in %q", text)
+	}
+}
+
+// ticket asks the hub for a ticket as u, with u's session cookie.
+func (c *client) ticket(u *user) string {
 	c.t.Helper()
 	var tk struct {
 		Ticket string `json:"ticket"`
 	}
-	if code := c.call(http.MethodPost, "/realtime/ticket", token, nil, &tk); code != http.StatusOK || tk.Ticket == "" {
+	if code := c.call(http.MethodPost, "/realtime/ticket", u, nil, &tk); code != http.StatusOK || tk.Ticket == "" {
 		c.t.Fatalf("ticket = %d", code)
 	}
 	return tk.Ticket
 }
 
-// dial opens a WebSocket as the token's user and subscribes to topic,
+// dial opens a WebSocket as u and subscribes to topic,
 // resuming after the event after when it is set. The hub does not
 // acknowledge a subscription, but it handles a connection's frames in
 // order: dial follows with a subscription the app refuses, and once its
 // refused event is in, the first frame has been handled. It returns the
 // events that came before that refusal: the first subscription's own.
-func (c *client) dial(token, topic, after string) (*websocket.Conn, []realtime.Event) {
+func (c *client) dial(u *user, topic, after string) (*websocket.Conn, []realtime.Event) {
 	c.t.Helper()
-	url := "ws" + strings.TrimPrefix(c.base, "http") + "/realtime/ws?ticket=" + c.ticket(token)
-	ws, _, err := websocket.Dial(c.t.Context(), url, nil)
+	wsURL := "ws" + strings.TrimPrefix(c.base, "http") + "/realtime/ws?ticket=" + c.ticket(u)
+	ws, _, err := websocket.Dial(c.t.Context(), wsURL, nil)
 	if err != nil {
 		c.t.Fatal(err)
 	}

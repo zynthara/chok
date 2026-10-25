@@ -1,0 +1,5 @@
+{{define "subject"}}Your chatter code is {{.Code}}{{end}}Your sign-in code for chatter: {{.Code}}
+{{if .Link}}
+Or open this link to sign in: {{.Link}}
+{{end}}
+It works once, until {{.ExpiresAt.Format "15:04 MST"}}. If you did not ask for it, ignore this mail.

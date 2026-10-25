@@ -1,23 +1,27 @@
 // Command chatter is chok's realtime example: chat rooms that update
 // without a reload, a bot that answers through a background worker, and
-// a live panel of the background jobs — identity, store, jobs and the
-// realtime hub in one app.
+// a live panel of the background jobs. People sign in with a code mailed
+// to them, and the session lives in a cookie — identity, mail, store,
+// jobs and the realtime hub in one app.
 //
 //	cd examples/chatter
 //	CHATTER_AUTH_SIGNING_KEY=$(openssl rand -hex 32) go run .
 //
-// Then open http://localhost:8080 in two browsers. README.md next to this
-// file walks through it, browser and curl.
+// Then open http://localhost:8080 in two browsers; the sign-in codes land
+// in /tmp/chatter-mail. README.md next to this file walks through it,
+// browser and curl.
 package main
 
 import (
-	_ "embed"
+	"context"
+	"embed"
 	"net/http"
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/identity"
 	"github.com/zynthara/chok/v3/jobs"
+	"github.com/zynthara/chok/v3/mail"
 	"github.com/zynthara/chok/v3/realtime"
 	"github.com/zynthara/chok/v3/store"
 )
@@ -29,6 +33,7 @@ type Config struct {
 	chok.Base
 	DB       db.Config       `yaml:"db"`
 	Auth     identity.Config `yaml:"auth"`
+	Mail     mail.Config     `yaml:"mail"`
 	Jobs     jobs.Config     `yaml:"jobs"`
 	Realtime realtime.Config `yaml:"realtime"`
 }
@@ -45,9 +50,18 @@ func main() {
 //go:embed index.html
 var page []byte
 
+// templates are the mails, one per kind identity asks for: login-code
+// (HTML and plain text) and password-reset.
+//
+//go:embed templates
+var templates embed.FS
+
 // setup assembles the app on d; chatter_test.go reuses it.
 func setup(app *chok.App, cfg Config, d *db.DB) {
-	auth := identity.MustNew(cfg.Auth, d) // /auth/register, /auth/login, ...
+	// Sign-in by a mailed code, the session in a cookie (chok.yaml); the
+	// mails go out through the mail battery, as .eml files here.
+	mailer := mail.MustNew(cfg.Mail, mail.Templates(templates))
+	auth := identity.MustNew(cfg.Auth, d, identity.Sender(mailSender{mailer})) // /auth/passwordless/start, .../verify, /auth/logout, ...
 	c := &chat{d: d, rooms: store.New[Room](d), members: store.New[Member](d), messages: store.New[Message](d)}
 	// The hub: a ticket from /realtime/ticket carries the signed-in user,
 	// and mayWatch decides which topics that user may follow.
@@ -72,4 +86,12 @@ func setup(app *chok.App, cfg Config, d *db.DB) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(page)
 	}))
+}
+
+// mailSender is identity's MailSender: each mail identity asks for goes
+// out through the mailer, with the template named after its kind.
+type mailSender struct{ m *mail.Mailer }
+
+func (s mailSender) Send(ctx context.Context, m identity.Mail) error {
+	return s.m.Send(ctx, mail.Message{To: []string{m.To}, Template: m.Kind, Data: m})
 }

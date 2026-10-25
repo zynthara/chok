@@ -1,0 +1,9 @@
+{{define "subject"}}Your chatter code is {{.Code}}{{end}}<!doctype html>
+<html lang="en">
+<body style="font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif; color: #1d232a">
+<p>Your sign-in code for chatter:</p>
+<p style="font-size: 26px; letter-spacing: 6px; margin: 12px 0"><b>{{.Code}}</b></p>
+{{if .Link}}<p>Or <a href="{{.Link}}">sign in with this link</a>.</p>
+{{end}}<p style="color: #6b7480">It works once, until {{.ExpiresAt.Format "15:04 MST"}}. If you did not ask for it, ignore this mail.</p>
+</body>
+</html>

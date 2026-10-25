@@ -8,6 +8,9 @@ log:
 
 http:
   addr: ":8080"
+  # The session cookie goes along with every request the browser makes:
+  # refuse cross-origin writes.
+  csrf: true
   openapi:
     title: Chatter API
 
@@ -20,6 +23,27 @@ auth:
   # signing_key is a secret of at least 32 bytes: set it through
   # CHATTER_AUTH_SIGNING_KEY instead of writing it here.
   token_ttl: 2h
+  # Sign in with a code mailed to you: POST /auth/passwordless/start, then
+  # POST /auth/passwordless/verify. A first sign-in creates the account.
+  passwordless:
+    enabled: true
+    # The mail's link signs in from the page directly.
+    magic_link_url: http://localhost:8080/
+  # The session is an HttpOnly cookie the page's scripts never see: only
+  # keeps the token out of the response bodies. secure: false because
+  # this runs on plain http; leave it out (true) behind https.
+  cookie:
+    enabled: true
+    only: true
+    secure: false
+
+mail:
+  from: chatter <chatter@example.com>
+  # Write every mail as an .eml file into dir instead of sending it: the
+  # sign-in codes are there. transport: smtp, with smtp.host and friends,
+  # sends real mail.
+  transport: dir
+  dir: /tmp/chatter-mail
 
 jobs:
   # The bot's worker looks for new messages twice a second.

@@ -172,10 +172,13 @@ func (c *chat) isMember(ctx context.Context, roomID, userID string) (bool, error
 	return c.members.Exists(ctx, store.Where(where.Eq("room_id", roomID), where.Eq("user_id", userID)))
 }
 
-// nameOf is how a user signs messages: the name given at registration.
+// nameOf is how a user signs messages: the account's name or, for an
+// account made by its first sign-in, which has none, the address's local
+// part.
 func nameOf(p chok.Principal) string {
 	if name := p.Extra["name"]; name != "" {
 		return name
 	}
-	return p.Email
+	name, _, _ := strings.Cut(p.Email, "@")
+	return name
 }
