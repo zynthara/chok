@@ -13,14 +13,15 @@ type Event struct {
 	// ID is "<origin>-<seq>": origin is a random id the publishing Hub
 	// draws in New, seq counts that Hub's events. A client resumes after
 	// the ID it saw last; IDs from different replicas are not ordered.
-	// The error and reset events the hub sends itself have no ID.
+	// The refused and reset events the hub sends itself have no ID.
 	ID string `json:"id"`
 	// Topic is the topic the event was published to.
 	Topic string `json:"topic"`
 	// Type is the application's name for the event, such as
-	// order.updated or run.finished. The hub sends two of its own: error,
-	// for a subscription refused, and reset, for a resume that went too
-	// far back.
+	// order.updated or run.finished. The hub sends two of its own:
+	// refused, for a subscription refused, and reset, for a resume that
+	// went too far back. (Not error: a browser's EventSource fires its own
+	// connection errors under that name.)
 	Type string `json:"type"`
 	// Data is the published value as JSON; empty when nil was published.
 	Data json.RawMessage `json:"data,omitzero"`
@@ -41,7 +42,7 @@ type Stats struct {
 	// Published counts this process's Publish calls, Send's included.
 	Published uint64 `json:"published"`
 	// Delivered counts the events put on connections' send queues, live
-	// or replayed; error and reset events are not counted.
+	// or replayed; refused and reset events are not counted.
 	Delivered uint64 `json:"delivered"`
 	// Dropped counts the connections dropped as slow consumers.
 	Dropped uint64 `json:"dropped"`
@@ -51,8 +52,8 @@ type Stats struct {
 
 // The event types the hub sends itself; Publish refuses them.
 const (
-	typeError = "error"
-	typeReset = "reset"
+	typeRefused = "refused"
+	typeReset   = "reset"
 )
 
 // nameRule describes what validName admits.

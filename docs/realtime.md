@@ -117,20 +117,16 @@ async function follow() {
     show(ev.data.title);
   });
   es.addEventListener("reset", () => reloadStories()); // too far behind: fetch the state anew
-  // A refused topic is an "error" event with data; EventSource fires its
-  // own errors under the same name, without data, when the connection
-  // breaks. It would then reconnect by itself, but with the same URL,
-  // whose ticket is spent: close it and open a fresh one instead.
-  es.addEventListener("error", (e) => {
-    if (e.data) return console.warn(JSON.parse(e.data).data.message);
-    es.close();
-    setTimeout(follow, 3000);
-  });
+  es.addEventListener("refused", (e) => console.warn(JSON.parse(e.data).data.message)); // a topic refused
+  // onerror is the connection only: EventSource would reconnect by itself,
+  // but with the same URL, whose ticket is spent — close it and open a
+  // fresh one instead.
+  es.onerror = () => { es.close(); setTimeout(follow, 3000); };
 }
 follow();
 ```
 
-- `topics=a,b` lists the topics; a refused one arrives as an `error`
+- `topics=a,b` lists the topics; a refused one arrives as a `refused`
   event and the others stream on. If every topic is refused the request
   answers `403`; a bad or spent ticket `401`; a bad topic list `400`.
 - `last_event_id` (or the `Last-Event-ID` header, which `EventSource`
@@ -156,7 +152,7 @@ async function connect() {
   ws.onmessage = (m) => {
     const ev = JSON.parse(m.data); // one event per frame: {id, topic, type, data, at}
     if (ev.type === "reset") return reloadRoom();
-    if (ev.type === "error") return console.warn(ev.topic, ev.data.message);
+    if (ev.type === "refused") return console.warn(ev.topic, ev.data.message);
     last = ev.id;
     show(ev);
   };
@@ -169,7 +165,7 @@ connect();
 - The client sends `{"subscribe":["a","b"],"after":"<event id>"}` and
   `{"unsubscribe":["a"]}`; `?topics=a,b` on the URL subscribes at once.
 - A subscription takes effect when the hub has handled its frame, and
-  nothing acknowledges it (a refusal is an `error` event; the frames of a
+  nothing acknowledges it (a refusal is a `refused` event; the frames of a
   connection are handled in order). So subscribe first, then read the
   current state from the API, and skip the events you already have — the
   other order can miss what happens in between.
@@ -220,6 +216,13 @@ the reason and message the client sees. Without `Authorize` nothing is
 open except `user:<UserID>`, the connection's own user's topic, which is
 reserved: only that user's connections follow it, whatever `Authorize`
 says, and `hub.Send(ctx, userID, type, data)` publishes to it.
+
+The hub keeps two event types for itself: `refused`, for a subscription
+turned down (its data is `{"reason", "message"}`), and `reset`, for a
+resume that went too far back; `Publish` refuses them. Do not name an
+event of your own `error` either: an `EventSource` fires its connection
+errors under that name, and a page's `onerror` would take it for a broken
+stream.
 
 ## Background jobs, live
 

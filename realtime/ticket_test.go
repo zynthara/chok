@@ -83,7 +83,7 @@ func TestTicket_Authn(t *testing.T) {
 	if stream == nil {
 		t.Fatalf("%d %s", code, body)
 	}
-	if _, ev := stream.nextEvent(t); ev.Type != "error" || ev.Topic != "user:usr_bob" {
+	if _, ev := stream.nextEvent(t); ev.Type != "refused" || ev.Topic != "user:usr_bob" {
 		t.Fatalf("another user's topic: %+v", ev)
 	}
 	if err := h.Send(t.Context(), "usr_ada", "note", "hi"); err != nil {
@@ -108,7 +108,7 @@ func TestTicket_Anonymous(t *testing.T) {
 	if stream == nil {
 		t.Fatalf("%d %s", code, body)
 	}
-	if _, ev := stream.nextEvent(t); ev.Type != "error" || ev.Topic != "user:" {
+	if _, ev := stream.nextEvent(t); ev.Type != "refused" || ev.Topic != "user:" {
 		t.Fatalf("an anonymous user: topic: %+v", ev)
 	}
 	publish(t, h, "public.guests", "welcome", nil)

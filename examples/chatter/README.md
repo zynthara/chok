@@ -98,8 +98,8 @@ data: {"id":"4f1c2a9be0d3-2","topic":"room:room_…","type":"message.created","d
 
 The same ticket does not open a second stream (`401`), and a user who has
 not joined the room is refused it: with only that topic, the stream
-answers `403` (`join the room first`); among other topics, it is an
-`error` event and the rest stream on. `GET /realtime/sse?topics=jobs&…`
+answers `403` (`join the room first`); among other topics, it is a
+`refused` event and the rest stream on. `GET /realtime/sse?topics=jobs&…`
 is the jobs panel; `/openapi.json` lists every route, the three realtime
 ones included.
 

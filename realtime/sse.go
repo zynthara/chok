@@ -15,7 +15,7 @@ import (
 // checked and the ticket redeemed before anything is streamed, so a bad
 // request still gets its error envelope — 400 for the topics, 401 for the
 // ticket, 403 when every topic is refused. Then the stream opens with
-// retry: 3000, an error event per refused topic, the events to replay or
+// retry: 3000, a refused event per refused topic, the events to replay or
 // a reset per topic when the client resumes (Last-Event-ID, or
 // ?last_event_id= for a new EventSource), and the live events, with a
 // comment line every PingInterval. It ends when the client goes, at

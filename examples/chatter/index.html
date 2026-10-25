@@ -217,7 +217,7 @@ async function connectChat() {
       $("#messages").replaceChildren();
       shown = new Set();
       loadHistory();
-    } else if (ev.type === "error") {
+    } else if (ev.type === "refused") {
       $("#chatError").textContent = ev.data.message;
     }
   };
@@ -238,12 +238,8 @@ async function listenToJobs() {
   // is spent: on error, close it and open a new one, resuming by id.
   const es = new EventSource(`/realtime/sse?topics=jobs&ticket=${await ticket()}&last_event_id=${lastRunEvent}`);
   es.onopen = () => $("#sseDot").classList.add("on");
-  es.onerror = (e) => {
-    if (e.data) return; // the hub's error event (a refused topic), not a broken connection
-    $("#sseDot").classList.remove("on");
-    es.close();
-    setTimeout(listenToJobs, 3000);
-  };
+  es.onerror = () => { $("#sseDot").classList.remove("on"); es.close(); setTimeout(listenToJobs, 3000); };
+  es.addEventListener("refused", (e) => console.warn("jobs panel:", JSON.parse(e.data).data.message));
   for (const kind of ["run.started", "run.finished", "run.failed", "run.skipped", "stats"]) {
     es.addEventListener(kind, (e) => {
       lastRunEvent = e.lastEventId;

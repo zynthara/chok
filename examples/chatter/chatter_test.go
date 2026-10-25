@@ -94,7 +94,7 @@ func TestChatter_FullPath(t *testing.T) {
 	panel := c.stream("/realtime/sse?topics=jobs&ticket=" + c.ticket(alice))
 	bobWS, _ := c.dial(bob, "room:"+lobby.RID, "")
 	carolWS, refused := c.dial(carol, "room:"+lobby.RID, "")
-	if len(refused) != 1 || refused[0].Type != "error" || refused[0].Topic != "room:"+lobby.RID || !strings.Contains(string(refused[0].Data), "join the room first") {
+	if len(refused) != 1 || refused[0].Type != "refused" || refused[0].Topic != "room:"+lobby.RID || !strings.Contains(string(refused[0].Data), "join the room first") {
 		t.Fatalf("carol's subscription: %+v", refused)
 	}
 	_ = carolWS.CloseNow() // a socket nobody reads would hold the stop for its close handshake
@@ -295,8 +295,8 @@ func (c *client) ticket(token string) string {
 // resuming after the event after when it is set. The hub does not
 // acknowledge a subscription, but it handles a connection's frames in
 // order: dial follows with a subscription the app refuses, and once its
-// error event is in, the first frame has been handled. It returns the
-// events that came before that error: the first subscription's own.
+// refused event is in, the first frame has been handled. It returns the
+// events that came before that refusal: the first subscription's own.
 func (c *client) dial(token, topic, after string) (*websocket.Conn, []realtime.Event) {
 	c.t.Helper()
 	url := "ws" + strings.TrimPrefix(c.base, "http") + "/realtime/ws?ticket=" + c.ticket(token)
@@ -318,7 +318,7 @@ func (c *client) dial(token, topic, after string) (*websocket.Conn, []realtime.E
 	var before []realtime.Event
 	for {
 		ev := read(c.t, ws)
-		if ev.Topic == "barrier" && ev.Type == "error" {
+		if ev.Topic == "barrier" && ev.Type == "refused" {
 			return ws, before
 		}
 		before = append(before, ev)

@@ -138,8 +138,8 @@ func TestSSE_HeartbeatComments(t *testing.T) {
 	})
 }
 
-// TestSSE_RefusedTopics: refused topics are error events at the start of
-// the stream and the others stream on; a stream whose every topic is
+// TestSSE_RefusedTopics: refused topics are refused events at the start
+// of the stream and the others stream on; a stream whose every topic is
 // refused does not start: 403, the refusal's message for one topic, every
 // topic's reason in the metadata.
 func TestSSE_RefusedTopics(t *testing.T) {
@@ -156,8 +156,8 @@ func TestSSE_RefusedTopics(t *testing.T) {
 			Reason  string `json:"reason"`
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal(ev.Data, &data); err != nil || b.event != "error" || b.id != "" {
-			t.Fatalf("want an error event, got %+v %+v %v", b, ev, err)
+		if err := json.Unmarshal(ev.Data, &data); err != nil || b.event != "refused" || ev.Type != "refused" || b.id != "" {
+			t.Fatalf("want a refused event, got %+v %+v %v", b, ev, err)
 		}
 		refused[ev.Topic] = data.Reason + ": " + data.Message
 	}

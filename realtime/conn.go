@@ -59,7 +59,7 @@ type queued struct {
 
 // newConn makes the hub's side of a connection. Its queue takes
 // SendBuffer live events; with what one subscribe frame can add — the
-// whole replay buffer, an error or a reset per topic — that bounds
+// whole replay buffer, a refused or a reset event per topic — that bounds
 // everything waiting, so a client that sends frames and never reads
 // cannot grow it without end.
 func (h *Hub) newConn(kind string, c claims, log *slog.Logger) *conn {
@@ -241,8 +241,8 @@ func (h *Hub) allowed(ctx context.Context, c *conn, topic string) *chok.Error {
 }
 
 // attach subscribes c to topics and queues, in one step under the lock
-// so that nothing published meanwhile is lost or doubled: an error event
-// per refusal, then — when the client resumes after an event — the
+// so that nothing published meanwhile is lost or doubled: a refused
+// event per refusal, then — when the client resumes after an event — the
 // events of those topics since then, or a reset event per topic when the
 // event is no longer kept. A connection whose queue overflows meanwhile
 // is dropped as a slow consumer.
@@ -269,7 +269,7 @@ func (h *Hub) attachLocked(c *conn, topics []string, refused []refusal, after st
 		return false
 	}
 	for _, r := range refused {
-		queue(h.ownEvent(r.topic, typeError, refusalData{Reason: r.err.Reason, Message: r.err.Message}))
+		queue(h.ownEvent(r.topic, typeRefused, refusalData{Reason: r.err.Reason, Message: r.err.Message}))
 	}
 	if len(topics) == 0 {
 		return overflow
@@ -301,7 +301,7 @@ func (h *Hub) attachLocked(c *conn, topics []string, refused []refusal, after st
 	return overflow
 }
 
-// refusalData is the data of an error event.
+// refusalData is the data of a refused event.
 type refusalData struct {
 	Reason  string `json:"reason"`
 	Message string `json:"message"`

@@ -395,15 +395,16 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   onerror 里换新 ticket 重开，并用 `?last_event_id=` 续传。
 - **主题与授权**：主题是 1–128 个 `A-Z a-z 0-9 _ . : -`。`realtime.Authorize(fn)`
   逐个订阅判断，ctx 带 ticket 的 principal；返回 `*chok.Error` 或 `chok.Coder`
-  时其 reason / message 进 error 事件，否则 Forbidden 并记 Warn。没有 Authorize 时
+  时其 reason / message 进 refused 事件，否则 Forbidden 并记 Warn。没有 Authorize 时
   只有 `user:<自己的 UserID>` 能订；`user:` 前缀保留，Authorize 对它不被调用，
-  `hub.Send(ctx, userID, …)` 发到它。被拒的订阅是一条 error 事件，连接不断；SSE 的
-  主题全部被拒时回 403。
+  `hub.Send(ctx, userID, …)` 发到它。被拒的订阅是一条 refused 事件，连接不断（不叫
+  error：EventSource 自己的连接错误用这个名字，页面惯用 onerror 重连）；SSE 的主题全部
+  被拒时回 403。
 - **投递**：`Publish(ctx, topic, typ, data)` 在锁内给事件编号
   `<origin>-<seq>`（origin 是 Hub 在 New 时抽的随机标识）、写进续传缓冲、放进每个
   订阅者的发送队列，从不等慢连接：队列里已有 `send_buffer` 条实时事件的连接被当作
   慢消费者断开（WS 关闭码 4408），计入 `Stats.Dropped`；订阅时补发的事件与 hub 自己
-  的 error / reset 不计入，但整条队列以 `send_buffer + replay + 2 × max_subscriptions`
+  的 refused / reset 不计入，但整条队列以 `send_buffer + replay + 2 × max_subscriptions`
   封顶，只发帧不读的客户端也撑不大它。WS 的每次写最多等两个 ping 间隔；连接结束后
   5 秒内关掉（卡在写上的连接发不出关闭帧，就直接切断）。data 用 chok 处理请求体的
   同一套 json/v2 选项编码，Duration 是字符串。

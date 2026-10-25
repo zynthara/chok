@@ -123,7 +123,7 @@ func TestPublish_Checks(t *testing.T) {
 	h := newHub(t, testConfig(t), Authorize(openTopics))
 	for _, c := range []struct{ topic, typ string }{
 		{"", "t"}, {strings.Repeat("a", 129), "t"}, {"a b", "t"}, {"a/b", "t"}, {"ok", ""}, {"ok", "line\nbreak"},
-		{"ok", "error"}, {"ok", "reset"},
+		{"ok", "refused"}, {"ok", "reset"},
 	} {
 		if err := h.Publish(t.Context(), c.topic, c.typ, nil); err == nil {
 			t.Errorf("Publish(%q, %q) accepted", c.topic, c.typ)
@@ -157,7 +157,7 @@ func TestAuthorize_DefaultRuleAndUserTopics(t *testing.T) {
 	send(t, ws, `{"subscribe":["user:usr_ada","user:usr_bob","news"]}`)
 	refused := map[string]bool{}
 	for range 2 {
-		if ev := readEvent(t, ws); ev.Type == "error" {
+		if ev := readEvent(t, ws); ev.Type == "refused" {
 			refused[ev.Topic] = true
 		}
 	}
@@ -179,7 +179,7 @@ func TestAuthorize_DefaultRuleAndUserTopics(t *testing.T) {
 	s2 := serveHub(t, h2)
 	ws2 := s2.dialWS("", "X-User", "usr_ada")
 	send(t, ws2, `{"subscribe":["user:usr_bob","user:usr_ada","news"]}`)
-	if ev := readEvent(t, ws2); ev.Type != "error" || ev.Topic != "user:usr_bob" {
+	if ev := readEvent(t, ws2); ev.Type != "refused" || ev.Topic != "user:usr_bob" {
 		t.Fatalf("another user's topic with Authorize: %+v", ev)
 	}
 	eventually(t, "the subscriptions", func() bool { return h2.Stats().Topics == 2 })

@@ -36,7 +36,7 @@ type Config struct {
 	// connection. A connection that falls further behind is a slow
 	// consumer: the hub drops it (a WebSocket with close code 4408) and
 	// counts it in Stats.Dropped. What a subscription adds — the events it
-	// replays, its error or reset events — does not count, but nothing
+	// replays, its refused or reset events — does not count, but nothing
 	// waits beyond SendBuffer + Replay + 2 × MaxSubscriptions events.
 	SendBuffer int `yaml:"send_buffer" default:"64"`
 	// PingInterval paces the heartbeats: a WebSocket ping, which the

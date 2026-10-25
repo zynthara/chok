@@ -50,11 +50,11 @@ func TestWS_SubscribeAndReceive(t *testing.T) {
 	}
 }
 
-// TestWS_RefusedSubscriptionGetsAnErrorEvent: a refused topic is an error
-// event naming the topic — the Authorize error's reason and message when
-// it is a *chok.Error or a chok.Coder, Forbidden otherwise — and the
-// connection stays, with its other topics.
-func TestWS_RefusedSubscriptionGetsAnErrorEvent(t *testing.T) {
+// TestWS_RefusedSubscriptionGetsARefusedEvent: a refused topic is a
+// refused event naming the topic — the Authorize error's reason and
+// message when it is a *chok.Error or a chok.Coder, Forbidden otherwise —
+// and the connection stays, with its other topics.
+func TestWS_RefusedSubscriptionGetsARefusedEvent(t *testing.T) {
 	var logs syncBuffer
 	h, err := New(testConfig(t), Logger(slogTo(&logs)), Authorize(func(ctx context.Context, topic string) error {
 		switch topic {
@@ -85,8 +85,8 @@ func TestWS_RefusedSubscriptionGetsAnErrorEvent(t *testing.T) {
 			t.Fatal(err)
 		}
 		w, ok := want[ev.Topic]
-		if !ok || ev.Type != "error" || ev.ID != "" || data.Reason != w[0] || data.Message != w[1] {
-			t.Fatalf("error event %+v %+v", ev, data)
+		if !ok || ev.Type != "refused" || ev.ID != "" || data.Reason != w[0] || data.Message != w[1] {
+			t.Fatalf("refused event %+v %+v", ev, data)
 		}
 		delete(want, ev.Topic)
 	}
@@ -215,7 +215,7 @@ func TestWS_SlowConsumerClosedWith4408(t *testing.T) {
 }
 
 // TestWS_FramesCannotOverfillTheQueue: what a subscribe frame queues —
-// replays, error and reset events — does not count against SendBuffer,
+// replays, refused and reset events — does not count against SendBuffer,
 // but everything waiting is capped (SendBuffer + Replay + two per
 // allowed topic), so a client that sends frames and never reads is
 // dropped as a slow consumer rather than growing the queue without end.

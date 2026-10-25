@@ -78,7 +78,7 @@ func Authn(mw chok.Middleware) Option {
 // Authorize decides which topics a connection may subscribe to: fn runs
 // once per subscription, with a context that carries the ticket's
 // principal (none for an anonymous ticket), and refuses the subscription
-// by returning an error. The client then gets an error event, with the
+// by returning an error. The client then gets a refused event, with the
 // reason and message of the error when it is a *chok.Error or a
 // chok.Coder, and Forbidden otherwise (that error is logged at Warn); its
 // other subscriptions stand. Without Authorize every topic is refused
@@ -155,8 +155,8 @@ func MustNew(cfg Config, opts ...Option) *Hub {
 // Publish sends an event of type typ, with data encoded as JSON (nil
 // sends none), to the subscribers of topic — this replica's at once and,
 // with Redis, the other replicas' through the backplane. A topic is 1 to
-// 128 of A-Z a-z 0-9 _ . : -, and so is typ, which must not be error or
-// reset, the hub's own. Publish fails only on a bad topic or type, or
+// 128 of A-Z a-z 0-9 _ . : -, and so is typ, which must not be refused
+// or reset, the hub's own. Publish fails only on a bad topic or type, or
 // data that does not encode; no subscriber is not an error, and a
 // backplane that does not take the event is logged, not returned: the
 // local subscribers have it. It does not block on slow connections: one
@@ -165,8 +165,8 @@ func (h *Hub) Publish(ctx context.Context, topic, typ string, data any) error {
 	if !validName(topic) {
 		return fmt.Errorf("realtime: publish: topic %q is not %s", topic, nameRule)
 	}
-	if !validName(typ) || typ == typeError || typ == typeReset {
-		return fmt.Errorf("realtime: publish to %s: type %q is not %s, or is the hub's own error or reset", topic, typ, nameRule)
+	if !validName(typ) || typ == typeRefused || typ == typeReset {
+		return fmt.Errorf("realtime: publish to %s: type %q is not %s, or is the hub's own refused or reset", topic, typ, nameRule)
 	}
 	var raw jsontext.Value
 	if data != nil {
@@ -205,8 +205,8 @@ func (h *Hub) newFrame(ev Event) *frame {
 	return &frame{id: ev.ID, topic: ev.Topic, typ: ev.Type, json: b}
 }
 
-// ownEvent is one of the hub's own events, error or reset: it has no ID,
-// so a client's last event ID does not move.
+// ownEvent is one of the hub's own events, refused or reset: it has no
+// ID, so a client's last event ID does not move.
 func (h *Hub) ownEvent(topic, typ string, data any) *frame {
 	ev := Event{Topic: topic, Type: typ, At: time.Now().UTC()}
 	if data != nil {

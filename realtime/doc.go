@@ -35,7 +35,7 @@
 // jobs. Authorize decides who may subscribe to what; without it, a
 // connection may subscribe to nothing but its own user's topic, user:<UserID>,
 // which is reserved: only that user's connections subscribe to it, and
-// Send publishes to it. A refused subscription is an error event to the
+// Send publishes to it. A refused subscription is a refused event to the
 // client, not a closed connection.
 //
 // # In the browser
@@ -51,7 +51,8 @@
 //	  const es = new EventSource(`/realtime/sse?ticket=${ticket}&topics=jobs&last_event_id=${last}`);
 //	  es.addEventListener("run.finished", e => { last = e.lastEventId; show(JSON.parse(e.data)); });
 //	  es.addEventListener("reset", reload); // too far behind: fetch the state anew
-//	  es.onerror = () => { es.close(); setTimeout(listen, 3000); };
+//	  es.addEventListener("refused", e => console.warn(JSON.parse(e.data).data.message));
+//	  es.onerror = () => { es.close(); setTimeout(listen, 3000); }; // the connection broke
 //	}
 //
 // A WebSocket also takes the client's frames: {"subscribe":["room:7"],
