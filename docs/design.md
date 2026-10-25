@@ -561,7 +561,7 @@ tag）与 `update`（用 `go install …@version`）。
 | 直接依赖 | 30 | `go list -m` 里非 indirect 的模块 |
 | 配置叶键 | 180 | `chok.Base` 与八个 Config 的叶子；逐键见 [config.md](config.md) |
 | examples/blog | 应用代码 120 行、chok 包 5 个 | 非测试 .go 的非空非注释行；不重复的 chok import |
-| examples/chatter | 应用代码 400 行、chok 包 7 个 | 行数同上口径；chok 包按顶层包计（store/where 算在 store 里）；由它自己的 `TestChatter_StaysSmall` 守着（契约 §10），不在 budget.txt 里 |
+| examples/chatter | 应用代码 400 行、chok 包 8 个 | 同上口径（不同的 import 路径如实计数，store/where 单算），由它自己的 `TestChatter_StaysSmall` 守着（契约 §10），不在 budget.txt 里 |
 
 质量门同样阻断：`make verify` = tidy-check、gofmt -s、vet、golangci-lint、
 `go fix -diff` 为空、SQLite lane、Postgres lane、MySQL lane、budget、smoke，

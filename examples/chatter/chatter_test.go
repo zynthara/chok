@@ -208,17 +208,16 @@ func TestChatter_FullPath(t *testing.T) {
 	}
 }
 
-// TestChatter_StaysSmall holds the example to its size (contract §10):
-// at most 400 lines of application code — the non-test Go files without
-// blank and comment lines, counted as hack/apibudget.sh counts
-// examples/blog — importing at most 7 chok packages, a package's
-// sub-packages counted with it (store/where with store).
+// TestChatter_StaysSmall holds the example to its size (contract §10,
+// v1.13): at most 400 lines of application code — the non-test Go files
+// without blank and comment lines, counted as hack/apibudget.sh counts
+// examples/blog — importing at most 8 chok packages, each distinct import
+// path once (store/where counts apart from store).
 func TestChatter_StaysSmall(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	const module = "github.com/zynthara/chok/v3"
 	lines, pkgs := 0, map[string]bool{}
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -239,17 +238,14 @@ func TestChatter_StaysSmall(t *testing.T) {
 		}
 		for _, imp := range f.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if path == module {
-				pkgs["chok"] = true
-			} else if rest, ok := strings.CutPrefix(path, module+"/"); ok {
-				top, _, _ := strings.Cut(rest, "/")
-				pkgs[top] = true
+			if path == "github.com/zynthara/chok/v3" || strings.HasPrefix(path, "github.com/zynthara/chok/v3/") {
+				pkgs[path] = true
 			}
 		}
 	}
-	t.Logf("%d lines of application code, %d chok packages: %v", lines, len(pkgs), pkgs)
-	if lines > 400 || len(pkgs) > 7 {
-		t.Fatalf("%d lines (at most 400) importing %d chok packages (at most 7): %v", lines, len(pkgs), pkgs)
+	t.Logf("%d lines of application code, %d chok packages", lines, len(pkgs))
+	if lines > 400 || len(pkgs) > 8 {
+		t.Fatalf("%d lines (at most 400) importing %d chok packages (at most 8): %v", lines, len(pkgs), pkgs)
 	}
 }
 
