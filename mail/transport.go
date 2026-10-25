@@ -134,7 +134,8 @@ func (m *Mailer) smtpSession(ctx context.Context, msg *Message, raw []byte) erro
 	if err := client.Quit(); err != nil {
 		return fmt.Errorf("smtp %s: QUIT: %w", addr, err)
 	}
-	m.log(ctx).DebugContext(ctx, "mail: sent", "to", strings.Join(msg.To, ", "), "subject", msg.Subject, "relay", addr)
+	// No subject: a sign-in mail's carries its code.
+	m.log(ctx).DebugContext(ctx, "mail: sent", "to", strings.Join(msg.To, ", "), "relay", addr)
 	return nil
 }
 

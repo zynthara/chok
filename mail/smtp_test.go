@@ -287,6 +287,25 @@ func TestSMTP_NoneOnLoopback(t *testing.T) {
 	}
 }
 
+// TestSMTP_SentLogLeavesTheSubjectOut: a delivered mail is a Debug line
+// with its recipients and relay, never its subject, which can carry a
+// sign-in code.
+func TestSMTP_SentLogLeavesTheSubjectOut(t *testing.T) {
+	s := newFakeSMTP(t, false, nil)
+	var logs syncBuffer
+	m, err := New(Config{From: testFrom, SMTP: SMTPConfig{Host: "127.0.0.1", Port: s.port, TLS: "none"}}, Logger(debugLogger(&logs)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send(t.Context(), Message{To: []string{"ada@example.com"}, Subject: "Your code is 482913", Text: "482913"}); err != nil {
+		t.Fatal(err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `level=DEBUG msg="mail: sent" to=ada@example.com relay=127.0.0.1:`) || strings.Contains(out, "482913") {
+		t.Fatalf("logs:\n%s", out)
+	}
+}
+
 // TestSMTP_StartTLSRequired: a relay that does not offer STARTTLS gets
 // neither the credentials nor the mail.
 func TestSMTP_StartTLSRequired(t *testing.T) {
