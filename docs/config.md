@@ -7,7 +7,7 @@ configuration types: `chok.Base`, which every application's Config embeds,
 and the Config of `db` and of each battery. An application names a
 battery's section in its own Config struct; the keys below carry the
 names examples/blog and `chok init` use: `db`, `auth` for identity, `jobs`,
-`telemetry`, `cache` and `realtime`.
+`telemetry`, `cache`, `realtime` and `mail`.
 
 `chok.Load` reads, lowest to highest: the defaults below, the file
 (`chok.yaml`, `<name>.yaml`, `configs/<name>.yaml` or `--config`), environment
@@ -213,3 +213,20 @@ The hub that pushes events to browsers over WebSocket and server-sent events, it
 | `realtime.replay` | int | `256` |  | Replay is how many recent events the hub keeps, across all topics, for clients that resume after an event they saw; 0 turns resuming off, so every resume gets a reset event. |
 | `realtime.send_buffer` | int | `64` |  | SendBuffer is how many published events may wait for one connection. A connection that falls further behind is a slow consumer: the hub drops it (a WebSocket with close code 4408) and counts it in Stats.Dropped. What a subscription adds — the events it replays, its refused or reset events — does not count, but nothing waits beyond SendBuffer + Replay + 2 × MaxSubscriptions events. |
 | `realtime.ticket_ttl` | duration | `60s` |  | TicketTTL is how long a ticket from {Path}/ticket can be redeemed. |
+
+## `mail.Config` — section `mail`
+
+Transactional mail through an SMTP relay, into .eml files or into the log; `mail.New` takes it.
+
+| Key | Type | Default | Rules | Description |
+|---|---|---|---|---|
+| `mail.dir` | string |  |  | Dir is where transport dir writes, one {unix nanoseconds}-{random}.eml file per mail; required with it, and created by New. |
+| `mail.from` | string |  |  | From is the sender, "Name &lt;addr&gt;" or "addr"; required. Message-IDs take its domain. |
+| `mail.reply_to` | string |  |  | ReplyTo is where replies go, when not to From. |
+| `mail.smtp.host` | string |  |  | Host is the relay; required with transport smtp. |
+| `mail.smtp.password` | string |  | **secret** | Username and Password authenticate with AUTH PLAIN, over TLS only (or to a loopback host); an empty Username skips authentication. |
+| `mail.smtp.port` | int | `587` |  | Port is the relay's port: 587 with starttls, 465 with implicit. |
+| `mail.smtp.tls` | string | `starttls` | `omitempty,oneof=starttls implicit none` | TLS is starttls (upgrade the plain connection; the relay must offer it), implicit (TLS from the first byte) or none, which only a loopback host may use, for local debugging. |
+| `mail.smtp.username` | string |  |  | Username and Password authenticate with AUTH PLAIN, over TLS only (or to a loopback host); an empty Username skips authentication. |
+| `mail.timeout` | duration | `15s` |  | Timeout bounds one Send: dialing, TLS, authentication and delivery. |
+| `mail.transport` | string | `smtp` | `omitempty,oneof=smtp dir log` | Transport is how a mail leaves: smtp sends it; dir writes it as an .eml file into Dir, for development, examples and tests; log only logs it. A Sender option replaces the transport, and then Transport and its settings are ignored. |
