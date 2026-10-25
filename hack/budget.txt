@@ -22,6 +22,7 @@ pkg telemetry       10
 pkg cache           10
 pkg choktest        10
 pkg realtime        16
+pkg mail            12
 
 provider identity/google    3
 provider identity/github    3

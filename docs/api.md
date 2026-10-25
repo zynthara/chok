@@ -22,11 +22,12 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`cache`](#cache) | 6 |
 | [`choktest`](#choktest) | 5 |
 | [`realtime`](#realtime) | 11 |
+| [`mail`](#mail) | 11 |
 | [`identity/google (provider)`](#identitygoogle) | 1 |
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 217 |
+| total | 228 |
 
 ## chok
 
@@ -317,6 +318,24 @@ full documentation is on pkg.go.dev and in `go doc`.
 | ↳ `func Logger(l *slog.Logger) Option` | Logger is where the hub logs; the default is slog.Default(). |
 | ↳ `func Redis(client *goredis.Client) Option` | Redis makes the hub one of several replicas sharing client: tickets live in Redis, so any replica redeems a ticket and only once, and every Publish also reaches the other replicas' subscribers, through PUBLISH on Config.Channel. |
 | `type Stats struct{ ... }` | Stats is a snapshot of a Hub: its connections and its counters since New. |
+
+## mail
+
+`import "github.com/zynthara/chok/v3/mail"` — Package mail is the mail battery: transactional mail — a sign-in code, a password reset, an order confirmation — sent with one value and the standard library only.
+
+| Declaration | |
+|---|---|
+| `type Attachment struct{ ... }` | Attachment is a file that travels with a mail. |
+| `type Config struct{ ... }` | Config is the mail section of an application's configuration: |
+| `type Mailer struct{ ... }` | Mailer sends mail: m.Send(ctx, mail.Message{To: …, Template: …, Data: …}). |
+| ↳ `func MustNew(cfg Config, opts ...Option) *Mailer` | MustNew is New that panics on error. |
+| ↳ `func New(cfg Config, opts ...Option) (*Mailer, error)` | New builds a mailer: it checks cfg, what the transport needs and every template, and creates transport dir's directory; it does not touch the network. |
+| `type Message struct{ ... }` | Message is one mail. |
+| `type Option func(*options)` | Option configures New. |
+| ↳ `func Logger(l *slog.Logger) Option` | Logger is where the mailer logs; the default is slog.Default(). |
+| ↳ `func Sender(fn func(ctx context.Context, m *Message, raw []byte) error) Option` | Sender replaces the transport, Config.Transport and its settings included: fn gets each composed message — m as rendered, its Subject, Text and HTML filled from the template — and raw, its RFC 5322 text, ready for an HTTP API or a test to take. |
+| ↳ `func Templates(fsys fs.FS) Option` | Templates gives the mails their templates: in fsys, each {name}.html is an html/template, and {name}.txt, a text/template, is its optional plain-text version, sent with it as multipart/alternative. |
+| `type SMTPConfig struct{ ... }` | SMTPConfig is mail.smtp: the relay a transport smtp mail goes through, such as Resend's, Postmark's or Amazon SES's. |
 
 ## identity/google
 
