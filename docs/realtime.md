@@ -100,7 +100,10 @@ async function ticket() {
 A ticket opens **one** connection, within `ticket_ttl` (60s), and binds
 it to the user it was issued to. Get a new one for every connection and
 every reconnect. Without `realtime.Authn` the ticket endpoint is public
-and its tickets anonymous — for pages that serve guests.
+and its tickets anonymous — for pages that serve guests. With identity's
+cookie mode (`auth.cookie`, [mail.md](mail.md#cookie-mode-and-csrf)) the
+page holds no token: the session cookie authenticates a plain
+`fetch("/realtime/ticket", {method: "POST"})`.
 
 ## In the browser: EventSource
 

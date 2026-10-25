@@ -9,8 +9,8 @@ chok is an opinionated Go application toolkit that an app imports and wires
 with plain Go code — no kernel, no registry, no generated files. One strict
 typed config, typed HTTP handlers with runtime OpenAPI and a gorm-backed
 store with owner scoping cover a CRUD resource with four imports. Batteries
-(identity, jobs, telemetry, cache, realtime) are values you construct and hand
-to `app.Use`, never services you look up.
+(identity, jobs, telemetry, cache, realtime, mail) are values you construct
+and hand to `app.Use`, never services you look up.
 
 - Module `github.com/zynthara/chok/v3`, Go 1.27 (toolchain go1.27.3), built on
   `main`. v3 is a rewrite: v2 code is a porting source, not a base.
@@ -22,7 +22,7 @@ to `app.Use`, never services you look up.
 
 `chok` (root) · `db` · `store` · `store/where` · `identity` · `identity/rbac` ·
 `identity/{google,github,apple,facebook}` · `jobs` · `telemetry` · `cache` ·
-`choktest` · `realtime`; the CLI is `cmd/chok`. Batteries import the root, the
+`choktest` · `realtime` · `mail`; the CLI is `cmd/chok`. Batteries import the root, the
 root no battery and no gorm. A new public package is an orchestrator decision.
 
 ## Three rules
@@ -84,9 +84,9 @@ stops; only points marked 执行者可定 are decided, under 实现级决策.
   `internal/lint/naming_test.go` checks every public package; its exemption
   list holds the frozen contract names that break a rule on purpose, and
   growing it is an orchestrator decision.
-- `hack/apibudget.sh`, limits in `hack/budget.txt`: public packages ≤ 11
-  (providers excluded), top-level exports ≤ 240 plus per-package caps,
-  option constructors ≤ 45 (where predicates excluded), direct deps ≤ 30,
+- `hack/apibudget.sh`, limits in `hack/budget.txt`: public packages ≤ 12
+  (providers excluded), top-level exports ≤ 250 plus per-package caps,
+  option constructors ≤ 50 (where predicates excluded), direct deps ≤ 30,
   examples/blog ≤ 120 app lines importing ≤ 5 chok packages. An unlisted
   public package or any count over its limit is red.
 - No compatibility shims: no v2 names, no `Deprecated` aliases.

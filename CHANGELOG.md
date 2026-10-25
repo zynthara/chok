@@ -56,6 +56,23 @@ package, configuration key, API, table and metric to its v3 form.
   **`identity/apple`** and **`identity/facebook`**, and an audit log with
   `/audit/logs`; **`identity/rbac`** adds casbin role-based access control
   with a Redis watcher.
+- **`identity`**: passwordless sign-in (`auth.passwordless`):
+  `POST /auth/passwordless/start` answers 202 whatever the address and
+  mails a code and a magic-link token in the background;
+  `POST /auth/passwordless/verify` trades either for a session —
+  `InvalidCode` with `attempts_left`, `CodeExpired` once a code expired,
+  was used or was tried `max_attempts` times — and creates the account of
+  a first sign-in unless `auto_register` is off. Codes are stored as
+  HMACs in the new table `auth_login_codes` (migration
+  `20261025000002`), starts are rate limited per client address, and an
+  hourly sweep deletes the expired codes.
+- **`identity`**: cookie mode (`auth.cookie`): register, login,
+  refresh-token, passwordless verify and the OAuth exchange set the
+  access token in an HttpOnly cookie as well (with `only`, in the cookie
+  alone); `Authn` reads it from requests without an `Authorization`
+  header; `POST /auth/logout` clears it; the OpenAPI document lists it
+  as `cookieAuth`. Pair it with `http.csrf`. `auth.reset_url` gives the
+  password-reset mail a link to the reset page.
 - **`jobs`**: cron-scheduled periodic jobs with skip, queue or allow
   overlap (a robfig/cron parser built in; see NOTICE), and transactional
   outbox workers that deliver at least once in order; `jobs.Observe`
@@ -82,6 +99,15 @@ package, configuration key, API, table and metric to its v3 form.
   event it saw (`after`, `Last-Event-ID`) or gets a `reset`. With
   `realtime.Redis`, tickets and events span every replica. See
   [docs/realtime.md](docs/realtime.md).
+- **`mail`**, a battery for transactional mail with the standard library
+  only: SMTP through a relay (STARTTLS or TLS from the first byte, AUTH
+  PLAIN, every recipient Bcc included, within `mail.timeout`), `.eml`
+  files in a directory for development, or the log; `html/template` and
+  optional `text/template` templates with partials and a subject define,
+  parsed at startup; attachments and inline images; RFC 5322 composition
+  with encoded headers and Message-IDs at the sender's domain;
+  `mail.Sender` swaps the transport for an HTTP API or a test. See
+  [docs/mail.md](docs/mail.md).
 - **`choktest`**: a throwaway database per test on the lane's dialect and
   an in-process App client.
 - **The `chok` command**: `init` scaffolds a project that serves on
@@ -91,16 +117,18 @@ package, configuration key, API, table and metric to its v3 form.
   application's document as JSON or YAML; `version` reports the build.
 - **Documentation**: [quickstart](docs/quickstart.md), whose programs are
   compiled by a test; [realtime](docs/realtime.md), the browser's side of
-  the realtime battery; a generated [configuration reference](docs/config.md)
+  the realtime battery; [mail](docs/mail.md), from a first mail to a
+  passwordless sign-in with a cookie session; a generated [configuration reference](docs/config.md)
   and [API map](docs/api.md), both kept current by tests;
   [design](docs/design.md) and the [v2 migration guide](docs/migration-v2-to-v3.md),
   in Chinese; English and Chinese READMEs.
 - **`examples/chatter`**: chat rooms over a WebSocket, a bot answering
-  from a jobs worker, and a jobs panel over server-sent events, in about
-  230 lines of Go and one HTML page without a build step.
-- **Budgets in CI**: at most eleven public packages, 240 exported
-  declarations (with per-package caps), 45 option constructors, 30 direct
-  dependencies, 150 configuration keys, and an `examples/blog` of 120
+  from a jobs worker, and a jobs panel over server-sent events, behind a
+  sign-in by mailed code with a cookie session, in about 240 lines of Go,
+  three mail templates and one HTML page without a build step.
+- **Budgets in CI**: at most twelve public packages, 250 exported
+  declarations (with per-package caps), 50 option constructors, 30 direct
+  dependencies, 180 configuration keys, and an `examples/blog` of 120
   application lines — `make budget`, part of `make verify`.
 
 ### Changed
@@ -119,6 +147,14 @@ package, configuration key, API, table and metric to its v3 form.
 - `identity` merges v2's account, auth, authz and audit; `jobs` merges
   scheduler and outbox; `telemetry` merges metrics and tracing; `cache`
   absorbs the redis module.
+- **Breaking:** `identity.MailSender` is `Send(ctx, identity.Mail)`. The
+  `Mail` carries the `Kind` (`password-reset` or `login-code`), the
+  address, the `Token`, the `Code`, a `Link` and `ExpiresAt`, so a sender
+  picks a template by kind. It replaces v2's `account.Sender`
+  (`Send(ctx, to, code string)`) and the `Send(ctx, to, token string)` of
+  earlier v3 snapshots; a sender written for either no longer compiles.
+  identity now sends in tracked goroutines, `Close` waits for the mails
+  in flight within its context, and a failed send is logged as a warning.
 
 ### Removed
 

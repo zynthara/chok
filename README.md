@@ -27,8 +27,8 @@
 chok gives a Go service one strict typed configuration, typed HTTP handlers
 that publish their own OpenAPI document, and a gorm-backed store that fences
 every query to the signed-in user — an authenticated CRUD resource takes four
-chok imports. Identity, jobs, telemetry, cache and realtime are batteries:
-values you construct and hand to `app.Use`. There is no kernel, no registry and no
+chok imports. Identity, jobs, telemetry, cache, realtime and mail are
+batteries: values you construct and hand to `app.Use`. There is no kernel, no registry and no
 generated file; `main.go` is the whole assembly:
 
 ```go
@@ -206,6 +206,82 @@ live background jobs: [docs/realtime.md](docs/realtime.md).
 [`examples/chatter`](examples/chatter) is a chat with a bot and a jobs
 panel built on it.
 
+## Mail and passwordless sign-in
+
+The `mail` battery sends transactional mail with the standard library
+alone — through an SMTP relay, into `.eml` files during development, or
+into the log — from `html/template` and `text/template` files. Given a
+way to mail, `identity` signs people in with a code instead of a
+password: `POST /auth/passwordless/start {"email"}` answers 202 and mails
+a code and a one-click link; `POST /auth/passwordless/verify` with the
+code (or the link's token) signs in, creating the account on first use.
+In cookie mode the session is an HttpOnly cookie the page's scripts never
+see, guarded by `http.csrf`.
+
+```go
+package main
+
+import (
+	"context"
+	"os"
+
+	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/v3/identity"
+	"github.com/zynthara/chok/v3/mail"
+)
+
+type Config struct {
+	chok.Base
+	DB   db.Config       `yaml:"db"`
+	Auth identity.Config `yaml:"auth"`
+	Mail mail.Config     `yaml:"mail"`
+}
+
+// sender is identity's MailSender: a mail is the template named after
+// its kind, templates/login-code.html or templates/password-reset.html.
+type sender struct{ m *mail.Mailer }
+
+func (s sender) Send(ctx context.Context, m identity.Mail) error {
+	return s.m.Send(ctx, mail.Message{To: []string{m.To}, Template: m.Kind, Data: m})
+}
+
+func main() {
+	cfg := chok.MustLoad[Config]("shop")
+	app := chok.New(cfg.Base)
+	d := db.MustOpen(cfg.DB)
+	m := mail.MustNew(cfg.Mail, mail.Templates(os.DirFS("templates")))
+	auth := identity.MustNew(cfg.Auth, d, identity.Sender(sender{m}))
+	app.Use(d, auth) // + POST /auth/passwordless/start, /auth/passwordless/verify, /auth/logout
+	app.Execute()
+}
+```
+
+```yaml
+# chok.yaml; the signing key comes from SHOP_AUTH_SIGNING_KEY
+http:
+  csrf: true   # the session cookie goes with every request
+db:
+  driver: sqlite
+  sqlite:
+    path: shop.db
+auth:
+  passwordless:
+    enabled: true
+  cookie:
+    enabled: true
+mail:
+  from: Shop <no-reply@shop.example>
+  smtp:
+    host: smtp.example.com   # the password comes from SHOP_MAIL_SMTP_PASSWORD
+    username: apikey
+```
+
+Templates, attachments, the three transports, retries through a jobs
+worker, the page's side of the sign-in and the cookie:
+[docs/mail.md](docs/mail.md). [`examples/chatter`](examples/chatter) signs
+in this way.
+
 ## Packages
 
 | Package | What it is |
@@ -214,13 +290,14 @@ panel built on it.
 | [`db`](https://pkg.go.dev/github.com/zynthara/chok/v3/db) | SQLite, MySQL and Postgres handles, transactions, model bases, RIDs, soft-unique indexes, auto / versioned / off migrations on one ledger |
 | [`store`](https://pkg.go.dev/github.com/zynthara/chok/v3/store) | Generic `Store[T]`: CRUD, owner scoping that fails closed, patches with optimistic locking, cursors, aggregates |
 | [`store/where`](https://pkg.go.dev/github.com/zynthara/chok/v3/store/where) | The query DSL: `Eq`, `In`, `Like`, `Order`, `Page`, `Cursor`, `FromQuery`, … |
-| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | Accounts, JWTs, login rate limiting, OAuth, the audit log, `Authn()` |
+| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | Accounts, JWTs, login rate limiting, OAuth, passwordless sign-in by mailed code, cookie sessions, the audit log, `Authn()` |
 | [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/rbac) | casbin role-based access control: `Require`, policies, a Redis watcher |
 | [`identity/google`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/google), [`github`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/github), [`apple`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/apple), [`facebook`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/facebook) | The OAuth providers |
 | [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | Cron-scheduled periodic jobs and transactional-outbox workers (at-least-once) |
 | [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/v3/telemetry) | Prometheus metrics, OpenTelemetry traces, slog to OpenTelemetry logs, SQL instrumentation |
 | [`cache`](https://pkg.go.dev/github.com/zynthara/chok/v3/cache) | An in-memory and a Redis layer behind one `Config`, with a circuit breaker |
 | [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/v3/realtime) | Events pushed to browsers over WebSocket and server-sent events: one-time tickets, authorized topics, resuming after a reconnect, a Redis backplane |
+| [`mail`](https://pkg.go.dev/github.com/zynthara/chok/v3/mail) | Transactional mail through an SMTP relay, `.eml` files or the log: templates, attachments, inline images; identity's sign-in codes |
 | [`choktest`](https://pkg.go.dev/github.com/zynthara/chok/v3/choktest) | Test helpers: a throwaway database per test on the lane's dialect, an in-process App client |
 
 Every exported symbol, one line each: [docs/api.md](docs/api.md).
@@ -264,6 +341,7 @@ More in [docs/design.md](docs/design.md) (Chinese).
 |---|---|
 | Quickstart: from an empty directory to an authenticated resource | [docs/quickstart.md](docs/quickstart.md) |
 | Realtime: events in the browser, five minutes | [docs/realtime.md](docs/realtime.md) |
+| Mail, passwordless sign-in and cookie sessions | [docs/mail.md](docs/mail.md) |
 | Configuration reference (generated) | [docs/config.md](docs/config.md) |
 | API map (generated) | [docs/api.md](docs/api.md) |
 | Design (Chinese) | [docs/design.md](docs/design.md) |

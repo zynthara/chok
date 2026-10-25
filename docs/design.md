@@ -13,8 +13,8 @@ chok 是一套有主见的 Go 应用工具包，模块路径 `github.com/zynthar
 要求 Go 1.27。应用 `import` 它、用普通 Go 代码装配：没有内核、没有注册表、
 没有生成文件。一份严格的类型化配置、带运行时 OpenAPI 的类型化 handler、
 带 owner 隔离的 gorm 存储，用四个 import 就能写出一个 CRUD 资源；身份、
-任务、遥测、缓存、实时推送这些电池是你构造出来交给 `app.Use` 的值，不是去查找
-的服务。
+任务、遥测、缓存、实时推送、邮件这些电池是你构造出来交给 `app.Use` 的值，不是
+去查找的服务。
 
 v2 是「有内核、由 yaml 段驱动模块装配的框架」：段在场即装配、`chok sync`
 生成装配代码、组件声明 `Descriptor`、依赖经 `k.Get` 查找、配置是可热换的
@@ -38,8 +38,8 @@ RCU 快照。v3 把这些全部拿掉，只留三条规则：
 
 ## 2. 包地图
 
-公开包 11 个（预算的上限，provider 子包不计；`realtime` 是 2026-10-25 加的
-第 11 个），其余一律 `internal/`：
+公开包 12 个（预算的上限，provider 子包不计；`realtime` 与 `mail` 是 2026-10-25
+加的第 11、12 个），其余一律 `internal/`：
 
 | 包 | 职责 | 依赖 |
 |---|---|---|
@@ -47,13 +47,14 @@ RCU 快照。v3 把这些全部拿掉，只留三条规则：
 | `db` | 打开三方言（SQLite / MySQL / Postgres）、池、事务、模型基座、RID、`Table` / `SoftUnique`、三种迁移模式与单账本 | gorm 与三个驱动 |
 | `store` | 泛型 `Store[T]`：CRUD、owner 隔离、Patch 与乐观锁、游标、聚合与投影、自描述错误 | `chok`、`db`、`store/where` |
 | `store/where` | 查询 DSL：`Eq` / `In` / `Like` / `Order` / `Page` / `Cursor` / `FromQuery` … | gorm（`Option` 的签名里出现 `*gorm.DB`，D11） |
-| `identity` | 账户、JWT、登录限速、OAuth、审计；`Authn()` 中间件；`/auth/*` 路由 | `chok`、`db`、`store` |
+| `identity` | 账户、JWT、登录限速、OAuth、邮件验证码的无密码登录、cookie 会话、审计；`Authn()` 中间件；`/auth/*` 路由 | `chok`、`db`、`store` |
 | `identity/rbac` | casbin RBAC：`Require` / `RequireInDomain`、策略服务、Redis watcher | `identity`；casbin 与 go-redis 只在这里 |
 | `identity/{google,github,apple,facebook}` | 四个 OAuth provider，各只导出 `New` | `identity` |
 | `jobs` | 周期任务（内置 cron 解析器）与事务性 outbox worker | `chok`、`db` |
 | `telemetry` | Prometheus 指标、OTel 链路、slog → OTel Logs、gorm 埋点 | `chok`、`db`；client_golang 与 otel |
 | `cache` | 内存层（otter）、Redis 层、熔断器 | go-redis、otter |
 | `realtime` | 实时推送：Hub、一次性 ticket、WebSocket 与 SSE 两种传输、续传缓冲、Redis backplane | `chok`；coder/websocket、go-redis |
+| `mail` | 事务邮件：SMTP（STARTTLS / 隐式 TLS、AUTH PLAIN）、`.eml` 目录、日志三种传输，`html/template` + `text/template` 模板，附件与内嵌图片 | `chok`；只用标准库 |
 | `choktest` | 测试辅助：`DB` / `Store` / `App` / `Client` / `Principal` | `chok`、`db`、`store` |
 
 依赖方向只有一个：电池 → 根包（与 `db`）。电池之间不互相 import：两个电池要
@@ -63,8 +64,9 @@ API 的地方，走 `internal/` 下的挂点：`internal/dbx`
 （db 告诉 store 与电池的东西：SoftUnique 索引、无基座的普通表、语句观察者、
 电池的迁移文件）、`internal/logtap`（telemetry 桥接 App 的 logger）、
 `internal/tracectx`（审计记录补 trace id）、`internal/redislog`（go-redis
-日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）。挂点都由提供方
-在 `init` 里赋值，使用方读取，公开面不变。
+日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）、
+`internal/openapi.UseCookieAuth`（identity 的 cookie 模式把 `cookieAuth` 写进 App
+的 OpenAPI 文档）。挂点都由提供方在 `init` 里赋值，使用方读取，公开面不变。
 
 命令行 `cmd/chok` 是 main 包，不计入公开包与导出预算；cobra 只出现在那里。
 
@@ -294,16 +296,17 @@ SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
 ## 7. 电池
 
 电池是值：构造、登记、用。它们只 import 根包（大多还有 `db`，identity 另用
-`store`；realtime 不碰数据库），彼此不认识。
+`store`；realtime 与 mail 不碰数据库），彼此不认识。
 
 ### 7.1 `identity`
 
 `identity.New(cfg, d, opts...)` 在同一个 `*db.DB` 上注册 users、identities、
-audit_logs 三张表（owner `identity`），并挂 `{prefix}`（默认 `/auth`）下的路由：
-register（201，`disable_register` 时不挂）、login（200）、refresh-token、
-change-password、me，以及有 `Sender` 时的 forgot / reset password；有 provider
-时加 OAuth 的 start / callback / exchange 与 identities 管理；审计开着且
-`admin_api` 时挂 `GET /audit/logs`。
+audit_logs、auth_login_codes 四张表（owner `identity`），并挂 `{prefix}`（默认
+`/auth`）下的路由：register（201，`disable_register` 时不挂）、login（200）、
+refresh-token、change-password、me，以及有 `Sender` 时的 forgot / reset
+password；`auth.passwordless.enabled` 时的 passwordless/start 与 /verify；
+`auth.cookie.enabled` 时的 logout；有 provider 时加 OAuth 的 start / callback /
+exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/logs`。
 
 - **`Authn()`**：Bearer HS256 JWT，**每个请求按主键读一次用户**：存在、
   active、token 的 `pv` 等于当前 `password_version`——禁用、改密、改角色、
@@ -311,6 +314,33 @@ change-password、me，以及有 `Sender` 时的 forgot / reset password；有 p
   Roles, Extra}`，store 的 owner 隔离就读它。
 - **会话上限**：`refresh_ttl` 从登录起算，refresh-token 不能无限续。
 - **登录限速**：按 email 与客户端 IP 两维、只记失败，429 带 `retry_after`。
+- **发信**：identity 不发信，只把 `identity.Mail{Kind, To, Token, Code, Link,
+  ExpiresAt}` 交给应用的 `MailSender`（`Sender` 选项）；应用按 `Kind`
+  （password-reset / login-code）选模板，通常经 mail 电池发出。发信在后台
+  goroutine 里做，响应不等它（是否有这个账户也就从时长上看不出来），失败只记
+  Warn；`Close` 在 ctx 内等在途的发送，超时则取消它们。`reset_url` /
+  `passwordless.magic_link_url` 配了，`Mail.Link` 就是带 `?token=` 的页面地址。
+- **无密码登录**（`auth.passwordless`，需要 `Sender`）：start 一律 202、无体，
+  按邮箱 upsert 一行 `auth_login_codes`（码与 magic-link token 都只存
+  HMAC-SHA256(signing_key, ·) 的 hex），`resend_after` 内再 start 不换码、不发信；
+  按客户端 IP 计 start 次数，与登录限速同一张表（另起一个维度名）、同一清扫。
+  verify 收 `{email, code}` 或 `{token}`：码错 401 InvalidCode 带
+  `attempts_left`，过期、用过、试满 `max_attempts`、没 start 过一律 401
+  CodeExpired；比较前先用条件 UPDATE 认领一次尝试、成功时条件 DELETE 消耗该行，
+  并发的猜测拿不到多于 `max_attempts` 次比较，并发的成功只有一个。未注册的邮箱
+  在 `auto_register`（nil 即 true）下建号：email 已验证、无密码、无名字。过期行由
+  identity 自己的每小时清扫删除。
+- **cookie 模式**（`auth.cookie`）：签发 token 的五处（register、login、
+  refresh-token、passwordless verify、OAuth exchange）同时 Set-Cookie（HttpOnly、
+  Secure 缺省开、SameSite 缺省 lax、Max-Age = token_ttl）；`only` 时响应体只剩
+  `{expires_at}`，OpenAPI 的响应 schema 随之改变。类型化 handler 写不了响应头，
+  所以这几条路由带一个路由级中间件，把 ResponseWriter 放进请求 ctx。`Authn` 在
+  没有 Authorization 头时读这个 cookie（有头以头为准）；logout 清 cookie、不吊销
+  token（token 无状态，要立即失效用 `Users().RevokeTokens`）。浏览器会给每个请求
+  自动带上 cookie，所以 cookie 会话必须配 `http.csrf: true` 并让前端与 API 同源
+  （或在 `http.cors` 里列出并开 `allow_credentials`）；identity 看不到 http 段，
+  只能在文档里写明。OpenAPI 加 `cookieAuth`（apiKey in cookie），非公开路由列
+  bearer 与 cookie 两种。
 - **OAuth**：Google / Apple 走 OIDC（自实现校验）、GitHub、Facebook；
   `Provider` 是封闭接口，四个子包各只导出 `New(identity.ProviderConfig)`。
   配置了却没在代码里链接的 provider 让 `New` 失败。进行中的 OAuth 状态只在进程
@@ -432,6 +462,38 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   并写入续传缓冲，各自忽略回声。`Start` 维持订阅、断线自动重连并记 Warn；`Health`
   在订阅未建立或已断开时报错，于是 App 的启动相要等订阅建立。
 
+### 7.6 `mail`
+
+`mail.New(cfg, opts...)` 一个 Mailer：组信、渲染模板、交给传输。没有池、没有
+队列、没有生命周期——`Health` 恒 nil、没有 Start / Close，`app.Use(m)` 可有可无
+（只为在 `/healthz` 里露个面）。只用标准库，不加依赖。
+
+- **组信**：RFC 5322。From / Reply-To 来自配置（`Headers["Reply-To"]` 可逐封
+  覆盖），To / Cc，Subject（换行折成空格，非 ASCII 用 `mime.QEncoding`），Date
+  （UTC），Message-ID（`<随机 hex@From 的域>`），MIME-Version；Bcc 只在信封上。
+  正文 quoted-printable，附件 base64；text + html → `multipart/alternative`，有
+  inline 图片 → 外包 `multipart/related`（Content-ID 即 `<Name>`），有附件 → 再包
+  `multipart/mixed`；附件的 Content-Type 缺省按扩展名猜。头字段在 76 列处折行，
+  `Headers` 不能写 From / To / Cc / Bcc / Subject / Date / Message-ID /
+  MIME-Version / Content-*，值不能跨行。地址不合法、模板不存在、Template 与正文
+  同时给，都是发出前的普通错误（不是 Coder，handler 自己包装）。
+- **模板**：`Templates(fsys)` 在 New 时解析 fs 里任意深度的 `.html` / `.txt`，模板
+  名即文件名去扩展名；`{name}.html` 是 html/template，同名 `.txt`（text/template）
+  可选、给了就一起发成 alternative；`_*.html` / `_*.txt` 是同类模板共用的局部；
+  `{{define "subject"}}` 是主题（.txt 的优先，html 的反转义），`Message.Subject`
+  非空时覆盖。解析失败、同名文件、孤立的 `.txt`、给两次 Templates 都让 New 失败，
+  坏模板不会等到第一封信才暴露。
+- **传输**：`smtp` 每次 Send 拨号 → EHLO → STARTTLS（中继不提供就报错，不降级）或
+  隐式 TLS → AUTH PLAIN（有 username 时）→ MAIL → 每个收件人（含 Bcc）一个 RCPT →
+  DATA → QUIT，整次受 `mail.timeout` 约束（连接的截止时间 + ctx 取消即断）；
+  `tls: none` 只许回环地址。`dir` 把每封信写成 `{unix 纳秒}-{随机}.eml`（先写临时
+  文件再改名，0600）并 Info 记路径；`log` 只记日志（Info：收件人、主题、字节数；
+  Debug：正文）。`Sender(fn)` 整个替换传输（HTTP API、测试捕获），收到渲染后的
+  Message 与组好的全文，此时 Transport 与它的字段一律不查。
+- **可靠投递不在本包**：Send 是一次尝试；要重试就在业务事务里 `jobs.Enqueue`、由
+  该 topic 的 Worker 调 Send（docs/mail.md 有配方）。给 identity 用时应用写一个
+  `MailSender` 适配器，按 `Mail.Kind` 选模板。
+
 ## 8. 测试
 
 - **真库，不 mock**：`choktest.DB(t)` 按 `CHOK_TEST_DRIVER` 给每个测试一个
@@ -448,12 +510,12 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   不用 `-run` 挑测试；缺 DSN 时 lane 直接失败。CI 用 `postgres:16` 与
   `mysql:8.4` 服务，两条 lane 都阻断。
 - **验收即文档**：`examples/blog` 的验收测试走一遍 README 的路径；
-  `examples/chatter` 的验收测试在真实服务器上经 HTTP、WebSocket 与 SSE 走它的
-  README 路径（三方言）；`make smoke`
+  `examples/chatter` 的验收测试在真实服务器上走它的 README 路径（三方言）：经
+  mail 的 dir 传输取验证码与链接登录、cookie 会话、HTTP、WebSocket 与 SSE；`make smoke`
   起真实二进制、探 `/healthz` 与 `/metrics`、SIGINT 后 3 秒内退出；`chok init`
   的自检测试在三方言上生成、构建、启动脚手架；`internal/tools/doccheck` 编译
-  quickstart、两份 README 与 `docs/realtime.md` 里的每个程序；`docs/config.md`
-  与 `docs/api.md` 由测试守着不腐烂。
+  quickstart、两份 README、`docs/realtime.md` 与 `docs/mail.md` 里的每个程序；
+  `docs/config.md` 与 `docs/api.md` 由测试守着不腐烂。
 - 时序逻辑优先 `testing/synctest`；测试从不占固定端口；每个 bug 修复与回归测试
   同一个提交。
 
@@ -489,13 +551,13 @@ tag）与 `update`（用 `go install …@version`）。
 
 | 项 | 上限 | 怎么量 |
 |---|---|---|
-| 公开包（provider 不计） | 11 | 既非 internal 也非 main 的包；名单外的包直接失败 |
-| 顶层导出 | 总 240；chok 64、db 30、store 30、store/where 28、identity 30、identity/rbac 8、jobs 17、telemetry 10、cache 10、choktest 10、realtime 16、provider 各 3 | `go doc -short` 的行数（构造函数缩在类型下、分组的 var / const 一行），方法不计；逐行见 [api.md](api.md) |
-| 选项构造函数 | 45（不含 store/where 的谓词） | 结果类型是 `Option` / `RouteOption` / `LoadOption` 的函数 |
+| 公开包（provider 不计） | 12 | 既非 internal 也非 main 的包；名单外的包直接失败 |
+| 顶层导出 | 总 250；chok 64、db 30、store 30、store/where 28、identity 30、identity/rbac 8、jobs 17、telemetry 10、cache 10、choktest 10、realtime 16、mail 12、provider 各 3 | `go doc -short` 的行数（构造函数缩在类型下、分组的 var / const 一行），方法不计；逐行见 [api.md](api.md) |
+| 选项构造函数 | 50（不含 store/where 的谓词） | 结果类型是 `Option` / `RouteOption` / `LoadOption` 的函数 |
 | 直接依赖 | 30 | `go list -m` 里非 indirect 的模块 |
-| 配置叶键 | 150 | `chok.Base` 与七个 Config 的叶子；逐键见 [config.md](config.md) |
+| 配置叶键 | 180 | `chok.Base` 与八个 Config 的叶子；逐键见 [config.md](config.md) |
 | examples/blog | 应用代码 120 行、chok 包 5 个 | 非测试 .go 的非空非注释行；不重复的 chok import |
-| examples/chatter | 应用代码 400 行、chok 包 7 个 | 同上口径，由它自己的 `TestChatter_StaysSmall` 守着（契约 §10），不在 budget.txt 里 |
+| examples/chatter | 应用代码 400 行、chok 包 7 个 | 行数同上口径；chok 包按顶层包计（store/where 算在 store 里）；由它自己的 `TestChatter_StaysSmall` 守着（契约 §10），不在 budget.txt 里 |
 
 质量门同样阻断：`make verify` = tidy-check、gofmt -s、vet、golangci-lint、
 `go fix -diff` 为空、SQLite lane、Postgres lane、MySQL lane、budget、smoke，

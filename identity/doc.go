@@ -17,7 +17,9 @@
 //
 // Mount registers register, login, refresh-token, change-password and me
 // under auth.prefix (/auth), forgot-password and reset-password with a
-// Sender, and the OAuth routes with Providers. The public ones are
+// Sender, passwordless/start and passwordless/verify with
+// auth.passwordless, logout in cookie mode, and the OAuth routes with
+// Providers. The public ones are
 // documented without security in the OpenAPI document. Request and
 // response bodies are v2's: register takes {email, password, name} and
 // answers 201 {token, expires_at}; login takes {email, password}.
@@ -29,11 +31,12 @@
 // auth.passwordless.enabled — a sign-in code. Each is a Mail whose Kind
 // picks the application's template; the send runs in the background and
 // Close waits for it. POST {prefix}/passwordless/start {email} always
-// answers 202 and mails a code and a magic-link token, unless one went out
-// within auth.passwordless.resend_after; POST {prefix}/passwordless/verify
-// with {email, code} or {token} answers what login does, creating the
-// account of an unknown address unless auto_register is off. Codes are
-// kept as HMACs in auth_login_codes, tried at most max_attempts times.
+// answers 202 and mails a code and a magic-link token, unless an unused
+// one went out within auth.passwordless.resend_after;
+// POST {prefix}/passwordless/verify with {email, code} or {token} answers
+// what login does, creating the account of an unknown address unless
+// auto_register is off. Codes are kept as HMACs in auth_login_codes,
+// tried at most max_attempts times.
 //
 // # Cookie mode
 //

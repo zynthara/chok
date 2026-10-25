@@ -140,7 +140,9 @@ curl -s localhost:8080/api/whoami
 `identity` also serves `GET /auth/me` (the account: `id`, `email`, `name`,
 `email_verified`, `roles`, `created_at`), `POST /auth/refresh-token` and
 `PUT /auth/change-password`; forgot and reset password appear once you
-pass `identity.Sender(...)`. Tokens last `auth.token_ttl` (2h), a session
+pass `identity.Sender(...)`, which also lets people sign in with a mailed
+code instead of a password, and `auth.cookie` keeps the session in an
+HttpOnly cookie ([docs/mail.md](mail.md)). Tokens last `auth.token_ttl` (2h), a session
 `auth.refresh_ttl` (168h) from its login, and ten failed logins in 15
 minutes, per email or per address, answer 429 — all in
 [docs/config.md](config.md#identityconfig--section-auth).
@@ -235,6 +237,8 @@ metrics — is [`examples/blog`](../examples/blog).
   [docs/design.md](design.md) (in Chinese).
 - Pages that update by themselves — a WebSocket or server-sent events,
   with tickets, topics and resuming: [docs/realtime.md](realtime.md).
+- Mail — sign-in codes, password resets, receipts — and sessions in a
+  cookie: [docs/mail.md](mail.md).
 - Coming from chok v2: [docs/migration-v2-to-v3.md](migration-v2-to-v3.md)
   (in Chinese). Request bodies are decoded with `encoding/json/v2`: field
   names match case-sensitively, unknown and duplicate fields are a 400,

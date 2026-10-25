@@ -344,6 +344,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | `auth.Principal`、`auth.PrincipalFrom` | `chok.Principal`、`chok.PrincipalFrom(ctx)`；`UserID` 是用户的 RID（`usr_…`） |
 | `account.WithExpiration` / `WithResetExpiration` / `WithLoginRateLimit` … | `auth.*` 配置键（§2.2） |
 | `account.WithPasswordCost` | 删除（bcrypt cost 12；测试经 choktest 自动降低） |
+| `account.Sender`：`Send(ctx, to, code string) error`，`WithSender` | `identity.MailSender`：`Send(ctx, identity.Mail) error`，`identity.Sender(s)`；`Mail` 带 `Kind`（`password-reset` / `login-code`）、`To`、`Token`、`Code`、`Link`、`ExpiresAt`，按 `Kind` 选模板，通常交给新的 `mail` 电池发（见 [mail.md](mail.md)）。发信在后台进行，失败只记 Warn，`Close` 会等在途的发送 |
 | `account.WithOAuthSessionStore` / `WithAuthCodeStore`、`MemorySessionStore`、`CookieCarrier` | 删除：OAuth 进行中的状态只在进程内（多副本须会话粘滞） |
 | `auth/jwt` 的可插拔 `TokenParser` / `PrincipalResolver` | 删除：`Authn` 只认本 Identity 签发的 HS256 token，每个请求按主键读一次用户 |
 | `account/providers/{google,github,apple,facebook}` | `identity/{google,github,apple,facebook}`，各只导出 `New(identity.ProviderConfig)` |
@@ -372,6 +373,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | `identities` | `ix_identity_user_provider` 改为真正的 `(user_id, provider)` 复合索引；单列 `idx_identities_user_id` 去掉 | 按 v3 的 SQL（`identity/migrations/<方言>/`）重建这两个索引 |
 | `audit_logs` | `before` / `after` 改名 `before_data` / `after_data`（MySQL 保留字）；`actor_id` / `resource_id` / `request_id` 加宽到 128；`action` / `result` NOT NULL；三个 `*_time` 索引真正包含 `occurred_at` | 改名并加宽列、重建索引 |
 | `casbin_rule` | 不变 | — |
+| `auth_login_codes` | v3 新增（无密码登录的验证码，只存 HMAC） | 跑版本化迁移 `20261025000002` 建表，见下 |
 | `schema_migrations_chok_account` / `_audit` / `_authz` | 不再使用 | 见下 |
 
 用版本化迁移（`db.migrate: versioned` 或 `off`）的 v2 库：先按 v3 的 SQL
@@ -383,6 +385,7 @@ SQL）：
 chok migrate mark-applied 20261024000001   # identity：users、identities
 chok migrate mark-applied 20261024000002   # identity：audit_logs
 chok migrate mark-applied 20261024000003   # rbac：casbin_rule
+chok migrate up --battery identity         # 真正执行 v3 新增的 20261025000002（auth_login_codes）
 chok migrate status --battery identity --battery rbac   # 全部 applied
 ```
 

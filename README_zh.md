@@ -25,8 +25,8 @@
 
 chok 给一个 Go 服务带来：一份严格的类型化配置、自动发布 OpenAPI 文档的类型化
 HTTP handler、把每条查询围在当前登录用户之内的 gorm 存储——一个带认证的 CRUD
-资源只要四个 chok import。身份、任务、遥测、缓存、实时推送是电池：你构造出来、
-交给 `app.Use` 的值。没有内核、没有注册表、没有生成文件；`main.go` 就是全部装配：
+资源只要四个 chok import。身份、任务、遥测、缓存、实时推送、邮件是电池：你构造
+出来、交给 `app.Use` 的值。没有内核、没有注册表、没有生成文件；`main.go` 就是全部装配：
 
 ```go
 package main
@@ -196,6 +196,77 @@ news.addEventListener("story.posted", (e) => console.log(JSON.parse(e.data).data
 [docs/realtime.md](docs/realtime.md)。[`examples/chatter`](examples/chatter)
 是在它上面做的带机器人与任务面板的聊天室。
 
+## 邮件与无密码登录
+
+`mail` 电池只用标准库发事务邮件——经 SMTP 中继、开发时写成 `.eml` 文件、或者只记
+日志——模板是 `html/template` 与 `text/template` 文件。有了发信的办法，`identity`
+就能用验证码代替密码登录：`POST /auth/passwordless/start {"email"}` 一律回 202，
+并寄出验证码与一键登录链接；`POST /auth/passwordless/verify` 交上验证码（或链接里的
+token）即登录，第一次登录时建号。cookie 模式下会话是页面脚本碰不到的 HttpOnly
+cookie，由 `http.csrf` 把守。
+
+```go
+package main
+
+import (
+	"context"
+	"os"
+
+	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/v3/identity"
+	"github.com/zynthara/chok/v3/mail"
+)
+
+type Config struct {
+	chok.Base
+	DB   db.Config       `yaml:"db"`
+	Auth identity.Config `yaml:"auth"`
+	Mail mail.Config     `yaml:"mail"`
+}
+
+// sender is identity's MailSender: a mail is the template named after
+// its kind, templates/login-code.html or templates/password-reset.html.
+type sender struct{ m *mail.Mailer }
+
+func (s sender) Send(ctx context.Context, m identity.Mail) error {
+	return s.m.Send(ctx, mail.Message{To: []string{m.To}, Template: m.Kind, Data: m})
+}
+
+func main() {
+	cfg := chok.MustLoad[Config]("shop")
+	app := chok.New(cfg.Base)
+	d := db.MustOpen(cfg.DB)
+	m := mail.MustNew(cfg.Mail, mail.Templates(os.DirFS("templates")))
+	auth := identity.MustNew(cfg.Auth, d, identity.Sender(sender{m}))
+	app.Use(d, auth) // + POST /auth/passwordless/start, /auth/passwordless/verify, /auth/logout
+	app.Execute()
+}
+```
+
+```yaml
+# chok.yaml; the signing key comes from SHOP_AUTH_SIGNING_KEY
+http:
+  csrf: true   # the session cookie goes with every request
+db:
+  driver: sqlite
+  sqlite:
+    path: shop.db
+auth:
+  passwordless:
+    enabled: true
+  cookie:
+    enabled: true
+mail:
+  from: Shop <no-reply@shop.example>
+  smtp:
+    host: smtp.example.com   # the password comes from SHOP_MAIL_SMTP_PASSWORD
+    username: apikey
+```
+
+模板、附件、三种传输、经 jobs worker 重试、页面一侧的登录流程与 cookie：
+[docs/mail.md](docs/mail.md)。[`examples/chatter`](examples/chatter) 就是这样登录的。
+
 ## 包
 
 | 包 | 是什么 |
@@ -204,13 +275,14 @@ news.addEventListener("story.posted", (e) => console.log(JSON.parse(e.data).data
 | [`db`](https://pkg.go.dev/github.com/zynthara/chok/v3/db) | SQLite / MySQL / Postgres 句柄、事务、模型基座、RID、软唯一索引、单账本上的 auto / versioned / off 迁移 |
 | [`store`](https://pkg.go.dev/github.com/zynthara/chok/v3/store) | 泛型 `Store[T]`：CRUD、失败关闭的 owner 隔离、带乐观锁的 Patch、游标、聚合 |
 | [`store/where`](https://pkg.go.dev/github.com/zynthara/chok/v3/store/where) | 查询 DSL：`Eq`、`In`、`Like`、`Order`、`Page`、`Cursor`、`FromQuery` … |
-| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | 账户、JWT、登录限速、OAuth、审计日志、`Authn()` |
+| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | 账户、JWT、登录限速、OAuth、邮件验证码的无密码登录、cookie 会话、审计日志、`Authn()` |
 | [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/rbac) | casbin 的基于角色的访问控制：`Require`、策略、Redis watcher |
 | [`identity/google`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/google)、[`github`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/github)、[`apple`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/apple)、[`facebook`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/facebook) | OAuth provider |
 | [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | cron 调度的周期任务与事务性 outbox worker（至少一次） |
 | [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/v3/telemetry) | Prometheus 指标、OpenTelemetry 链路、slog 到 OpenTelemetry Logs、SQL 埋点 |
 | [`cache`](https://pkg.go.dev/github.com/zynthara/chok/v3/cache) | 一个 `Config` 后面的内存层与 Redis 层，带熔断器 |
 | [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/v3/realtime) | 经 WebSocket 与 server-sent events 推给浏览器的事件：一次性 ticket、授权的主题、断线续传、Redis backplane |
+| [`mail`](https://pkg.go.dev/github.com/zynthara/chok/v3/mail) | 经 SMTP 中继、`.eml` 文件或日志发出的事务邮件：模板、附件、内嵌图片；identity 的登录验证码 |
 | [`choktest`](https://pkg.go.dev/github.com/zynthara/chok/v3/choktest) | 测试辅助：按 lane 的方言给每个测试一个一次性数据库、进程内的 App 客户端 |
 
 每个导出符号一行：[docs/api.md](docs/api.md)。
@@ -250,6 +322,7 @@ go install github.com/zynthara/chok/v3/cmd/chok@latest   # 或在项目里 go to
 |---|---|
 | Quickstart：从空目录到带认证的资源 | [docs/quickstart.md](docs/quickstart.md) |
 | 实时推送：五分钟在浏览器里看到事件 | [docs/realtime.md](docs/realtime.md) |
+| 邮件、无密码登录与 cookie 会话 | [docs/mail.md](docs/mail.md) |
 | 配置参考（生成） | [docs/config.md](docs/config.md) |
 | API 地图（生成） | [docs/api.md](docs/api.md) |
 | 设计文档 | [docs/design.md](docs/design.md) |

@@ -11,7 +11,7 @@ import (
 )
 
 // The documents whose go blocks readers copy whole.
-var documents = []string{"docs/quickstart.md", "README.md", "README_zh.md", "docs/realtime.md"}
+var documents = []string{"docs/quickstart.md", "README.md", "README_zh.md", "docs/realtime.md", "docs/mail.md"}
 
 // appName finds the name a program gives chok.MustLoad, whose upper case
 // prefixes its environment variables.
@@ -98,8 +98,8 @@ func TestDocs_GoProgramsBuild(t *testing.T) {
 			programs = append(programs, p)
 		}
 	}
-	if len(programs) < 8 {
-		t.Fatalf("found %d programs; the quickstart has three, each README two and docs/realtime.md one", len(programs))
+	if len(programs) < 11 {
+		t.Fatalf("found %d programs; the quickstart has three, each README three, docs/realtime.md and docs/mail.md one each", len(programs))
 	}
 	gomod := "module example.com/docs\n\ngo 1.27\n\nrequire github.com/zynthara/chok/v3 v3.0.0\n\nreplace github.com/zynthara/chok/v3 => " + root + "\n"
 	if err := os.WriteFile(filepath.Join(mod, "go.mod"), []byte(gomod), 0o644); err != nil {

@@ -120,8 +120,9 @@ type PasswordlessConfig struct {
 	// MaxAttempts is how many wrong codes a code survives; after them the
 	// user asks for a new one.
 	MaxAttempts int `yaml:"max_attempts" default:"5"`
-	// ResendAfter is the least time between two codes for one address: a
-	// start within it answers the same 202 and mails nothing.
+	// ResendAfter is the least time between two codes for one address
+	// while the first is unused: a start within it answers the same 202
+	// and mails nothing.
 	ResendAfter time.Duration `yaml:"resend_after" default:"60s"`
 	// MagicLinkURL is the front end's sign-in page, an absolute URL:
 	// given, the login-code Mail's Link is MagicLinkURL?token=<token>, for

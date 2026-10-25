@@ -142,7 +142,7 @@ Accounts, tokens, OAuth providers and the audit log; `identity.New` takes it. Th
 | `auth.passwordless.enabled` | bool |  |  | Enabled mounts the two routes; it needs a Sender to mail the codes. |
 | `auth.passwordless.magic_link_url` | string |  |  | MagicLinkURL is the front end's sign-in page, an absolute URL: given, the login-code Mail's Link is MagicLinkURL?token=&lt;token&gt;, for the page to post to {prefix}/passwordless/verify. |
 | `auth.passwordless.max_attempts` | int | `5` |  | MaxAttempts is how many wrong codes a code survives; after them the user asks for a new one. |
-| `auth.passwordless.resend_after` | duration | `60s` |  | ResendAfter is the least time between two codes for one address: a start within it answers the same 202 and mails nothing. |
+| `auth.passwordless.resend_after` | duration | `60s` |  | ResendAfter is the least time between two codes for one address while the first is unused: a start within it answers the same 202 and mails nothing. |
 | `auth.prefix` | string | `/auth` |  | Prefix is where the routes mount: {prefix}/register, {prefix}/login, ... |
 | `auth.providers.<name>.client_id` | string |  |  | ClientID is the OAuth client: Google's client ID, GitHub's and Facebook's app ID, Apple's Services ID. |
 | `auth.providers.<name>.client_secret` | string |  | **secret** | ClientSecret is the client's secret; for Apple, the PEM contents of the .p8 signing key. |
