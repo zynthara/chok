@@ -27,8 +27,8 @@
 chok gives a Go service one strict typed configuration, typed HTTP handlers
 that publish their own OpenAPI document, and a gorm-backed store that fences
 every query to the signed-in user — an authenticated CRUD resource takes four
-chok imports. Identity, jobs, telemetry and cache are batteries: values you
-construct and hand to `app.Use`. There is no kernel, no registry and no
+chok imports. Identity, jobs, telemetry, cache and realtime are batteries:
+values you construct and hand to `app.Use`. There is no kernel, no registry and no
 generated file; `main.go` is the whole assembly:
 
 ```go
@@ -147,6 +147,65 @@ Its [README](examples/blog/README.md) walks all nine steps — another user's
 metrics — and its acceptance test walks the same path in CI. For a guided
 build-up from an empty directory, read the [quickstart](docs/quickstart.md).
 
+## Realtime
+
+The `realtime` battery pushes events to browsers as they happen — an
+updated order, a chat message, a finished background job — over a
+WebSocket or server-sent events, from the same topics. The page trades
+its token for a one-time ticket, so no long-lived token travels in a
+URL; `Authorize` decides who follows what; a reconnecting page resumes
+where it left off; with Redis, every replica shares the events.
+
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/realtime"
+)
+
+type Config struct {
+	chok.Base
+	Realtime realtime.Config `yaml:"realtime"`
+}
+
+type story struct {
+	Title string `json:"title" validate:"required,max=200"`
+}
+
+func main() {
+	cfg := chok.MustLoad[Config]("news")
+	app := chok.New(cfg.Base)
+	// Anonymous tickets (no realtime.Authn), and anyone may follow "news".
+	hub := realtime.MustNew(cfg.Realtime, realtime.Authorize(func(_ context.Context, topic string) error {
+		if topic == "news" {
+			return nil
+		}
+		return chok.ErrForbidden.Msgf("no topic %s", topic)
+	}))
+	app.Use(hub) // POST /realtime/ticket, GET /realtime/ws, GET /realtime/sse
+
+	chok.POST(app.Router(), "/stories", func(ctx context.Context, s *story) (chok.None, error) {
+		return chok.None{}, hub.Publish(ctx, "news", "story.posted", s)
+	})
+	app.Execute()
+}
+```
+
+```js
+// In the page: a one-time ticket, then the stream.
+const {ticket} = await (await fetch("/realtime/ticket", {method: "POST"})).json();
+const news = new EventSource(`/realtime/sse?topics=news&ticket=${ticket}`);
+news.addEventListener("story.posted", (e) => console.log(JSON.parse(e.data).data.title));
+```
+
+Reconnecting and resuming, the WebSocket protocol, several replicas and
+live background jobs: [docs/realtime.md](docs/realtime.md).
+[`examples/chatter`](examples/chatter) is a chat with a bot and a jobs
+panel built on it.
+
 ## Packages
 
 | Package | What it is |
@@ -161,6 +220,7 @@ build-up from an empty directory, read the [quickstart](docs/quickstart.md).
 | [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | Cron-scheduled periodic jobs and transactional-outbox workers (at-least-once) |
 | [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/v3/telemetry) | Prometheus metrics, OpenTelemetry traces, slog to OpenTelemetry logs, SQL instrumentation |
 | [`cache`](https://pkg.go.dev/github.com/zynthara/chok/v3/cache) | An in-memory and a Redis layer behind one `Config`, with a circuit breaker |
+| [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/v3/realtime) | Events pushed to browsers over WebSocket and server-sent events: one-time tickets, authorized topics, resuming after a reconnect, a Redis backplane |
 | [`choktest`](https://pkg.go.dev/github.com/zynthara/chok/v3/choktest) | Test helpers: a throwaway database per test on the lane's dialect, an in-process App client |
 
 Every exported symbol, one line each: [docs/api.md](docs/api.md).
@@ -203,6 +263,7 @@ More in [docs/design.md](docs/design.md) (Chinese).
 | Topic | Where |
 |---|---|
 | Quickstart: from an empty directory to an authenticated resource | [docs/quickstart.md](docs/quickstart.md) |
+| Realtime: events in the browser, five minutes | [docs/realtime.md](docs/realtime.md) |
 | Configuration reference (generated) | [docs/config.md](docs/config.md) |
 | API map (generated) | [docs/api.md](docs/api.md) |
 | Design (Chinese) | [docs/design.md](docs/design.md) |

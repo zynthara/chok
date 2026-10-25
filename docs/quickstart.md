@@ -233,6 +233,8 @@ metrics — is [`examples/blog`](../examples/blog).
   symbol: [docs/api.md](api.md).
 - How the pieces fit — lifecycle, errors, the store, the batteries:
   [docs/design.md](design.md) (in Chinese).
+- Pages that update by themselves — a WebSocket or server-sent events,
+  with tickets, topics and resuming: [docs/realtime.md](realtime.md).
 - Coming from chok v2: [docs/migration-v2-to-v3.md](migration-v2-to-v3.md)
   (in Chinese). Request bodies are decoded with `encoding/json/v2`: field
   names match case-sensitively, unknown and duplicate fields are a 400,

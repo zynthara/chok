@@ -25,8 +25,8 @@
 
 chok 给一个 Go 服务带来：一份严格的类型化配置、自动发布 OpenAPI 文档的类型化
 HTTP handler、把每条查询围在当前登录用户之内的 gorm 存储——一个带认证的 CRUD
-资源只要四个 chok import。身份、任务、遥测、缓存是电池：你构造出来、交给
-`app.Use` 的值。没有内核、没有注册表、没有生成文件；`main.go` 就是全部装配：
+资源只要四个 chok import。身份、任务、遥测、缓存、实时推送是电池：你构造出来、
+交给 `app.Use` 的值。没有内核、没有注册表、没有生成文件；`main.go` 就是全部装配：
 
 ```go
 package main
@@ -140,6 +140,62 @@ curl -s "localhost:8080/api/v1/posts?status=draft" -H "Authorization: Bearer $TO
 版本的更新 409、删除、OpenAPI 文档与指标——验收测试在 CI 里走同一条路径。想从
 空目录一步步搭起来，读 [quickstart](docs/quickstart.md)。
 
+## 实时推送
+
+`realtime` 电池把事件即时推到浏览器——订单变了、聊天来了新消息、后台任务跑完了
+——经 WebSocket 或 server-sent events，两者共用同一套主题。页面先用自己的 token
+换一张一次性 ticket，长期 token 不进任何 URL；`Authorize` 决定谁能订什么；断线
+重连的页面从断点续上；有 Redis 时所有副本共享事件。
+
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/realtime"
+)
+
+type Config struct {
+	chok.Base
+	Realtime realtime.Config `yaml:"realtime"`
+}
+
+type story struct {
+	Title string `json:"title" validate:"required,max=200"`
+}
+
+func main() {
+	cfg := chok.MustLoad[Config]("news")
+	app := chok.New(cfg.Base)
+	// Anonymous tickets (no realtime.Authn), and anyone may follow "news".
+	hub := realtime.MustNew(cfg.Realtime, realtime.Authorize(func(_ context.Context, topic string) error {
+		if topic == "news" {
+			return nil
+		}
+		return chok.ErrForbidden.Msgf("no topic %s", topic)
+	}))
+	app.Use(hub) // POST /realtime/ticket, GET /realtime/ws, GET /realtime/sse
+
+	chok.POST(app.Router(), "/stories", func(ctx context.Context, s *story) (chok.None, error) {
+		return chok.None{}, hub.Publish(ctx, "news", "story.posted", s)
+	})
+	app.Execute()
+}
+```
+
+```js
+// In the page: a one-time ticket, then the stream.
+const {ticket} = await (await fetch("/realtime/ticket", {method: "POST"})).json();
+const news = new EventSource(`/realtime/sse?topics=news&ticket=${ticket}`);
+news.addEventListener("story.posted", (e) => console.log(JSON.parse(e.data).data.title));
+```
+
+重连与续传、WebSocket 协议、多副本、实时的后台任务面板：
+[docs/realtime.md](docs/realtime.md)。[`examples/chatter`](examples/chatter)
+是在它上面做的带机器人与任务面板的聊天室。
+
 ## 包
 
 | 包 | 是什么 |
@@ -154,6 +210,7 @@ curl -s "localhost:8080/api/v1/posts?status=draft" -H "Authorization: Bearer $TO
 | [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | cron 调度的周期任务与事务性 outbox worker（至少一次） |
 | [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/v3/telemetry) | Prometheus 指标、OpenTelemetry 链路、slog 到 OpenTelemetry Logs、SQL 埋点 |
 | [`cache`](https://pkg.go.dev/github.com/zynthara/chok/v3/cache) | 一个 `Config` 后面的内存层与 Redis 层，带熔断器 |
+| [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/v3/realtime) | 经 WebSocket 与 server-sent events 推给浏览器的事件：一次性 ticket、授权的主题、断线续传、Redis backplane |
 | [`choktest`](https://pkg.go.dev/github.com/zynthara/chok/v3/choktest) | 测试辅助：按 lane 的方言给每个测试一个一次性数据库、进程内的 App 客户端 |
 
 每个导出符号一行：[docs/api.md](docs/api.md)。
@@ -192,6 +249,7 @@ go install github.com/zynthara/chok/v3/cmd/chok@latest   # 或在项目里 go to
 | 主题 | 位置 |
 |---|---|
 | Quickstart：从空目录到带认证的资源 | [docs/quickstart.md](docs/quickstart.md) |
+| 实时推送：五分钟在浏览器里看到事件 | [docs/realtime.md](docs/realtime.md) |
 | 配置参考（生成） | [docs/config.md](docs/config.md) |
 | API 地图（生成） | [docs/api.md](docs/api.md) |
 | 设计文档 | [docs/design.md](docs/design.md) |

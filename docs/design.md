@@ -13,7 +13,8 @@ chok 是一套有主见的 Go 应用工具包，模块路径 `github.com/zynthar
 要求 Go 1.27。应用 `import` 它、用普通 Go 代码装配：没有内核、没有注册表、
 没有生成文件。一份严格的类型化配置、带运行时 OpenAPI 的类型化 handler、
 带 owner 隔离的 gorm 存储，用四个 import 就能写出一个 CRUD 资源；身份、
-任务、遥测、缓存这些电池是你构造出来交给 `app.Use` 的值，不是去查找的服务。
+任务、遥测、缓存、实时推送这些电池是你构造出来交给 `app.Use` 的值，不是去查找
+的服务。
 
 v2 是「有内核、由 yaml 段驱动模块装配的框架」：段在场即装配、`chok sync`
 生成装配代码、组件声明 `Descriptor`、依赖经 `k.Get` 查找、配置是可热换的
@@ -37,7 +38,8 @@ RCU 快照。v3 把这些全部拿掉，只留三条规则：
 
 ## 2. 包地图
 
-公开包 10 个（预算的上限，provider 子包不计），其余一律 `internal/`：
+公开包 11 个（预算的上限，provider 子包不计；`realtime` 是 2026-10-25 加的
+第 11 个），其余一律 `internal/`：
 
 | 包 | 职责 | 依赖 |
 |---|---|---|
@@ -51,10 +53,13 @@ RCU 快照。v3 把这些全部拿掉，只留三条规则：
 | `jobs` | 周期任务（内置 cron 解析器）与事务性 outbox worker | `chok`、`db` |
 | `telemetry` | Prometheus 指标、OTel 链路、slog → OTel Logs、gorm 埋点 | `chok`、`db`；client_golang 与 otel |
 | `cache` | 内存层（otter）、Redis 层、熔断器 | go-redis、otter |
+| `realtime` | 实时推送：Hub、一次性 ticket、WebSocket 与 SSE 两种传输、续传缓冲、Redis backplane | `chok`；coder/websocket、go-redis |
 | `choktest` | 测试辅助：`DB` / `Store` / `App` / `Client` / `Principal` | `chok`、`db`、`store` |
 
-依赖方向只有一个：电池 → 根包（与 `db`）。电池之间不互相 import；需要跨包
-协作而又不该成为公开 API 的地方，走 `internal/` 下的挂点：`internal/dbx`
+依赖方向只有一个：电池 → 根包（与 `db`）。电池之间不互相 import：两个电池要
+协作时，由应用写一个闭包把它们接起来——`jobs.Observe(func(ev jobs.Event) {
+hub.Publish(…) })` 把任务的运行事件交给 realtime。需要跨包协作而又不该成为公开
+API 的地方，走 `internal/` 下的挂点：`internal/dbx`
 （db 告诉 store 与电池的东西：SoftUnique 索引、无基座的普通表、语句观察者、
 电池的迁移文件）、`internal/logtap`（telemetry 桥接 App 的 logger）、
 `internal/tracectx`（审计记录补 trace id）、`internal/redislog`（go-redis
@@ -101,7 +106,9 @@ body 列出每个组件的状态与耗时）；`/livez` 只说明进程活着。
 
 电池的停机次序有讲究：`app.Use(tel, d, auth)` 把 telemetry 放第一个，它最后
 关，才能把其他组件停机时产生的 span 与日志冲出去；`d` 在 `auth` 之前，于是
-identity 关审计队列时数据库还在。
+identity 关审计队列时数据库还在；realtime 的 Hub 放在会发布事件的电池之后
+（`app.Use(d, auth, jobs, hub)`），它先关、先向浏览器道别，而 jobs 在停机前跑完
+的运行仍能发布出去（Starter 在任何 Close 之前就已停下）。
 
 ## 4. 配置
 
@@ -286,8 +293,8 @@ SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
 
 ## 7. 电池
 
-电池是值：构造、登记、用。它们只 import 根包与 `db`（identity 另用 `store`），
-彼此不认识。
+电池是值：构造、登记、用。它们只 import 根包（大多还有 `db`，identity 另用
+`store`；realtime 不碰数据库），彼此不认识。
 
 ### 7.1 `identity`
 
@@ -333,6 +340,13 @@ change-password、me，以及有 `Sender` 时的 forgot / reset password；有 p
 其余进程 `enabled: false` 只 Enqueue。`Stats()` 给出每个作业的运行统计；
 `Health` 恒 nil——毒消息不该把实例拉出轮转，失败看统计与日志。
 
+`jobs.Observe(fn)` 是统计的流式版本：每次运行（周期任务、worker 的一轮 sweep、
+retention 清理）开始、结束、失败，以及因运行中而被跳过的触发，都同步交给 fn 一个
+`jobs.Event{Kind, Job, Type, StartedAt, Duration, Error, Next, Messages}`——
+`Kind` 是 run.started / run.finished / run.failed / run.skipped，`Type` 是
+periodic / worker / cleanup。fn 在运行的 goroutine 里调用，要快；它的 panic 被
+recover 并记 Warn，不影响运行与统计。典型用法是交给 realtime 做实时的任务面板。
+
 ### 7.3 `telemetry`
 
 `telemetry.New(cfg)` 一个值管三件事，`app.Use(tel, …)` 放第一个：
@@ -366,6 +380,53 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
 不可达会让启动相等到 `app.start_timeout` 后失败，要「Redis 不在也能启动」就开
 熔断器。
 
+### 7.5 `realtime`
+
+`realtime.New(cfg, opts...)` 一个 Hub：主题的订阅表、经 WebSocket 或 SSE 订阅
+它们的连接、打开连接用的 ticket，以及有 Redis 时通往其他副本的 backplane。
+`app.Use(hub)` 挂 `{path}`（默认 `/realtime`）下的三个端点：`POST /ticket`、
+`GET /ws`、`GET /sse`，都在 OpenAPI 里。
+
+- **ticket**：浏览器的 WebSocket 与 `EventSource` 带不了 `Authorization` 头，长期
+  token 放进 URL 又会进代理日志，所以页面先拿 token 换一张一次性 ticket（32 字节
+  随机数，`ticket_ttl` 内兑换一次），ws / sse 端点兑换它并把连接绑定到签发时的
+  principal。`realtime.Authn(auth.Authn())` 守 ticket 端点；不给则端点公开、ticket
+  匿名（游客页面）。`EventSource` 的自动重连带着用过的 ticket，必然 401：页面在
+  onerror 里换新 ticket 重开，并用 `?last_event_id=` 续传。
+- **主题与授权**：主题是 1–128 个 `A-Z a-z 0-9 _ . : -`。`realtime.Authorize(fn)`
+  逐个订阅判断，ctx 带 ticket 的 principal；返回 `*chok.Error` 或 `chok.Coder`
+  时其 reason / message 进 error 事件，否则 Forbidden 并记 Warn。没有 Authorize 时
+  只有 `user:<自己的 UserID>` 能订；`user:` 前缀保留，Authorize 对它不被调用，
+  `hub.Send(ctx, userID, …)` 发到它。被拒的订阅是一条 error 事件，连接不断；SSE 的
+  主题全部被拒时回 403。
+- **投递**：`Publish(ctx, topic, typ, data)` 在锁内给事件编号
+  `<origin>-<seq>`（origin 是 Hub 在 New 时抽的随机标识）、写进续传缓冲、放进每个
+  订阅者的发送队列，从不等慢连接：队列里已有 `send_buffer` 条的连接被当作慢消费者
+  断开（WS 关闭码 4408），计入 `Stats.Dropped`。data 用 chok 处理请求体的同一套
+  json/v2 选项编码，Duration 是字符串。
+- **续传**：最近 `replay` 条事件（所有主题共用一条序列）留在内存。WS 的
+  `{"subscribe":[…],"after":"<id>"}`、SSE 的 `Last-Event-ID` 头或
+  `?last_event_id=` 续上该事件之后、所订主题的事件；该事件已不在缓冲里时每个主题
+  一条 reset，客户端从 API 重新拉全量。缓冲是进程内的：新起的副本是空的。
+- **两种传输**：WS 每帧一条 Event JSON；客户端帧只有 subscribe / unsubscribe，
+  其它帧、坏主题或超出 `max_subscriptions` → 关闭 1008；每 `ping_interval` 一次
+  协议 ping，两个间隔内没有 pong 即断开；Origin 不在 `allowed_origins`（或同 Host）
+  时升级前 403。SSE 先写 `retry: 3000`，每个事件 `id` / `event` / `data`（整条
+  Event），每 `ping_interval` 一行注释；服务器的写截止时间被清除、改为每次写各自
+  的截止时间（两个 ping 间隔），所以 `http.write_timeout` 不再切断流，
+  `http.request_timeout` 则如常结束它。WS 升级后不受 HTTP 超时约束。两种连接都在
+  结束时记一条访问日志（101 / 200，时长即连接时长）。
+- **停机**：`http.Server.Shutdown` 会等所有在途请求，而一条 SSE 流永远不会自己
+  结束，所以 Hub 在第一个流请求到来时经 `http.ServerContextKey` 找到服务器、用
+  `RegisterOnShutdown` 登记一个钩子，Shutdown 一开始就结束该服务器上的流；WS 是
+  hijack 出去的连接，Shutdown 不管，由随后的 `Close` 发 1001。`Close` 等所有连接
+  结束，受 `app.shutdown_timeout` 约束。
+- **多副本**：`realtime.Redis(client)`（`cache.Redis()` 可直接传）让 ticket 存进
+  Redis（`{channel}:ticket:<ticket>`，SET NX 加 TTL 签发、GETDEL 兑换，跨副本一次
+  性），每个 Publish 本地投递后再 `PUBLISH {channel}`；其他副本投递给自己的订阅者
+  并写入续传缓冲，各自忽略回声。`Start` 维持订阅、断线自动重连并记 Warn；`Health`
+  在订阅未建立或已断开时报错，于是 App 的启动相要等订阅建立。
+
 ## 8. 测试
 
 - **真库，不 mock**：`choktest.DB(t)` 按 `CHOK_TEST_DRIVER` 给每个测试一个
@@ -377,13 +438,17 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   `JSON` / `WithBearer`），`t.Cleanup` 跑停机相。
 - **三方言 lane**：`make test` 是 SQLite lane（清空三个变量，`-race`）；
   `make test-pg` 与 `make test-mysql` 把 Makefile `DB_PKG_DIRS` 里的包
-  （db、store、choktest、identity、jobs、telemetry、cmd/chok）**全量**重跑，
+  （db、store、choktest、identity、jobs、telemetry、cmd/chok、examples/chatter）
+  **全量**重跑，
   不用 `-run` 挑测试；缺 DSN 时 lane 直接失败。CI 用 `postgres:16` 与
   `mysql:8.4` 服务，两条 lane 都阻断。
-- **验收即文档**：`examples/blog` 的验收测试走一遍 README 的路径；`make smoke`
+- **验收即文档**：`examples/blog` 的验收测试走一遍 README 的路径；
+  `examples/chatter` 的验收测试在真实服务器上经 HTTP、WebSocket 与 SSE 走它的
+  README 路径（三方言）；`make smoke`
   起真实二进制、探 `/healthz` 与 `/metrics`、SIGINT 后 3 秒内退出；`chok init`
   的自检测试在三方言上生成、构建、启动脚手架；`internal/tools/doccheck` 编译
-  quickstart 里的每个程序；`docs/config.md` 与 `docs/api.md` 由测试守着不腐烂。
+  quickstart、两份 README 与 `docs/realtime.md` 里的每个程序；`docs/config.md`
+  与 `docs/api.md` 由测试守着不腐烂。
 - 时序逻辑优先 `testing/synctest`；测试从不占固定端口；每个 bug 修复与回归测试
   同一个提交。
 
@@ -419,12 +484,13 @@ tag）与 `update`（用 `go install …@version`）。
 
 | 项 | 上限 | 怎么量 |
 |---|---|---|
-| 公开包（provider 不计） | 10 | 既非 internal 也非 main 的包；名单外的包直接失败 |
-| 顶层导出 | 总 220；chok 64、db 30、store 30、store/where 28、identity 30、identity/rbac 8、jobs 15、telemetry 10、cache 10、choktest 10、provider 各 3 | `go doc -short` 的行数（构造函数缩在类型下、分组的 var / const 一行），方法不计；逐行见 [api.md](api.md) |
-| 选项构造函数 | 40（不含 store/where 的谓词） | 结果类型是 `Option` / `RouteOption` / `LoadOption` 的函数 |
+| 公开包（provider 不计） | 11 | 既非 internal 也非 main 的包；名单外的包直接失败 |
+| 顶层导出 | 总 240；chok 64、db 30、store 30、store/where 28、identity 30、identity/rbac 8、jobs 17、telemetry 10、cache 10、choktest 10、realtime 16、provider 各 3 | `go doc -short` 的行数（构造函数缩在类型下、分组的 var / const 一行），方法不计；逐行见 [api.md](api.md) |
+| 选项构造函数 | 45（不含 store/where 的谓词） | 结果类型是 `Option` / `RouteOption` / `LoadOption` 的函数 |
 | 直接依赖 | 30 | `go list -m` 里非 indirect 的模块 |
-| 配置叶键 | 150 | `chok.Base` 与六个 Config 的叶子；逐键见 [config.md](config.md) |
+| 配置叶键 | 150 | `chok.Base` 与七个 Config 的叶子；逐键见 [config.md](config.md) |
 | examples/blog | 应用代码 120 行、chok 包 5 个 | 非测试 .go 的非空非注释行；不重复的 chok import |
+| examples/chatter | 应用代码 400 行、chok 包 7 个 | 同上口径，由它自己的 `TestChatter_StaysSmall` 守着（契约 §10），不在 budget.txt 里 |
 
 质量门同样阻断：`make verify` = tidy-check、gofmt -s、vet、golangci-lint、
 `go fix -diff` 为空、SQLite lane、Postgres lane、MySQL lane、budget、smoke，
