@@ -1,6 +1,7 @@
 package main
 
 import (
+	"go/doc"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +87,24 @@ func TestAPIDoc_MatchesTheBudget(t *testing.T) {
 		rows := strings.Count(sec, "\n| `") + strings.Count(sec, "\n| ↳ `")
 		if rows != listed[name] {
 			t.Errorf("%s: %d rows, summary %d", name, rows, listed[name])
+		}
+	}
+}
+
+// TestSynopsis_ReadsAuthorize: go/doc drops the synopsis of a comment
+// that starts with "Author", taking it for a copyright line; the doc of
+// realtime.Authorize does, and api.md still describes it.
+func TestSynopsis_ReadsAuthorize(t *testing.T) {
+	p := &doc.Package{}
+	for text, want := range map[string]string{
+		"Authorize decides who may subscribe. More follows.": "Authorize decides who may subscribe.",
+		"Authorization header aside, it works.":              "Authorization header aside, it works.",
+		"Copyright 2026 nobody.\n":                           "Copyright 2026 nobody.",
+		"New builds a hub.\n\nDetails.":                      "New builds a hub.",
+		"":                                                   "",
+	} {
+		if got := synopsis(p, text); got != want {
+			t.Errorf("synopsis(%q) = %q, want %q", text, got, want)
 		}
 	}
 }

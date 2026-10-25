@@ -121,7 +121,7 @@ func render(root string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		s := section{p: p, synopsis: dp.Synopsis(dp.Doc)}
+		s := section{p: p, synopsis: synopsis(dp, dp.Doc)}
 		for line := range strings.Lines(string(out)) {
 			trimmed := strings.TrimSpace(line)
 			m := declName.FindStringSubmatch(trimmed)
@@ -218,20 +218,20 @@ func describe(p *doc.Package, kind, name string) (string, error) {
 	case "func":
 		for _, f := range p.Funcs {
 			if f.Name == name {
-				return p.Synopsis(f.Doc), nil
+				return synopsis(p, f.Doc), nil
 			}
 		}
 		for _, t := range p.Types {
 			for _, f := range t.Funcs {
 				if f.Name == name {
-					return p.Synopsis(f.Doc), nil
+					return synopsis(p, f.Doc), nil
 				}
 			}
 		}
 	case "type":
 		for _, t := range p.Types {
 			if t.Name == name {
-				return p.Synopsis(t.Doc), nil
+				return synopsis(p, t.Doc), nil
 			}
 		}
 	case "var", "const":
@@ -256,7 +256,7 @@ func describe(p *doc.Package, kind, name string) (string, error) {
 					text = spec.Doc.Text()
 				}
 			}
-			about := p.Synopsis(text)
+			about := synopsis(p, text)
 			if len(v.Names) > 1 {
 				about = strings.Join(v.Names, ", ") + ": " + about
 			}
@@ -264,4 +264,16 @@ func describe(p *doc.Package, kind, name string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("go doc lists %s %s, but its declaration was not found", kind, name)
+}
+
+// synopsis is the first sentence of text as go/doc cleans it. go/doc
+// returns none for a text that starts like a copyright notice — with
+// "copyright", "all rights" or "author" — which the comment of an
+// Authorize function does, so such a text is read behind a neutral word.
+func synopsis(p *doc.Package, text string) string {
+	if s := p.Synopsis(text); s != "" || strings.TrimSpace(text) == "" {
+		return s
+	}
+	const lead = "Then "
+	return strings.TrimPrefix(p.Synopsis(lead+text), lead)
 }
