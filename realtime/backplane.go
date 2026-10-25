@@ -163,7 +163,7 @@ func (h *Hub) receive(ctx context.Context, payload string) {
 	err := json.Unmarshal([]byte(payload), &ev)
 	origin, seq, ok := strings.Cut(ev.ID, "-")
 	if err != nil || !ok || origin == "" || seq == "" || !validName(ev.ID) || !validName(ev.Topic) ||
-		!validName(ev.Type) || ev.Type == typeRefused || ev.Type == typeReset {
+		!validName(ev.Type) || reserved(ev.Type) {
 		h.logger.WarnContext(ctx, "realtime: ignored a malformed message on the Redis backplane", "channel", h.cfg.Channel, "error", err)
 		return
 	}

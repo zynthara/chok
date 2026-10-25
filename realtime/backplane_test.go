@@ -181,6 +181,7 @@ func TestBackplane_IgnoresMalformedMessages(t *testing.T) {
 		`{"id":"abc-1","topic":"bad topic","type":"x","at":"2026-01-01T00:00:00Z"}`,
 		`{"id":"abc-1","topic":"public.a","type":"reset","at":"2026-01-01T00:00:00Z"}`,
 		`{"id":"abc-1","topic":"public.a","type":"refused","at":"2026-01-01T00:00:00Z"}`,
+		`{"id":"abc-1","topic":"public.a","type":"error","at":"2026-01-01T00:00:00Z"}`,
 	} {
 		if err := c.Publish(t.Context(), "chok:realtime", payload).Err(); err != nil {
 			t.Fatal(err)
@@ -192,7 +193,7 @@ func TestBackplane_IgnoresMalformedMessages(t *testing.T) {
 	if ev := readEvent(t, ws); ev.Type != "good" || ev.ID != "abc-1" {
 		t.Fatalf("%+v", ev)
 	}
-	if n := strings.Count(logs.String(), "ignored a malformed message"); n != 5 {
+	if n := strings.Count(logs.String(), "ignored a malformed message"); n != 6 {
 		t.Fatalf("%d malformed messages logged:\n%s", n, logs.String())
 	}
 }

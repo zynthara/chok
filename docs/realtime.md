@@ -219,10 +219,9 @@ says, and `hub.Send(ctx, userID, type, data)` publishes to it.
 
 The hub keeps two event types for itself: `refused`, for a subscription
 turned down (its data is `{"reason", "message"}`), and `reset`, for a
-resume that went too far back; `Publish` refuses them. Do not name an
-event of your own `error` either: an `EventSource` fires its connection
-errors under that name, and a page's `onerror` would take it for a broken
-stream.
+resume that went too far back. `Publish` refuses them, and `error` too:
+an `EventSource` fires its connection errors under that name, and a
+page's `onerror` would take such an event for a broken stream.
 
 ## Background jobs, live
 

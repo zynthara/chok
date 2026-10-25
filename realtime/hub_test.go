@@ -123,7 +123,7 @@ func TestPublish_Checks(t *testing.T) {
 	h := newHub(t, testConfig(t), Authorize(openTopics))
 	for _, c := range []struct{ topic, typ string }{
 		{"", "t"}, {strings.Repeat("a", 129), "t"}, {"a b", "t"}, {"a/b", "t"}, {"ok", ""}, {"ok", "line\nbreak"},
-		{"ok", "refused"}, {"ok", "reset"},
+		{"ok", "refused"}, {"ok", "reset"}, {"ok", "error"},
 	} {
 		if err := h.Publish(t.Context(), c.topic, c.typ, nil); err == nil {
 			t.Errorf("Publish(%q, %q) accepted", c.topic, c.typ)

@@ -156,7 +156,8 @@ func MustNew(cfg Config, opts ...Option) *Hub {
 // sends none), to the subscribers of topic — this replica's at once and,
 // with Redis, the other replicas' through the backplane. A topic is 1 to
 // 128 of A-Z a-z 0-9 _ . : -, and so is typ, which must not be refused
-// or reset, the hub's own. Publish fails only on a bad topic or type, or
+// or reset, the hub's own, nor error, the name of an EventSource's
+// connection errors. Publish fails only on a bad topic or type, or
 // data that does not encode; no subscriber is not an error, and a
 // backplane that does not take the event is logged, not returned: the
 // local subscribers have it. It does not block on slow connections: one
@@ -165,8 +166,8 @@ func (h *Hub) Publish(ctx context.Context, topic, typ string, data any) error {
 	if !validName(topic) {
 		return fmt.Errorf("realtime: publish: topic %q is not %s", topic, nameRule)
 	}
-	if !validName(typ) || typ == typeRefused || typ == typeReset {
-		return fmt.Errorf("realtime: publish to %s: type %q is not %s, or is the hub's own refused or reset", topic, typ, nameRule)
+	if !validName(typ) || reserved(typ) {
+		return fmt.Errorf("realtime: publish to %s: type %q is not %s, or is refused, reset or error, which the hub keeps for itself", topic, typ, nameRule)
 	}
 	var raw jsontext.Value
 	if data != nil {

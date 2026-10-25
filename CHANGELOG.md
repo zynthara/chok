@@ -74,7 +74,8 @@ package, configuration key, API, table and metric to its v3 form.
   its token for a one-time ticket at `POST /realtime/ticket`, so no
   long-lived token travels in a URL; `realtime.Authorize` decides every
   subscription — a refused one is a `refused` event, never a closed
-  connection — and `user:<UserID>` topics are their user's alone
+  connection; `refused`, `reset` and `error` are the hub's own types, which
+  `Publish` refuses — and `user:<UserID>` topics are their user's alone
   (`hub.Send`). `hub.Publish` never waits on a slow connection — one that
   falls `send_buffer` events behind is dropped — and the last `replay`
   events stay in memory, so a reconnecting page resumes after the last

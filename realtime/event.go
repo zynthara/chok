@@ -20,8 +20,9 @@ type Event struct {
 	// Type is the application's name for the event, such as
 	// order.updated or run.finished. The hub sends two of its own:
 	// refused, for a subscription refused, and reset, for a resume that
-	// went too far back. (Not error: a browser's EventSource fires its own
-	// connection errors under that name.)
+	// went too far back. Neither is error, which Publish refuses too: a
+	// browser's EventSource fires its own connection errors under that
+	// name.
 	Type string `json:"type"`
 	// Data is the published value as JSON; empty when nil was published.
 	Data json.RawMessage `json:"data,omitzero"`
@@ -50,11 +51,19 @@ type Stats struct {
 	Backplane string `json:"backplane"`
 }
 
-// The event types the hub sends itself; Publish refuses them.
+// The event types the hub sends itself, and error, which Publish refuses
+// with them: an EventSource fires its own connection errors under that
+// name, and a page's onerror would take such an event for a broken
+// stream.
 const (
 	typeRefused = "refused"
 	typeReset   = "reset"
+	typeError   = "error"
 )
+
+// reserved reports an event type no application may publish: refused,
+// reset or error.
+func reserved(typ string) bool { return typ == typeRefused || typ == typeReset || typ == typeError }
 
 // nameRule describes what validName admits.
 const nameRule = "1 to 128 characters of A-Z, a-z, 0-9, _ . : -"

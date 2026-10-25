@@ -36,7 +36,8 @@
 // connection may subscribe to nothing but its own user's topic, user:<UserID>,
 // which is reserved: only that user's connections subscribe to it, and
 // Send publishes to it. A refused subscription is a refused event to the
-// client, not a closed connection.
+// client, not a closed connection. The event types refused, reset and
+// error are the hub's: Publish refuses them.
 //
 // # In the browser
 //

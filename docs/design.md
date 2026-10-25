@@ -399,7 +399,8 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   只有 `user:<自己的 UserID>` 能订；`user:` 前缀保留，Authorize 对它不被调用，
   `hub.Send(ctx, userID, …)` 发到它。被拒的订阅是一条 refused 事件，连接不断（不叫
   error：EventSource 自己的连接错误用这个名字，页面惯用 onerror 重连）；SSE 的主题全部
-  被拒时回 403。
+  被拒时回 403。refused、reset 与 error 三个类型 `Publish` 一律拒绝（backplane 收到的
+  也丢弃）：error 若能发布，页面的 onerror 会把它当成断线。
 - **投递**：`Publish(ctx, topic, typ, data)` 在锁内给事件编号
   `<origin>-<seq>`（origin 是 Hub 在 New 时抽的随机标识）、写进续传缓冲、放进每个
   订阅者的发送队列，从不等慢连接：队列里已有 `send_buffer` 条实时事件的连接被当作
