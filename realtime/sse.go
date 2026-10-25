@@ -38,7 +38,7 @@ func (h *Hub) serveSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := withClaims(r.Context(), cl)
-	c := newConn(kindSSE, cl, nil, h.connLogger(ctx), h.cfg.SendBuffer)
+	c := h.newConn(kindSSE, cl, h.connLogger(ctx))
 	ok, refused := h.check(ctx, c, topics)
 	if len(ok) == 0 {
 		chok.WriteError(w, r, allRefused(refused))

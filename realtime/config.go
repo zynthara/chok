@@ -32,10 +32,12 @@ type Config struct {
 	// origin. Empty admits the same host only. Server-sent event streams
 	// are ordinary requests that CORS governs.
 	AllowedOrigins []string `yaml:"allowed_origins"`
-	// SendBuffer is how many events may wait for one connection. A
-	// connection that falls further behind is a slow consumer: the hub
-	// drops it (a WebSocket with close code 4408) and counts it in
-	// Stats.Dropped.
+	// SendBuffer is how many published events may wait for one
+	// connection. A connection that falls further behind is a slow
+	// consumer: the hub drops it (a WebSocket with close code 4408) and
+	// counts it in Stats.Dropped. What a subscription adds — the events it
+	// replays, its error or reset events — does not count, but nothing
+	// waits beyond SendBuffer + Replay + 2 × MaxSubscriptions events.
 	SendBuffer int `yaml:"send_buffer" default:"64"`
 	// PingInterval paces the heartbeats: a WebSocket ping, which the
 	// client must answer within two intervals or be disconnected, and an

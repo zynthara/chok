@@ -52,15 +52,16 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	// and keeps its values: the request id, the logger.
 	ctx, cancel := context.WithCancel(withClaims(context.WithoutCancel(r.Context()), cl))
 	defer cancel()
-	c := newConn(kindWS, cl, nil, h.connLogger(ctx), h.cfg.SendBuffer)
+	c := h.newConn(kindWS, cl, h.connLogger(ctx))
 	if !h.register(c) {
 		_ = ws.Close(closeGoingAway, "the server is shutting down")
 		return
 	}
 	defer h.unregister(c)
 	var wg sync.WaitGroup
-	wg.Go(func() { h.wsWrite(ctx, ws, c) })
-	wg.Go(func() { h.wsHeartbeat(ctx, ws, c) })
+	written := make(chan struct{}) // the writer has closed the connection
+	wg.Go(func() { defer close(written); h.wsWrite(ctx, ws, c) })
+	wg.Go(func() { h.wsHeartbeat(ctx, ws, c, written) })
 	if topics := splitTopics(r.URL.Query()["topics"]); len(topics) > 0 {
 		if reason := h.wsSubscribe(ctx, c, topics, ""); reason != "" {
 			c.end(closePolicy, reason)
@@ -196,8 +197,16 @@ func (h *Hub) wsSubscribe(ctx context.Context, c *conn, topics []string, after s
 	return ""
 }
 
+// closeGrace is how long an ended WebSocket may take to close: a write
+// stuck on a client that stopped reading holds the writer, which would
+// send the close frame after it, so the heartbeat cuts the connection
+// once the grace has passed (coder/websocket gives its close frame as
+// long).
+const closeGrace = 5 * time.Second
+
 // wsWrite sends the queued events until the connection ends, then closes
-// it with the code it ended with.
+// it with the code it ended with. A write may block for two ping
+// intervals, the time a client has to answer a ping.
 func (h *Hub) wsWrite(ctx context.Context, ws *websocket.Conn, c *conn) {
 	for {
 		select {
@@ -216,7 +225,10 @@ func (h *Hub) wsWrite(ctx context.Context, ws *websocket.Conn, c *conn) {
 			if !ok {
 				break
 			}
-			if err := ws.Write(ctx, websocket.MessageText, f.json); err != nil {
+			wctx, cancel := context.WithTimeout(ctx, 2*h.cfg.PingInterval)
+			err := ws.Write(wctx, websocket.MessageText, f.json)
+			cancel()
+			if err != nil {
 				c.end(closeDead, "")
 				_ = ws.CloseNow()
 				return
@@ -226,13 +238,21 @@ func (h *Hub) wsWrite(ctx context.Context, ws *websocket.Conn, c *conn) {
 }
 
 // wsHeartbeat pings the client every PingInterval; one that does not
-// answer within two intervals is cut off without a close handshake.
-func (h *Hub) wsHeartbeat(ctx context.Context, ws *websocket.Conn, c *conn) {
+// answer within two intervals is cut off without a close handshake. Once
+// the connection has ended, it gives the writer closeGrace to close it.
+func (h *Hub) wsHeartbeat(ctx context.Context, ws *websocket.Conn, c *conn, written <-chan struct{}) {
 	ticker := time.NewTicker(h.cfg.PingInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-c.done:
+			grace := time.NewTimer(closeGrace)
+			defer grace.Stop()
+			select {
+			case <-written:
+			case <-grace.C:
+				_ = ws.CloseNow()
+			}
 			return
 		case <-ticker.C:
 		}

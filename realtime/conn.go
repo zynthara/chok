@@ -37,6 +37,7 @@ type conn struct {
 	srv    *http.Server // SSE: the server the stream is on, for its shutdown
 	log    *slog.Logger // carries the request id
 	limit  int          // live events that may wait: Config.SendBuffer
+	cap    int          // every event that may wait, replays and the hub's own included
 
 	topics map[string]bool // guarded by Hub.mu
 
@@ -56,9 +57,16 @@ type queued struct {
 	live bool
 }
 
-func newConn(kind string, c claims, srv *http.Server, log *slog.Logger, limit int) *conn {
+// newConn makes the hub's side of a connection. Its queue takes
+// SendBuffer live events; with what one subscribe frame can add — the
+// whole replay buffer, an error or a reset per topic — that bounds
+// everything waiting, so a client that sends frames and never reads
+// cannot grow it without end.
+func (h *Hub) newConn(kind string, c claims, log *slog.Logger) *conn {
+	cfg := h.cfg
 	return &conn{
-		kind: kind, userID: c.userID(), srv: srv, log: log, limit: limit,
+		kind: kind, userID: c.userID(), log: log,
+		limit: cfg.SendBuffer, cap: cfg.SendBuffer + cfg.Replay + 2*cfg.MaxSubscriptions,
 		topics: map[string]bool{},
 		wake:   make(chan struct{}, 1),
 		done:   make(chan struct{}),
@@ -72,15 +80,16 @@ const (
 	gone            // dropped: the connection has ended
 )
 
-// push queues f. A live event that finds limit events waiting is refused:
-// the connection is a slow consumer. An ended connection takes nothing.
+// push queues f. A live event that finds limit live events waiting is
+// refused, and so is any event that finds cap events waiting: the
+// connection is a slow consumer. An ended connection takes nothing.
 func (c *conn) push(f *frame, live bool) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ended {
 		return gone
 	}
-	if live && c.live >= c.limit {
+	if live && c.live >= c.limit || len(c.queue) >= c.cap {
 		return full
 	}
 	c.queue = append(c.queue, queued{f: f, live: live})
@@ -235,15 +244,35 @@ func (h *Hub) allowed(ctx context.Context, c *conn, topic string) *chok.Error {
 // so that nothing published meanwhile is lost or doubled: an error event
 // per refusal, then — when the client resumes after an event — the
 // events of those topics since then, or a reset event per topic when the
-// event is no longer kept.
+// event is no longer kept. A connection whose queue overflows meanwhile
+// is dropped as a slow consumer.
 func (h *Hub) attach(c *conn, topics []string, refused []refusal, after string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	overflow := h.attachLocked(c, topics, refused, after)
+	if overflow {
+		h.dropLocked(c)
+	}
+	h.mu.Unlock()
+	if overflow {
+		h.logDropped([]*conn{c}, "")
+	}
+}
+
+func (h *Hub) attachLocked(c *conn, topics []string, refused []refusal, after string) (overflow bool) {
+	queue := func(f *frame) bool {
+		switch c.push(f, false) {
+		case full:
+			overflow = true
+		case queuedOK:
+			return true
+		}
+		return false
+	}
 	for _, r := range refused {
-		c.push(h.ownEvent(r.topic, typeError, refusalData{Reason: r.err.Reason, Message: r.err.Message}), false)
+		queue(h.ownEvent(r.topic, typeError, refusalData{Reason: r.err.Reason, Message: r.err.Message}))
 	}
 	if len(topics) == 0 {
-		return
+		return overflow
 	}
 	for _, t := range topics {
 		c.topics[t] = true
@@ -255,20 +284,21 @@ func (h *Hub) attach(c *conn, topics []string, refused []refusal, after string) 
 		subs[c] = true
 	}
 	if after == "" {
-		return
+		return overflow
 	}
 	frames, kept := h.replay.since(after, topics)
 	if !kept {
 		for _, t := range topics {
-			c.push(h.ownEvent(t, typeReset, nil), false)
+			queue(h.ownEvent(t, typeReset, nil))
 		}
-		return
+		return overflow
 	}
 	for _, f := range frames {
-		if c.push(f, false) == queuedOK {
+		if queue(f) {
 			h.delivered.Add(1)
 		}
 	}
+	return overflow
 }
 
 // refusalData is the data of an error event.
@@ -314,19 +344,23 @@ func (h *Hub) deliverLocked(f *frame) []*conn {
 		switch c.push(f, true) {
 		case queuedOK:
 			h.delivered.Add(1)
-			continue
-		case gone:
-			continue
+		case full:
+			h.dropLocked(c)
+			slow = append(slow, c)
 		}
-		h.detachLocked(c, nil)
-		h.dropped.Add(1)
-		c.end(closeSlow, "slow consumer")
-		slow = append(slow, c)
 	}
 	return slow
 }
 
-// logDropped reports the slow consumers deliverLocked dropped.
+// dropLocked ends c as a slow consumer: no more events, close code 4408.
+func (h *Hub) dropLocked(c *conn) {
+	h.detachLocked(c, nil)
+	h.dropped.Add(1)
+	c.end(closeSlow, "slow consumer")
+}
+
+// logDropped reports the slow consumers dropped while publishing to
+// topic, or while subscribing ("").
 func (h *Hub) logDropped(slow []*conn, topic string) {
 	for _, c := range slow {
 		c.log.Info("realtime: dropped a slow consumer", "transport", c.kind, "user_id", c.userID,

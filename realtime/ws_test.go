@@ -214,6 +214,44 @@ func TestWS_SlowConsumerClosedWith4408(t *testing.T) {
 	})
 }
 
+// TestWS_FramesCannotOverfillTheQueue: what a subscribe frame queues —
+// replays, error and reset events — does not count against SendBuffer,
+// but everything waiting is capped (SendBuffer + Replay + two per
+// allowed topic), so a client that sends frames and never reads is
+// dropped as a slow consumer rather than growing the queue without end.
+func TestWS_FramesCannotOverfillTheQueue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testConfig(t)
+		cfg.SendBuffer, cfg.Replay, cfg.MaxSubscriptions = 2, 4, 2 // a cap of 10
+		h := newHub(t, cfg, Authorize(openTopics))
+		s, stop := servePipe(t, h)
+		defer stop()
+		for range 4 {
+			publish(t, h, "public.a", "old", nil)
+		}
+		ws := s.dialWS("") // never reads: the first event stays in the server's write
+		after := `"after":"` + h.origin + `-1"`
+		for round := 1; h.Stats().Dropped == 0; round++ {
+			if round > 10 {
+				t.Fatalf("still connected after %d rounds: %+v", round, h.Stats())
+			}
+			send(t, ws, `{"subscribe":["public.a"],`+after+`}`) // three replays a round
+			send(t, ws, `{"unsubscribe":["public.a"]}`)
+			synctest.Wait()
+		}
+		if st := h.Stats(); st.Dropped != 1 || st.Topics != 0 || st.Connections != 1 {
+			t.Fatalf("stats %+v", st)
+		}
+		// Its writer is stuck on the first event, so the 4408 cannot go
+		// out: the connection is cut once closeGrace has passed.
+		time.Sleep(closeGrace)
+		synctest.Wait()
+		if n := h.Stats().Connections; n != 0 {
+			t.Fatalf("%d connections %s after the drop", n, closeGrace)
+		}
+	})
+}
+
 // TestWS_MissedPongsDisconnect: the hub pings every PingInterval; a
 // client that does not answer within two intervals is cut off, one that
 // answers stays.

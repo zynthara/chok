@@ -401,9 +401,12 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   主题全部被拒时回 403。
 - **投递**：`Publish(ctx, topic, typ, data)` 在锁内给事件编号
   `<origin>-<seq>`（origin 是 Hub 在 New 时抽的随机标识）、写进续传缓冲、放进每个
-  订阅者的发送队列，从不等慢连接：队列里已有 `send_buffer` 条的连接被当作慢消费者
-  断开（WS 关闭码 4408），计入 `Stats.Dropped`。data 用 chok 处理请求体的同一套
-  json/v2 选项编码，Duration 是字符串。
+  订阅者的发送队列，从不等慢连接：队列里已有 `send_buffer` 条实时事件的连接被当作
+  慢消费者断开（WS 关闭码 4408），计入 `Stats.Dropped`；订阅时补发的事件与 hub 自己
+  的 error / reset 不计入，但整条队列以 `send_buffer + replay + 2 × max_subscriptions`
+  封顶，只发帧不读的客户端也撑不大它。WS 的每次写最多等两个 ping 间隔；连接结束后
+  5 秒内关掉（卡在写上的连接发不出关闭帧，就直接切断）。data 用 chok 处理请求体的
+  同一套 json/v2 选项编码，Duration 是字符串。
 - **续传**：最近 `replay` 条事件（所有主题共用一条序列）留在内存。WS 的
   `{"subscribe":[…],"after":"<id>"}`、SSE 的 `Last-Event-ID` 头或
   `?last_event_id=` 续上该事件之后、所订主题的事件；该事件已不在缓冲里时每个主题
