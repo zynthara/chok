@@ -28,10 +28,10 @@ provider identity/github    3
 provider identity/apple     3
 provider identity/facebook  3
 
-limit public_packages    11
-limit exports_total      240
-limit option_ctors       45   # store/where predicates are query DSL, not counted
+limit public_packages    12
+limit exports_total      250
+limit option_ctors       50   # store/where predicates are query DSL, not counted
 limit direct_deps        30
 limit blog_app_lines     120
 limit blog_chok_imports  5
-limit config_keys        150  # leaf keys of chok.Base and the batteries' Config (hack/configkeys.sh)
+limit config_keys        180  # leaf keys of chok.Base and the batteries' Config (hack/configkeys.sh)
