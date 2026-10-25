@@ -94,6 +94,13 @@ func TestChatter_FullPath(t *testing.T) {
 	if code := c.call(http.MethodGet, "/api/rooms", nil, nil, nil); code != http.StatusUnauthorized {
 		t.Fatalf("no session = %d", code)
 	}
+	// passwordless.only: there is no password to register, log in with or
+	// reset.
+	for _, path := range []string{"/auth/register", "/auth/login", "/auth/forgot-password", "/auth/reset-password"} {
+		if code := c.call(http.MethodPost, path, nil, map[string]string{"email": "alice@example.com", "password": "password123"}, nil); code != http.StatusNotFound {
+			t.Fatalf("POST %s = %d, want 404", path, code)
+		}
+	}
 
 	// alice opens a room, bob joins it, carol does not.
 	var lobby Room

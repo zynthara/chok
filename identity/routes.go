@@ -27,6 +27,9 @@ import (
 //	POST   {prefix}/passwordless/start    public: mail a code, 202
 //	POST   {prefix}/passwordless/verify   public: the code or token for a token
 //
+// and with auth.passwordless.only no password routes: register, login,
+// forgot-password, reset-password and change-password are left out.
+//
 // With auth.cookie.enabled the routes that issue a token set the session
 // cookie too, and one more route clears it:
 //
@@ -45,11 +48,16 @@ import (
 func (idn *Identity) Mount(r chok.Router) {
 	g := r.Group(idn.cfg.Prefix)
 	tag := chok.Tags("auth")
-	if !idn.cfg.DisableRegister {
+	// With passwordless.only the password routes stay out: accounts are
+	// their addresses, and a mailed code is the only way in.
+	passwords := !idn.cfg.Passwordless.Only
+	if passwords && !idn.cfg.DisableRegister {
 		tokenRoute(idn, g, "/register", idn.register, chok.Created(), chok.Public(), tag, chok.Summary("Register an account"))
 	}
-	tokenRoute(idn, g, "/login", idn.login, chok.Public(), tag, chok.Summary("Log in"))
-	if idn.sender != nil {
+	if passwords {
+		tokenRoute(idn, g, "/login", idn.login, chok.Public(), tag, chok.Summary("Log in"))
+	}
+	if passwords && idn.sender != nil {
 		chok.POST(g, "/forgot-password", idn.forgotPassword, chok.Public(), tag, chok.Summary("Mail a password-reset token"))
 		chok.POST(g, "/reset-password", idn.resetPassword, chok.Public(), tag, chok.Summary("Reset the password with a token"))
 	}
@@ -59,7 +67,9 @@ func (idn *Identity) Mount(r chok.Router) {
 	}
 	authed := g.Group("", idn.Authn())
 	tokenRoute(idn, authed, "/refresh-token", idn.refreshToken, tag, chok.Summary("Refresh the access token"))
-	chok.PUT(authed, "/change-password", idn.changePassword, tag, chok.Summary("Change the password"))
+	if passwords {
+		chok.PUT(authed, "/change-password", idn.changePassword, tag, chok.Summary("Change the password"))
+	}
 	chok.GET(authed, "/me", idn.me, tag, chok.Summary("Get the signed-in user"))
 	if idn.cfg.Cookie.Enabled {
 		chok.POST(authed, "/logout", idn.logout, chok.Use(keepResponse), tag, chok.Summary("Log out"))

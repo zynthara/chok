@@ -3,7 +3,7 @@
 Chat rooms that update without a reload, a bot that answers through a
 background worker, and a live panel of the background jobs, behind a
 sign-in by mailed code: identity, mail, store, jobs and the realtime hub
-in one app of about 240 lines of Go, three mail templates and one HTML
+in one app of about 240 lines of Go, two mail templates and one HTML
 page with plain JavaScript (no build step). `main.go` assembles it;
 `chat.go` is the rooms and messages; `bot.go` the worker, a periodic job
 and the bridge from the jobs to the hub.
@@ -16,7 +16,8 @@ How the pieces meet:
   `templates/login-code.html` and `.txt`. Here `chok.yaml` sets the mail
   transport to `dir`: every mail becomes an `.eml` file in
   `/tmp/chatter-mail` instead of leaving the machine. A first sign-in
-  creates the account.
+  creates the account, and `auth.passwordless.only` leaves the code the
+  only way in: there is no password to register, log in with or reset.
 - The session is an HttpOnly cookie (`auth.cookie`, with `only`): the page
   never holds a token, its `fetch` calls carry the cookie by themselves,
   and `http.csrf` refuses cross-origin writes.

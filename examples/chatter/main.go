@@ -50,8 +50,9 @@ func main() {
 //go:embed index.html
 var page []byte
 
-// templates are the mails, one per kind identity asks for: login-code
-// (HTML and plain text) and password-reset.
+// templates are the mails, one per kind identity asks for. With
+// passwordless.only (chok.yaml) there is one kind, login-code, in HTML and
+// plain text.
 //
 //go:embed templates
 var templates embed.FS

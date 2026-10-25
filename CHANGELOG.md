@@ -65,7 +65,9 @@ package, configuration key, API, table and metric to its v3 form.
   a first sign-in unless `auto_register` is off. Codes are stored as
   HMACs in the new table `auth_login_codes` (migration
   `20261025000002`), starts are rate limited per client address, and an
-  hourly sweep deletes the expired codes.
+  hourly sweep deletes the expired codes. `auth.passwordless.only` leaves
+  the code the only way in: register, login, forgot-password,
+  reset-password and change-password are not mounted.
 - **`identity`**: cookie mode (`auth.cookie`): register, login,
   refresh-token, passwordless verify and the OAuth exchange set the
   access token in an HttpOnly cookie as well (with `only`, in the cookie
@@ -125,7 +127,7 @@ package, configuration key, API, table and metric to its v3 form.
 - **`examples/chatter`**: chat rooms over a WebSocket, a bot answering
   from a jobs worker, and a jobs panel over server-sent events, behind a
   sign-in by mailed code with a cookie session, in about 240 lines of Go,
-  three mail templates and one HTML page without a build step.
+  two mail templates and one HTML page without a build step.
 - **Budgets in CI**: at most twelve public packages, 250 exported
   declarations (with per-package caps), 50 option constructors, 30 direct
   dependencies, 180 configuration keys, and an `examples/blog` of 120

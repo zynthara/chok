@@ -113,6 +113,12 @@ type ProviderConfig struct {
 type PasswordlessConfig struct {
 	// Enabled mounts the two routes; it needs a Sender to mail the codes.
 	Enabled bool `yaml:"enabled"`
+	// Only leaves passwordless sign-in the only way in, for an application
+	// whose accounts are their addresses: register, login, forgot-password,
+	// reset-password and change-password are not mounted. refresh-token,
+	// me, logout, OAuth and the identities routes stay, and
+	// Users().Create and ResetPassword still work. It needs Enabled.
+	Only bool `yaml:"only"`
 	// CodeTTL is how long a code, and its magic-link token, is valid.
 	CodeTTL time.Duration `yaml:"code_ttl" default:"10m"`
 	// CodeLength is how many digits a code has, 6 to 10.
@@ -279,6 +285,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Passwordless.MagicLinkURL != "" && !absoluteURL(c.Passwordless.MagicLinkURL) {
 		errs = append(errs, errors.New("passwordless.magic_link_url must be an absolute http or https URL"))
+	}
+	if c.Passwordless.Only && !c.Passwordless.Enabled {
+		errs = append(errs, errors.New("passwordless.only needs passwordless.enabled: without it nobody could sign in"))
 	}
 	errs = append(errs, c.Cookie.check()...)
 	if (c.LoginRateWindow > 0) != (c.LoginRateLimit > 0) {

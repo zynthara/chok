@@ -27,6 +27,8 @@ auth:
   # POST /auth/passwordless/verify. A first sign-in creates the account.
   passwordless:
     enabled: true
+    # Nothing else: no register, login, forgot- or reset-password routes.
+    only: true
     # The mail's link signs in from the page directly.
     magic_link_url: http://localhost:8080/
   # The session is an HttpOnly cookie the page's scripts never see: only

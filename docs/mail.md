@@ -245,6 +245,12 @@ people in with a code mailed to them:
   ask for a new one. The first sign-in of an unknown address creates its
   account — email verified, no password — unless `auto_register: false`.
 
+For an application whose accounts are their addresses, `only: true` (with
+`enabled`) leaves the code the only way in: register, login,
+forgot-password, reset-password and change-password are not mounted at
+all, while refresh-token, me, logout and OAuth stay, and
+`Users().Create` and `ResetPassword` still work for operators.
+
 The codes are kept as HMACs, never as they are, in the table
 `auth_login_codes`; an hourly sweep deletes the expired ones. In the
 page, the flow is two small forms:
@@ -334,7 +340,7 @@ the cookie as the security scheme `cookieAuth` next to `bearerAuth`.
 | `POST /passwordless/start` `{email}` | `passwordless.enabled` | 202; 429 over the client's limit |
 | `POST /passwordless/verify` `{email, code}` or `{token}` | `passwordless.enabled` | 200 `{token, expires_at}`; 401 `InvalidCode` / `CodeExpired` / disabled; 429 |
 | `POST /logout` | `cookie.enabled`; bearer or cookie | 204, the cookie cleared |
-| `POST /forgot-password` `{email}` | a `Sender` | 204; `Mail{Kind: "password-reset"}` when the account exists |
+| `POST /forgot-password` `{email}` | a `Sender`, without `passwordless.only` | 204; `Mail{Kind: "password-reset"}` when the account exists |
 
 The `mail`, `auth.passwordless` and `auth.cookie` keys, with their
 defaults, are in [config.md](config.md).

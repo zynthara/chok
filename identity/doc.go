@@ -36,7 +36,8 @@
 // POST {prefix}/passwordless/verify with {email, code} or {token} answers
 // what login does, creating the account of an unknown address unless
 // auto_register is off. Codes are kept as HMACs in auth_login_codes,
-// tried at most max_attempts times.
+// tried at most max_attempts times. With auth.passwordless.only the
+// password routes are not mounted at all.
 //
 // # Cookie mode
 //

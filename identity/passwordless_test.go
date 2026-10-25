@@ -202,6 +202,66 @@ func TestPasswordless_IgnoresDisableRegister(t *testing.T) {
 	}
 }
 
+// TestPasswordless_Only: with only, the password routes are not there —
+// a 404 envelope, and nothing in the OpenAPI document — while the code
+// sign-in, refresh-token, me and logout work, and the administration can
+// still create accounts and set passwords.
+func TestPasswordless_Only(t *testing.T) {
+	sender := newMockSender()
+	idn := newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true, Only: true}, Cookie: CookieConfig{Enabled: true}}, Sender(sender))
+	c := serve(t, idn)
+	gone := [][2]string{
+		{http.MethodPost, "/auth/register"}, {http.MethodPost, "/auth/login"}, {http.MethodPost, "/auth/forgot-password"},
+		{http.MethodPost, "/auth/reset-password"}, {http.MethodPut, "/auth/change-password"},
+	}
+	for _, route := range gone {
+		var e envelope
+		if code := c.JSON(route[0], route[1], map[string]string{"email": "alice@test.com", "password": "password123"}, &e); code != http.StatusNotFound || e.Reason != "NotFound" {
+			t.Errorf("%s %s with only = %d %+v", route[0], route[1], code, e)
+		}
+	}
+	m := startCode(t, c, sender, "alice@test.com")
+	code, tok, e := verify(c, map[string]string{"email": "alice@test.com", "code": m.Code})
+	if code != http.StatusOK || tok.Token == "" {
+		t.Fatalf("verify = %d %+v", code, e)
+	}
+	authed := c.WithBearer(tok.Token)
+	if code := authed.GetJSON("/auth/me", nil); code != http.StatusOK {
+		t.Fatalf("me = %d", code)
+	}
+	if code := authed.PostJSON("/auth/refresh-token", nil, nil); code != http.StatusOK {
+		t.Fatalf("refresh-token = %d", code)
+	}
+	if code := authed.PostJSON("/auth/logout", nil, nil); code != http.StatusNoContent {
+		t.Fatalf("logout = %d", code)
+	}
+	// The administration still provisions accounts and sets passwords.
+	u, err := idn.Users().Create(t.Context(), "ops@test.com", "password123", "Ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idn.Users().ResetPassword(t.Context(), userByEmail(t, idn, "alice@test.com").RID, "another-pass1"); err != nil {
+		t.Fatalf("ResetPassword with only: %v", err)
+	}
+	if !userByEmail(t, idn, "alice@test.com").HasPassword || !u.HasPassword {
+		t.Fatal("the administration's passwords")
+	}
+	var s spec
+	if code := c.GetJSON("/openapi.json", &s); code != http.StatusOK {
+		t.Fatalf("openapi = %d", code)
+	}
+	for _, route := range gone {
+		if s.Paths[route[1]] != nil {
+			t.Errorf("%s is documented: %v", route[1], s.Paths[route[1]])
+		}
+	}
+	for _, path := range []string{"/auth/passwordless/start", "/auth/passwordless/verify", "/auth/refresh-token", "/auth/me", "/auth/logout"} {
+		if s.Paths[path] == nil {
+			t.Errorf("%s is not documented", path)
+		}
+	}
+}
+
 // TestPasswordless_InvalidCode: a wrong code is InvalidCode with
 // attempts_left; after max_attempts the code is used up, the right one
 // included.

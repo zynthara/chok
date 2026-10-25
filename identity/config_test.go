@@ -36,6 +36,7 @@ func TestConfig_Validate(t *testing.T) {
 		"a negative resend":      {Config{SigningKey: testKey, Passwordless: PasswordlessConfig{ResendAfter: -time.Minute}}, "passwordless.resend_after must not be negative"},
 		"negative attempts":      {Config{SigningKey: testKey, Passwordless: PasswordlessConfig{MaxAttempts: -1}}, "passwordless.max_attempts"},
 		"a relative magic link":  {Config{SigningKey: testKey, Passwordless: PasswordlessConfig{MagicLinkURL: "/sign-in"}}, "passwordless.magic_link_url must be an absolute"},
+		"only, not enabled":      {Config{SigningKey: testKey, Passwordless: PasswordlessConfig{Only: true}}, "passwordless.only needs passwordless.enabled"},
 	}
 	for name, c := range cases {
 		err := c.cfg.Validate()
@@ -73,6 +74,17 @@ func TestConfig_LoadsWithDefaults(t *testing.T) {
 		t.Fatalf("a 4-digit code: %v", err)
 	}
 	t.Setenv("IDT_AUTH_PASSWORDLESS_CODE_LENGTH", "6")
+	// only needs enabled, at load time too.
+	t.Setenv("IDT_AUTH_PASSWORDLESS_ONLY", "true")
+	if _, err := chok.Load[appConfig]("idt", chok.Args(nil)); err == nil || !strings.Contains(err.Error(), "passwordless.only needs passwordless.enabled") {
+		t.Fatalf("only without enabled: %v", err)
+	}
+	t.Setenv("IDT_AUTH_PASSWORDLESS_ENABLED", "true")
+	if cfg, err := chok.Load[appConfig]("idt", chok.Args(nil)); err != nil || !cfg.Auth.Passwordless.Only {
+		t.Fatalf("only with enabled: %+v %v", cfg.Auth.Passwordless, err)
+	}
+	t.Setenv("IDT_AUTH_PASSWORDLESS_ONLY", "false")
+	t.Setenv("IDT_AUTH_PASSWORDLESS_ENABLED", "false")
 	// The key is a secret: missing, the load fails and names it.
 	t.Setenv("IDT_AUTH_SIGNING_KEY", "")
 	if _, err := chok.Load[appConfig]("idt", chok.Args(nil)); err == nil || !strings.Contains(err.Error(), "signing_key") {
@@ -107,6 +119,9 @@ func TestNew_RefusesBadConfig(t *testing.T) {
 	}
 	if _, err := New(Config{SigningKey: testKey, Passwordless: PasswordlessConfig{CodeLength: 11}}, d); err == nil || !strings.Contains(err.Error(), "code_length") {
 		t.Fatalf("an 11-digit code fails New: %v", err)
+	}
+	if _, err := New(Config{SigningKey: testKey, Passwordless: PasswordlessConfig{Only: true}}, d, Sender(newMockSender())); err == nil || !strings.Contains(err.Error(), "passwordless.only needs passwordless.enabled") {
+		t.Fatalf("only without enabled fails New: %v", err)
 	}
 	defer func() {
 		if recover() == nil {

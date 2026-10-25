@@ -330,7 +330,10 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   CodeExpired；比较前先用条件 UPDATE 认领一次尝试、成功时条件 DELETE 消耗该行，
   并发的猜测拿不到多于 `max_attempts` 次比较，并发的成功只有一个。未注册的邮箱
   在 `auto_register`（nil 即 true）下建号：email 已验证、无密码、无名字。过期行由
-  identity 自己的每小时清扫删除。
+  identity 自己的每小时清扫删除。`passwordless.only`（须同时 `enabled`）给「邮箱
+  就是账号」的应用关掉密码面：register、login、forgot / reset password、
+  change-password 都不挂，refresh-token、me、logout、OAuth 照常，`Users()` 的
+  Create / ResetPassword 仍可用。
 - **cookie 模式**（`auth.cookie`）：签发 token 的五处（register、login、
   refresh-token、passwordless verify、OAuth exchange）同时 Set-Cookie（HttpOnly、
   Secure 缺省开、SameSite 缺省 lax、Max-Age = token_ttl）；`only` 时响应体只剩
