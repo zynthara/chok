@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,7 @@ func periodicEntry(t *testing.T, name, spec string, overlap Overlap, fn func(con
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newEntry(name, spec, schedule, overlap, fn, "job", name)
+	return newEntry(typePeriodic, name, spec, schedule, overlap, fn)
 }
 
 // startScheduler runs entries until the test ends.
@@ -348,4 +349,207 @@ func TestPeriodic_UnsatisfiableSpecNeverFires(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// observed collects the events an Observe function receives.
+type observed struct {
+	mu     sync.Mutex
+	events []Event
+}
+
+func (o *observed) observe(ev Event) {
+	o.mu.Lock()
+	o.events = append(o.events, ev)
+	o.mu.Unlock()
+}
+
+func (o *observed) get() []Event {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]Event(nil), o.events...)
+}
+
+// TestObserve_ReportsStartsEndsAndFailures: every run of a periodic job is
+// a run.started and then a run.finished or run.failed — an error and a
+// panic both fail — with its start in UTC, its duration, its error and
+// the job's next trigger after the event.
+func TestObserve_ReportsStartsEndsAndFailures(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t0 := time.Now().UTC()
+		var calls atomic.Int32
+		e := periodicEntry(t, "report", "@every 1s", OverlapSkip, func(context.Context) error {
+			time.Sleep(100 * time.Millisecond)
+			switch calls.Add(1) {
+			case 2:
+				return errors.New("boom")
+			case 3:
+				panic("deliberate")
+			}
+			return nil
+		})
+		o := &observed{}
+		s := &scheduler{logger: testLogger(t), entries: []*entry{e}, observers: []func(Event){o.observe}}
+		ctx, cancel := context.WithCancel(t.Context())
+		s.start(ctx)
+		time.Sleep(3500 * time.Millisecond)
+		cancel()
+		if err := s.wait(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		at := func(d time.Duration) time.Time { return t0.Add(d) }
+		const run = 100 * time.Millisecond
+		want := []Event{
+			{Kind: "run.started", Job: "report", Type: "periodic", StartedAt: at(time.Second), Next: at(2 * time.Second)},
+			{Kind: "run.finished", Job: "report", Type: "periodic", StartedAt: at(time.Second), Duration: run, Next: at(2 * time.Second)},
+			{Kind: "run.started", Job: "report", Type: "periodic", StartedAt: at(2 * time.Second), Next: at(3 * time.Second)},
+			{Kind: "run.failed", Job: "report", Type: "periodic", StartedAt: at(2 * time.Second), Duration: run, Error: "boom", Next: at(3 * time.Second)},
+			{Kind: "run.started", Job: "report", Type: "periodic", StartedAt: at(3 * time.Second), Next: at(4 * time.Second)},
+			{Kind: "run.failed", Job: "report", Type: "periodic", StartedAt: at(3 * time.Second), Duration: run, Error: "panic: deliberate", Next: at(4 * time.Second)},
+		}
+		got := o.get()
+		if len(got) != len(want) {
+			t.Fatalf("events:\n got %+v\nwant %+v", got, want)
+		}
+		for i := range want {
+			g, w := got[i], want[i]
+			if g.Kind != w.Kind || g.Job != w.Job || g.Type != w.Type || !g.StartedAt.Equal(w.StartedAt) ||
+				g.Duration != w.Duration || g.Error != w.Error || !g.Next.Equal(w.Next) || g.Messages != 0 {
+				t.Fatalf("event %d:\n got %+v\nwant %+v", i, g, w)
+			}
+			if g.StartedAt.Location() != time.UTC || g.Next.Location() != time.UTC {
+				t.Fatalf("event %d is not in UTC: %+v", i, g)
+			}
+		}
+		// The statistics are those of the same three runs.
+		if st := e.snapshot(); st.Runs != 3 || st.Failures != 2 {
+			t.Fatalf("stats %+v", st)
+		}
+	})
+}
+
+// TestObserve_ReportsSkippedTriggers: a trigger dropped under OverlapSkip,
+// or folded into the queued run under OverlapQueue, is a run.skipped
+// stamped with the moment it fired; the trigger that queues is not.
+func TestObserve_ReportsSkippedTriggers(t *testing.T) {
+	for _, c := range []struct {
+		overlap Overlap
+		run     time.Duration
+		skipped []time.Duration
+	}{
+		{OverlapSkip, 2500 * time.Millisecond, []time.Duration{2 * time.Second, 3 * time.Second}},
+		// Triggers at 2s, 3s and 4s fire during the first run: 2s queues,
+		// 3s and 4s fold into it.
+		{OverlapQueue, 3500 * time.Millisecond, []time.Duration{3 * time.Second, 4 * time.Second}},
+	} {
+		t.Run(c.overlap.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				t0 := time.Now().UTC()
+				e := periodicEntry(t, "slow", "@every 1s", c.overlap, func(context.Context) error {
+					time.Sleep(c.run)
+					return nil
+				})
+				o := &observed{}
+				s := &scheduler{logger: testLogger(t), entries: []*entry{e}, observers: []func(Event){o.observe}}
+				ctx, cancel := context.WithCancel(t.Context())
+				s.start(ctx)
+				time.Sleep(4600 * time.Millisecond)
+				cancel()
+				if err := s.wait(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				var skipped []time.Duration
+				for _, ev := range o.get() {
+					if ev.Kind == "run.skipped" {
+						if ev.Job != "slow" || ev.Type != "periodic" || ev.Duration != 0 || !ev.Next.Equal(ev.StartedAt.Add(time.Second)) {
+							t.Fatalf("skipped event %+v", ev)
+						}
+						skipped = append(skipped, ev.StartedAt.Sub(t0))
+					}
+				}
+				if !slices.Equal(skipped, c.skipped) {
+					t.Fatalf("skipped triggers at %v, want %v", skipped, c.skipped)
+				}
+				if st := e.snapshot(); st.Skipped != int64(len(c.skipped)) {
+					t.Fatalf("stats count %d skipped, the events %d", st.Skipped, len(c.skipped))
+				}
+			})
+		})
+	}
+}
+
+// TestObserve_PanicIsIsolated: an Observe function that panics is logged
+// at Warn and changes nothing else — the run goes on and counts as it
+// would, and the functions given after it still get every event, in the
+// order the functions were given.
+func TestObserve_PanicIsIsolated(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var logs syncBuffer
+		var order []string
+		var mu sync.Mutex
+		record := func(name string) func(Event) {
+			return func(ev Event) {
+				mu.Lock()
+				order = append(order, name+" "+ev.Kind)
+				mu.Unlock()
+			}
+		}
+		var ran atomic.Int32
+		e := periodicEntry(t, "steady", "@every 1s", OverlapSkip, func(context.Context) error {
+			ran.Add(1)
+			return nil
+		})
+		s := &scheduler{
+			logger:  slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})),
+			entries: []*entry{e},
+			observers: []func(Event){
+				record("first"),
+				func(Event) { panic("observer bug") },
+				record("third"),
+			},
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		s.start(ctx)
+		time.Sleep(2500 * time.Millisecond)
+		cancel()
+		if err := s.wait(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if ran.Load() != 2 {
+			t.Fatalf("the job ran %d times, want 2", ran.Load())
+		}
+		if st := e.snapshot(); st.Runs != 2 || st.Failures != 0 || st.LastError != "" {
+			t.Fatalf("the panics leaked into the stats: %+v", st)
+		}
+		want := []string{
+			"first run.started", "third run.started", "first run.finished", "third run.finished",
+			"first run.started", "third run.started", "first run.finished", "third run.finished",
+		}
+		mu.Lock()
+		got := slices.Clone(order)
+		mu.Unlock()
+		if !slices.Equal(got, want) {
+			t.Fatalf("observer calls %v, want %v", got, want)
+		}
+		if out := logs.String(); strings.Count(out, "jobs: an Observe function panicked") != 4 || !strings.Contains(out, "observer bug") {
+			t.Fatalf("log:\n%s", out)
+		}
+	})
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writers.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

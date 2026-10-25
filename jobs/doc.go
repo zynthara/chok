@@ -59,4 +59,16 @@
 // Workers and periodic jobs run in the processes where Config.Enabled is
 // true; run them in one process of a deployment and set enabled: false in
 // the others, which can still Enqueue.
+//
+// # Watching the runs
+//
+// Stats is a snapshot; Observe is the stream. Its function receives an
+// Event as each run starts, finishes or fails and as a trigger is
+// skipped, so a dashboard can show the background work live — hand the
+// events to the realtime battery, in the application, since batteries do
+// not import each other:
+//
+//	jobs.Observe(func(ev jobs.Event) {
+//		_ = hub.Publish(context.Background(), "jobs", ev.Kind, ev)
+//	})
 package jobs

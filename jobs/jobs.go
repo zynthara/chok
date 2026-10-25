@@ -41,9 +41,10 @@ type Jobs struct {
 type Option func(*options)
 
 type options struct {
-	periodic []periodicOption
-	workers  []workerOption
-	logger   *slog.Logger
+	periodic  []periodicOption
+	workers   []workerOption
+	observers []func(ev Event)
+	logger    *slog.Logger
 }
 
 type periodicOption struct {
@@ -114,6 +115,63 @@ func Worker(topic string, fn func(ctx context.Context, m Message) error) Option 
 // logger.
 func Logger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
 
+// Observe calls fn at every run's start, end and failure, and at every
+// trigger skipped because a run was in flight — of the periodic jobs, the
+// workers' sweeps and the cleanup alike. fn runs synchronously in the
+// run's goroutine, before the job's function and after it, so it must be
+// quick: hand the event on, to realtime's Publish for instance. A panic
+// in fn is recovered and logged at Warn; the run and its Stats are not
+// affected. Observe may be given more than once: the functions are called
+// in the order given.
+func Observe(fn func(ev Event)) Option {
+	return func(o *options) { o.observers = append(o.observers, fn) }
+}
+
+// Event is one moment of a run that Observe reports: a periodic job's
+// run, a worker's sweep of its topic or the retention cleanup's run
+// starting, finishing or failing, or a trigger skipped while a run was in
+// flight. Kind and Type are its two enumerations, as strings so an
+// observer can pass the event on as it is.
+type Event struct {
+	// Kind is run.started, run.finished, run.failed or run.skipped. A run
+	// that returned an error or panicked failed; one stopped by shutdown
+	// finished.
+	Kind string `json:"kind"`
+	// Job is the periodic job's name, the worker's topic, or "cleanup".
+	Job string `json:"job"`
+	// Type is periodic, worker or cleanup.
+	Type string `json:"type"`
+	// StartedAt is when the run started, in UTC; for run.skipped, when
+	// the trigger fired.
+	StartedAt time.Time `json:"started_at"`
+	// Duration is how long the run took, on run.finished and run.failed.
+	// Like JobStats.AvgDuration it has no default representation in
+	// encoding/json/v2: chok's handlers and realtime write it as a string
+	// ("1.5s").
+	Duration time.Duration `json:"duration,omitzero"`
+	// Error is the run's error on run.failed: "panic: ..." for a panic.
+	Error string `json:"error,omitzero"`
+	// Next is a periodic job's next trigger after the event, in UTC; zero
+	// for the workers and the cleanup.
+	Next time.Time `json:"next,omitzero"`
+	// Messages counts, when a run ends, the messages a worker's sweep
+	// handed to its function and the function took, or the rows the
+	// cleanup deleted.
+	Messages int `json:"messages,omitzero"`
+}
+
+// The values of Event.Kind and Event.Type.
+const (
+	kindStarted  = "run.started"
+	kindFinished = "run.finished"
+	kindFailed   = "run.failed"
+	kindSkipped  = "run.skipped"
+
+	typePeriodic = "periodic"
+	typeWorker   = "worker"
+	typeCleanup  = "cleanup"
+)
+
 // Stats is a snapshot of the background work of this process.
 type Stats struct {
 	// Periodic has an entry per periodic job, in the order given to New.
@@ -181,7 +239,12 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error) {
 	if o.logger == nil {
 		o.logger = d.Logger()
 	}
-	j := &Jobs{cfg: cfg, logger: o.logger, sched: &scheduler{logger: o.logger}}
+	for _, fn := range o.observers {
+		if fn == nil {
+			return nil, errors.New("jobs: Observe with a nil function")
+		}
+	}
+	j := &Jobs{cfg: cfg, logger: o.logger, sched: &scheduler{logger: o.logger, observers: o.observers}}
 	// Every option is checked before anything touches the database.
 	names := map[string]bool{}
 	for _, p := range o.periodic {
@@ -200,7 +263,7 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error) {
 		if err != nil {
 			return nil, fmt.Errorf("jobs: periodic job %q: spec %q: %w", p.name, p.spec, err)
 		}
-		j.periodic = append(j.periodic, newEntry(p.name, p.spec, schedule, p.overlap, p.fn, "job", p.name))
+		j.periodic = append(j.periodic, newEntry(typePeriodic, p.name, p.spec, schedule, p.overlap, p.fn))
 	}
 	topics := map[string]bool{}
 	for _, w := range o.workers {
@@ -227,15 +290,15 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error) {
 			return nil, err // unreachable: the topic and fn were checked above
 		}
 		j.relays = append(j.relays, r)
-		e := newEntry(w.topic, sweep, every(cfg.PollInterval), OverlapSkip, r.run, "worker", w.topic)
-		e.quiet = true
+		e := newEntry(typeWorker, w.topic, sweep, every(cfg.PollInterval), OverlapSkip, r.run)
+		e.quiet, e.count = true, r.delivered.Load
 		j.workers = append(j.workers, e)
 		workerTopics = append(workerTopics, w.topic)
 	}
 	if cfg.Retention > 0 {
-		j.cleanup = newEntry("cleanup", "@every "+cfg.CleanupInterval.String(), every(cfg.CleanupInterval), OverlapSkip,
-			func(ctx context.Context) error { return j.cleanupOnce(ctx, workerTopics) }, "job", "cleanup")
-		j.cleanup.quiet = true
+		j.cleanup = newEntry(typeCleanup, "cleanup", "@every "+cfg.CleanupInterval.String(), every(cfg.CleanupInterval), OverlapSkip,
+			func(ctx context.Context) error { return j.cleanupOnce(ctx, workerTopics) })
+		j.cleanup.quiet, j.cleanup.count = true, j.deleted.Load
 	}
 	j.sched.entries = slices.Concat(j.periodic, j.workers)
 	if j.cleanup != nil {

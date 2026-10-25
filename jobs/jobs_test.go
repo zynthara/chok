@@ -165,6 +165,7 @@ func TestNew_RefusesBadOptions(t *testing.T) {
 		{Worker("", in.handle), "a topic must be 1 to 200 bytes"},
 		{Worker(strings.Repeat("t", 201), in.handle), "a topic must be 1 to 200 bytes"},
 		{Worker("nil", nil), `worker "nil" has a nil function`},
+		{Observe(nil), "Observe with a nil function"},
 	} {
 		if _, err := New(fastConfig(), d, c.opt); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("want %q, got %v", c.want, err)
@@ -507,6 +508,102 @@ func TestCleanup_RunsUnderStart(t *testing.T) {
 	}
 }
 
+// TestObserve_WorkersAndCleanup: a worker's sweep is a worker event named
+// by its topic that counts the messages the function took, a failed sweep
+// carries its error, and the cleanup's run counts the rows it deleted;
+// neither has a Next. Events go to the Observe functions alongside, not
+// instead of, the Stats.
+func TestObserve_WorkersAndCleanup(t *testing.T) {
+	d := dbtest.Open(t)
+	in := &inbox{}
+	var mu sync.Mutex
+	var events []Event
+	observe := func(ev Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	}
+	// sum adds up Messages over the end events of one job and kind.
+	sum := func(job, kind string) (n int, seen bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, ev := range events {
+			if ev.Job == job && ev.Kind == kind {
+				n, seen = n+ev.Messages, true
+			}
+		}
+		return n, seen
+	}
+	var healed atomic.Bool
+	cfg := fastConfig()
+	cfg.SettleWindow, cfg.Retention, cfg.CleanupInterval = 50*time.Millisecond, time.Millisecond, 20*time.Millisecond
+	j := newJobs(t, d, cfg,
+		Worker("orders", in.handle),
+		Worker("flaky", func(context.Context, Message) error {
+			if !healed.Load() {
+				return errors.New("not yet")
+			}
+			return nil
+		}),
+		Observe(observe))
+	run(t, j)
+	for i := range 3 {
+		enqueueTx(t, d, j, "orders", i)
+	}
+	enqueueTx(t, d, j, "flaky", "x")
+	eventually(t, "the sweeps that took the three orders", func() bool { n, _ := sum("orders", "run.finished"); return n == 3 })
+	eventually(t, "a failed sweep of flaky", func() bool { _, seen := sum("flaky", "run.failed"); return seen })
+	healed.Store(true)
+	// Once flaky has a watermark too, the cleanup deletes all but the
+	// floor watermark's own row; its runs' events add up to what it
+	// deleted, as the Stats do.
+	rows := func() int64 {
+		var n int64
+		if err := d.Unsafe(t.Context()).Table("chok_jobs_messages").Count(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	eventually(t, "the cleanup", func() bool { return rows() == 1 })
+	eventually(t, "the cleanup's events", func() bool {
+		n, _ := sum("cleanup", "run.finished")
+		return n == 3 && j.Stats().Cleanup.Messages == 3
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	kinds := map[string]bool{}
+	for _, ev := range events {
+		kinds[ev.Type+" "+ev.Kind] = true
+		if !ev.Next.IsZero() || ev.StartedAt.Location() != time.UTC || ev.StartedAt.IsZero() {
+			t.Fatalf("event %+v: a worker or cleanup event has no Next and starts in UTC", ev)
+		}
+		switch ev.Type {
+		case "worker":
+			if ev.Job != "orders" && ev.Job != "flaky" {
+				t.Fatalf("worker event %+v", ev)
+			}
+			if ev.Kind == "run.failed" && (ev.Job != "flaky" || !strings.Contains(ev.Error, "not yet") || ev.Messages != 0) {
+				t.Fatalf("failed sweep %+v", ev)
+			}
+		case "cleanup":
+			if ev.Job != "cleanup" || ev.Kind == "run.failed" {
+				t.Fatalf("cleanup event %+v", ev)
+			}
+		default:
+			t.Fatalf("event of type %q: %+v", ev.Type, ev)
+		}
+		if ev.Kind == "run.started" && (ev.Duration != 0 || ev.Messages != 0 || ev.Error != "") {
+			t.Fatalf("a start carries an outcome: %+v", ev)
+		}
+	}
+	for _, k := range []string{"worker run.started", "worker run.finished", "worker run.failed", "cleanup run.started", "cleanup run.finished"} {
+		if !kinds[k] {
+			t.Fatalf("no %s event among %v", k, slices.Sorted(maps.Keys(kinds)))
+		}
+	}
+}
+
 // TestDisabled_StartRunsNothing is v2's TestModule_Disabled_NotVisible and
 // the enqueue-only half of TestModule_RelaysRequireScheduler: with
 // enabled false, Start returns at once without starting anything, and
@@ -766,7 +863,7 @@ func TestMigrations_AutoCreatesTheTables(t *testing.T) {
 // launched. Both return and nothing is left running.
 func TestStartAndClose_Concurrently(t *testing.T) {
 	for range 300 {
-		e := newEntry("tick", "@every 1h", every(time.Hour), OverlapSkip, noop, "job", "tick")
+		e := newEntry(typePeriodic, "tick", "@every 1h", every(time.Hour), OverlapSkip, noop)
 		j := &Jobs{cfg: Config{Enabled: true, StopBudget: 5 * time.Second}, logger: testLogger(t),
 			sched: &scheduler{logger: testLogger(t), entries: []*entry{e}}}
 		started := make(chan error, 1)

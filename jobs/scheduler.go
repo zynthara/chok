@@ -27,13 +27,15 @@ func (e every) Next(t time.Time) time.Time { return t.Add(time.Duration(e)) }
 // entry is one scheduled function — a Periodic job, a worker's sweep, or
 // the retention cleanup — with its overlap state and its statistics.
 type entry struct {
+	typ      string // Event.Type: periodic, worker or cleanup
 	name     string
 	spec     string
 	schedule cron.Schedule
 	overlap  Overlap
 	fn       func(ctx context.Context) error
-	attrs    []any // what the log lines name it by
-	quiet    bool  // successful runs log at Debug, not Info
+	attrs    []any        // what the log lines name it by
+	quiet    bool         // successful runs log at Debug, not Info
+	count    func() int64 // a counter whose growth over a run is Event.Messages; nil for periodic jobs
 
 	mu      sync.Mutex
 	busy    bool // a run is in flight (OverlapSkip and OverlapQueue)
@@ -43,12 +45,30 @@ type entry struct {
 	stats   JobStats
 }
 
-func newEntry(name, spec string, schedule cron.Schedule, overlap Overlap, fn func(ctx context.Context) error, attrs ...any) *entry {
+// newEntry builds the entry of typ (periodic, worker or cleanup). The log
+// lines name a worker's sweep by its topic, the others as a job.
+func newEntry(typ, name, spec string, schedule cron.Schedule, overlap Overlap, fn func(ctx context.Context) error) *entry {
+	key := "job"
+	if typ == typeWorker {
+		key = "worker"
+	}
 	return &entry{
-		name: name, spec: spec, schedule: schedule, overlap: overlap, fn: fn,
-		attrs: slices.Clip(attrs), // appending to it allocates: runs may log concurrently
+		typ: typ, name: name, spec: spec, schedule: schedule, overlap: overlap, fn: fn,
+		attrs: slices.Clip([]any{key, name}), // appending to it allocates: runs may log concurrently
 		stats: JobStats{Name: name, Spec: spec},
 	}
+}
+
+// event returns the Event of kind for e at now: a periodic job's carries
+// its next trigger after now.
+func (e *entry) event(kind string, start, now time.Time) Event {
+	ev := Event{Kind: kind, Job: e.name, Type: e.typ, StartedAt: start.UTC()}
+	if e.typ == typePeriodic {
+		if next := e.schedule.Next(now); !next.IsZero() {
+			ev.Next = next.UTC()
+		}
+	}
+	return ev
 }
 
 func (e *entry) setNext(t time.Time) {
@@ -74,9 +94,27 @@ func (e *entry) snapshot() JobStats {
 // the scheduler's. It is v2's scheduler with robfig/cron's runner replaced
 // by those loops.
 type scheduler struct {
-	logger  *slog.Logger
-	entries []*entry
-	wg      sync.WaitGroup // the loops and the runs
+	logger    *slog.Logger
+	entries   []*entry
+	observers []func(ev Event) // Observe's functions, in order
+	wg        sync.WaitGroup   // the loops and the runs
+}
+
+// observe hands ev to every Observe function in turn. A panicking
+// function is logged and skipped: it cannot fail the run or stop the
+// functions after it.
+func (s *scheduler) observe(ctx context.Context, e *entry, ev Event) {
+	for _, fn := range s.observers {
+		func() {
+			defer func() {
+				if p := recover(); p != nil {
+					s.logger.WarnContext(ctx, "jobs: an Observe function panicked; the run goes on",
+						append(e.attrs, "kind", ev.Kind, "panic", fmt.Sprint(p))...)
+				}
+			}()
+			fn(ev)
+		}()
+	}
 }
 
 // start launches the loops; everything stops when ctx is done.
@@ -136,17 +174,22 @@ func (s *scheduler) loop(ctx context.Context, e *entry) {
 // trigger starts a run unless the entry's Overlap says otherwise: Skip
 // drops a trigger while a run is in flight; Queue keeps one to run when
 // the current run ends, folding further ones into it; Allow always runs.
+// A dropped or folded trigger is a run.skipped event.
 func (s *scheduler) trigger(ctx context.Context, e *entry) {
 	e.mu.Lock()
 	switch e.overlap {
 	case OverlapAllow:
 	case OverlapQueue:
 		if e.busy {
-			if e.queued {
+			folded := e.queued
+			if folded {
 				e.stats.Skipped++
 			}
 			e.queued = true
 			e.mu.Unlock()
+			if folded {
+				s.skipped(ctx, e)
+			}
 			return
 		}
 		e.busy = true
@@ -155,12 +198,21 @@ func (s *scheduler) trigger(ctx context.Context, e *entry) {
 			e.stats.Skipped++
 			e.mu.Unlock()
 			s.logger.DebugContext(ctx, "jobs: a run is still in flight; trigger skipped", e.attrs...)
+			s.skipped(ctx, e)
 			return
 		}
 		e.busy = true
 	}
 	e.mu.Unlock()
 	s.wg.Go(func() { s.runs(ctx, e) })
+}
+
+// skipped reports a trigger that started no run.
+func (s *scheduler) skipped(ctx context.Context, e *entry) {
+	if len(s.observers) > 0 {
+		now := time.Now()
+		s.observe(ctx, e, e.event(kindSkipped, now, now))
+	}
 }
 
 // runs runs e, and once more while a trigger is queued behind the run.
@@ -183,10 +235,11 @@ func (s *scheduler) runs(ctx context.Context, e *entry) {
 	}
 }
 
-// execute runs e once with panic recovery and statistics. A panic is a
-// failed run: its stack goes to the log at Error (not into LastError, to
-// keep Stats small). A run that ends with its context's error after the
-// scheduler stopped is not a failure: it was told to stop.
+// execute runs e once with panic recovery and statistics, and reports
+// its start and its end to the observers. A panic is a failed run: its
+// stack goes to the log at Error (not into LastError, to keep Stats
+// small). A run that ends with its context's error after the scheduler
+// stopped is not a failure: it was told to stop.
 func (s *scheduler) execute(ctx context.Context, e *entry) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -194,6 +247,13 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 	e.running++
 	e.mu.Unlock()
 	start := time.Now()
+	var counted int64
+	if e.count != nil {
+		counted = e.count()
+	}
+	if len(s.observers) > 0 {
+		s.observe(ctx, e, e.event(kindStarted, start, start))
+	}
 	var err error
 	func() {
 		defer func() {
@@ -227,6 +287,22 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 		e.stats.LastError = ""
 	}
 	e.mu.Unlock()
+
+	if len(s.observers) > 0 {
+		kind := kindFinished
+		if err != nil {
+			kind = kindFailed
+		}
+		ev := e.event(kind, start, start.Add(dur))
+		ev.Duration = dur
+		if err != nil {
+			ev.Error = err.Error()
+		}
+		if e.count != nil {
+			ev.Messages = int(e.count() - counted)
+		}
+		s.observe(ctx, e, ev)
+	}
 
 	attrs := append(e.attrs, "duration", dur)
 	switch {
