@@ -322,8 +322,9 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   `passwordless.magic_link_url` 配了，`Mail.Link` 就是带 `?token=` 的页面地址。
 - **无密码登录**（`auth.passwordless`，需要 `Sender`）：start 一律 202、无体，
   按邮箱 upsert 一行 `auth_login_codes`（码与 magic-link token 都只存
-  HMAC-SHA256(signing_key, ·) 的 hex），`resend_after` 内再 start 不换码、不发信；
-  按客户端 IP 计 start 次数，与登录限速同一张表（另起一个维度名）、同一清扫。
+  HMAC-SHA256(signing_key, ·) 的 hex），码未用时在 `resend_after` 内再 start 不换码、
+  不发信（码用掉即删行，之后的 start 照常发新码）；按客户端 IP 计 start 次数，与登录
+  限速同一张表（另起一个维度名）、同一清扫。
   verify 收 `{email, code}` 或 `{token}`：码错 401 InvalidCode 带
   `attempts_left`，过期、用过、试满 `max_attempts`、没 start 过一律 401
   CodeExpired；比较前先用条件 UPDATE 认领一次尝试、成功时条件 DELETE 消耗该行，
