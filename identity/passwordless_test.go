@@ -185,6 +185,23 @@ func TestPasswordless_VerifySignsIn(t *testing.T) {
 	}
 }
 
+// TestPasswordless_IgnoresDisableRegister: disable_register drops the
+// register route only; a first sign-in by code still makes the account.
+func TestPasswordless_IgnoresDisableRegister(t *testing.T) {
+	idn, sender := pwIdentity(t, Config{DisableRegister: true})
+	c := serve(t, idn)
+	if code := c.PostJSON("/auth/register", map[string]string{"email": "bob@test.com", "password": "password123"}, nil); code != http.StatusNotFound {
+		t.Fatalf("register with disable_register = %d", code)
+	}
+	m := startCode(t, c, sender, "bob@test.com")
+	if code, tok, e := verify(c, map[string]string{"email": "bob@test.com", "code": m.Code}); code != http.StatusOK || tok.Token == "" {
+		t.Fatalf("a first sign-in with disable_register = %d %+v", code, e)
+	}
+	if u := userByEmail(t, idn, "bob@test.com"); !u.EmailVerified || u.HasPassword {
+		t.Fatalf("the account: %+v", u)
+	}
+}
+
 // TestPasswordless_InvalidCode: a wrong code is InvalidCode with
 // attempts_left; after max_attempts the code is used up, the right one
 // included.
