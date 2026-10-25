@@ -216,9 +216,13 @@ answer and the worker's bookkeeping, a mail can go out twice. While a
 message fails, the ones behind it on its topic wait, so give mail a topic
 of its own, and check the addresses before you enqueue (a request's
 `validate:"email"` does): then the worker's errors are the relay's, which
-a retry can fix. identity's mails can take the same road: the
+a retry can fix. identity's mails can take the same road — the
 `MailSender` enqueues instead of sending, in a transaction of its own
-(`d.RunInTx(ctx, …)` around `Enqueue`), and the worker sends.
+(`d.RunInTx(ctx, …)` around `Enqueue`), and the worker sends — but the
+payload then keeps a sign-in code or a reset token in the jobs table, in
+the clear, until `jobs.retention` removes it, where identity itself only
+stores HMACs. For those mails one attempt is usually the better trade: a
+user who gets no code asks for another.
 
 ## Passwordless sign-in
 
