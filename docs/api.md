@@ -21,11 +21,12 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`telemetry`](#telemetry) | 6 |
 | [`cache`](#cache) | 6 |
 | [`choktest`](#choktest) | 5 |
+| [`realtime`](#realtime) | 11 |
 | [`identity/google (provider)`](#identitygoogle) | 1 |
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 206 |
+| total | 217 |
 
 ## chok
 
@@ -298,6 +299,24 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `func Store[T db.Modeler](t testing.TB, opts ...store.Option) *store.Store[T]` | Store returns the store of T on a fresh database holding T's table, as store.New would with opts. |
 | `type Client struct{ ... }` | Client sends requests to an App in process. |
 | ↳ `func App(t testing.TB, base chok.Base, setup func(app *chok.App)) *Client` | App builds an App from base — a zero Base means every default — runs setup on it to register components and routes, and runs its start phase: Starters start and every Healther must report healthy. |
+
+## realtime
+
+`import "github.com/zynthara/chok/v3/realtime"` — Package realtime is chok's battery for pushing events to browsers as they happen: a Hub of topics that clients subscribe to over a WebSocket or a server-sent event stream, opened with one-time tickets, resumed after a reconnect from a short replay buffer, and shared by the replicas of a deployment through Redis.
+
+| Declaration | |
+|---|---|
+| `type Config struct{ ... }` | Config is the realtime section of an application's configuration: |
+| `type Event struct{ ... }` | Event is one event as a client receives it: a WebSocket text frame carries one, and so does the data line of a server-sent event. |
+| `type Hub struct{ ... }` | Hub is the realtime battery: the topics, the connections subscribed to them over WebSocket or server-sent events, the tickets that open them, and, with Redis, the backplane to the other replicas. |
+| ↳ `func MustNew(cfg Config, opts ...Option) *Hub` | MustNew is New that panics on error. |
+| ↳ `func New(cfg Config, opts ...Option) (*Hub, error)` | New builds a hub from cfg after checking cfg and every option; nothing runs until Start, and nothing is served until Mount. |
+| `type Option func(*options)` | Option configures New. |
+| ↳ `func Authn(mw chok.Middleware) Option` | Authn guards {Path}/ticket with mw — identity's Authn(), typically — so that a ticket carries the principal mw puts in the request, and the connection it opens acts for that user. |
+| ↳ `func Authorize(fn func(ctx context.Context, topic string) error) Option` | Authorize decides which topics a connection may subscribe to: fn runs once per subscription, with a context that carries the ticket's principal (none for an anonymous ticket), and refuses the subscription by returning an error. |
+| ↳ `func Logger(l *slog.Logger) Option` | Logger is where the hub logs; the default is slog.Default(). |
+| ↳ `func Redis(client *goredis.Client) Option` | Redis makes the hub one of several replicas sharing client: tickets live in Redis, so any replica redeems a ticket and only once, and every Publish also reaches the other replicas' subscribers, through PUBLISH on Config.Channel. |
+| `type Stats struct{ ... }` | Stats is a snapshot of a Hub: its connections and its counters since New. |
 
 ## identity/google
 

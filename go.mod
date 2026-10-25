@@ -7,6 +7,7 @@ toolchain go1.27.3
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/casbin/casbin/v3 v3.10.0
+	github.com/coder/websocket v1.8.15
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/go-sql-driver/mysql v1.10.0
