@@ -155,7 +155,9 @@ func (m *Mailer) Health(context.Context) error { return nil }
 // Config.Timeout. A bad recipient address, a Template that does not
 // exist, a Template given with Text or HTML, a header Headers may not
 // set: these are plain errors, not chok.Coder ones — a handler wraps them
-// in its own. A transport failure wraps the transport's error.
+// in its own. A transport failure wraps the transport's error. Errors
+// leave the subject and the recipients out — a subject may carry a
+// sign-in code, and errors end up in logs.
 func (m *Mailer) Send(ctx context.Context, msg Message) error {
 	rendered, err := m.render(msg)
 	if err != nil {
@@ -168,7 +170,7 @@ func (m *Mailer) Send(ctx context.Context, msg Message) error {
 	ctx, cancel := context.WithTimeout(ctx, m.cfg.Timeout)
 	defer cancel()
 	if err := m.deliver(ctx, rendered, raw); err != nil {
-		return fmt.Errorf("mail: send %q to %s: %w", rendered.Subject, strings.Join(rendered.To, ", "), err)
+		return fmt.Errorf("mail: send: %w", err)
 	}
 	return nil
 }

@@ -141,9 +141,9 @@ func TestSend_TimeoutAndErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = m.Send(t.Context(), Message{To: []string{"ada@example.com"}, Subject: "Hi", Text: "x"})
-	if !errors.Is(err, boom) || !strings.Contains(err.Error(), `send "Hi" to ada@example.com`) {
-		t.Fatalf("the transport's error: %v", err)
+	err = m.Send(t.Context(), Message{To: []string{"ada@example.com"}, Subject: "Your code is 123456", Text: "x"})
+	if !errors.Is(err, boom) || err.Error() != "mail: send: the API said no" {
+		t.Fatalf("the transport's error, without the subject or the address: %v", err)
 	}
 	if left := time.Until(deadline); left <= 0 || left > 3*time.Second {
 		t.Fatalf("deadline in %s", left)
