@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/identity/internal/authz"
 	"github.com/zynthara/chok/v3/internal/conf"
@@ -40,6 +44,14 @@ type Identity struct {
 
 	authorize atomic.Pointer[authz.Func] // installed by identity/rbac
 
+	// The mails in flight: Close stops new ones and waits for these, and
+	// cancels their contexts if it gives up.
+	mailMu     sync.Mutex
+	mailClosed bool
+	mailing    sync.WaitGroup
+	mailCtx    context.Context
+	stopMail   context.CancelFunc
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -63,18 +75,40 @@ func Providers(p ...Provider) Option {
 	return func(o *options) { o.providers = append(o.providers, p...) }
 }
 
-// Sender enables the forgot-password and reset-password routes: s mails
-// the reset token. Without it the routes are not mounted.
+// Sender gives identity a way to mail: it enables the forgot-password and
+// reset-password routes, which are not mounted without it.
 func Sender(s MailSender) Option { return func(o *options) { o.sender = s } }
 
 // Logger is where identity logs outside requests; the default is
 // slog.Default(). On a request it logs with chok.LoggerFrom.
 func Logger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
 
-// MailSender delivers a password-reset token: put it in a link to the
-// application's reset page, which posts it to {prefix}/reset-password.
+// MailSender sends the mails identity asks for, typically through the
+// mail battery with a template per Mail.Kind. identity calls it in the
+// background, so a response never waits on it; an error is logged as a
+// warning. ctx carries the request's values, not its cancellation.
 type MailSender interface {
-	Send(ctx context.Context, to, token string) error
+	Send(ctx context.Context, m Mail) error
+}
+
+// Mail is a mail identity asks the application to send; the application's
+// MailSender picks the template by Kind.
+type Mail struct {
+	// Kind is what the mail is for: "password-reset".
+	Kind string
+	// To is the address to send it to.
+	To string
+	// Token is the password-reset token, which the reset page posts to
+	// {prefix}/reset-password with the new password.
+	Token string
+	// Code is empty for a password reset.
+	Code string
+	// Link is the page that takes Token, auth.reset_url with ?token=
+	// added; empty without it, and the application builds its own from
+	// Token.
+	Link string
+	// ExpiresAt is when Token stops working, in UTC.
+	ExpiresAt time.Time
 }
 
 // New builds the identity battery on d: it registers the users,
@@ -111,6 +145,8 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 		}
 	}
 	idn := &Identity{cfg: cfg, d: d, logger: o.logger, sender: o.sender, cost: costOf()}
+	// The mails outlive the requests that ask for them; Close ends them.
+	idn.mailCtx, idn.stopMail = context.WithCancel(context.Background())
 	var err error
 	if idn.access, err = newTokens(cfg.SigningKey, issuerAccess, cfg.TokenTTL); err != nil {
 		return nil, err
@@ -176,12 +212,12 @@ func (idn *Identity) Name() string { return "identity" }
 // the last minute.
 func (idn *Identity) Health(context.Context) error { return idn.audit.health() }
 
-// Close writes the queued audit events, within ctx, and stops the
-// background work: the login throttle's sweeps and the OAuth session
-// store's.
+// Close waits, within ctx, for the mails in flight and writes the queued
+// audit events, and stops the background work: the login throttle's
+// sweeps and the OAuth session store's.
 func (idn *Identity) Close(ctx context.Context) error {
 	idn.closeOnce.Do(func() {
-		var errs []error
+		errs := []error{idn.waitForMail(ctx)}
 		if idn.limiter != nil {
 			idn.limiter.Close()
 		}
@@ -192,4 +228,68 @@ func (idn *Identity) Close(ctx context.Context) error {
 		idn.closeErr = errors.Join(errs...)
 	})
 	return idn.closeErr
+}
+
+// sendMail hands m to the Sender in the background, so that a response
+// takes as long whether or not a mail goes out. The send keeps ctx's
+// values — the request's logger and id — but not its cancellation; Close
+// waits for it. A failure is a warning in the log.
+func (idn *Identity) sendMail(ctx context.Context, m Mail) {
+	logger := chok.LoggerFrom(ctx)
+	idn.mailMu.Lock()
+	if idn.mailClosed {
+		idn.mailMu.Unlock()
+		logger.WarnContext(ctx, "identity: closed; mail not sent", "kind", m.Kind, "to", maskEmail(m.To))
+		return
+	}
+	idn.mailing.Add(1)
+	idn.mailMu.Unlock()
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(idn.mailCtx, cancel)
+	go func() {
+		defer idn.mailing.Done()
+		defer cancel()
+		defer stop()
+		defer func() {
+			if p := recover(); p != nil {
+				logger.ErrorContext(ctx, "identity: the MailSender panicked", "kind", m.Kind, "panic", p)
+			}
+		}()
+		if err := idn.sender.Send(ctx, m); err != nil {
+			logger.WarnContext(ctx, "identity: mail not sent", "kind", m.Kind, "to", maskEmail(m.To), "error", err)
+		}
+	}()
+}
+
+// waitForMail stops new mails and waits, within ctx, for the ones in
+// flight; those still going when ctx ends have their contexts canceled.
+func (idn *Identity) waitForMail(ctx context.Context) error {
+	idn.mailMu.Lock()
+	idn.mailClosed = true
+	idn.mailMu.Unlock()
+	defer idn.stopMail()
+	done := make(chan struct{})
+	go func() {
+		idn.mailing.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("identity: closed before the mails in flight were sent: %w", ctx.Err())
+	}
+}
+
+// withToken is base with token added as the query parameter token, ""
+// without a base.
+func withToken(base, token string) string {
+	if base == "" {
+		return ""
+	}
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + "token=" + url.QueryEscape(token)
 }

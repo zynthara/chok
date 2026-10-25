@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/zynthara/chok/v3/choktest"
 	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/internal/apptest"
+	"github.com/zynthara/chok/v3/internal/conf"
 	"github.com/zynthara/chok/v3/internal/dbtest"
 )
 
@@ -98,27 +100,29 @@ func userByEmail(t testing.TB, idn *Identity, email string) *User {
 	return &u
 }
 
-// mockSender records the reset tokens identity mails.
+// mockSender records the mails identity hands it, and answers err.
 type mockSender struct {
 	mu     sync.Mutex
-	to     string
-	token  string
+	mails  []Mail
+	err    error
 	called chan struct{}
 }
 
-func newMockSender() *mockSender { return &mockSender{called: make(chan struct{}, 1)} }
+func newMockSender() *mockSender { return &mockSender{called: make(chan struct{}, 64)} }
 
-func (s *mockSender) Send(_ context.Context, to, token string) error {
+func (s *mockSender) Send(_ context.Context, m Mail) error {
 	s.mu.Lock()
-	s.to, s.token = to, token
+	s.mails = append(s.mails, m)
+	err := s.err
 	s.mu.Unlock()
 	select {
 	case s.called <- struct{}{}:
 	default:
 	}
-	return nil
+	return err
 }
 
+// wait reports whether a mail came within d.
 func (s *mockSender) wait(d time.Duration) bool {
 	select {
 	case <-s.called:
@@ -128,10 +132,14 @@ func (s *mockSender) wait(d time.Duration) bool {
 	}
 }
 
-func (s *mockSender) last() (string, string) {
+// last is the latest mail.
+func (s *mockSender) last() Mail {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.to, s.token
+	if len(s.mails) == 0 {
+		return Mail{}
+	}
+	return s.mails[len(s.mails)-1]
 }
 
 // hasKey reports whether the metadata value v is an object with key.
@@ -168,4 +176,55 @@ func jsonRequest(t testing.TB, method, path string, body any, headers ...string)
 		req.Header.Set(headers[i], headers[i+1])
 	}
 	return req
+}
+
+// syncBuffer is a log destination tests read while identity writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// loggedApp is an App with idn, served in process through its handler,
+// whose log the test reads.
+func loggedApp(t testing.TB, idn *Identity) (http.Handler, *syncBuffer) {
+	t.Helper()
+	var base chok.Base
+	if err := conf.Defaults(&base); err != nil {
+		t.Fatal(err)
+	}
+	logs := &syncBuffer{}
+	app := chok.New(base, chok.Logger(slog.New(slog.NewTextHandler(logs, nil))))
+	app.Use(idn)
+	return app.Handler(), logs
+}
+
+// serveJSON sends a JSON request to h and returns the recorded response.
+func serveJSON(t testing.TB, h http.Handler, method, path string, body any, headers ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, jsonRequest(t, method, path, body, headers...))
+	return rec
+}
+
+// eventually fails the test unless cond holds within five seconds.
+func eventually(t testing.TB, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: not within 5s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }

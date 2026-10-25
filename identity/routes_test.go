@@ -232,9 +232,10 @@ func TestForgotAndResetPassword(t *testing.T) {
 	if !sender.wait(2 * time.Second) {
 		t.Fatal("the sender was not called within 2s")
 	}
-	to, token := sender.last()
-	if to != "alice@test.com" || token == "" {
-		t.Fatalf("mailed %q to %q", token, to)
+	m := sender.last()
+	token := m.Token
+	if m.Kind != "password-reset" || m.To != "alice@test.com" || token == "" || m.Code != "" || m.Link != "" || time.Until(m.ExpiresAt) < 14*time.Minute || m.ExpiresAt.Location() != time.UTC {
+		t.Fatalf("mailed %+v", m)
 	}
 	if code := c.PostJSON("/auth/reset-password", map[string]string{"token": token, "new_password": "resetpass789"}, nil); code != http.StatusNoContent {
 		t.Fatalf("reset = %d", code)

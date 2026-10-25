@@ -243,28 +243,14 @@ func (idn *Identity) forgotPassword(ctx context.Context, req *forgotPasswordRequ
 	// Every outcome is the same 204, at the same speed: the mail goes out
 	// in the background, so whether the account exists never shows.
 	if err == nil && user.Active {
-		go idn.mailResetToken(context.WithoutCancel(ctx), user)
+		// The token is bound to the password version, so it works once.
+		token, exp, err := idn.reset.sign(user.RID, map[string]any{"purpose": "reset", "pv": user.PasswordVersion})
+		if err != nil {
+			return chok.None{}, err
+		}
+		idn.sendMail(ctx, Mail{Kind: "password-reset", To: user.Email, Token: token, Link: withToken(idn.cfg.ResetURL, token), ExpiresAt: exp.UTC()})
 	}
 	return chok.None{}, nil
-}
-
-// mailResetToken signs a reset token bound to the password version, so
-// it works once, and hands it to the sender; failures are only logged.
-func (idn *Identity) mailResetToken(ctx context.Context, user *User) {
-	logger := chok.LoggerFrom(ctx)
-	defer func() {
-		if p := recover(); p != nil {
-			logger.ErrorContext(ctx, "identity: password-reset mail panicked", "panic", p)
-		}
-	}()
-	token, _, err := idn.reset.sign(user.RID, map[string]any{"purpose": "reset", "pv": user.PasswordVersion})
-	if err != nil {
-		logger.ErrorContext(ctx, "identity: sign the reset token", "error", err)
-		return
-	}
-	if err := idn.sender.Send(ctx, user.Email, token); err != nil {
-		logger.ErrorContext(ctx, "identity: send the reset token", "error", err)
-	}
 }
 
 func (idn *Identity) resetPassword(ctx context.Context, req *resetPasswordRequest) (chok.None, error) {

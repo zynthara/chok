@@ -30,6 +30,8 @@ func TestConfig_Validate(t *testing.T) {
 		"a negative ttl":         {Config{SigningKey: testKey, TokenTTL: -time.Second}, "token_ttl must not be negative"},
 		"a bad redirect entry":   {Config{SigningKey: testKey, AllowedRedirectBacks: []string{"ftp://x.test/"}}, "allowed_redirect_backs"},
 		"a negative retention":   {Config{SigningKey: testKey, Audit: AuditConfig{Retention: -time.Hour}}, "audit.retention"},
+		"a relative reset page":  {Config{SigningKey: testKey, ResetURL: "/reset"}, "reset_url must be an absolute"},
+		"a reset page in ftp":    {Config{SigningKey: testKey, ResetURL: "ftp://app.test/reset"}, "reset_url must be an absolute"},
 	}
 	for name, c := range cases {
 		err := c.cfg.Validate()

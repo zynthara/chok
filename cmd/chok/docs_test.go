@@ -55,8 +55,8 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 	for _, s := range configSections {
 		total += len(conf.Keys(s.typ))
 	}
-	if len(rows) != total || total != 152 {
-		t.Fatalf("%d rows for %d keys; the budget counts 152", len(rows), total)
+	if len(rows) != total || total != 153 {
+		t.Fatalf("%d rows for %d keys; the budget counts 153", len(rows), total)
 	}
 	for key, want := range map[string][]string{
 		"auth.signing_key":                    {"| **secret** |", "at least 32 bytes"},

@@ -40,6 +40,11 @@ type Config struct {
 	RefreshTTL time.Duration `yaml:"refresh_ttl" default:"168h"`
 	// ResetTTL is how long a password-reset token is valid.
 	ResetTTL time.Duration `yaml:"reset_ttl" default:"15m"`
+	// ResetURL is the front end's password-reset page, an absolute URL:
+	// given, the password-reset Mail's Link is ResetURL?token=<token>, for
+	// the page to post to {prefix}/reset-password; without it the
+	// application builds the link from Mail.Token.
+	ResetURL string `yaml:"reset_url"`
 	// LoginRateWindow and LoginRateLimit throttle failed logins: once an
 	// email, or a client IP, has failed LoginRateLimit times within the
 	// window, login answers 429 until the window slides. Both 0 turn the
@@ -176,6 +181,9 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("allowed_redirect_backs %q: %w", raw, err))
 		}
 	}
+	if c.ResetURL != "" && !absoluteURL(c.ResetURL) {
+		errs = append(errs, errors.New("reset_url must be an absolute http or https URL"))
+	}
 	if c.OAuthCallbackFrontendURL != "" {
 		if u, err := url.Parse(c.OAuthCallbackFrontendURL); err != nil || u.Scheme == "" || u.Host == "" {
 			errs = append(errs, errors.New("oauth_callback_frontend_url must be an absolute URL"))
@@ -203,4 +211,11 @@ func (c *Config) Validate() error {
 	}
 	slices.Sort(msgs)
 	return errors.New(strings.Join(msgs, "; "))
+}
+
+// absoluteURL reports an http or https URL with a host: a link that works
+// from a mail.
+func absoluteURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }

@@ -140,6 +140,7 @@ Accounts, tokens, OAuth providers and the audit log; `identity.New` takes it. Th
 | `auth.providers.<name>.team_id` | string |  |  | TeamID and KeyID identify Apple's signing key: the developer team and the key, ten characters each. |
 | `auth.refresh_ttl` | duration | `168h` |  | RefreshTTL bounds a session: refresh-token issues fresh tokens until RefreshTTL after the login that started the session, then the user logs in again. Every session ends: 0 takes the default. |
 | `auth.reset_ttl` | duration | `15m` |  | ResetTTL is how long a password-reset token is valid. |
+| `auth.reset_url` | string |  |  | ResetURL is the front end's password-reset page, an absolute URL: given, the password-reset Mail's Link is ResetURL?token=&lt;token&gt;, for the page to post to {prefix}/reset-password; without it the application builds the link from Mail.Token. |
 | `auth.signing_key` | string |  | **secret** | SigningKey signs the access and password-reset tokens (HS256); at least 32 bytes. |
 | `auth.token_ttl` | duration | `2h` |  | TokenTTL is how long an access token is valid. |
 
