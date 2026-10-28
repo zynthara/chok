@@ -15,6 +15,7 @@ import (
 
 	gomysql "github.com/go-sql-driver/mysql"
 
+	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/db"
 	"github.com/zynthara/chok/v3/internal/dbtest"
 	"github.com/zynthara/chok/v3/store"
@@ -56,6 +57,44 @@ func seedSales(t *testing.T, s *store.Store[sale]) {
 		&sale{Status: "paid", Qty: 20, Price: 2.25, Flag: true, At: t0.Add(time.Hour)},
 		&sale{Status: "draft", Qty: 3, Price: 0.25, Flag: false, At: t0.Add(2 * time.Hour)},
 	)
+}
+
+// TestListFromQuery_ParsesValuesByType: a URL filter on a boolean,
+// numeric or time field reaches the database as that type, and every
+// dialect agrees. As text, ?flag=true matched no row on SQLite and the
+// false row on MySQL.
+func TestListFromQuery_ParsesValuesByType(t *testing.T) {
+	s, _ := sales(t)
+	seedSales(t, s)
+	ctx := t.Context()
+	for query, want := range map[string]int64{
+		"flag=true":                      2,
+		"flag=false":                     1,
+		"flag=1":                         2,
+		"flag=true&flag=false":           3,
+		"flag=":                          3,
+		"qty=20":                         1,
+		"qty=10&qty=3":                   2,
+		"price=2.25":                     1,
+		"at=2026-07-01T09:00:00Z":        1,
+		"at=2026-07-01T17:00:00%2B08:00": 1,
+		"status=paid&flag=true":          2,
+		"status=draft&flag=true":         0,
+	} {
+		page, err := s.ListFromQuery(ctx, mustQuery(t, query))
+		if err != nil {
+			t.Errorf("%s: %v", query, err)
+			continue
+		}
+		if page.Total != want {
+			t.Errorf("%s: total %d, want %d", query, page.Total, want)
+		}
+	}
+	for _, query := range []string{"flag=maybe", "qty=abc", "qty=1.5", "price=x", "price=NaN", "at=yesterday"} {
+		if _, err := s.ListFromQuery(ctx, mustQuery(t, query)); !errors.Is(err, chok.ErrBadRequest) || !errors.Is(err, where.ErrInvalidParam) {
+			t.Errorf("%s: %v", query, err)
+		}
+	}
 }
 
 // TestAggregate_TypeMappingConverges: the drivers hand aggregates back as

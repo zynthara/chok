@@ -65,10 +65,11 @@ import (
 type Store[T db.Modeler] struct {
 	d            *db.DB
 	schema       *schema.Schema
-	queryFields  map[string]string // public name → column: what a URL filters and orders on
-	updateFields map[string]string // public name → column: what Patch writes
-	columns      map[string]string // public name → column: every column, for the code
-	constraints  map[string]string // constraint or index name → public field
+	queryFields  map[string]string       // public name → column: what a URL filters and orders on
+	updateFields map[string]string       // public name → column: what Patch writes
+	columns      map[string]string       // public name → column: every column, for the code
+	filterTypes  map[string]reflect.Type // query fields whose URL values ListFromQuery parses
+	constraints  map[string]string       // constraint or index name → public field
 	soft         bool
 	owned        bool
 	policy       db.StorePolicy
@@ -176,6 +177,7 @@ func New[T db.Modeler](d *db.DB, opts ...Option) *Store[T] {
 	}
 	s := &Store[T]{d: d, schema: stmt.Schema, dialect: stmt.Name()}
 	s.queryFields, s.updateFields, s.columns = declaredFields(t, stmt.Schema)
+	s.filterTypes = filterTypes(t, stmt.Schema, s.queryFields)
 	for field, col := range cfg.aliases {
 		if _, ok := s.columns[field]; !ok {
 			panic(fmt.Sprintf("store.New: Alias(%q, %q): %s declares no field %q", field, col, t.Name(), field))

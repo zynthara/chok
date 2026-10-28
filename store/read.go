@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -269,14 +271,126 @@ func (s *Store[T]) List(ctx context.Context, opts ...where.Option) (*chok.Page[T
 
 // ListFromQuery serves chok.List: page, size, order=field:asc|desc and
 // cursor from the query string, and every query field as an equality
-// filter (a repeated parameter matches any of its values). An unknown
-// parameter is a 400. The page always carries Total.
+// filter (a repeated parameter matches any of its values). A filter on a
+// boolean, numeric or time field is read as that type first: true or
+// false (1 and 0 too), a number, an RFC 3339 time. An unknown parameter,
+// or a value that does not parse, is a 400. The page always carries Total.
 func (s *Store[T]) ListFromQuery(ctx context.Context, q url.Values) (*chok.Page[T], error) {
+	q, typed, err := s.typedFilters(q)
+	if err != nil {
+		return nil, queryError(err)
+	}
 	opts, err := where.FromQuery(q, s.queryFields, true)
 	if err != nil {
 		return nil, queryError(err)
 	}
-	return s.List(ctx, append(opts, where.Count())...)
+	return s.List(ctx, append(append(opts, typed...), where.Count())...)
+}
+
+// typedFilters takes the filters on filterTypes fields out of q and
+// returns them as options holding values of the field's Go type. As text,
+// the way where.FromQuery passes every value, ?flag=true matched no row on
+// SQLite and the false rows on MySQL: both read "true" as 0 against a
+// boolean column. As there, an empty value is no filter and a repeated
+// parameter matches any of its values.
+func (s *Store[T]) typedFilters(q url.Values) (url.Values, []where.Option, error) {
+	rest := maps.Clone(q)
+	var opts []where.Option
+	for _, name := range slices.Sorted(maps.Keys(q)) {
+		t, ok := s.filterTypes[name]
+		if !ok || slices.Contains(listParams, name) {
+			continue
+		}
+		var args []any
+		for _, v := range q[name] {
+			if v == "" {
+				continue
+			}
+			x, err := parseFilter(t, v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%w: %s must be %v, got %q", where.ErrInvalidParam, name, err, v)
+			}
+			args = append(args, x)
+		}
+		delete(rest, name)
+		switch len(args) {
+		case 0:
+		case 1:
+			opts = append(opts, where.Eq(name, args[0]))
+		default:
+			opts = append(opts, where.In(name, args...))
+		}
+	}
+	return rest, opts, nil
+}
+
+// listParams are where.FromQuery's own parameters: a field of the same
+// name is not a URL filter.
+var listParams = []string{"page", "size", "order", "cursor"}
+
+// filterTypes: the query fields whose URL values ListFromQuery parses —
+// booleans, numbers and times, behind a pointer too. A type with its own
+// driver.Valuer decides its database form and keeps the text.
+func filterTypes(t reflect.Type, sch *schema.Schema, query map[string]string) map[string]reflect.Type {
+	types := map[string]reflect.Type{}
+	for _, f := range sch.Fields {
+		if f.DBName == "" || f.DBName == "id" {
+			continue
+		}
+		name, ft := publicName(t, f), f.IndirectFieldType
+		if _, ok := query[name]; !ok || ft.Implements(valuerType) || reflect.PointerTo(ft).Implements(valuerType) {
+			continue
+		}
+		switch ft.Kind() {
+		case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64:
+			types[name] = ft
+		default:
+			if ft == timeType {
+				types[name] = ft
+			}
+		}
+	}
+	return types
+}
+
+// parseFilter reads a URL value as a filterTypes type. Its error says
+// what the value must be.
+func parseFilter(t reflect.Type, v string) (any, error) {
+	if t == timeType {
+		at, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return nil, errors.New("an RFC 3339 time")
+		}
+		return at.UTC(), nil
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, errors.New("true or false")
+		}
+		return b, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n, err := strconv.ParseInt(v, 10, t.Bits())
+		if err != nil {
+			return nil, errors.New("an integer")
+		}
+		return n, nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		n, err := strconv.ParseUint(v, 10, t.Bits())
+		if err != nil {
+			return nil, errors.New("a non-negative integer")
+		}
+		return n, nil
+	default:
+		f, err := strconv.ParseFloat(v, t.Bits())
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, errors.New("a number")
+		}
+		return f, nil
+	}
 }
 
 // ListWithCursor returns a keyset page: the rows after where.Cursor's
