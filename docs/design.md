@@ -448,6 +448,12 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   的码、`Users().MarkEmailVerified`），同一事务里解绑此前的所有绑定——v3 不会
   产生这种绑定，v2 的数据里可能有。否则抢注者绑定的登录方式，会在主人接管账户
   之后留下来。
+- **第一次用码证明邮箱**：passwordless 的码第一次证明一个已有账户的邮箱时，清掉
+  此前设的密码（`has_password` 置 false，hash 换成随机串）并吊销 token（bump
+  `password_version`），抢注者设的密码与拿到的 token 一起失效；之后要密码就走
+  reset-password。reset-password 本来就换密码、吊销 token。
+  `Users().MarkEmailVerified` 是应用自己的验证（多半是注册后马上点的链接），密码
+  与 token 都不动：`auth.admins` 里的邮箱应由主人自己注册，或者关掉开放注册。
 - **用户管理**：`Users()` 是运维面（Create、Get、`GetByEmail`、SetRoles、
   SetActive、ResetPassword、MarkEmailVerified、RevokeTokens），并实现
   `chok.Lister[User]`：全表、没有 owner 围栏，可按 email、name、email_verified、

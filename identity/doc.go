@@ -36,7 +36,9 @@
 // one went out within auth.passwordless.resend_after;
 // POST {prefix}/passwordless/verify with {email, code} or {token} answers
 // what login does, creating the account of an unknown address unless
-// auto_register is off. Codes are kept as HMACs in auth_login_codes,
+// auto_register is off. The code that first proves an existing account's
+// address takes the account over: the password set before it stops
+// working and its tokens are revoked. Codes are kept as HMACs in auth_login_codes,
 // tried at most max_attempts times. With auth.passwordless.only the
 // password routes are not mounted at all.
 //

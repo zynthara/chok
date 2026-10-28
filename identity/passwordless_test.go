@@ -162,8 +162,10 @@ func TestPasswordless_VerifySignsIn(t *testing.T) {
 	if _, ok := loginCodeOf(t, idn, "alice@test.com"); ok {
 		t.Fatal("the code outlives the sign-in")
 	}
-	if u := userByEmail(t, idn, "alice@test.com"); !u.HasPassword {
-		t.Fatal("the password stays")
+	// The first proof took the account over: the password set before it
+	// is gone (TestPasswordless_FirstProofRevokesThePassword).
+	if u := userByEmail(t, idn, "alice@test.com"); u.HasPassword {
+		t.Fatal("the password set before the first proof stays")
 	}
 
 	// An unknown address: the account comes with the first sign-in.
@@ -182,6 +184,32 @@ func TestPasswordless_VerifySignsIn(t *testing.T) {
 	// It has no password to log in with; the reason says so.
 	if code, _ := login(t, c, "bob@test.com", "anything123"); code != http.StatusUnauthorized {
 		t.Fatalf("a password login = %d", code)
+	}
+}
+
+// TestPasswordless_FirstProofRevokesThePassword: whoever registers an
+// address need not own it. The code that proves the address first takes
+// the account over clean: the password set before it no longer logs in
+// and the tokens issued before are revoked, so a squatter that registered
+// a listed administrator's address is left with nothing.
+func TestPasswordless_FirstProofRevokesThePassword(t *testing.T) {
+	idn, sender := pwIdentity(t, Config{Admins: []string{"root@test.com"}})
+	c := serve(t, idn)
+	squatter := register(t, c, "root@test.com", "squatterpass1")
+	m := startCode(t, c, sender, "root@test.com")
+	code, tok, e := verify(c, map[string]string{"email": "root@test.com", "code": m.Code})
+	if code != http.StatusOK {
+		t.Fatalf("the owner's verify = %d %+v", code, e)
+	}
+	if code, _ := login(t, c, "root@test.com", "squatterpass1"); code != http.StatusUnauthorized {
+		t.Fatalf("the squatter's password after the owner's code = %d", code)
+	}
+	if code := c.WithBearer(squatter).GetJSON("/auth/me", nil); code != http.StatusUnauthorized {
+		t.Fatalf("the squatter's token after the owner's code = %d", code)
+	}
+	var me meResponse
+	if code := c.WithBearer(tok.Token).GetJSON("/auth/me", &me); code != http.StatusOK || !me.EmailVerified || len(me.Roles) != 1 || me.Roles[0] != "admin" {
+		t.Fatalf("the owner's token = %d %+v", code, me)
 	}
 }
 

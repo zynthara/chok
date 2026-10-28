@@ -217,12 +217,28 @@ func (idn *Identity) passwordlessVerify(ctx context.Context, req *passwordlessVe
 			return nil, err
 		}
 	}
-	// The code proved the address.
+	// The code proved the address. The first proof takes the account over
+	// clean: whoever registered the address need not own it, so the
+	// password set before stops working and the tokens issued are revoked.
 	if !user.EmailVerified {
-		if err := idn.verifyEmail(ctx, user, map[string]any{}); err != nil {
+		set := map[string]any{"password_version": bumpVersion}
+		if user.HasPassword {
+			hash, err := hashPassword(randomSecret(), idn.cost)
+			if err != nil {
+				return nil, err
+			}
+			set["password_hash"], set["has_password"] = hash, false
+		}
+		if err := idn.verifyEmail(ctx, user, set); err != nil {
 			return nil, err
 		}
-		user.EmailVerified = true
+		if user.HasPassword {
+			chok.LoggerFrom(ctx).InfoContext(ctx, "identity: a mailed code proved the address first; the password set before it no longer works", "user_id", user.RID)
+		}
+		// The token carries the new password_version.
+		if user, err = idn.users.Get(ctx, store.RID(user.RID)); err != nil {
+			return nil, err
+		}
 	}
 	return idn.issueToken(ctx, user, now.Unix())
 }

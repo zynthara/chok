@@ -192,10 +192,14 @@ func (s *UserService) RevokeTokens(ctx context.Context, id string) error {
 }
 
 // MarkEmailVerified records that the user proved the email address, after
-// the application's own verification (a link, a code). Tokens stay
-// valid; calling it again is a no-op. As with a mailed reset token or
-// code, the first verification unlinks the providers linked before it:
-// identity links none to an unverified account, but data from v2 may.
+// the application's own verification (a link, a code). As with a mailed
+// reset token or code, the first verification unlinks the providers
+// linked before it: identity links none to an unverified account, but
+// data from v2 may. Unlike a mailed code it keeps the password and the
+// tokens, taking the verification for the registrant's own — a link
+// clicked right after registering — so an address in auth.admins should
+// be registered by its owner, or registration turned off. Calling it
+// again is a no-op.
 func (s *UserService) MarkEmailVerified(ctx context.Context, id string) error {
 	u, err := s.Get(ctx, id)
 	if err != nil {

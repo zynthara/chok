@@ -83,7 +83,12 @@ type Config struct {
 	// next time a token is issued to it or Authn reads it. The grant is
 	// written once and never undone here: removing an address revokes
 	// nothing (Users().SetRoles does). An unverified address gets nothing,
-	// so whoever registers a listed address first gains no power by it.
+	// so whoever registers a listed address first gains no power by it,
+	// and loses the account once the owner proves the address with a
+	// mailed reset token or code. Users().MarkEmailVerified keeps the
+	// registrant's password: an application that verifies addresses that
+	// way should have the owners register the listed ones, or turn
+	// registration off.
 	Admins []string `yaml:"admins"`
 }
 

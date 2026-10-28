@@ -206,6 +206,12 @@ package, configuration key, API, table and metric to its v3 form.
   need not own it. The first proof of an address — reset-password, a
   passwordless code, `Users().MarkEmailVerified` — unlinks the providers
   linked before it; v2 let unverified accounts link.
+- **Breaking:** a passwordless code that proves an address for the first
+  time takes the account over clean: the password set before it no
+  longer logs in (reset-password sets a new one) and the account's tokens
+  are revoked, since whoever registered the address need not own it.
+  `Users().MarkEmailVerified` keeps both: list in `auth.admins` only
+  addresses their owners registered, or turn registration off.
 - **Breaking:** `jobs.Worker` is generic: `Worker[T](topic, fn)` with
   `fn func(ctx, jobs.Message[T]) error`, the payload decoded into `T`
   (`Worker[jsontext.Value]` for the JSON as stored); a payload that does
