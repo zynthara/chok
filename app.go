@@ -126,6 +126,9 @@ func New(base Base, opts ...Option) *App {
 	} else if base.Log.Access {
 		a.access = a.logger
 	}
+	for _, w := range base.warnings {
+		a.logger.Warn("chok: " + w)
+	}
 	a.crossOrigin = a.crossOriginProtection()
 	a.mountBuiltins()
 	return a

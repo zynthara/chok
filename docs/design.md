@@ -135,7 +135,10 @@ identity 关审计队列时数据库还在；realtime 的 Hub 放在会发布事
 - **严格**：未知键 → `unknown key http.adr (did you mean addr?)`；未知段同理；
   类型错误点名路径与行号；先跑 `validate` tag（go-playground/validator，错误按
   yaml 路径报告），再递归调用 `Validate() error`；所有问题聚合成一个错误。
-  对不上任何键的 `{PREFIX}_*` 环境变量只告警。
+  对不上任何键的 `{PREFIX}_*` 环境变量只告警：`Load` 把告警存进 `Base`（未导出
+  字段），`New` 建好 logger 后按原顺序经 App 的 logger 发出（`log.format: json`
+  时就是 JSON 行，给了 `chok.Logger` 就走注入的 logger）；配置类型里没有 `Base`、
+  或 `Load` 失败时当场经 `slog.Default` 发出；`--check-config` 打到 stderr。
 - **`--check-config`**：`Load` 在命令行上看到它就打印脱敏后的有效配置并
   exit 0，失败 exit 2，不构建 App。CI 可以直接拿应用二进制校验配置（D16）。
 - **热更**：只有 `log.level`，经 SIGHUP。其余改动需要重启——这是刻意的：v2 的

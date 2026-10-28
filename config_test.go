@@ -2,6 +2,7 @@ package chok
 
 import (
 	"bytes"
+	"encoding/json/v2"
 	"fmt"
 	"log/slog"
 	"os"
@@ -88,18 +89,78 @@ func TestLoad_TyposFailWithSuggestions(t *testing.T) {
 	}
 }
 
+// TestLoad_EnvTypoIsWarningNotError: an environment variable with the
+// prefix that matches no key is a warning, not an error. Load keeps it in
+// the Base, and New logs it through the App's logger: a JSON line with
+// the default format, the injected logger when there is one.
 func TestLoad_EnvTypoIsWarningNotError(t *testing.T) {
 	t.Chdir(t.TempDir())
-	var buf bytes.Buffer
+	var global bytes.Buffer
 	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&global, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
+	path := filepath.Join(t.TempDir(), "app.log")
 	t.Setenv("TYPO_HTTP_ADR", ":1")
-	if _, err := Load[Base]("typo", Args(nil)); err != nil {
+	t.Setenv("TYPO_LOG_OUTPUT", path)
+	cfg, err := Load[appConfig]("typo", Args(nil))
+	if err != nil {
 		t.Fatalf("an unmatched variable is not an error: %v", err)
 	}
-	if !strings.Contains(buf.String(), "TYPO_HTTP_ADR matches no config key (did you mean TYPO_HTTP_ADDR?)") {
-		t.Fatalf("warning: %s", buf.String())
+	if global.Len() != 0 {
+		t.Fatalf("Load logged before an App could: %s", global.String())
+	}
+	const warning = "chok: environment variable TYPO_HTTP_ADR matches no config key (did you mean TYPO_HTTP_ADDR?)"
+
+	app := New(cfg.Base) // the App's own logger: json, to the file
+	app.closeLogs()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var line struct {
+		Level string `json:"level"`
+		Msg   string `json:"msg"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &line); err != nil || line.Level != "WARN" || line.Msg != warning {
+		t.Fatalf("the warning is one JSON line from the App's logger: %s (%v)", raw, err)
+	}
+
+	var injected bytes.Buffer
+	New(cfg.Base, Logger(slog.New(slog.NewTextHandler(&injected, nil))))
+	if !strings.Contains(injected.String(), `level=WARN msg="`+warning+`"`) {
+		t.Fatalf("an injected logger gets it: %s", injected.String())
+	}
+
+	// No Base to keep it in, or a failed Load: slog.Default at once.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&global, nil))) // New installed its own
+	if _, err := Load[struct{ Port int }]("typo", Args(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(global.String(), "TYPO_HTTP_ADR matches no config key") {
+		t.Fatalf("a configuration without a Base logs at once: %s", global.String())
+	}
+	global.Reset()
+	t.Setenv("TYPO_APP_START_TIMEOUT", "soon")
+	if _, err := Load[Base]("typo", Args(nil)); err == nil {
+		t.Fatal("a bad duration is an error")
+	}
+	if !strings.Contains(global.String(), "TYPO_HTTP_ADR matches no config key") {
+		t.Fatalf("a failed Load logs at once: %s", global.String())
+	}
+}
+
+// TestLoad_CheckConfigPrintsWarningsToStderr: --check-config never gets
+// to New, so its warnings go to stderr with the configuration.
+func TestLoad_CheckConfigPrintsWarningsToStderr(t *testing.T) {
+	t.Chdir(t.TempDir())
+	out, errOut := stubProcess(t)
+	t.Setenv("TYPO_HTTP_ADR", ":1")
+	if code := exited(func() { _, _ = Load[Base]("typo", Args([]string{"--check-config"})) }); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(errOut.String(), "typo: warning: environment variable TYPO_HTTP_ADR matches no config key") ||
+		!strings.Contains(out.String(), "configuration is valid") {
+		t.Fatalf("stdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 }
 

@@ -33,6 +33,10 @@ type Base struct {
 	App  AppConfig  `yaml:"app"`
 	HTTP HTTPConfig `yaml:"http"`
 	Log  LogConfig  `yaml:"log"`
+
+	// warnings are what Load found worth a warning; New logs them through
+	// the App's logger, in the configured format.
+	warnings []string
 }
 
 // AppConfig is the app section.
@@ -200,7 +204,9 @@ func Args(args []string) LoadOption {
 // http.adr (did you mean addr?)"), a value of the wrong type names its
 // path, validate tags and Validate methods run on the result, and every
 // problem is reported in one error. An environment variable with the
-// prefix that matches no key is logged as a warning.
+// prefix that matches no key is a warning: Load keeps it in the Base that
+// T is or embeds, and New logs it through the App's logger (a T without a
+// Base, or a failed Load, logs it through slog.Default at once).
 //
 // Struct tags: yaml:"key" names the key; default:"value" is its default;
 // secret:"true" masks it wherever the configuration is printed.
@@ -221,17 +227,50 @@ func Load[T any](name string, opts ...LoadOption) (T, error) {
 	cl := parseCommandLine(args)
 	o := conf.Options{Name: name, EnvPrefix: lc.envPrefix, Override: cl.config, File: lc.file, Flags: lc.flags}
 	res, err := conf.Load(&cfg, o)
-	for _, w := range res.Warnings {
-		slog.Warn("chok: " + w)
-	}
 	if cl.check {
+		for _, w := range res.Warnings {
+			_, _ = fmt.Fprintf(stderr, "%s: warning: %s\n", name, w)
+		}
 		checkConfig(name, res.File, cfg, err)
+	}
+	base := baseIn(&cfg)
+	if err != nil || base == nil {
+		for _, w := range res.Warnings {
+			slog.Warn("chok: " + w)
+		}
 	}
 	if err != nil {
 		return cfg, err
 	}
 	remember(name, o, cfg)
+	if base != nil {
+		base.warnings = res.Warnings
+	}
 	return cfg, nil
+}
+
+// baseIn finds the Base that *cfg is or holds in a field, embedded or
+// not, depth first; nil if there is none.
+func baseIn(cfg any) *Base {
+	var find func(v reflect.Value) *Base
+	find = func(v reflect.Value) *Base {
+		if b, ok := v.Addr().Interface().(*Base); ok {
+			return b
+		}
+		if v.Kind() != reflect.Struct {
+			return nil
+		}
+		for i := range v.NumField() {
+			if !v.Type().Field(i).IsExported() {
+				continue
+			}
+			if b := find(v.Field(i)); b != nil {
+				return b
+			}
+		}
+		return nil
+	}
+	return find(reflect.ValueOf(cfg).Elem())
 }
 
 // MustLoad is Load that prints the problems to stderr and exits 2 on error.
