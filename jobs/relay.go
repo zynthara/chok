@@ -104,7 +104,9 @@ type scanPos struct {
 var errSweepRunning = errors.New("jobs: a sweep of this worker is already running")
 
 // errRetryLater ends a sweep quietly at a message whose next try is not
-// due yet: the topic waits without calling the handler.
+// due yet: the topic waits without calling the handler. The scheduler
+// counts the sweep as a run that succeeded and keeps LastError, the
+// failure the topic still waits on.
 var errRetryLater = errors.New("jobs: the next try of the head message is not due")
 
 // loggedError is a delivery failure the relay has logged itself, with the
@@ -167,9 +169,9 @@ func newRelay(topic string, handler func(ctx context.Context, m rawMessage) erro
 // correctness is not affected (at-least-once holds at any budget).
 const maxSweepPages = 100
 
-// run is one sweep. Any error aborted the sweep with the watermark parked
-// before the failed row; a message whose next try is not due ends it
-// quietly, with nil.
+// run is one sweep. An error aborted it with the watermark parked before
+// the failed row; errRetryLater ends it there quietly, at a message whose
+// next try is not due.
 func (r *relay) run(ctx context.Context) error {
 	if !r.mu.TryLock() {
 		return errSweepRunning
@@ -187,9 +189,6 @@ func (r *relay) run(ctx context.Context) error {
 	r.headMu.Lock()
 	r.head = head
 	r.headMu.Unlock()
-	if errors.Is(err, errRetryLater) {
-		return nil
-	}
 	return err
 }
 

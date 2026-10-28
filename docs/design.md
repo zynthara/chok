@@ -501,7 +501,8 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
 其余进程 `enabled: false` 只 Enqueue。`Stats()` 给出每个作业的运行统计；
 `Health` 恒 nil——毒消息不该把实例拉出轮转，失败看统计与日志：worker 的统计另有
 `parked`（本进程停放的条数）、`head_attempts` 与 `next_retry`（topic 卡在一条失败
-消息上时，它的失败次数与下次重试时间）。
+消息上时，它的失败次数与下次重试时间）。那几轮只等下次重试的扫描算作成功，但不清
+`last_error`，所以卡住期间它一直是最近一次失败的错误。
 
 `jobs.Observe(fn)` 是统计的流式版本：每次运行（周期任务、worker 的一轮 sweep、
 retention 清理）开始、结束、失败，以及因运行中而被跳过的触发，都同步交给 fn 一个

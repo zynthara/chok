@@ -231,7 +231,8 @@ type JobStats struct {
 	LastStart time.Time `json:"last_start"`
 	LastEnd   time.Time `json:"last_end"`
 	// LastError is the error of the last finished run; empty when it
-	// succeeded.
+	// succeeded. A worker's sweep that only waits for a failing message's
+	// next try leaves it as it was.
 	LastError string `json:"last_error"`
 	// Runs counts the finished runs, failed ones included; Failures
 	// counts the runs that returned an error or panicked.

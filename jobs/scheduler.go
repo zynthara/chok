@@ -239,7 +239,9 @@ func (s *scheduler) runs(ctx context.Context, e *entry) {
 // its start and its end to the observers. A panic is a failed run: its
 // stack goes to the log at Error (not into LastError, to keep Stats
 // small). A run that ends with its context's error after the scheduler
-// stopped is not a failure: it was told to stop.
+// stopped is not a failure: it was told to stop. Nor is a worker's sweep
+// that ends at a message whose next try is not due (errRetryLater), and
+// it keeps LastError: the topic still waits on that failure.
 func (s *scheduler) execute(ctx context.Context, e *entry) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -266,7 +268,8 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 	}()
 	dur := time.Since(start)
 	stopped := err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err())
-	if stopped {
+	waiting := errors.Is(err, errRetryLater)
+	if stopped || waiting {
 		err = nil
 	}
 
@@ -278,7 +281,7 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 	if err != nil {
 		e.stats.Failures++
 		e.stats.LastError = err.Error()
-	} else {
+	} else if !waiting {
 		e.stats.LastError = ""
 	}
 	e.mu.Unlock()

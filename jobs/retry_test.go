@@ -24,8 +24,9 @@ import (
 // again after RetryBackoff, then after twice as long each time up to
 // MaxBackoff — not on every sweep — and the MaxAttempts-th failure parks
 // it; the messages behind it wait, then flow. While it waits, Stats show
-// its failures and its next try. The clock is synctest's, the database
-// the lane's.
+// its failures, the last one's error and its next try: the sweeps that
+// only wait keep LastError. The clock is synctest's, the database the
+// lane's.
 func TestWorker_BacksOffBetweenTries(t *testing.T) {
 	// gorm caches a table's parsed schema for the whole process, with a
 	// channel in it: parsed first inside the bubble, the cache would
@@ -58,7 +59,8 @@ func TestWorker_BacksOffBetweenTries(t *testing.T) {
 		time.Sleep(2 * time.Second)
 		synctest.Wait()
 		st := j.Stats().Workers[0]
-		if st.HeadAttempts != 2 || !st.NextRetry.Equal(start.Add(3100*time.Millisecond)) || st.Failures != 2 || st.Parked != 0 {
+		if st.HeadAttempts != 2 || !st.NextRetry.Equal(start.Add(3100*time.Millisecond)) || st.Failures != 2 || st.Parked != 0 ||
+			!strings.Contains(st.LastError, "downstream down") {
 			t.Fatalf("stats while the head waits: %+v", st)
 		}
 
@@ -75,7 +77,7 @@ func TestWorker_BacksOffBetweenTries(t *testing.T) {
 			t.Fatalf("after the park the topic delivered %v, want [2]", took)
 		}
 		st = j.Stats().Workers[0]
-		if st.Parked != 1 || st.HeadAttempts != 0 || !st.NextRetry.IsZero() || st.Failures != 4 || st.Messages != 1 {
+		if st.Parked != 1 || st.HeadAttempts != 0 || !st.NextRetry.IsZero() || st.Failures != 4 || st.Messages != 1 || st.LastError != "" {
 			t.Fatalf("stats after the park: %+v", st)
 		}
 		dead, err := j.Dead(t.Context(), "flaky", 0)
