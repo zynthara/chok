@@ -148,7 +148,7 @@ func (c PasswordlessConfig) autoRegister() bool { return c.AutoRegister == nil |
 // verify, the OAuth exchange — sets the cookie too, Authn reads it from a
 // request without an Authorization header, and POST {prefix}/logout clears
 // it. A cookie rides along with every request the browser makes: serve
-// the front end from the same origin and turn on http.csrf.
+// the front end from the same origin and keep http.csrf on (the default).
 type CookieConfig struct {
 	// Enabled turns cookie mode on.
 	Enabled bool `yaml:"enabled"`

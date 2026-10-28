@@ -72,8 +72,11 @@ type HTTPConfig struct {
 	// H2C serves HTTP/2 without TLS (behind a proxy that speaks it).
 	H2C  bool       `yaml:"h2c"`
 	CORS CORSConfig `yaml:"cors"`
-	// CSRF rejects cross-origin unsafe requests (http.CrossOriginProtection).
-	CSRF    bool          `yaml:"csrf"`
+	// CSRF rejects the unsafe requests a browser sends from another site
+	// (http.CrossOriginProtection); clients that send neither
+	// Sec-Fetch-Site nor Origin — curl, apps, services — pass. Turning
+	// it off while routes accept a session cookie logs a warning.
+	CSRF    bool          `yaml:"csrf" default:"true"`
 	OpenAPI OpenAPIConfig `yaml:"openapi"`
 	Health  HealthConfig  `yaml:"health"`
 }

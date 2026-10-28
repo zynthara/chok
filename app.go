@@ -49,6 +49,13 @@ type App struct {
 	// wrapSecurity is what the Wrap middleware's authentication accepts,
 	// on every route; buildHandler records it.
 	wrapSecurity []openapi.Scheme
+	// cookieAuth is set when a route accepts a session cookie.
+	cookieAuth atomic.Bool
+
+	// crossOrigin is the CSRF protection, in the stack with http.csrf;
+	// exempt is the patterns batteries exempted from it (under mu).
+	crossOrigin *http.CrossOriginProtection
+	exempt      map[string]bool
 }
 
 type component struct {
@@ -113,6 +120,7 @@ func New(base Base, opts ...Option) *App {
 	} else if base.Log.Access {
 		a.access = a.logger
 	}
+	a.crossOrigin = a.crossOriginProtection()
 	a.mountBuiltins()
 	return a
 }
@@ -230,6 +238,8 @@ func (a *App) run(ctx context.Context, comps []*component) error {
 		attrs = append(attrs, "version", a.version)
 	}
 	a.logger.Info("chok: starting", attrs...)
+	a.Handler() // the middleware stack is fixed: every route's schemes are known
+	a.warnCookieWithoutCSRF()
 
 	runCtx, cancelRun := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRun()

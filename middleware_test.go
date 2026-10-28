@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/zynthara/chok/v3/internal/csrf"
+	"github.com/zynthara/chok/v3/internal/openapi"
 	"github.com/zynthara/chok/v3/internal/reqinfo"
 )
 
@@ -92,9 +95,11 @@ func TestCORS(t *testing.T) {
 	}
 }
 
+// TestCSRF_RejectsCrossSitePost: with the default http.csrf, a browser's
+// cross-site POST is a 403 envelope; a CORS origin is trusted, and a
+// same-origin request or one without the browser's headers passes.
 func TestCSRF_RejectsCrossSitePost(t *testing.T) {
 	base := testBase(t)
-	base.HTTP.CSRF = true
 	base.HTTP.CORS.AllowOrigins = []string{"https://app.example"}
 	app := New(base, Logger(quiet()))
 	POST(app.Router(), "/transfer", func(context.Context, *None) (None, error) { return None{}, nil })
@@ -110,6 +115,114 @@ func TestCSRF_RejectsCrossSitePost(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("same-origin: %d", rec.Code)
 	}
+	rec = do(t, app.Handler(), call{method: http.MethodPost, path: "/transfer"})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("no Sec-Fetch-Site and no Origin, as from curl: %d", rec.Code)
+	}
+}
+
+// TestCSRF_OnByDefault: http.csrf defaults to true, through Load and in
+// the defaults a zero Base gets.
+func TestCSRF_OnByDefault(t *testing.T) {
+	if !testBase(t).HTTP.CSRF {
+		t.Fatal("the defaults leave csrf off")
+	}
+	loaded, err := Load[Base]("csrftest", Args(nil))
+	if err != nil || !loaded.HTTP.CSRF {
+		t.Fatalf("Load: csrf %v, %v", loaded.HTTP.CSRF, err)
+	}
+	app := New(loaded, Logger(quiet()))
+	POST(app.Router(), "/x", func(context.Context, *None) (None, error) { return None{}, nil })
+	if rec := do(t, app.Handler(), call{method: http.MethodPost, path: "/x", header: map[string]string{"Sec-Fetch-Site": "cross-site"}}); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site POST: %d", rec.Code)
+	}
+}
+
+// TestCSRF_BatteryExemption: a battery exempts its own route through the
+// internal hook, below its router's prefix; other routes stay checked, a
+// repeat is harmless and a foreign router is ignored.
+func TestCSRF_BatteryExemption(t *testing.T) {
+	app := New(testBase(t), Logger(quiet()))
+	auth := app.Group("/auth")
+	auth.Handle(http.MethodPost, "/apple/callback", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusFound) }))
+	POST(auth, "/login", func(context.Context, *None) (None, error) { return None{}, nil })
+	csrf.Exempt(auth, http.MethodPost, "/apple/callback")
+	csrf.Exempt(auth, http.MethodPost, "/apple/callback")
+	csrf.Exempt(http.NewServeMux(), http.MethodPost, "/login")
+	crossSite := map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://appleid.apple.com"}
+	if rec := do(t, app.Handler(), call{method: http.MethodPost, path: "/auth/apple/callback", header: crossSite}); rec.Code != http.StatusFound {
+		t.Fatalf("exempted callback: %d", rec.Code)
+	}
+	if rec := do(t, app.Handler(), call{method: http.MethodPost, path: "/auth/login", header: crossSite}); rec.Code != http.StatusForbidden {
+		t.Fatalf("login stays checked: %d", rec.Code)
+	}
+}
+
+// TestCSRF_CookieWithoutCSRFWarnsOnce: with http.csrf off and routes
+// that accept the session cookie, Run warns once before it serves; with
+// csrf on, or only a bearer token, it says nothing.
+func TestCSRF_CookieWithoutCSRFWarnsOnce(t *testing.T) {
+	ok := func(context.Context, *None) (None, error) { return None{}, nil }
+	for name, c := range map[string]struct {
+		csrf  bool
+		authn Middleware
+		want  int
+	}{
+		"cookie, csrf off": {false, fakeAuthn(openapi.BearerAuth, openapi.CookieAuth("sid")), 1},
+		"cookie, csrf on":  {true, fakeAuthn(openapi.CookieAuth("sid")), 0},
+		"bearer, csrf off": {false, fakeAuthn(openapi.BearerAuth), 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := testBase(t)
+			base.HTTP.CSRF = c.csrf
+			var logs syncBuffer
+			app := New(base, Logger(slog.New(slog.NewJSONHandler(&logs, nil))))
+			api := app.Group("/api", c.authn)
+			GET(api, "/a", ok)
+			POST(api, "/b", ok)
+			app.Router().Handle(http.MethodGet, "/raw", http.NotFoundHandler(), c.authn)
+			ctx, cancel := context.WithCancel(t.Context())
+			done := runAsync(app, ctx)
+			waitFor(t, app.ready.Load, "ready")
+			cancel()
+			if err := await(t, done); err != nil {
+				t.Fatal(err)
+			}
+			if n := strings.Count(logs.String(), "http.csrf is off while routes accept a session cookie"); n != c.want {
+				t.Fatalf("%d warnings, want %d:\n%s", n, c.want, logs.String())
+			}
+		})
+	}
+	// Wrap's authentication counts as well.
+	base := testBase(t)
+	base.HTTP.CSRF = false
+	var logs syncBuffer
+	app := New(base, Logger(slog.New(slog.NewJSONHandler(&logs, nil))), Wrap(fakeAuthn(openapi.CookieAuth("sid"))))
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(app, ctx)
+	waitFor(t, app.ready.Load, "ready")
+	cancel()
+	if err := await(t, done); err != nil || strings.Count(logs.String(), "http.csrf is off") != 1 {
+		t.Fatalf("Wrap: %v\n%s", err, logs.String())
+	}
+}
+
+// syncBuffer is a bytes.Buffer the App's goroutines may log into.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func TestTimeout_Writes504WhenHandlerRespectsCtx(t *testing.T) {

@@ -46,8 +46,11 @@
 // alone — Authn reads that cookie from a request without an
 // Authorization header, and POST {prefix}/logout clears it. A browser
 // sends the cookie with every request to the API, so serve the front end
-// from the same origin and turn on http.csrf; SameSite lax, the default,
-// keeps it off other sites' POSTs.
+// from the same origin and keep http.csrf on (the default; the App warns
+// at startup when it is off); SameSite lax, the default, keeps it off
+// other sites' POSTs. The OAuth callbacks are exempt from http.csrf:
+// Apple posts its callback from its own site, and the state parameter
+// defends it.
 //
 // # Tokens and the principal
 //

@@ -235,7 +235,8 @@ v3 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复键
 
 - 默认中间件栈（Recover、RequestID、ClientIP、访问日志、超时、CORS）保留，次序
   冻结；遥测由 `telemetry` 作为 `Instrumenter` 插进去，不再由 web 模块按角色自动挂。
-  CSRF 用标准库的 `http.CrossOriginProtection`（`http.csrf: true`）。
+  CSRF 用标准库的 `http.CrossOriginProtection`（`http.csrf`，默认开；只拦浏览器
+  的跨站写请求，curl 与移动端不受影响）。
 - 访问日志字段：method、path、route、status、bytes、duration、request_id、
   client_ip；JSON 格式下 `duration` 是 `"1.5ms"` 这样的字符串。
 - OpenAPI 从 3.0 升到 3.1；文档在 `/openapi.json`、UI 在 `/docs`（v2 是

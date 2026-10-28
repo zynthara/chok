@@ -585,6 +585,35 @@ func TestOAuth_FormPostCallback(t *testing.T) {
 	}
 }
 
+// TestOAuth_CallbackIsExemptFromCSRF: Apple posts the callback from its
+// own site, which the default CSRF protection would refuse; identity
+// exempts each provider's POST callback, which its state parameter
+// defends, and nothing else.
+func TestOAuth_CallbackIsExemptFromCSRF(t *testing.T) {
+	p := newFake("fake")
+	p.caps = oauth.Capabilities{CallbackMethod: http.MethodPost, RequiresFormPost: true}
+	fx := newOAuthFixture(t, Config{}, p)
+	p.seed("c", verified("x", "x@idp.test"))
+	start := fx.send(http.MethodGet, "/auth/fake/start", nil, nil)
+	state := query(t, start.Header.Get("Location"), "state")
+	crossSite := func(path string, form url.Values) *http.Response {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Origin", "https://appleid.apple.com")
+		for _, ck := range start.Cookies() {
+			req.AddCookie(ck)
+		}
+		return fx.c.Do(req)
+	}
+	if cb := crossSite("/auth/fake/callback", url.Values{"code": {"c"}, "state": {state}}); cb.StatusCode != http.StatusFound {
+		t.Fatalf("a cross-site form post to the callback = %d", cb.StatusCode)
+	}
+	if resp := crossSite("/auth/exchange", url.Values{"code": {"x"}}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a cross-site POST to exchange = %d; only the callback is exempt", resp.StatusCode)
+	}
+}
+
 func TestOAuth_CloseStopsTheStore(t *testing.T) {
 	fx := newOAuthFixture(t, Config{}, nil)
 	if err := fx.idn.Close(t.Context()); err != nil {

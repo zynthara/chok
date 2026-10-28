@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/zynthara/chok/v3/internal/clientip"
+	"github.com/zynthara/chok/v3/internal/csrf"
+	"github.com/zynthara/chok/v3/internal/openapi"
 	"github.com/zynthara/chok/v3/internal/reqinfo"
 )
 
@@ -52,8 +54,9 @@ func ClientIP(ctx context.Context) string {
 func (a *App) buildHandler() http.Handler {
 	h, security := wrap(http.HandlerFunc(a.serveMux), a.wrap)
 	a.wrapSecurity = security
+	a.noteCookieAuth(security)
 	if a.base.HTTP.CSRF {
-		h = a.csrf(h)
+		h = a.crossOrigin.Handler(h)
 	}
 	if len(a.base.HTTP.CORS.AllowOrigins) > 0 {
 		h = cors(a.base.HTTP.CORS, h)
@@ -294,19 +297,66 @@ func cors(c CORSConfig, next http.Handler) http.Handler {
 	})
 }
 
-// csrf rejects cross-origin unsafe requests; the CORS origins are trusted.
-func (a *App) csrf(next http.Handler) http.Handler {
+// crossOriginProtection rejects cross-origin unsafe requests with a 403
+// envelope; the CORS origins are trusted.
+func (a *App) crossOriginProtection() *http.CrossOriginProtection {
 	p := http.NewCrossOriginProtection()
-	for _, o := range a.base.HTTP.CORS.AllowOrigins {
-		if o == "*" {
-			continue
-		}
-		if err := p.AddTrustedOrigin(o); err != nil {
-			a.logger.Warn("chok: http.cors origin is not usable for csrf", "origin", o, "error", err)
+	if a.base.HTTP.CSRF {
+		for _, o := range a.base.HTTP.CORS.AllowOrigins {
+			if o == "*" {
+				continue
+			}
+			if err := p.AddTrustedOrigin(o); err != nil {
+				a.logger.Warn("chok: http.cors origin is not usable for csrf", "origin", o, "error", err)
+			}
 		}
 	}
 	p.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, ErrForbidden.Msgf("cross-origin request denied"))
 	}))
-	return p.Handler(next)
+	return p
+}
+
+// A battery exempts its own route — an OAuth provider's form_post
+// callback — through the internal hook: the App exports no exemption.
+func init() {
+	csrf.Exempt = func(r any, method, pattern string) {
+		if cr, ok := r.(*router); ok {
+			full := joinPath(cr.prefix, pattern)
+			if method != "" {
+				full = method + " " + full
+			}
+			cr.app.exemptCSRF(full)
+		}
+	}
+}
+
+// exemptCSRF lets requests matching pattern past the CSRF check, once.
+func (a *App) exemptCSRF(pattern string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.exempt[pattern] {
+		return
+	}
+	if a.exempt == nil {
+		a.exempt = map[string]bool{}
+	}
+	a.exempt[pattern] = true
+	a.crossOrigin.AddInsecureBypassPattern(pattern)
+}
+
+// noteCookieAuth remembers that a route accepts a session cookie, which
+// makes a switched-off http.csrf worth a warning.
+func (a *App) noteCookieAuth(security []openapi.Scheme) {
+	if slices.ContainsFunc(security, func(s openapi.Scheme) bool { return s.In == "cookie" }) {
+		a.cookieAuth.Store(true)
+	}
+}
+
+// warnCookieWithoutCSRF is the one warning Run gives when the session
+// cookie travels with requests that nothing checks the origin of.
+func (a *App) warnCookieWithoutCSRF() {
+	if !a.base.HTTP.CSRF && a.cookieAuth.Load() {
+		a.logger.Warn("chok: http.csrf is off while routes accept a session cookie: another site can make a signed-in browser act for its user")
+	}
 }

@@ -8,9 +8,6 @@ log:
 
 http:
   addr: ":8080"
-  # The session cookie goes along with every request the browser makes:
-  # refuse cross-origin writes.
-  csrf: true
   openapi:
     title: Chatter API
 

@@ -64,7 +64,8 @@ API 的地方，走 `internal/` 下的挂点：`internal/dbx`
 （db 告诉 store 与电池的东西：SoftUnique 索引、无基座的普通表、语句观察者、
 电池的迁移文件）、`internal/logtap`（telemetry 桥接 App 的 logger）、
 `internal/tracectx`（审计记录补 trace id）、`internal/redislog`（go-redis
-日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）。挂点都由提供方
+日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）、`internal/csrf`
+（电池为自己的路由登记 CSRF 豁免）。挂点都由提供方
 在 `init` 里赋值，使用方读取，公开面不变。另有一个内部接口
 `internal/openapi.Securer`：identity 的 `Authn()` 返回的 handler 实现它，报告
 自己接受的认证方案，根包在套中间件时识别它（§5.4）。
@@ -195,9 +196,19 @@ ClientIP（只信 `http.trusted_proxies` 里的代理）→ 遥测槽位（`Inst
 → AccessLog（字段固定：method、path、route、status、bytes、duration、
 request_id、client_ip；JSON 格式下 duration 是 `"1.5ms"` 这样的字符串）→
 Timeout（`http.request_timeout` > 0 时）→ CORS（配置了 `http.cors` 时）→
-CSRF（`http.csrf` 时套 `http.CrossOriginProtection`）→ `chok.Wrap(...)` →
-路由组 → 路由级 `Use(...)`。请求内用 `chok.RequestID(ctx)`、
-`chok.ClientIP(ctx)`、`chok.LoggerFrom(ctx)`（带 request_id 的子 logger）。
+CSRF（`http.csrf`，默认开）→ `chok.Wrap(...)` → 路由组 → 路由级 `Use(...)`。
+请求内用 `chok.RequestID(ctx)`、`chok.ClientIP(ctx)`、`chok.LoggerFrom(ctx)`
+（带 request_id 的子 logger）。
+
+CSRF 是标准库的 `http.CrossOriginProtection`：只查不安全方法（POST / PUT /
+PATCH / DELETE）的 `Sec-Fetch-Site` 与 `Origin`，浏览器从别的网站发来的这类请求
+得 403 信封；curl、移动端、服务间调用不带这两个头，不受影响。
+`http.cors.allow_origins`（`*` 除外）加为可信来源，配了 CORS 的跨域前端照常可用。
+它默认开着，关掉会告警：`http.csrf: false` 而有路由用 cookie 认证（认证中间件
+报告了 cookieAuth，§5.4）时，`Run` 在开始监听前记一条 Warn。电池经
+`internal/csrf` 挂点为自己的路由登记豁免——identity 为每个 OAuth provider 的
+`POST {prefix}/{name}/callback` 登记（Apple 的 `form_post` 回调是
+appleid.apple.com 发起的跨站 POST，防线是 state 参数）；应用没有公开的豁免 API。
 
 ### 5.4 OpenAPI 与内建端点
 
@@ -365,10 +376,10 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   所以这几条路由带一个路由级中间件，把 ResponseWriter 放进请求 ctx。`Authn` 在
   没有 Authorization 头时读这个 cookie（有头以头为准）；logout 清 cookie、不吊销
   token（token 无状态，要立即失效用 `Users().RevokeTokens`）。浏览器会给每个请求
-  自动带上 cookie，所以 cookie 会话必须配 `http.csrf: true` 并让前端与 API 同源
-  （或在 `http.cors` 里列出并开 `allow_credentials`）；identity 看不到 http 段，
-  只能在文档里写明。OpenAPI 加 `cookieAuth`（apiKey in cookie），非公开路由列
-  bearer 与 cookie 两种。
+  自动带上 cookie，所以 cookie 会话靠 `http.csrf`（默认开着，关掉会告警，§5.3）
+  并让前端与 API 同源（或在 `http.cors` 里列出并开 `allow_credentials`）。
+  cookie 模式下 `Authn` 向 OpenAPI 报告 bearer 与 `cookieAuth`（apiKey in
+  cookie）两种（§5.4）。
 - **OAuth**：Google / Apple 走 OIDC（自实现校验）、GitHub、Facebook；
   `Provider` 是封闭接口，四个子包各只导出 `New(identity.ProviderConfig)`。
   配置了却没在代码里链接的 provider 让 `New` 失败。进行中的 OAuth 状态只在进程

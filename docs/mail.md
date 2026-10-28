@@ -68,8 +68,6 @@ func main() {
 
 ```yaml
 # chok.yaml; the signing key comes from SHOP_AUTH_SIGNING_KEY
-http:
-  csrf: true                  # the session cookie goes with every request
 db:
   driver: sqlite
   sqlite:
@@ -299,8 +297,6 @@ of a user's tokens at once. With `cookie.only`, the bodies leave the
 token out (`{"expires_at"}` alone): the page's scripts never see it.
 
 ```yaml
-http:
-  csrf: true          # refuse cross-origin writes
 auth:
   cookie:
     enabled: true
@@ -310,15 +306,17 @@ auth:
 
 A browser sends the cookie with every request to your API, wherever the
 request comes from, so a cookie session needs protection from cross-site
-requests: turn on `http.csrf` (Go's `CrossOriginProtection`: a
-cross-origin `POST`, `PUT`, `PATCH` or `DELETE` from a browser is a 403)
-and serve the page from the API's origin. `SameSite=Lax` keeps the cookie
-off other sites' `POST`s as well. A front end on another origin goes in
-`http.cors.allow_origins`, which `http.csrf` trusts, with
-`http.cors.allow_credentials: true`, and fetches with
-`credentials: "include"`; on another site altogether it also needs
-`same_site: none`. identity cannot see the `http` section, so it cannot
-check any of this for you.
+requests. `http.csrf` gives it and is on by default (Go's
+`CrossOriginProtection`: a cross-origin `POST`, `PUT`, `PATCH` or
+`DELETE` from a browser is a 403; curl and mobile apps send none of the
+headers it reads and pass); switch it off while routes take the cookie
+and the app logs a warning when it starts. Serve the page from the API's
+origin. `SameSite=Lax` keeps the cookie off other sites' `POST`s as well.
+A front end on another origin goes in `http.cors.allow_origins`, which
+`http.csrf` trusts, with `http.cors.allow_credentials: true`, and fetches
+with `credentials: "include"`; on another site altogether it also needs
+`same_site: none`. The OAuth callbacks are exempt: Apple posts its
+callback from its own site, and the `state` parameter defends it.
 
 In the page, `fetch` sends the cookie on its own (same origin needs no
 `credentials` option), and nothing is stored in `localStorage`:

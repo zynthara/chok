@@ -217,7 +217,7 @@ a code (and, with `magic_link_url` set, a one-click link);
 `POST /auth/passwordless/verify` with the code (or the link's token) signs
 in, creating the account on first use.
 In cookie mode the session is an HttpOnly cookie the page's scripts never
-see, guarded by `http.csrf`.
+see, guarded by `http.csrf`, which is on by default.
 
 ```go
 package main
@@ -260,8 +260,6 @@ func main() {
 
 ```yaml
 # chok.yaml; the signing key comes from SHOP_AUTH_SIGNING_KEY
-http:
-  csrf: true   # the session cookie goes with every request
 db:
   driver: sqlite
   sqlite:

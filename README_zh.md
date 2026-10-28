@@ -204,7 +204,7 @@ news.addEventListener("story.posted", (e) => console.log(JSON.parse(e.data).data
 并寄出验证码（配了 `magic_link_url` 时还有一键登录链接）；
 `POST /auth/passwordless/verify` 交上验证码（或链接里的 token）即登录，第一次登录时
 建号。cookie 模式下会话是页面脚本碰不到的 HttpOnly
-cookie，由 `http.csrf` 把守。
+cookie，由默认开着的 `http.csrf` 把守。
 
 ```go
 package main
@@ -247,8 +247,6 @@ func main() {
 
 ```yaml
 # chok.yaml; the signing key comes from SHOP_AUTH_SIGNING_KEY
-http:
-  csrf: true   # the session cookie goes with every request
 db:
   driver: sqlite
   sqlite:

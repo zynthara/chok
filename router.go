@@ -52,6 +52,7 @@ func (r *router) register(method, pattern string, h http.Handler, mw []Middlewar
 	full := joinPath(r.prefix, pattern)
 	chain := append(slices.Clone(r.mw), mw...)
 	h, security := wrap(h, chain)
+	r.app.noteCookieAuth(security)
 	key := full
 	if method != "" {
 		key = method + " " + full

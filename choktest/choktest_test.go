@@ -186,15 +186,24 @@ func TestApp_LifecycleInProcess(t *testing.T) {
 }
 
 // TestApp_ZeroBaseIsTheDefaults: a zero Base serves the default
-// endpoints, so a test needs no configuration at all.
+// endpoints, so a test needs no configuration at all, and keeps the
+// default CSRF protection on.
 func TestApp_ZeroBaseIsTheDefaults(t *testing.T) {
-	c := choktest.App(t, chok.Base{}, nil)
+	c := choktest.App(t, chok.Base{}, func(app *chok.App) {
+		chok.POST(app.Router(), "/x", func(context.Context, *chok.None) (chok.None, error) { return chok.None{}, nil })
+	})
 	for _, path := range []string{"/healthz", "/livez", "/readyz", "/openapi.json", "/docs"} {
 		resp := c.Do(httptest.NewRequest(http.MethodGet, path, nil))
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("%s = %d", path, resp.StatusCode)
 		}
+	}
+	if code := c.PostJSON("/x", nil, nil, "Sec-Fetch-Site", "cross-site"); code != http.StatusForbidden {
+		t.Errorf("a cross-site POST = %d; csrf is on by default", code)
+	}
+	if code := c.PostJSON("/x", nil, nil); code != http.StatusNoContent {
+		t.Errorf("a POST without the browser's headers = %d", code)
 	}
 }
 

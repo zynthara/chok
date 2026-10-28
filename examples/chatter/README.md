@@ -20,7 +20,7 @@ How the pieces meet:
   only way in: there is no password to register, log in with or reset.
 - The session is an HttpOnly cookie (`auth.cookie`, with `only`): the page
   never holds a token, its `fetch` calls carry the cookie by themselves,
-  and `http.csrf` refuses cross-origin writes.
+  and `http.csrf`, on by default, refuses cross-origin writes.
 - A message is written in a transaction; `d.AfterCommit` publishes it to
   the topic `room:<id>`, so nobody sees a message that rolled back.
 - A message that mentions `@bot` also `Enqueue`s the bot's turn in the
