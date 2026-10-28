@@ -158,7 +158,7 @@ func TestRefreshToken_SessionEndsAfterRefreshTTL(t *testing.T) {
 	register(t, c, "alice@test.com", "password123")
 	u := userByEmail(t, idn, "alice@test.com")
 	// A session that began two hours ago, in a token still valid.
-	old, err := idn.issueToken(u, time.Now().Add(-2*time.Hour).Unix())
+	old, err := idn.issueToken(t.Context(), u, time.Now().Add(-2*time.Hour).Unix())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestRefreshToken_SessionEndsAfterRefreshTTL(t *testing.T) {
 		t.Fatalf("me = %d", code)
 	}
 	// A refresh keeps the session's start: the chain ends at the same time.
-	fresh, err := idn.issueToken(u, time.Now().Add(-30*time.Minute).Unix())
+	fresh, err := idn.issueToken(t.Context(), u, time.Now().Add(-30*time.Minute).Unix())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestResetPassword_RefusesBadTokens(t *testing.T) {
 	c := serve(t, idn)
 	register(t, c, "alice@test.com", "password123")
 	u := userByEmail(t, idn, "alice@test.com")
-	access, err := idn.issueToken(u, time.Now().Unix())
+	access, err := idn.issueToken(t.Context(), u, time.Now().Unix())
 	if err != nil {
 		t.Fatal(err)
 	}

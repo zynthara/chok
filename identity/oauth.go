@@ -351,7 +351,7 @@ func (f *oauthFlow) handleExchange(w http.ResponseWriter, r *http.Request) {
 		chok.WriteError(w, r, errDisabled)
 		return
 	}
-	tok, err := f.idn.issueToken(user, time.Now().Unix())
+	tok, err := f.idn.issueToken(ctx, user, time.Now().Unix())
 	if err != nil {
 		chok.WriteError(w, r, err)
 		return

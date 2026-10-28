@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"regexp"
 	"slices"
@@ -77,6 +78,13 @@ type Config struct {
 	Cookie CookieConfig `yaml:"cookie"`
 	// Audit configures the audit log.
 	Audit AuditConfig `yaml:"audit"`
+	// Admins lists the email addresses of the first administrators: a
+	// user whose address is listed, and verified, gets the admin role the
+	// next time a token is issued to it or Authn reads it. The grant is
+	// written once and never undone here: removing an address revokes
+	// nothing (Users().SetRoles does). An unverified address gets nothing,
+	// so whoever registers a listed address first gains no power by it.
+	Admins []string `yaml:"admins"`
 }
 
 // ProviderConfig is one OAuth provider's section, auth.providers.<name>.
@@ -319,6 +327,11 @@ func (c *Config) Validate() error {
 	if c.Audit.AsyncBuffer < 0 {
 		errs = append(errs, errors.New("audit.async_buffer must not be negative"))
 	}
+	for _, a := range c.Admins {
+		if !plainAddress(a) {
+			errs = append(errs, fmt.Errorf("admins: %q is not an email address", a))
+		}
+	}
 	if len(errs) == 0 {
 		return nil
 	}
@@ -328,6 +341,13 @@ func (c *Config) Validate() error {
 	}
 	slices.Sort(msgs)
 	return errors.New(strings.Join(msgs, "; "))
+}
+
+// plainAddress reports an email address alone, without a display name
+// or angle brackets: alice@example.com.
+func plainAddress(s string) bool {
+	a, err := mail.ParseAddress(s)
+	return err == nil && a.Name == "" && a.Address == strings.TrimSpace(s)
 }
 
 // absoluteURL reports an http or https URL with a host: a link that works

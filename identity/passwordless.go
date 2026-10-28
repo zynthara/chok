@@ -224,7 +224,7 @@ func (idn *Identity) passwordlessVerify(ctx context.Context, req *passwordlessVe
 		}
 		user.EmailVerified = true
 	}
-	return idn.issueToken(user, now.Unix())
+	return idn.issueToken(ctx, user, now.Unix())
 }
 
 // registerByCode creates the account of an address that proved itself

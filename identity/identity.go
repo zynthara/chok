@@ -38,6 +38,8 @@ type Identity struct {
 	cost    int    // bcrypt cost of every password hash
 	padding string // a hash at that cost, compared against when the email is unknown
 
+	admins map[string]bool // auth.admins, normalized
+
 	limiter *loginLimiter // nil when the login throttle is off
 	oauth   *oauthFlow    // nil without providers
 	audit   *Audit
@@ -157,7 +159,10 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 	if cfg.Passwordless.Enabled && o.sender == nil {
 		return nil, errors.New("identity: auth.passwordless.enabled needs a Sender to mail the codes: pass identity.Sender(...)")
 	}
-	idn := &Identity{cfg: cfg, d: d, logger: o.logger, sender: o.sender, cost: costOf()}
+	idn := &Identity{cfg: cfg, d: d, logger: o.logger, sender: o.sender, cost: costOf(), admins: map[string]bool{}}
+	for _, a := range cfg.Admins {
+		idn.admins[normalizeEmail(a)] = true
+	}
 	// The mails outlive the requests that ask for them; Close ends them.
 	idn.mailCtx, idn.stopMail = context.WithCancel(context.Background())
 	var err error

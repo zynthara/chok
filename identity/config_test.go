@@ -14,6 +14,10 @@ func TestConfig_Validate(t *testing.T) {
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("a key is all a config needs: %v", err)
 	}
+	admins := Config{SigningKey: testKey, Admins: []string{"root@test.com", " Ops@Test.com "}}
+	if err := admins.Validate(); err != nil {
+		t.Fatalf("addresses, in any case and spacing, are admins: %v", err)
+	}
 	cases := map[string]struct {
 		cfg  Config
 		want string
@@ -37,6 +41,9 @@ func TestConfig_Validate(t *testing.T) {
 		"negative attempts":      {Config{SigningKey: testKey, Passwordless: PasswordlessConfig{MaxAttempts: -1}}, "passwordless.max_attempts"},
 		"a relative magic link":  {Config{SigningKey: testKey, Passwordless: PasswordlessConfig{MagicLinkURL: "/sign-in"}}, "passwordless.magic_link_url must be an absolute"},
 		"only, not enabled":      {Config{SigningKey: testKey, Passwordless: PasswordlessConfig{Only: true}}, "passwordless.only needs passwordless.enabled"},
+		"an admin, not an email": {Config{SigningKey: testKey, Admins: []string{"root"}}, `admins: "root" is not an email address`},
+		"an admin with a name":   {Config{SigningKey: testKey, Admins: []string{"Root <root@test.com>"}}, "admins:"},
+		"an admin in brackets":   {Config{SigningKey: testKey, Admins: []string{"<root@test.com>"}}, "admins:"},
 	}
 	for name, c := range cases {
 		err := c.cfg.Validate()

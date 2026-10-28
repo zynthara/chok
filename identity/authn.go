@@ -131,6 +131,7 @@ func (idn *Identity) authenticate(ctx context.Context, raw string) (context.Cont
 		return nil, errStaleToken
 	}
 	start, _ := intClaim(claims, "sat")
+	idn.grantAdmin(ctx, user)
 	ctx = chok.WithPrincipal(ctx, principalOf(user))
 	return context.WithValue(ctx, sessionKey{}, &session{user: user, start: start}), nil
 }

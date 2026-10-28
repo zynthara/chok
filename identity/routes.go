@@ -138,7 +138,7 @@ func (idn *Identity) register(ctx context.Context, req *registerRequest) (*token
 	if err != nil {
 		return nil, err
 	}
-	return idn.issueToken(user, time.Now().Unix())
+	return idn.issueToken(ctx, user, time.Now().Unix())
 }
 
 // createUser makes an active account with a password: register and
@@ -206,12 +206,13 @@ func (idn *Identity) login(ctx context.Context, req *loginRequest) (*tokenRespon
 		failed()
 		return nil, errBadLogin
 	}
-	return idn.issueToken(user, time.Now().Unix())
+	return idn.issueToken(ctx, user, time.Now().Unix())
 }
 
 // issueToken signs an access token for user in the session that began
-// at start (Unix seconds).
-func (idn *Identity) issueToken(user *User, start int64) (*tokenResponse, error) {
+// at start (Unix seconds), after auth.admins has had its say.
+func (idn *Identity) issueToken(ctx context.Context, user *User, start int64) (*tokenResponse, error) {
+	idn.grantAdmin(ctx, user)
 	claims := map[string]any{"name": user.Name, "pv": user.PasswordVersion, "sat": start}
 	if roles := user.RoleList(); len(roles) > 0 {
 		claims["roles"] = roles
@@ -233,7 +234,7 @@ func (idn *Identity) refreshToken(ctx context.Context, _ *chok.None) (*tokenResp
 	if ttl := idn.cfg.RefreshTTL; ttl > 0 && time.Since(time.Unix(s.start, 0)) > ttl {
 		return nil, errSessionEnded
 	}
-	return idn.issueToken(s.user, s.start)
+	return idn.issueToken(ctx, s.user, s.start)
 }
 
 func (idn *Identity) changePassword(ctx context.Context, req *changePasswordRequest) (chok.None, error) {
