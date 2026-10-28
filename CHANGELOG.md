@@ -200,6 +200,12 @@ package, configuration key, API, table and metric to its v3 form.
   empty domain. `AddUserToRole`, `RemoveUserFromRole`, `UserRoles` and
   `BootstrapAdmin` are gone: list the first admin in `auth.admins`.
   A password reset now marks the address verified.
+- **Breaking:** linking a provider needs a verified address:
+  `POST {prefix}/identities/link` answers 403 `EMAIL_NOT_VERIFIED` for an
+  account whose address nobody has proven, since whoever registered it
+  need not own it. The first proof of an address — reset-password, a
+  passwordless code, `Users().MarkEmailVerified` — unlinks the providers
+  linked before it; v2 let unverified accounts link.
 - **Breaking:** `jobs.Worker` is generic: `Worker[T](topic, fn)` with
   `fn func(ctx, jobs.Message[T]) error`, the payload decoded into `T`
   (`Worker[jsontext.Value]` for the JSON as stored); a payload that does

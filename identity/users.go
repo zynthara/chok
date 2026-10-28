@@ -182,7 +182,7 @@ func (s *UserService) ResetPassword(ctx context.Context, id, password string) er
 	if len(password) < 8 || len(password) > 72 {
 		return chok.ErrValidation.Msgf("password must be 8 to 72 bytes").With("fields", map[string]string{"password": "length"})
 	}
-	return notFoundUser(s.idn.setPassword(ctx, id, "password", password, false))
+	return notFoundUser(s.idn.setPassword(ctx, id, "password", password))
 }
 
 // RevokeTokens makes every token issued to the user stop working, and
@@ -193,9 +193,15 @@ func (s *UserService) RevokeTokens(ctx context.Context, id string) error {
 
 // MarkEmailVerified records that the user proved the email address, after
 // the application's own verification (a link, a code). Tokens stay
-// valid; calling it again is a no-op.
+// valid; calling it again is a no-op. As with a mailed reset token or
+// code, the first verification unlinks the providers linked before it:
+// identity links none to an unverified account, but data from v2 may.
 func (s *UserService) MarkEmailVerified(ctx context.Context, id string) error {
-	return s.update(ctx, id, map[string]any{"email_verified": true})
+	u, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	return notFoundUser(s.idn.verifyEmail(ctx, u, map[string]any{}))
 }
 
 func (s *UserService) update(ctx context.Context, id string, set map[string]any) error {

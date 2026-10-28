@@ -386,6 +386,16 @@ func (f *oauthFlow) handleLink(w http.ResponseWriter, r *http.Request) {
 		chok.WriteError(w, r, chok.ErrUnauthorized)
 		return
 	}
+	// Refused before the round trip to the provider; link checks again.
+	u, err := f.idn.users.Get(r.Context(), store.RID(p.UserID))
+	if err != nil {
+		chok.WriteError(w, r, notFoundUser(err))
+		return
+	}
+	if !u.EmailVerified {
+		chok.WriteError(w, r, errLinkUnverified)
+		return
+	}
 	var req linkRequest
 	if err := readJSON(w, r, &req); err != nil {
 		chok.WriteError(w, r, err)
@@ -525,14 +535,20 @@ func (f *oauthFlow) resolve(ctx context.Context, ext *oauth.Identity) (*User, *l
 }
 
 // link attaches a provider's account to an existing user, for a signed-in
-// user linking one more provider.
+// user linking one more provider. The user's address must be verified.
 func (f *oauthFlow) link(ctx context.Context, userID string, ext *oauth.Identity) (*linkedIdentity, error) {
 	if userID == "" || ext.Provider == "" || ext.ProviderAccountID == "" {
 		return nil, errors.New("identity: a link needs the user and the provider's account")
 	}
 	var l *linkedIdentity
 	err := f.idn.d.RunInTx(ctx, func(ctx context.Context) error {
-		var err error
+		u, err := f.idn.users.Get(ctx, store.RID(userID))
+		if err != nil {
+			return notFoundUser(err)
+		}
+		if !u.EmailVerified {
+			return errLinkUnverified
+		}
 		l, err = f.linkTx(ctx, userID, ext)
 		return err
 	})
@@ -572,6 +588,12 @@ func (f *oauthFlow) touch(ctx context.Context, linkID string) {
 }
 
 var errLastMethod = chok.NewError(http.StatusPreconditionFailed, "FailedPrecondition", "keep at least one way to sign in: a password or a provider")
+
+// errLinkUnverified refuses a link to an account whose address nobody has
+// proven. Whoever registered the address need not own it, and a provider
+// it linked would let it back in after the owner took the account over
+// with a mailed reset token or code.
+var errLinkUnverified = chok.NewError(http.StatusForbidden, "EMAIL_NOT_VERIFIED", "verify the email address before linking a provider")
 
 // unlinkIdentity removes one of the user's links, unless it is the last
 // way to sign in. The user row is locked for the count and the delete, so

@@ -375,6 +375,9 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
   `Authn` 时就加上 `admin` 并落库，只加一次；从列表里删掉不撤销。
 - **reset-password 成功即置 `email_verified`**（邮件里的 token 证明邮箱可达）；v2
   不改这个字段。
+- **绑定登录方式要先验证邮箱**：未验证邮箱的账户调 `/identities/link` 答 403
+  `EMAIL_NOT_VERIFIED`（v2 允许）。v2 库里已有的这类绑定，在邮箱第一次被证明时
+  （reset-password、passwordless 的码、`Users().MarkEmailVerified`）自动解绑。
 - **`/audit/logs`** 路径不变：`users.roles` 含 `admin` 的用户总能读；挂了 rbac 后，
   其余用户由 rbac 判 `audit/read`。
 - **决策审计**跟随 `auth.audit.enabled`；watcher 频道固定 `chok:authz:policy`。

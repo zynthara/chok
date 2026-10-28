@@ -442,6 +442,12 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   时，抢注管理员邮箱的人拿不到权限。reset-password 成功即证明邮箱可达，置
   `email_verified`，所以用密码登录的应用也能走 `auth.admins`；运维调用的
   `Users().ResetPassword` 不置。
+- **绑定要先验证邮箱**：注册邮箱的人不一定是邮箱的主人。未验证邮箱的账户不能
+  绑定新的登录方式（`POST {prefix}/identities/link` 与回调都答 403
+  `EMAIL_NOT_VERIFIED`）；邮箱第一次被证明时（reset-password、passwordless
+  的码、`Users().MarkEmailVerified`），同一事务里解绑此前的所有绑定——v3 不会
+  产生这种绑定，v2 的数据里可能有。否则抢注者绑定的登录方式，会在主人接管账户
+  之后留下来。
 - **用户管理**：`Users()` 是运维面（Create、Get、`GetByEmail`、SetRoles、
   SetActive、ResetPassword、MarkEmailVerified、RevokeTokens），并实现
   `chok.Lister[User]`：全表、没有 owner 围栏，可按 email、name、email_verified、

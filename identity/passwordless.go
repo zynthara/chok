@@ -219,7 +219,7 @@ func (idn *Identity) passwordlessVerify(ctx context.Context, req *passwordlessVe
 	}
 	// The code proved the address.
 	if !user.EmailVerified {
-		if err := idn.users.Update(ctx, store.RID(user.RID), store.Set(map[string]any{"email_verified": true})); err != nil {
+		if err := idn.verifyEmail(ctx, user, map[string]any{}); err != nil {
 			return nil, err
 		}
 		user.EmailVerified = true

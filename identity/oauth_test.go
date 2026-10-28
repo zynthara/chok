@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/choktest"
@@ -431,6 +432,10 @@ func TestOAuth_LinkFlowBindsToTheCurrentUser(t *testing.T) {
 	fx := newOAuthFixture(t, Config{}, nil)
 	tok := register(t, fx.c, "alice@local.test", "Password!23")
 	alice := userByEmail(t, fx.idn, "alice@local.test")
+	// Only a verified account links (TestOAuth_LinkNeedsAVerifiedEmail).
+	if err := fx.idn.Users().MarkEmailVerified(t.Context(), alice.RID); err != nil {
+		t.Fatal(err)
+	}
 	// The provider account has another email: without the link intent the
 	// callback would sign in a new user, carol.
 	fx.p.seed("idp-code", verified("remote-acc-99", "carol@idp.test"))
@@ -470,6 +475,9 @@ func TestOAuth_PasswordUserSurvivesLink(t *testing.T) {
 	fx := newOAuthFixture(t, Config{}, nil)
 	tok := register(t, fx.c, "alice@local.test", "Password!23")
 	u := userByEmail(t, fx.idn, "alice@local.test")
+	if err := fx.idn.Users().MarkEmailVerified(t.Context(), u.RID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fx.idn.oauth.link(t.Context(), u.RID, verified("remote-1", "carol@idp.test")); err != nil {
 		t.Fatal(err)
 	}
@@ -487,6 +495,129 @@ func TestOAuth_PasswordUserSurvivesLink(t *testing.T) {
 	}
 	if code, _ := login(t, fx.c, "alice@local.test", "Password!23"); code != http.StatusOK {
 		t.Fatalf("login after the unlink = %d", code)
+	}
+}
+
+// TestOAuth_LinkNeedsAVerifiedEmail: whoever registers an address need
+// not own it, so an account links no provider before its address is
+// proven. Otherwise a squatter that registered someone else's address and
+// linked a provider of its own would still sign in through it after the
+// owner took the account over with a reset — as an administrator, when
+// auth.admins lists the address.
+func TestOAuth_LinkNeedsAVerifiedEmail(t *testing.T) {
+	sender := newMockSender()
+	p := newFake("fake")
+	idn := newIdentity(t, Config{OAuthCallbackFrontendURL: frontendURL, Admins: []string{"root@test.com"}}, Providers(p), Sender(sender.send))
+	fx := &oauthFixture{idn: idn, p: p, c: serve(t, idn)}
+	tok := register(t, fx.c, "root@test.com", "password123")
+	resp := fx.sendJSON(t, "/auth/identities/link", map[string]string{"provider": "fake"}, nil, bearerHeader(tok)...)
+	var e envelope
+	decodeBody(t, resp, &e)
+	if resp.StatusCode != http.StatusForbidden || e.Reason != "EMAIL_NOT_VERIFIED" {
+		t.Fatalf("link from an unverified account = %d %+v", resp.StatusCode, e)
+	}
+	root := userByEmail(t, idn, "root@test.com")
+	var ce *chok.Error
+	if _, err := idn.oauth.link(t.Context(), root.RID, verified("squatter-acc", "squatter@idp.test")); !errors.As(err, &ce) || ce.Reason != "EMAIL_NOT_VERIFIED" {
+		t.Fatalf("the callback's link for an unverified account: %v", err)
+	}
+	// The owner takes the address over with a mailed reset token; the
+	// squatter's provider then signs in to an account of its own.
+	if code := fx.c.PostJSON("/auth/forgot-password", map[string]string{"email": "root@test.com"}, nil); code != http.StatusNoContent {
+		t.Fatalf("forgot-password = %d", code)
+	}
+	if !sender.wait(5 * time.Second) {
+		t.Fatal("no reset mail")
+	}
+	if code := fx.c.PostJSON("/auth/reset-password", map[string]string{"token": sender.last().Token, "new_password": "ownerpass456"}, nil); code != http.StatusNoContent {
+		t.Fatalf("reset-password = %d", code)
+	}
+	p.seed("idp-code", verified("squatter-acc", "squatter@idp.test"))
+	cb := fx.signIn(t, "idp-code", "")
+	resp = fx.sendJSON(t, "/auth/exchange", map[string]string{"code": query(t, cb.Header.Get("Location"), "code")}, cb.Cookies())
+	var out exchangeResponse
+	decodeBody(t, resp, &out)
+	var me meResponse
+	if code := fx.c.WithBearer(out.Token).GetJSON("/auth/me", &me); code != http.StatusOK || me.Email != "squatter@idp.test" || len(me.Roles) != 0 {
+		t.Fatalf("the squatter's provider sign-in = %d %+v", code, me)
+	}
+	// The owner, the address proven, links.
+	_, owner := login(t, fx.c, "root@test.com", "ownerpass456")
+	if resp := fx.sendJSON(t, "/auth/identities/link", map[string]string{"provider": "fake"}, nil, bearerHeader(owner)...); resp.StatusCode != http.StatusOK {
+		t.Fatalf("link after the reset = %d", resp.StatusCode)
+	}
+}
+
+// TestOAuth_VerifyingTheEmailUnlinksEarlierLinks: a provider linked while
+// nobody had proven the address (identity links none now; data from v2
+// may hold one) goes when the address is first proven — by a mailed reset
+// token, a mailed code or Users().MarkEmailVerified. A link made after
+// that stays.
+func TestOAuth_VerifyingTheEmailUnlinksEarlierLinks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// again proves the address a second time. A second code would wait
+		// out the resend interval, and a verified account's code sign-in
+		// does not verify again anyway.
+		again bool
+		prove func(t *testing.T, fx *oauthFixture, sender *mockSender, u *User)
+	}{
+		{"reset-password", true, func(t *testing.T, fx *oauthFixture, sender *mockSender, u *User) {
+			if code := fx.c.PostJSON("/auth/forgot-password", map[string]string{"email": u.Email}, nil); code != http.StatusNoContent {
+				t.Fatalf("forgot-password = %d", code)
+			}
+			if !sender.wait(5 * time.Second) {
+				t.Fatal("no reset mail")
+			}
+			if code := fx.c.PostJSON("/auth/reset-password", map[string]string{"token": sender.last().Token, "new_password": "newpassword456"}, nil); code != http.StatusNoContent {
+				t.Fatalf("reset-password = %d", code)
+			}
+		}},
+		{"passwordless", false, func(t *testing.T, fx *oauthFixture, sender *mockSender, u *User) {
+			m := startCode(t, fx.c, sender, u.Email)
+			if code, _, e := verify(fx.c, map[string]string{"email": u.Email, "code": m.Code}); code != http.StatusOK {
+				t.Fatalf("verify = %d %+v", code, e)
+			}
+		}},
+		{"MarkEmailVerified", true, func(t *testing.T, fx *oauthFixture, _ *mockSender, u *User) {
+			if err := fx.idn.Users().MarkEmailVerified(t.Context(), u.RID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sender := newMockSender()
+			p := newFake("fake")
+			cfg := Config{OAuthCallbackFrontendURL: frontendURL}
+			cfg.Passwordless.Enabled = true
+			idn := newIdentity(t, cfg, Providers(p), Sender(sender.send))
+			fx := &oauthFixture{idn: idn, p: p, c: serve(t, idn)}
+			u, err := idn.Users().Create(t.Context(), "alice@test.com", "password123", "Alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// As v2 let it: a link to the unverified account.
+			if _, err := idn.oauth.linkTx(t.Context(), u.RID, verified("early-acc", "early@idp.test")); err != nil {
+				t.Fatal(err)
+			}
+			tc.prove(t, fx, sender, u)
+			if !userByEmail(t, idn, "alice@test.com").EmailVerified {
+				t.Fatal("the address is not verified")
+			}
+			if links, _ := idn.oauth.links(t.Context(), u.RID); len(links) != 0 {
+				t.Fatalf("links after the first verification: %+v", links)
+			}
+			if !tc.again {
+				return
+			}
+			if _, err := idn.oauth.link(t.Context(), u.RID, verified("later-acc", "later@idp.test")); err != nil {
+				t.Fatal(err)
+			}
+			tc.prove(t, fx, sender, userByEmail(t, idn, "alice@test.com"))
+			if links, _ := idn.oauth.links(t.Context(), u.RID); len(links) != 1 || links[0].ProviderAccountID != "later-acc" {
+				t.Fatalf("links after a later verification: %+v", links)
+			}
+		})
 	}
 }
 

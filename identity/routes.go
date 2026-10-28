@@ -39,7 +39,7 @@ import (
 //	GET    {prefix}/{name}/start      public; GET or POST /{name}/callback after it
 //	POST   {prefix}/exchange          public: the one-time code for a token
 //	GET    {prefix}/identities        bearer: the user's login methods
-//	POST   {prefix}/identities/link   bearer: link another provider
+//	POST   {prefix}/identities/link   bearer: link another provider, the email verified
 //	DELETE {prefix}/identities/{id}   bearer: unlink one
 //
 // and with auth.audit.enabled and admin_api, GET /audit/logs. The OpenAPI
@@ -245,28 +245,53 @@ func (idn *Identity) changePassword(ctx context.Context, req *changePasswordRequ
 	if comparePassword(s.user.PasswordHash, req.OldPassword) != nil {
 		return chok.None{}, errWrongOld
 	}
-	return chok.None{}, idn.setPassword(ctx, s.user.RID, "new_password", req.NewPassword, false)
+	return chok.None{}, idn.setPassword(ctx, s.user.RID, "new_password", req.NewPassword)
 }
 
-// setPassword stores a new password and revokes the user's tokens;
-// verified marks the email verified as well.
-func (idn *Identity) setPassword(ctx context.Context, userID, field, password string, verified bool) error {
-	if err := checkPasswordStrength(field, password); err != nil {
-		return err
-	}
-	hash, err := hashPassword(password, idn.cost)
+// setPassword stores a new password and revokes the user's tokens.
+func (idn *Identity) setPassword(ctx context.Context, userID, field, password string) error {
+	set, err := idn.passwordColumns(field, password)
 	if err != nil {
 		return err
 	}
-	set := map[string]any{
+	return idn.users.Update(ctx, store.RID(userID), store.Set(set))
+}
+
+// passwordColumns checks a new password and returns the columns that
+// store it: the hash, and the password_version bump that revokes the
+// user's tokens.
+func (idn *Identity) passwordColumns(field, password string) (map[string]any, error) {
+	if err := checkPasswordStrength(field, password); err != nil {
+		return nil, err
+	}
+	hash, err := hashPassword(password, idn.cost)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
 		"password_hash":    hash,
 		"has_password":     true,
 		"password_version": bumpVersion,
+	}, nil
+}
+
+// verifyEmail writes set to u's row with the address verified. The first
+// verification also unlinks, in the same transaction, every provider
+// linked before it: whoever registered an address need not own it, and a
+// provider it linked would let it back into the account the owner has
+// just taken over. identity links no provider to an unverified account,
+// but data from v2 may hold such links.
+func (idn *Identity) verifyEmail(ctx context.Context, u *User, set map[string]any) error {
+	set["email_verified"] = true
+	if u.EmailVerified {
+		return idn.users.Update(ctx, store.RID(u.RID), store.Set(set))
 	}
-	if verified {
-		set["email_verified"] = true
-	}
-	return idn.users.Update(ctx, store.RID(userID), store.Set(set))
+	return idn.d.RunInTx(ctx, func(ctx context.Context) error {
+		if err := idn.users.Update(ctx, store.RID(u.RID), store.Set(set)); err != nil {
+			return err
+		}
+		return idn.links.Delete(ctx, store.Where(where.Eq("user_id", u.RID)))
+	})
 }
 
 func (idn *Identity) forgotPassword(ctx context.Context, req *forgotPasswordRequest) (chok.None, error) {
@@ -308,7 +333,11 @@ func (idn *Identity) resetPassword(ctx context.Context, req *resetPasswordReques
 		return chok.None{}, errResetToken
 	}
 	// The token came by mail: the address is the user's.
-	return chok.None{}, idn.setPassword(ctx, user.RID, "new_password", req.NewPassword, true)
+	set, err := idn.passwordColumns("new_password", req.NewPassword)
+	if err != nil {
+		return chok.None{}, err
+	}
+	return chok.None{}, idn.verifyEmail(ctx, user, set)
 }
 
 func (idn *Identity) me(ctx context.Context, _ *chok.None) (*meResponse, error) {
