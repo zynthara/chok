@@ -12,8 +12,9 @@ import (
 var errSignal = errors.New("chok: stop signal")
 
 // Execute runs the App under OS signals and exits 1 if it fails:
-// SIGINT and SIGTERM stop it gracefully, SIGQUIT stops it fast (drain
-// skipped, the stop budget capped at 5s), SIGHUP re-reads the
+// SIGINT and SIGTERM stop it gracefully; another SIGINT or SIGTERM while
+// it stops, or SIGQUIT at any time, stops it fast (the drain ends, what
+// is left of the stop budget is capped at 5s); SIGHUP re-reads the
 // configuration file and applies log.level, logging that any other
 // change needs a restart.
 func (a *App) Execute() {
@@ -22,16 +23,22 @@ func (a *App) Execute() {
 	sig := make(chan os.Signal, 4)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
 	defer signal.Stop(sig)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
 		for {
 			select {
-			case <-ctx.Done():
+			case <-done:
 				return
 			case s := <-sig:
-				switch s {
-				case syscall.SIGHUP:
+				switch {
+				case s == syscall.SIGHUP:
 					a.reloadLogLevel()
-				case syscall.SIGQUIT:
+				case ctx.Err() != nil: // stopping already
+					if a.stopFast() {
+						a.logger.Info("chok: signal received while stopping, stopping fast", "signal", s.String())
+					}
+				case s == syscall.SIGQUIT:
 					a.logger.Info("chok: SIGQUIT received, stopping fast")
 					cancel(errFastStop)
 				default:

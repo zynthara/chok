@@ -45,6 +45,12 @@ type App struct {
 	ready    atomic.Bool
 	draining atomic.Bool
 	addr     atomic.Pointer[string]
+	// probed is set once /readyz has been requested: someone watches the
+	// readiness, so a stop waits out http.drain_delay.
+	probed atomic.Bool
+	// hurry is closed when a stop under way turns fast (a second signal).
+	hurry     chan struct{}
+	hurryOnce sync.Once
 
 	// wrapSecurity is what the Wrap middleware's authentication accepts,
 	// on every route; buildHandler records it.
@@ -109,7 +115,7 @@ type Namer interface{ Name() string }
 // base normally comes from Load or MustLoad. Unless Logger is given, New
 // builds the root logger from base.Log and installs it as slog.Default.
 func New(base Base, opts ...Option) *App {
-	a := &App{base: base, mux: http.NewServeMux(), reload: lastLoad.Load()}
+	a := &App{base: base, mux: http.NewServeMux(), reload: lastLoad.Load(), hurry: make(chan struct{})}
 	for _, o := range opts {
 		o(a)
 	}
@@ -192,6 +198,22 @@ func (a *App) Addr() string {
 
 var errFastStop = errors.New("chok: fast stop")
 
+// fastStopBudget caps a fast stop: SIGQUIT, or a second signal while the
+// App stops.
+const fastStopBudget = 5 * time.Second
+
+// stopFast turns a stop under way, or the one to come, fast: the drain
+// ends and what is left of the stop budget is capped at fastStopBudget.
+// It reports whether this call made the change.
+func (a *App) stopFast() bool {
+	changed := false
+	a.hurryOnce.Do(func() {
+		close(a.hurry)
+		changed = true
+	})
+	return changed
+}
+
 func init() {
 	apptest.Ready = func(app any) bool {
 		a := app.(*App)
@@ -207,9 +229,11 @@ func init() {
 // server listen and /readyz turn 200.
 //
 // Stop phase, under one app.shutdown_timeout budget: /readyz turns 503,
-// http.drain_delay passes, the HTTP server shuts down within
-// http.shutdown_timeout, the Starters' context is canceled and Run waits
-// for them, then every Closer is closed in reverse Use order.
+// http.drain_delay passes — only when /readyz has been requested since
+// the start, so a stop nobody's probes watch does not wait — the HTTP
+// server shuts down within http.shutdown_timeout, the Starters' context
+// is canceled and Run waits for them, then every Closer is closed in
+// reverse Use order.
 //
 // Run returns nil when ctx is canceled, ctx.Err() when its deadline
 // expires, and the failure otherwise. It can be called once.
@@ -265,7 +289,7 @@ func (a *App) run(ctx context.Context, comps []*component) error {
 		return a.stop(ctx, nil, cancelRun, &starters, comps, fast)
 	}
 	if err := a.awaitHealthy(ctx, comps, failed); err != nil {
-		return errors.Join(fmt.Errorf("chok: start: %w", err), stop(false))
+		return errors.Join(fmt.Errorf("chok: start: %w", err), stop(errors.Is(context.Cause(ctx), errFastStop)))
 	}
 
 	var srv *http.Server
@@ -369,20 +393,39 @@ func (a *App) stop(ctx context.Context, srv *http.Server, cancelRun context.Canc
 		budget = 30 * time.Second
 	}
 	if fast {
-		budget = min(budget, 5*time.Second)
+		budget = min(budget, fastStopBudget)
 	}
-	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
-	defer cancel()
 	begin := time.Now()
+	stopCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer cancel(nil)
+	limit := func(d time.Duration, what string) *time.Timer {
+		return time.AfterFunc(d, func() { cancel(fmt.Errorf("%s (%s)", what, d)) })
+	}
+	defer limit(budget, "app.shutdown_timeout").Stop()
+	go func() {
+		select {
+		case <-a.hurry: // what is left of the budget is capped
+			if time.Until(begin.Add(budget)) > fastStopBudget {
+				defer limit(fastStopBudget, "the fast stop's budget").Stop()
+				<-stopCtx.Done()
+			}
+		case <-stopCtx.Done():
+		}
+	}()
 	a.logger.Info("chok: stopping", "fast", fast, "budget", budget)
 	a.ready.Store(false)
 	a.draining.Store(true)
 
 	var errs []error
 	if srv != nil {
-		if d := a.base.HTTP.DrainDelay; d > 0 && !fast {
+		switch d := a.base.HTTP.DrainDelay; {
+		case d <= 0 || fast:
+		case !a.probed.Load():
+			a.logger.Debug("chok: drain skipped: /readyz was never requested", "drain_delay", d)
+		default:
 			select {
 			case <-time.After(d):
+			case <-a.hurry:
 			case <-stopCtx.Done():
 			}
 		}
@@ -404,7 +447,7 @@ func (a *App) stop(ctx context.Context, srv *http.Server, cancelRun context.Canc
 	select {
 	case <-done:
 	case <-stopCtx.Done():
-		errs = append(errs, fmt.Errorf("chok: components still running after app.shutdown_timeout (%s)", budget))
+		errs = append(errs, fmt.Errorf("chok: components still running after %w", context.Cause(stopCtx)))
 	}
 
 	for _, comp := range slices.Backward(comps) {

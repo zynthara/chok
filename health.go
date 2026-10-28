@@ -124,6 +124,7 @@ func (a *App) mountBuiltins() {
 		writeJSON(w, r, http.StatusOK, map[string]string{"status": statusUp})
 	})
 	a.handleBuiltin(http.MethodGet, "/readyz", func(w http.ResponseWriter, r *http.Request) {
+		a.probed.Store(true)
 		if !a.ready.Load() || a.draining.Load() {
 			writeJSON(w, r, http.StatusServiceUnavailable, map[string]string{"status": statusDown})
 			return

@@ -60,6 +60,30 @@ func TestSignal_SIGQUIT_FastShutdown(t *testing.T) {
 	}
 }
 
+// TestSignal_SecondSignalStopsFast: a SIGINT while the App drains turns
+// the stop fast instead of waiting the drain out.
+func TestSignal_SecondSignalStopsFast(t *testing.T) {
+	base := testBase(t)
+	base.HTTP.Enabled = true
+	base.HTTP.Addr = "127.0.0.1:0"
+	base.HTTP.DrainDelay = time.Hour
+	var logs syncBuffer
+	app := New(base, Logger(slog.New(slog.NewTextHandler(&logs, nil))))
+	done := startExecute(t, app)
+	if code := get(t, "http://"+app.Addr()+"/readyz"); code != 200 {
+		t.Fatalf("readyz = %d", code) // a probe watches: the stop drains
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	waitFor(t, app.draining.Load, "draining")
+	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	if code := awaitExit(t, done); code != -1 {
+		t.Fatalf("got exit %d", code)
+	}
+	if n := strings.Count(logs.String(), "chok: signal received while stopping, stopping fast"); n != 1 {
+		t.Fatalf("the switch logged %d times:\n%s", n, logs.String())
+	}
+}
+
 func TestSignal_FailureExits1(t *testing.T) {
 	base := testBase(t)
 	base.HTTP.Enabled = true

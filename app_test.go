@@ -278,6 +278,99 @@ func TestStop_DrainDelayHoldsReadyz503(t *testing.T) {
 	}
 }
 
+// TestStop_DrainOnlyWhenProbed: http.drain_delay is waited only when
+// /readyz has been requested since the start — a load balancer or a
+// Kubernetes probe watches; with nobody probing the stop skips it and
+// says so at debug level.
+func TestStop_DrainOnlyWhenProbed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, probed := range []bool{false, true} {
+			base := testBase(t)
+			base.HTTP.DrainDelay = 5 * time.Second
+			var logs syncBuffer
+			app := New(base, Logger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))))
+			if probed {
+				app.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			}
+			begin := time.Now()
+			if err := app.stop(context.Background(), &http.Server{}, func() {}, &sync.WaitGroup{}, nil, false); err != nil {
+				t.Fatal(err)
+			}
+			want := time.Duration(0)
+			if probed {
+				want = 5 * time.Second
+			}
+			if d := time.Since(begin); d != want {
+				t.Errorf("probed=%v: the stop took %s, want %s", probed, d, want)
+			}
+			if skipped := strings.Contains(logs.String(), "chok: drain skipped: /readyz was never requested"); skipped == probed {
+				t.Errorf("probed=%v: the skip logged: %v\n%s", probed, skipped, logs.String())
+			}
+		}
+	})
+}
+
+// TestStop_UnprobedRunSkipsDrain: a Run nobody probed stops without
+// waiting out the drain delay.
+func TestStop_UnprobedRunSkipsDrain(t *testing.T) {
+	base := testBase(t)
+	base.HTTP.Enabled = true
+	base.HTTP.Addr = "127.0.0.1:0"
+	base.HTTP.DrainDelay = time.Hour
+	app := New(base, Logger(quiet()))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runAsync(app, ctx)
+	waitFor(t, app.ready.Load, "ready")
+	if code := get(t, "http://"+app.Addr()+"/livez"); code != http.StatusOK {
+		t.Fatalf("livez = %d", code) // another probe is not a readiness probe
+	}
+	cancel()
+	if err := await(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStop_FastCutsTheDrainAndCapsTheRest: a stop turned fast midway — a
+// second signal — ends the drain at once and caps what is left of the
+// budget at 5s.
+func TestStop_FastCutsTheDrainAndCapsTheRest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, stubborn := range []bool{false, true} {
+			base := testBase(t)
+			base.HTTP.DrainDelay = time.Hour
+			base.App.ShutdownTimeout = 2 * time.Hour
+			app := New(base, Logger(quiet()))
+			app.probed.Store(true)
+			release := make(chan struct{})
+			var starters sync.WaitGroup
+			if stubborn {
+				starters.Go(func() { <-release }) // a Starter that ignores its ctx
+			}
+			done := make(chan error, 1)
+			begin := time.Now()
+			go func() {
+				done <- app.stop(context.Background(), &http.Server{}, func() {}, &starters, nil, false)
+			}()
+			time.Sleep(time.Minute) // into the drain
+			synctest.Wait()
+			if !app.stopFast() || app.stopFast() {
+				t.Fatal("stopFast reports the first change only")
+			}
+			err := <-done
+			close(release)
+			took := time.Since(begin)
+			switch {
+			case !stubborn && (err != nil || took != time.Minute):
+				t.Errorf("the drain did not end at once: %s, %v", took, err)
+			case stubborn && took != time.Minute+5*time.Second:
+				t.Errorf("the stop took %s; want the minute it drained plus the 5s cap", took)
+			case stubborn && (err == nil || !strings.Contains(err.Error(), "components still running after the fast stop's budget (5s)")):
+				t.Errorf("got %v", err)
+			}
+		}
+	})
+}
+
 func get(t *testing.T, url string) int {
 	t.Helper()
 	resp, err := http.Get(url)

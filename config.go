@@ -62,7 +62,9 @@ type HTTPConfig struct {
 	// ShutdownTimeout bounds http.Server.Shutdown.
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" default:"10s"`
 	// DrainDelay is how long /readyz reports 503 before the server stops
-	// accepting, so load balancers move traffic away first.
+	// accepting, so load balancers move traffic away first. A stop waits
+	// it only when /readyz has been requested since the start: with no
+	// probe watching, Ctrl-C stops at once.
 	DrainDelay time.Duration `yaml:"drain_delay" default:"5s"`
 	// TrustedProxies lists the proxy addresses or CIDRs whose
 	// X-Forwarded-For and X-Real-Ip headers are believed.

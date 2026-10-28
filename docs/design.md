@@ -100,11 +100,15 @@ body 列出每个组件的状态与耗时）；`/livez` 只说明进程活着。
 
 **停机相**：`/readyz` 改 503 → 等 `http.drain_delay`（给负载均衡摘流）→
 `http.Server.Shutdown(http.shutdown_timeout)` → 取消 Starter 的 ctx 并等待 →
-逆序 `Close`，整个停机相受 `app.shutdown_timeout` 总预算约束。所有停机路径
-从 `context.WithoutCancel(ctx)` 派生，trace id 与 request id 保持关联。
+逆序 `Close`，整个停机相受 `app.shutdown_timeout` 总预算约束。drain 按需：只在
+进程启动以来 `/readyz` 被请求过时才等（有人在看就绪状态——Kubernetes 探针、
+负载均衡的健康检查）；从没被请求过就跳过并记一条 Debug，开发时 Ctrl-C 立即停。
+所有停机路径从 `context.WithoutCancel(ctx)` 派生，trace id 与 request id 保持
+关联。
 
-**信号**（`Execute`）：SIGINT / SIGTERM 优雅停；SIGQUIT 快停（跳过 drain，
-预算封顶 5 秒）；SIGHUP 重读配置文件、只应用 `log.level`，其他改动记一条
+**信号**（`Execute`）：SIGINT / SIGTERM 优雅停；停机过程中再来一个 SIGINT /
+SIGTERM，或任何时候的 SIGQUIT，快停（剩下的 drain 立即结束，剩余预算封顶 5 秒，
+记一条 Info）；SIGHUP 重读配置文件、只应用 `log.level`，其他改动记一条
 「需要重启」。`Run(ctx)` 是不带信号的版本，供嵌入与测试；一个 App 只能 Run
 一次。`app.Handler()` 返回完整处理链，测试与嵌入用它，不必监听端口。
 

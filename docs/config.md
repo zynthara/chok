@@ -40,7 +40,7 @@ Embedded without a tag in every application's Config, so its sections `app`, `ht
 | `http.cors.expose_headers` | list of string | `X-Request-Id` |  |  |
 | `http.cors.max_age` | duration | `12h` |  |  |
 | `http.csrf` | bool | `true` |  | CSRF rejects the unsafe requests a browser sends from another site (http.CrossOriginProtection); clients that send neither Sec-Fetch-Site nor Origin — curl, apps, services — pass. Turning it off while routes accept a session cookie logs a warning. |
-| `http.drain_delay` | duration | `5s` |  | DrainDelay is how long /readyz reports 503 before the server stops accepting, so load balancers move traffic away first. |
+| `http.drain_delay` | duration | `5s` |  | DrainDelay is how long /readyz reports 503 before the server stops accepting, so load balancers move traffic away first. A stop waits it only when /readyz has been requested since the start: with no probe watching, Ctrl-C stops at once. |
 | `http.enabled` | bool | `true` |  | Enabled starts the HTTP server; false runs a worker process whose Handler still serves in-process requests. |
 | `http.h2c` | bool |  |  | H2C serves HTTP/2 without TLS (behind a proxy that speaks it). |
 | `http.health.enabled` | bool | `true` |  |  |

@@ -97,8 +97,9 @@ func main() {
 | 命名实例（`db.instances.<name>`） | 在代码里再 `db.Open` 一个句柄，配置放进自己的段 |
 
 生命周期的次序：启动相按 `Use` 顺序调用 `Start`，然后等所有 `Healther` 健康
-（`app.start_timeout`）才开始监听；停机相 `/readyz` 503 → `http.drain_delay` →
-HTTP Shutdown → 取消 Starter → 逆序 `Close`。telemetry 放在 `Use` 的第一个，
+（`app.start_timeout`）才开始监听；停机相 `/readyz` 503 → `http.drain_delay`（只在
+`/readyz` 被请求过时才等）→ HTTP Shutdown → 取消 Starter → 逆序 `Close`；停机中
+再按一次 Ctrl-C 转快停。telemetry 放在 `Use` 的第一个，
 它最后关、能冲出其他组件停机时的 span 与日志。
 
 ## 2. 配置
