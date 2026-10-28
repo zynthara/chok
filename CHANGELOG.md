@@ -33,14 +33,23 @@ package, configuration key, API, table and metric to its v3 form.
 - **`chok`**: the App and its lifecycle — `New`, `Use` (Start, Close,
   Health, Mount and the telemetry slot by interface), `Run` / `Execute`
   with a start phase gated on health, drain, and SIGINT / SIGTERM /
-  SIGQUIT / SIGHUP (which applies `log.level` only).
+  SIGQUIT / SIGHUP (which applies `log.level` only). The drain waits only
+  once `/readyz` has been probed, and a second SIGINT or SIGTERM during
+  the stop stops fast. `Load`'s warnings reach the App's logger, as JSON
+  under `log.format: json`.
 - **`chok`**: typed handlers `GET` / `POST` / `PUT` / `PATCH` / `DELETE`
   and `List`, binding `path` / `query` / `header` / `json` tags with
   `encoding/json/v2` and `validate` rules; errors that describe their HTTP
   envelope through `chok.Coder`; the default middleware stack (recover,
-  request id, client ip, access log, timeout, CORS, CSRF); an OpenAPI 3.1
-  document at `/openapi.json` with its UI at `/docs`; `/healthz`,
-  `/readyz`, `/livez` and optional pprof.
+  request id, client ip, access log, timeout, CORS, and CSRF protection,
+  on by default); an OpenAPI 3.1 document at `/openapi.json` with its UI
+  at `/docs`, each route's security taken from its authentication
+  middleware; `/healthz`, `/readyz`, `/livez` and optional pprof.
+- **`chok`**: `SPA(r, prefix, fsys)` serves a single-page application
+  from an `fs.FS` such as an embedded `dist`: files as they are, with
+  content-hash ETags and immutable caching under `assets/`, `index.html`
+  for the page paths a browser asks for, and the 404 envelope for the
+  rest; the API's routes keep precedence.
 - **`db`**: SQLite (pure Go), MySQL and Postgres as peers, UTC
   throughout; transactions on the context; model bases with prefixed
   public ids; soft-unique indexes; `migrate: auto | versioned | off` with
@@ -49,13 +58,18 @@ package, configuration key, API, table and metric to its v3 form.
 - **`store`** and **`store/where`**: a generic `Store[T]` with owner
   scoping that fails closed, patches with optimistic locking, cursor
   pages, aggregates and projections as generic methods, and error types
-  that map to 400 / 401 / 404 / 409.
+  that map to 400 / 401 / 404 / 409. `store:"query"` fences what a URL
+  may filter and sort on (values read as the field's type); code names
+  any mapped column.
 - **`identity`**: accounts, JWT access tokens checked against the user on
   every request, sessions bounded by `refresh_ttl`, login rate limiting,
   OAuth through **`identity/google`**, **`identity/github`**,
   **`identity/apple`** and **`identity/facebook`**, and an audit log with
-  `/audit/logs`; **`identity/rbac`** adds casbin role-based access control
-  with a Redis watcher.
+  `/audit/logs`; **`identity/rbac`** adds casbin permissions over
+  identity's roles — `admin` passes every check — with tenant domains and
+  a Redis watcher. `auth.admins` makes the listed addresses admins once
+  they are verified; `Users()` finds a user by email and lists every user
+  for an admin page.
 - **`identity`**: passwordless sign-in (`auth.passwordless`):
   `POST /auth/passwordless/start` answers 202 whatever the address and
   mails a code and a magic-link token in the background;
@@ -77,9 +91,14 @@ package, configuration key, API, table and metric to its v3 form.
   password-reset mail a link to the reset page.
 - **`jobs`**: cron-scheduled periodic jobs with skip, queue or allow
   overlap (a robfig/cron parser built in; see NOTICE), and transactional
-  outbox workers that deliver at least once in order; `jobs.Observe`
-  streams every run — started, finished, failed, skipped — as a
-  `jobs.Event`, for a live jobs panel through `realtime`.
+  outbox workers that deliver at least once in order, the payload decoded
+  into the worker's type. A failing message is retried with a growing
+  wait and, after `max_attempts`, parked in the dead letters
+  (`Dead`, `Requeue`, `Discard`) while its topic moves on; a graceful
+  restart does not deliver again what was delivered. `jobs.Observe`
+  streams every run — started, finished, failed, skipped — and every
+  parked message as a `jobs.Event`, for a live jobs panel through
+  `realtime`.
 - **`telemetry`**: Prometheus metrics named after the OpenTelemetry
   semantic conventions (`http_server_request_duration_seconds`,
   `db_client_operation_duration_seconds`, …) on `/metrics`, OpenTelemetry
@@ -104,11 +123,12 @@ package, configuration key, API, table and metric to its v3 form.
 - **`mail`**, a battery for transactional mail with the standard library
   only: SMTP through a relay (STARTTLS or TLS from the first byte, AUTH
   PLAIN, every recipient Bcc included, within `mail.timeout`), `.eml`
-  files in a directory for development, or the log; `html/template` and
-  optional `text/template` templates with partials and a subject define,
-  parsed at startup; attachments and inline images; RFC 5322 composition
-  with encoded headers and Message-IDs at the sender's domain;
-  `mail.Sender` swaps the transport for an HTTP API or a test. See
+  files in a directory for development, or the log; templates in
+  `html/template`, `text/template` or both, with partials and a subject
+  define, parsed at startup; attachments and inline images; RFC 5322
+  composition with encoded headers and Message-IDs at the sender's domain;
+  `mail.Sender` swaps the transport for an HTTP API or a test, and
+  `SendTemplate` is what `identity.Sender` takes. See
   [docs/mail.md](docs/mail.md).
 - **`choktest`**: a throwaway database per test on the lane's dialect and
   an in-process App client.
@@ -149,14 +169,53 @@ package, configuration key, API, table and metric to its v3 form.
 - `identity` merges v2's account, auth, authz and audit; `jobs` merges
   scheduler and outbox; `telemetry` merges metrics and tracing; `cache`
   absorbs the redis module.
-- **Breaking:** `identity.MailSender` is `Send(ctx, identity.Mail)`. The
-  `Mail` carries the `Kind` (`password-reset` or `login-code`), the
-  address, the `Token`, the `Code`, a `Link` and `ExpiresAt`, so a sender
-  picks a template by kind. It replaces v2's `account.Sender`
-  (`Send(ctx, to, code string)`) and the `Send(ctx, to, token string)` of
-  earlier v3 snapshots; a sender written for either no longer compiles.
-  identity now sends in tracked goroutines, `Close` waits for the mails
-  in flight within its context, and a failed send is logged as a warning.
+- **Breaking:** identity sends mail through a function:
+  `identity.Sender(fn)` takes `func(ctx, to, template string, data any) error`,
+  which `(*mail.Mailer).SendTemplate` is, so the wiring is
+  `identity.Sender(mailer.SendTemplate)`. identity calls it with the
+  mail's kind (`password-reset` or `login-code`) as the template name and
+  an `identity.Mail` — the `Token`, the `Code`, a `Link` and `ExpiresAt` —
+  as the data. It replaces v2's `account.Sender`
+  (`Send(ctx, to, code string)`) and the `MailSender` interface of earlier
+  v3 snapshots, whose senders no longer compile. identity sends in
+  tracked goroutines, `Close` waits for the mails in flight within its
+  context, and a failed send is logged as a warning.
+- **Breaking:** `chok.Public()` and `http.openapi.bearer_auth` are gone.
+  A route's OpenAPI security is what its authentication middleware
+  reports: identity's `Authn` reports `bearerAuth`, and `cookieAuth` in
+  cookie mode; a route without one is public in the document, as it is
+  in fact. A middleware of the application's own is not recognised.
+- **Breaking:** `http.csrf` is on by default, a zero `chok.Base`
+  included: cross-site POST / PUT / PATCH / DELETE from a browser get a
+  403, while same-origin requests, the origins of `http.cors`, and
+  clients that send no `Sec-Fetch-Site` or `Origin` (curl, mobile apps,
+  services) pass. identity exempts its OAuth callbacks (Apple posts
+  them). Turning it off while a route takes a cookie session logs a
+  warning at startup.
+- **Breaking:** one set of roles. `identity/rbac` decides on the
+  principal's `Roles` (identity's `users.roles`, set with
+  `Users().SetRoles`): `admin` passes everything, then the user's own
+  grants, then what `GrantRole` gave any of the roles; roles within a
+  domain stay in casbin, and the InDomain membership methods refuse the
+  empty domain. `AddUserToRole`, `RemoveUserFromRole`, `UserRoles` and
+  `BootstrapAdmin` are gone: list the first admin in `auth.admins`.
+  A password reset now marks the address verified.
+- **Breaking:** `jobs.Worker` is generic: `Worker[T](topic, fn)` with
+  `fn func(ctx, jobs.Message[T]) error`, the payload decoded into `T`
+  (`Worker[jsontext.Value]` for the JSON as stored); a payload that does
+  not decode is parked. A failing message is no longer retried on every
+  sweep forever: see `max_attempts`, `retry_backoff` and `max_backoff`.
+  The jobs migration `20261025000001` gained the failure columns and two
+  tables in place: drop and recreate a development database made by an
+  earlier snapshot.
+- **Breaking:** `jobs.retention` defaults to `168h` when the
+  configuration does not set it; a `jobs.Config` built in code still
+  keeps messages forever with a zero `Retention`.
+- **Breaking:** `store`: an unknown field named by code — in a `where`
+  option, a locator, an aggregate, `Order`, `Set` or an upsert's conflict
+  columns — is a 500 that keeps the field's name out of the response
+  (`errors.Is(err, where.ErrUnknownField)` still holds); an unknown field
+  from the URL is still a 400 that lists the allowed ones.
 
 ### Removed
 

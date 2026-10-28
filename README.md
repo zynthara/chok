@@ -278,14 +278,14 @@ in this way.
 
 | Package | What it is |
 |---|---|
-| [`chok`](https://pkg.go.dev/github.com/zynthara/chok/v3) | Configuration loading, the App and its lifecycle, typed handlers and routing, binding and validation, error envelopes, default middleware, OpenAPI, health probes, slog |
+| [`chok`](https://pkg.go.dev/github.com/zynthara/chok/v3) | Configuration loading, the App and its lifecycle, typed handlers and routing, binding and validation, error envelopes, default middleware, OpenAPI, health probes, slog, a single-page app served beside the API (`SPA`) |
 | [`db`](https://pkg.go.dev/github.com/zynthara/chok/v3/db) | SQLite, MySQL and Postgres handles, transactions, model bases, RIDs, soft-unique indexes, auto / versioned / off migrations on one ledger |
 | [`store`](https://pkg.go.dev/github.com/zynthara/chok/v3/store) | Generic `Store[T]`: CRUD, owner scoping that fails closed, patches with optimistic locking, cursors, aggregates |
 | [`store/where`](https://pkg.go.dev/github.com/zynthara/chok/v3/store/where) | The query DSL: `Eq`, `In`, `Like`, `Order`, `Page`, `Cursor`, `FromQuery`, … |
-| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | Accounts, JWTs, login rate limiting, OAuth, passwordless sign-in by mailed code, cookie sessions, the audit log, `Authn()` |
-| [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/rbac) | casbin role-based access control: `Require`, policies, a Redis watcher |
+| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | Accounts, JWTs, login rate limiting, OAuth, passwordless sign-in by mailed code, cookie sessions, the audit log, the first admin from `auth.admins`, `Authn()` |
+| [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/rbac) | casbin permissions over identity's roles, `admin` passing every check: `Require`, policies, tenant domains, a Redis watcher |
 | [`identity/google`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/google), [`github`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/github), [`apple`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/apple), [`facebook`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/facebook) | The OAuth providers |
-| [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | Cron-scheduled periodic jobs and transactional-outbox workers (at-least-once) |
+| [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | Cron-scheduled periodic jobs and transactional-outbox workers: at least once, typed payloads, retries with backoff, dead letters |
 | [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/v3/telemetry) | Prometheus metrics, OpenTelemetry traces, slog to OpenTelemetry logs, SQL instrumentation |
 | [`cache`](https://pkg.go.dev/github.com/zynthara/chok/v3/cache) | An in-memory and a Redis layer behind one `Config`, with a circuit breaker |
 | [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/v3/realtime) | Events pushed to browsers over WebSocket and server-sent events: one-time tickets, authorized topics, resuming after a reconnect, a Redis backplane |

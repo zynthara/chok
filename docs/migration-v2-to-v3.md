@@ -170,7 +170,7 @@ v3 的段名由应用的 Config struct 决定；下表右列用 `examples/blog` 
 | `audit.enable_admin_api` | `auth.audit.admin_api` | |
 | `audit.purge_interval` / `purge_batch_size` | — | 删除：固定每小时、每批 1000 |
 | `authz.*`（`enabled`、`driver`、`casbin.*`） | — | 整段删除，改为代码：`rbac.New(auth, d, rbac.Model(text), rbac.Watcher(client))` |
-| `authz.casbin.bootstrap_admin_user_id` | — | 代码：`rb.Policy().BootstrapAdmin(ctx, userID)` |
+| `authz.casbin.bootstrap_admin_user_id` | `auth.admins` | 改为邮箱列表：列出的邮箱验证过后，登录时自动得到 `admin` 角色（§5） |
 | `authz.casbin.redis_watcher_channel` | — | 固定 `chok:authz:policy` |
 | `authz.casbin.audit_enabled` | — | 跟随 `auth.audit.enabled` |
 | `scheduler.enabled`、`outbox.enabled` | `jobs.enabled` | 合并：false 时本进程只 Enqueue |
@@ -352,7 +352,9 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | `account.WithOAuthSessionStore` / `WithAuthCodeStore`、`MemorySessionStore`、`CookieCarrier` | 删除：OAuth 进行中的状态只在进程内（多副本须会话粘滞） |
 | `auth/jwt` 的可插拔 `TokenParser` / `PrincipalResolver` | 删除：`Authn` 只认本 Identity 签发的 HS256 token，每个请求按主键读一次用户 |
 | `account/providers/{google,github,apple,facebook}` | `identity/{google,github,apple,facebook}`，各只导出 `New(identity.ProviderConfig)` |
-| `authz.Module()`、`authz/casbin` | `rb, err := rbac.New(auth, d, opts...)`，`app.Use(rb)`；`rb.Require(obj, act)` / `rb.RequireInDomain(obj, act, param)` 中间件；`rb.Policy()` 策略服务 |
+| `authz.Module()`、`authz/casbin` | `rb, err := rbac.New(auth, d, opts...)`（或 `rbac.MustNew`），`app.Use(rb)`；`rb.Require(obj, act)` / `rb.RequireInDomain(obj, act, param)` 中间件；`rb.Policy()` 策略服务 |
+| casbin 的全局角色成员：`AddUserToRole` / `RemoveUserFromRole` / `UserRoles` | 删除：全局角色只在 identity，`auth.Users().SetRoles(ctx, id, roles)` 设置、`auth.Users().Get(ctx, id)` 的 `Roles` 读取；rbac 判定读 `Principal.Roles`。域内的 `AddUserToRoleInDomain` 等保留，但域不能是 "" 或 `*` |
+| `casbin.Bootstrap(ctx, svc, casbin.BootstrapConfig{AdminUserID, …})`（种一个 admin 用户与它的全权限） | 删除：`admin` 是内置角色，在 rbac 里不用授权就全通；首个管理员写进 `auth.admins` |
 | `audit.Module()` 与它的 `audit.Logger`：`Log(ctx, audit.Entry)` / `LogSync` / `Query` | `auth.Audit().Log(ctx, identity.Event)`（异步）/ `LogSync`（随 ctx 的事务）/ `ListFromQuery`（`/audit/logs` 用）；常量 `audit.ResultSuccess`、`ActorTypeUser` → `identity.ResultSuccess`、`ActorUser` |
 
 行为变化：
@@ -365,8 +367,16 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
   created_at}`。其余路由与请求 / 响应体逐字沿用 v2（register 201、login 200，体都是
   `{token, expires_at}`；forgot-password 一律 204）。
 - **登录限速**默认开（15m / 10，按 email 与客户端 IP），429 带 `Retry-After`。
-- **`/audit/logs`** 路径不变：没有 rbac 时要求 `users.roles` 含 `admin`，挂了 rbac
-  后改由 rbac 判 `audit/read`。
+- **角色只有一套**：v2 的 `users.roles`（进 token 的角色）与 casbin 的全局角色
+  成员是两套、互不相通；v3 只留 `users.roles`，rbac 判定时读它：`admin` 全通，
+  其余按用户自己的授权（`GrantUser`）与它的角色的授权（`GrantRole`）。
+- **首个管理员**：`auth.admins: [ops@example.com]`。列出的邮箱一旦验证过（无密码
+  登录、OAuth 的已验证邮箱、或 reset-password），下次签发 token 或请求经过
+  `Authn` 时就加上 `admin` 并落库，只加一次；从列表里删掉不撤销。
+- **reset-password 成功即置 `email_verified`**（邮件里的 token 证明邮箱可达）；v2
+  不改这个字段。
+- **`/audit/logs`** 路径不变：`users.roles` 含 `admin` 的用户总能读；挂了 rbac 后，
+  其余用户由 rbac 判 `audit/read`。
 - **决策审计**跟随 `auth.audit.enabled`；watcher 频道固定 `chok:authz:policy`。
 
 表的变化（v3 的表名沿用 v2，不加前缀）：
@@ -376,7 +386,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | `users` | 不变 | — |
 | `identities` | `ix_identity_user_provider` 改为真正的 `(user_id, provider)` 复合索引；单列 `idx_identities_user_id` 去掉 | 按 v3 的 SQL（`identity/migrations/<方言>/`）重建这两个索引 |
 | `audit_logs` | `before` / `after` 改名 `before_data` / `after_data`（MySQL 保留字）；`actor_id` / `resource_id` / `request_id` 加宽到 128；`action` / `result` NOT NULL；三个 `*_time` 索引真正包含 `occurred_at` | 改名并加宽列、重建索引 |
-| `casbin_rule` | 不变 | — |
+| `casbin_rule` | 表形不变；全局的角色绑定（`ptype = 'g'`、`v2 = '*'`）不再由 API 管理 | 把这些行的角色合并进对应用户的 `users.roles`（`Users().SetRoles`），再删掉这些行，见下 |
 | `auth_login_codes` | v3 新增（无密码登录的验证码，只存 HMAC） | 跑版本化迁移 `20261025000002` 建表，见下 |
 | `schema_migrations_chok_account` / `_audit` / `_authz` | 不再使用 | 见下 |
 
@@ -397,6 +407,25 @@ chok migrate status --battery identity --battery rbac   # 全部 applied
 
 `db.migrate: auto` 的库不用登记：auto 模式下电池不写账本，AutoMigrate 会补上缺的列
 与索引，但不会改名列——`before` / `after` 两列仍要手工改名。
+
+v2 的全局角色绑定（`casbin_rule` 里 `ptype = 'g'` 且 `v2 = '*'` 的行，由
+`AddUserToRole` 与 `Bootstrap` 写入）v3 的匹配器仍然认，但已经没有 API 能列出或
+删掉它们，和 `users.roles` 成了两处。升级时把它们搬进 `users.roles`：
+
+```sql
+SELECT v0 AS user_id, v1 AS role FROM casbin_rule WHERE ptype = 'g' AND v2 = '*';
+```
+
+把每个用户的这些角色并进它现有的角色，用 `auth.Users().SetRoles(ctx, userID,
+roles)` 写回（会吊销该用户的 token，下次登录就是新角色），然后删掉这些行，再
+重启各副本（或调 `rb.Policy().ReloadPolicy(ctx)`）：
+
+```sql
+DELETE FROM casbin_rule WHERE ptype = 'g' AND v2 = '*';
+```
+
+`Bootstrap` 给 `admin` 角色种的 `p` 行（`admin, *, *, *`）留着无害——`admin` 现在
+内置全通——也可以一起删。
 
 ## 6. jobs（scheduler + outbox）
 

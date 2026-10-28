@@ -263,14 +263,14 @@ mail:
 
 | 包 | 是什么 |
 |---|---|
-| [`chok`](https://pkg.go.dev/github.com/zynthara/chok/v3) | 配置装载、App 与生命周期、类型化 handler 与路由、绑定与校验、错误信封、默认中间件、OpenAPI、健康探针、slog |
+| [`chok`](https://pkg.go.dev/github.com/zynthara/chok/v3) | 配置装载、App 与生命周期、类型化 handler 与路由、绑定与校验、错误信封、默认中间件、OpenAPI、健康探针、slog、与 API 同域服务的单页应用（`SPA`） |
 | [`db`](https://pkg.go.dev/github.com/zynthara/chok/v3/db) | SQLite / MySQL / Postgres 句柄、事务、模型基座、RID、软唯一索引、单账本上的 auto / versioned / off 迁移 |
 | [`store`](https://pkg.go.dev/github.com/zynthara/chok/v3/store) | 泛型 `Store[T]`：CRUD、失败关闭的 owner 隔离、带乐观锁的 Patch、游标、聚合 |
 | [`store/where`](https://pkg.go.dev/github.com/zynthara/chok/v3/store/where) | 查询 DSL：`Eq`、`In`、`Like`、`Order`、`Page`、`Cursor`、`FromQuery` … |
-| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | 账户、JWT、登录限速、OAuth、邮件验证码的无密码登录、cookie 会话、审计日志、`Authn()` |
-| [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/rbac) | casbin 的基于角色的访问控制：`Require`、策略、Redis watcher |
+| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | 账户、JWT、登录限速、OAuth、邮件验证码的无密码登录、cookie 会话、审计日志、`auth.admins` 指定的首个管理员、`Authn()` |
+| [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/rbac) | 基于 identity 角色的 casbin 权限，`admin` 全通：`Require`、策略、租户域、Redis watcher |
 | [`identity/google`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/google)、[`github`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/github)、[`apple`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/apple)、[`facebook`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/facebook) | OAuth provider |
-| [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | cron 调度的周期任务与事务性 outbox worker（至少一次） |
+| [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | cron 调度的周期任务与事务性 outbox worker：至少一次、类型化 payload、退避重试、死信 |
 | [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/v3/telemetry) | Prometheus 指标、OpenTelemetry 链路、slog 到 OpenTelemetry Logs、SQL 埋点 |
 | [`cache`](https://pkg.go.dev/github.com/zynthara/chok/v3/cache) | 一个 `Config` 后面的内存层与 Redis 层，带熔断器 |
 | [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/v3/realtime) | 经 WebSocket 与 server-sent events 推给浏览器的事件：一次性 ticket、授权的主题、断线续传、Redis backplane |

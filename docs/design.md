@@ -48,7 +48,7 @@ RCU 快照。v3 把这些全部拿掉，只留三条规则：
 | `store` | 泛型 `Store[T]`：CRUD、owner 隔离、Patch 与乐观锁、游标、聚合与投影、自描述错误 | `chok`、`db`、`store/where` |
 | `store/where` | 查询 DSL：`Eq` / `In` / `Like` / `Order` / `Page` / `Cursor` / `FromQuery` … | gorm（`Option` 的签名里出现 `*gorm.DB`，D11） |
 | `identity` | 账户、JWT、登录限速、OAuth、邮件验证码的无密码登录、cookie 会话、审计；`Authn()` 中间件；`/auth/*` 路由 | `chok`、`db`、`store` |
-| `identity/rbac` | casbin RBAC：`Require` / `RequireInDomain`、策略服务、Redis watcher | `identity`；casbin 与 go-redis 只在这里 |
+| `identity/rbac` | casbin 权限：`Require` / `RequireInDomain`（读 `Principal.Roles`，`admin` 全通）、策略服务、Redis watcher | `identity`；casbin 与 go-redis 只在这里 |
 | `identity/{google,github,apple,facebook}` | 四个 OAuth provider，各只导出 `New` | `identity` |
 | `jobs` | 周期任务（内置 cron 解析器）与事务性 outbox worker | `chok`、`db` |
 | `telemetry` | Prometheus 指标、OTel 链路、slog → OTel Logs、gorm 埋点 | `chok`、`db`；client_golang 与 otel |
@@ -147,7 +147,8 @@ identity 关审计队列时数据库还在；realtime 的 Hub 放在会发布事
 电池的 Config 由应用嵌进自己的 struct（`Auth identity.Config \`yaml:"auth"\``），
 段名由应用决定；`identity.New` / `jobs.New` 等在构造时再跑一次 `Validate()`，
 并给代码里构造的零值填默认（布尔开关除外：`jobs.Enabled`、
-`telemetry.Metrics.Enabled` 与 cache 的三个 `Enabled` 没有零值默认）。
+`telemetry.Metrics.Enabled` 与 cache 的三个 `Enabled` 没有零值默认；
+`jobs.Retention` 也除外，0 表示永久保留，`168h` 只在配置文件没写这个键时生效）。
 
 ## 5. HTTP
 
@@ -242,6 +243,38 @@ security，也没有 `securitySchemes`；`components.securitySchemes` 是所有�
 内建端点 `/healthz`、`/livez`、`/readyz`、OpenAPI、`/docs` 与
 `app.debug` 打开时的 `/debug/pprof/*`（含 goroutineleak）都带自己的路由模板，
 访问日志的 `route` 与指标的 `http_route` 用它命名。
+
+### 5.5 单页应用：`chok.SPA`
+
+`chok.SPA(r, prefix, fsys)` 在 prefix 下服务打包好的前端（Vite、webpack 等的
+`dist`），通常嵌进二进制：
+
+```go
+//go:embed dist
+var dist embed.FS
+
+web, _ := fs.Sub(dist, "dist") // 去掉 dist/ 这一层，index.html 在根上
+chok.SPA(app.Router(), "/", web)
+```
+
+- 注册 GET（ServeMux 的 GET 也接 HEAD）的 `{prefix}` 与 `{prefix}/{rest...}`；
+  prefix 为 "/" 时就是全站兜底。更具体的路由——API、内建端点——照旧胜出，SPA
+  不遮挡它们；不写方法的路由（method ""）与 SPA 的模式冲突，ServeMux 会 panic，
+  所以 API 路由要写明方法。不进 OpenAPI，访问日志的 route 是注册的模式；fsys
+  根上没有 index.html 时 panic。
+- 存在的文件原样给（`http.ServeContent`：Content-Type、Range、条件请求）。ETag
+  是内容的 SHA-256（强 ETag），按路径缓存，文件的大小或修改时间变了就重算：
+  `embed.FS` 永远不变，开发时用 `os.DirFS` 改了文件，下个请求就是新的 ETag。
+  `{prefix}/assets/` 下是打包器带哈希的产物，`Cache-Control: public,
+  max-age=31536000, immutable`；其余文件与 index.html 一律 `no-cache`（每次带
+  ETag 回源校验，没变就是 304）。
+- 找不到：最后一段带 `.` 的路径（像文件）→ 404 信封；否则 Accept 含
+  `text/html`（浏览器打开页面）→ 回 index.html，由前端路由接管；否则 → 404
+  信封，API 客户端打错路径不会收到一页 HTML。目录不列出。
+- 与 API 同域：前端与 API 同源时，cookie 会话（`auth.cookie`）不用 CORS；
+  `http.csrf`（默认开）挡住别的网站借浏览器发来的写请求，前端自己的请求同源，
+  照常通过（§5.3）。前端在别的域时，在 `http.cors` 里列出它并开
+  `allow_credentials`，CSRF 也就把它当作可信来源。
 
 ## 6. 数据
 
@@ -395,8 +428,35 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   内：多副本须会话粘滞。
 - **审计**：`Audit().Log`（异步入队，不进调用方事务）/ `LogSync`（同步，随 ctx
   事务）；trace id 由 telemetry 经内部钩子补上。
-- **`identity/rbac`**：casbin 的 (sub, dom, obj, act) 模型，`Require` /
-  `RequireInDomain` 中间件（无 principal 401、拒绝 403），策略服务，Redis
+- **角色只有一套**：全局角色只存在 identity——`users.roles` → `Principal.Roles`，
+  用 `Users().SetRoles` 管（会吊销该用户的 token，下个请求就是新角色）。内置的
+  `admin` 在 rbac 里无所不能，在 identity 里可读审计；store 的
+  `db.store.admin_roles` 默认仍为空，要让管理员越过 owner 隔离须显式写
+  `admin_roles: [admin]`。
+- **首个管理员**：`auth.admins` 是邮箱列表（规范化后比较）。列表里**且已验证**
+  的用户，在签发 token（register、login、refresh-token、passwordless verify、
+  OAuth exchange）或 `Authn` 读到他时，角色里还没有 `admin` 就加上并落库：按行的
+  version 乐观锁，并发请求只写一次，记一条审计 `user.role.grant`（actor 是
+  system），不吊销已有 token；写失败只记 Warn、请求照常，下个请求再试。只增不删：
+  从列表里删掉邮箱不撤销角色（要撤用 `SetRoles`）。未验证的邮箱不授予——开放注册
+  时，抢注管理员邮箱的人拿不到权限。reset-password 成功即证明邮箱可达，置
+  `email_verified`，所以用密码登录的应用也能走 `auth.admins`；运维调用的
+  `Users().ResetPassword` 不置。
+- **用户管理**：`Users()` 是运维面（Create、Get、`GetByEmail`、SetRoles、
+  SetActive、ResetPassword、MarkEmailVerified、RevokeTokens），并实现
+  `chok.Lister[User]`：全表、没有 owner 围栏，可按 email、name、email_verified、
+  active、created_at 过滤，每页默认 20、最多 100。管理接口因此是一行
+  `chok.List(admin, "/users", auth.Users())`，**只能挂在管理员授权之后**（比如
+  `rb.Require("user", "read")` 的组里）；响应体是 `User` 的 JSON，不含 roles 与
+  active，要显示它们的管理页自己写 handler。
+- **`identity/rbac`**：casbin 的 (sub, dom, obj, act) 模型管权限。判定读
+  `chok.Principal` 的 UserID 与 Roles（不必是 identity 签发的 principal）：
+  `Require(obj, act)` 放行，当且仅当 Roles 含 `admin`，或 casbin 允许这个用户
+  （`GrantUser`），或允许 Roles 里任一角色（`GrantRole`）；无 principal 401、
+  拒绝 403。`RequireInDomain` 同理：`admin` 跨所有域，后两条在该域判定，域内的
+  角色由 `AddUserToRoleInDomain` 管——域不能是 "" 或 `*`（全局角色用
+  `Users().SetRoles`）。`HasPermission(ctx, userID, …)` 按 userID 读 identity 的
+  用户后同规则判定，用户不存在 → false。`New` / `MustNew`、策略服务、Redis
   watcher 同步多副本。不 import rbac 的应用不链接 casbin，也不建 casbin_rule 表。
 
 ### 7.2 `jobs`
