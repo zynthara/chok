@@ -86,7 +86,7 @@ func (s *UserService) ResetPassword(ctx context.Context, id, password string) er
 	if len(password) < 8 || len(password) > 72 {
 		return chok.ErrValidation.Msgf("password must be 8 to 72 bytes").With("fields", map[string]string{"password": "length"})
 	}
-	return notFoundUser(s.idn.setPassword(ctx, id, "password", password))
+	return notFoundUser(s.idn.setPassword(ctx, id, "password", password, false))
 }
 
 // RevokeTokens makes every token issued to the user stop working, and

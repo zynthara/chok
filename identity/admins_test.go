@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zynthara/chok/v3/internal/dbtest"
 )
@@ -241,5 +242,42 @@ func TestAdmins_ConcurrentRequestsWriteOnce(t *testing.T) {
 	}
 	if n := grantRecords(t, idn, u.RID); n != 1 {
 		t.Fatalf("grant records = %d, want 1", n)
+	}
+}
+
+func TestResetPassword_VerifiesTheAddress(t *testing.T) {
+	sender := newMockSender()
+	cfg := adminsConfig()
+	idn := newIdentity(t, cfg, Sender(sender.send))
+	c := serve(t, idn)
+	register(t, c, "root@test.com", "password123")
+	if code := c.PostJSON("/auth/forgot-password", map[string]string{"email": "root@test.com"}, nil); code != http.StatusNoContent {
+		t.Fatalf("forgot-password = %d", code)
+	}
+	if !sender.wait(5 * time.Second) {
+		t.Fatal("no reset mail")
+	}
+	if code := c.PostJSON("/auth/reset-password", map[string]string{"token": sender.last().Token, "new_password": "newpassword456"}, nil); code != http.StatusNoContent {
+		t.Fatalf("reset-password = %d", code)
+	}
+	if u := userByEmail(t, idn, "root@test.com"); !u.EmailVerified {
+		t.Fatal("a reset through the mailed token verifies the address")
+	}
+	// A password login is now an administrator's, through auth.admins.
+	if code, tok := login(t, c, "root@test.com", "newpassword456"); code != http.StatusOK || !slices.Equal(tokenRoles(t, idn, tok), adminOnly) {
+		t.Fatalf("login after the reset = %d", code)
+	}
+	// An operator's reset and a change of password prove nothing.
+	register(t, c, "bob@test.com", "password123")
+	bob := userByEmail(t, idn, "bob@test.com")
+	if err := idn.Users().ResetPassword(t.Context(), bob.RID, "newpassword456"); err != nil {
+		t.Fatal(err)
+	}
+	_, tok := login(t, c, "bob@test.com", "newpassword456")
+	if code := c.WithBearer(tok).JSON(http.MethodPut, "/auth/change-password", map[string]string{"old_password": "newpassword456", "new_password": "password789"}, nil); code != http.StatusNoContent {
+		t.Fatalf("change-password = %d", code)
+	}
+	if u := userByEmail(t, idn, "bob@test.com"); u.EmailVerified {
+		t.Fatal("UserService.ResetPassword or change-password verified the address")
 	}
 }

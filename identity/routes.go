@@ -245,11 +245,12 @@ func (idn *Identity) changePassword(ctx context.Context, req *changePasswordRequ
 	if comparePassword(s.user.PasswordHash, req.OldPassword) != nil {
 		return chok.None{}, errWrongOld
 	}
-	return chok.None{}, idn.setPassword(ctx, s.user.RID, "new_password", req.NewPassword)
+	return chok.None{}, idn.setPassword(ctx, s.user.RID, "new_password", req.NewPassword, false)
 }
 
-// setPassword stores a new password and revokes the user's tokens.
-func (idn *Identity) setPassword(ctx context.Context, userID, field, password string) error {
+// setPassword stores a new password and revokes the user's tokens;
+// verified marks the email verified as well.
+func (idn *Identity) setPassword(ctx context.Context, userID, field, password string, verified bool) error {
 	if err := checkPasswordStrength(field, password); err != nil {
 		return err
 	}
@@ -257,11 +258,15 @@ func (idn *Identity) setPassword(ctx context.Context, userID, field, password st
 	if err != nil {
 		return err
 	}
-	return idn.users.Update(ctx, store.RID(userID), store.Set(map[string]any{
+	set := map[string]any{
 		"password_hash":    hash,
 		"has_password":     true,
 		"password_version": bumpVersion,
-	}))
+	}
+	if verified {
+		set["email_verified"] = true
+	}
+	return idn.users.Update(ctx, store.RID(userID), store.Set(set))
 }
 
 func (idn *Identity) forgotPassword(ctx context.Context, req *forgotPasswordRequest) (chok.None, error) {
@@ -302,7 +307,8 @@ func (idn *Identity) resetPassword(ctx context.Context, req *resetPasswordReques
 	if pv, ok := intClaim(claims, "pv"); !user.Active || !ok || pv != int64(user.PasswordVersion) {
 		return chok.None{}, errResetToken
 	}
-	return chok.None{}, idn.setPassword(ctx, user.RID, "new_password", req.NewPassword)
+	// The token came by mail: the address is the user's.
+	return chok.None{}, idn.setPassword(ctx, user.RID, "new_password", req.NewPassword, true)
 }
 
 func (idn *Identity) me(ctx context.Context, _ *chok.None) (*meResponse, error) {
