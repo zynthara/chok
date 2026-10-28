@@ -190,20 +190,30 @@ func TestPolicy_RejectsGlobalAsTenant(t *testing.T) {
 	if err := p.AddUserToRoleInDomain(ctx, "u", "r", "*"); err == nil || !strings.Contains(err.Error(), "Users().SetRoles") {
 		t.Errorf("the error points to identity: %v", err)
 	}
+	// "" means global for a grant, but a membership needs a tenant: no
+	// second home for global roles.
+	for name, fn := range map[string]func() error{
+		"AddUserToRoleInDomain":      func() error { return p.AddUserToRoleInDomain(ctx, "u", "r", "") },
+		"RemoveUserFromRoleInDomain": func() error { return p.RemoveUserFromRoleInDomain(ctx, "u", "r", "") },
+		"UserRolesInDomain":          func() error { _, err := p.UserRolesInDomain(ctx, "u", ""); return err },
+	} {
+		if err := fn(); err == nil || !strings.Contains(err.Error(), "needs a tenant domain") || !strings.Contains(err.Error(), "Users()") {
+			t.Errorf("%s with domain \"\": %v", name, err)
+		}
+	}
 }
 
+// TestPolicy_EmptyDomainIsGlobal: a grant in domain "" is a global grant,
+// reaching the users whose identity roles name the role.
 func TestPolicy_EmptyDomainIsGlobal(t *testing.T) {
 	idn, p := policy(t)
 	ctx := context.Background()
-	x := user(t, idn, "x@test.com")
-	if err := p.AddUserToRoleInDomain(ctx, x, "member", ""); err != nil {
-		t.Fatal(err)
-	}
+	x := user(t, idn, "x@test.com", "member")
 	if err := p.GrantRoleInDomain(ctx, "member", "task", "read", ""); err != nil {
 		t.Fatal(err)
 	}
-	if roles, err := p.UserRolesInDomain(ctx, x, ""); err != nil || len(roles) != 1 || roles[0] != "member" {
-		t.Fatalf("roles = %v %v", roles, err)
+	if perms, err := p.RolePermissions(ctx, "member"); err != nil || len(perms) != 1 || perms[0] != (rbac.Permission{Object: "task", Action: "read"}) {
+		t.Fatalf("permissions = %v %v", perms, err)
 	}
 	if ok, _ := p.HasPermission(ctx, x, "task", "read"); !ok {
 		t.Fatal("a grant in domain \"\" is global")

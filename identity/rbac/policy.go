@@ -30,49 +30,50 @@ type Permission struct {
 	Action string
 }
 
-// AddUserToRoleInDomain binds userID to role in domain.
+// AddUserToRoleInDomain binds userID to role in domain, a tenant: "" and
+// "*" are refused, as a user's global roles are identity's
+// (Users().SetRoles).
 func (p *PolicyService) AddUserToRoleInDomain(ctx context.Context, userID, role, domain string) error {
-	if err := rejectGlobalAsTenant(domain, "AddUserToRoleInDomain"); err != nil {
+	if err := rejectGlobalMembership(domain, "AddUserToRoleInDomain"); err != nil {
 		return err
 	}
-	dom := normalizeDomain(domain)
-	added, err := p.e.enforcer.AddRoleForUserInDomain(userID, role, dom)
+	added, err := p.e.enforcer.AddRoleForUserInDomain(userID, role, domain)
 	if err != nil {
 		return err
 	}
 	if added {
-		p.e.fireAudit(ctx, "AddUserToRoleInDomain", role, userID, dom)
+		p.e.fireAudit(ctx, "AddUserToRoleInDomain", role, userID, domain)
 	}
 	return nil
 }
 
-// RemoveUserFromRoleInDomain removes a binding in domain.
+// RemoveUserFromRoleInDomain removes a binding in domain, a tenant as in
+// AddUserToRoleInDomain.
 func (p *PolicyService) RemoveUserFromRoleInDomain(ctx context.Context, userID, role, domain string) error {
-	if err := rejectGlobalAsTenant(domain, "RemoveUserFromRoleInDomain"); err != nil {
+	if err := rejectGlobalMembership(domain, "RemoveUserFromRoleInDomain"); err != nil {
 		return err
 	}
-	dom := normalizeDomain(domain)
-	removed, err := p.e.enforcer.DeleteRoleForUserInDomain(userID, role, dom)
+	removed, err := p.e.enforcer.DeleteRoleForUserInDomain(userID, role, domain)
 	if err != nil {
 		return err
 	}
 	if removed {
-		p.e.fireAudit(ctx, "RemoveUserFromRoleInDomain", role, userID, dom)
+		p.e.fireAudit(ctx, "RemoveUserFromRoleInDomain", role, userID, domain)
 	}
 	return nil
 }
 
-// UserRolesInDomain lists the roles bound to userID in domain.
+// UserRolesInDomain lists the roles bound to userID in domain, a tenant
+// as in AddUserToRoleInDomain.
 func (p *PolicyService) UserRolesInDomain(ctx context.Context, userID, domain string) ([]string, error) {
-	if err := rejectGlobalAsTenant(domain, "UserRolesInDomain"); err != nil {
+	if err := rejectGlobalMembership(domain, "UserRolesInDomain"); err != nil {
 		return nil, err
 	}
-	return p.e.enforcer.GetRolesForUserInDomain(userID, normalizeDomain(domain)), nil
+	return p.e.enforcer.GetRolesForUserInDomain(userID, domain), nil
 }
 
 // DomainsForUser lists the domains where userID holds a role bound by
-// AddUserToRoleInDomain, "*" for one bound in domain "", the global
-// scope; the roles identity keeps are not here. Casbin does not expose
+// AddUserToRoleInDomain; the global roles identity keeps are not here. Casbin does not expose
 // it, so it filters the grouping policies.
 func (p *PolicyService) DomainsForUser(ctx context.Context, userID string) ([]string, error) {
 	policies, err := p.e.enforcer.GetGroupingPolicy()
@@ -273,6 +274,18 @@ func rejectGlobalAsTenant(domain, methodName string) error {
 			globalDomain, globalAlternative(methodName))
 	}
 	return nil
+}
+
+// rejectGlobalMembership refuses a role binding outside a tenant: "*" as
+// rejectGlobalAsTenant does, and "" too, which means global for grants. A
+// user's global roles live only in identity, so the principal's Roles say
+// all of them.
+func rejectGlobalMembership(domain, methodName string) error {
+	if domain == "" {
+		return fmt.Errorf("rbac: %s needs a tenant domain; for global roles use %s",
+			methodName, globalAlternative(methodName))
+	}
+	return rejectGlobalAsTenant(domain, methodName)
 }
 
 // globalAlternative names the global-equivalent method so the error
