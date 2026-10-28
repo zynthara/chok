@@ -12,9 +12,6 @@ http:
   addr: ":8080"
   openapi:
     title: {{.Name}} API
-    # Nothing here logs users in yet, so no route asks for a bearer token
-    # in /openapi.json. Turn it back on with an authenticating battery.
-    bearer_auth: false
 
 db:
   driver: sqlite     # sqlite | mysql | postgres

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/openapi"
 	"github.com/zynthara/chok/v3/store"
 	"github.com/zynthara/chok/v3/store/where"
 )
@@ -43,8 +42,9 @@ import (
 //	POST   {prefix}/identities/link   bearer: link another provider
 //	DELETE {prefix}/identities/{id}   bearer: unlink one
 //
-// and with auth.audit.enabled and admin_api, GET /audit/logs. Public
-// routes are documented without security in the OpenAPI document.
+// and with auth.audit.enabled and admin_api, GET /audit/logs. The OpenAPI
+// document lists the routes behind Authn with its schemes and the others
+// without security.
 func (idn *Identity) Mount(r chok.Router) {
 	g := r.Group(idn.cfg.Prefix)
 	tag := chok.Tags("auth")
@@ -52,18 +52,18 @@ func (idn *Identity) Mount(r chok.Router) {
 	// their addresses, and a mailed code is the only way in.
 	passwords := !idn.cfg.Passwordless.Only
 	if passwords && !idn.cfg.DisableRegister {
-		tokenRoute(idn, g, "/register", idn.register, chok.Created(), chok.Public(), tag, chok.Summary("Register an account"))
+		tokenRoute(idn, g, "/register", idn.register, chok.Created(), tag, chok.Summary("Register an account"))
 	}
 	if passwords {
-		tokenRoute(idn, g, "/login", idn.login, chok.Public(), tag, chok.Summary("Log in"))
+		tokenRoute(idn, g, "/login", idn.login, tag, chok.Summary("Log in"))
 	}
 	if passwords && idn.sender != nil {
-		chok.POST(g, "/forgot-password", idn.forgotPassword, chok.Public(), tag, chok.Summary("Mail a password-reset token"))
-		chok.POST(g, "/reset-password", idn.resetPassword, chok.Public(), tag, chok.Summary("Reset the password with a token"))
+		chok.POST(g, "/forgot-password", idn.forgotPassword, tag, chok.Summary("Mail a password-reset token"))
+		chok.POST(g, "/reset-password", idn.resetPassword, tag, chok.Summary("Reset the password with a token"))
 	}
 	if idn.cfg.Passwordless.Enabled {
-		chok.POST(g, "/passwordless/start", idn.passwordlessStart, chok.Status(http.StatusAccepted), chok.Public(), tag, chok.Summary("Mail a sign-in code"))
-		tokenRoute(idn, g, "/passwordless/verify", idn.passwordlessVerify, chok.Public(), tag, chok.Summary("Sign in with a mailed code"))
+		chok.POST(g, "/passwordless/start", idn.passwordlessStart, chok.Status(http.StatusAccepted), tag, chok.Summary("Mail a sign-in code"))
+		tokenRoute(idn, g, "/passwordless/verify", idn.passwordlessVerify, tag, chok.Summary("Sign in with a mailed code"))
 	}
 	authed := g.Group("", idn.Authn())
 	tokenRoute(idn, authed, "/refresh-token", idn.refreshToken, tag, chok.Summary("Refresh the access token"))
@@ -73,10 +73,6 @@ func (idn *Identity) Mount(r chok.Router) {
 	chok.GET(authed, "/me", idn.me, tag, chok.Summary("Get the signed-in user"))
 	if idn.cfg.Cookie.Enabled {
 		chok.POST(authed, "/logout", idn.logout, chok.Use(keepResponse), tag, chok.Summary("Log out"))
-		// The OpenAPI document lists the cookie next to the bearer token.
-		if openapi.UseCookieAuth != nil {
-			openapi.UseCookieAuth(r, idn.cfg.Cookie.Name)
-		}
 	}
 	if idn.oauth != nil {
 		idn.oauth.mount(g, authed)

@@ -64,9 +64,10 @@ API 的地方，走 `internal/` 下的挂点：`internal/dbx`
 （db 告诉 store 与电池的东西：SoftUnique 索引、无基座的普通表、语句观察者、
 电池的迁移文件）、`internal/logtap`（telemetry 桥接 App 的 logger）、
 `internal/tracectx`（审计记录补 trace id）、`internal/redislog`（go-redis
-日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）、
-`internal/openapi.UseCookieAuth`（identity 的 cookie 模式把 `cookieAuth` 写进 App
-的 OpenAPI 文档）。挂点都由提供方在 `init` 里赋值，使用方读取，公开面不变。
+日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）。挂点都由提供方
+在 `init` 里赋值，使用方读取，公开面不变。另有一个内部接口
+`internal/openapi.Securer`：identity 的 `Authn()` 返回的 handler 实现它，报告
+自己接受的认证方案，根包在套中间件时识别它（§5.4）。
 
 命令行 `cmd/chok` 是 main 包，不计入公开包与导出预算；cobra 只出现在那里。
 
@@ -153,7 +154,7 @@ chok.List[T](r, pattern, lister, ...RouteOption)
 路由只有这一种写法，底层是标准库 `ServeMux` 的模式路由；逃生门是
 `r.Handle(method, pattern, http.Handler)`。一行注册同时完成：路由、请求绑定、
 校验、响应编码、错误映射与 OpenAPI 登记。`RouteOption`：`Summary`、`Tags`、
-`Status`、`Created`、`Public`、`Use`（路由级中间件）、`MaxBody`、`Deprecated`。
+`Status`、`Created`、`Use`（路由级中间件）、`MaxBody`、`Deprecated`。
 
 **绑定**：请求 struct 的字段 tag 是 `path` / `query` / `header` / `json` /
 `validate`。JSON 体先解码（`encoding/json/v2`：大小写敏感、重复键与未知字段
@@ -206,8 +207,21 @@ OpenAPI 3.1 文档在 `http.openapi.path`（默认 `/openapi.json`），swagger-
 enum / email → format）、List 的分页与过滤参数；命名类型进
 `components.schemas`。没有写 `Summary` 时按「POST 集合 → Create <单数>、GET
 带尾参 → Get <单数>、集合 → List <复数>、PUT → Replace、PATCH → Update、
-DELETE → Delete」生成。非 `Public()` 的路由标 bearer（`http.openapi.bearer_auth`
-可关）。内建端点 `/healthz`、`/livez`、`/readyz`、OpenAPI、`/docs` 与
+DELETE → Delete」生成。
+
+一条路由的 `security` 由它实际经过的认证中间件决定：注册时 chok 逐层套中间件，
+哪一层的 handler 报告了认证方案，这条路由就列出这些方案（任一即可，按链的顺序
+去重）。计入的链是 `Group` 的中间件、`Handle` 的 `mw`、路由级 `Use(...)`，以及
+`chok.Wrap(...)`（作用于所有路由，排在路由自己的方案前面）。identity 的
+`Authn()` 报告 `bearerAuth`（http bearer，JWT），cookie 模式下再报
+`cookieAuth`（cookie 里的 apiKey，名字是 `auth.cookie.name`）。文档里有任何方案
+时，没经过认证中间件的路由写 `security: []`；整个应用都没有时，文档不写
+security，也没有 `securitySchemes`；`components.securitySchemes` 是所有路由
+报告的并集。所以文档与实际一致：忘了挂 Authn 的路由在文档里就是公开的，公开
+路由也不用另外标。应用自己写的认证中间件不被识别，文档里显示为公开；要被识别
+就用 identity 的 `Authn()`。
+
+内建端点 `/healthz`、`/livez`、`/readyz`、OpenAPI、`/docs` 与
 `app.debug` 打开时的 `/debug/pprof/*`（含 goroutineleak）都带自己的路由模板，
 访问日志的 `route` 与指标的 `http_route` 用它命名。
 

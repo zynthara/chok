@@ -50,10 +50,8 @@ func ClientIP(ctx context.Context) string {
 // the Instrumenters, AccessLog, Timeout, CORS, CSRF, the Wrap middleware,
 // then the routes.
 func (a *App) buildHandler() http.Handler {
-	var h http.Handler = http.HandlerFunc(a.serveMux)
-	for _, mw := range slices.Backward(a.wrap) {
-		h = mw(h)
-	}
+	h, security := wrap(http.HandlerFunc(a.serveMux), a.wrap)
+	a.wrapSecurity = security
 	if a.base.HTTP.CSRF {
 		h = a.csrf(h)
 	}

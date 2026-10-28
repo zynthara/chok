@@ -223,8 +223,10 @@ func TestStats_Counts(t *testing.T) {
 }
 
 // TestMount_OpenAPIAndAccessLog: the three endpoints are in the OpenAPI
-// document — the ticket behind bearer auth with Authn and public without,
-// ws and sse public with their ticket parameter — and the access log has
+// document — the ticket with the Authn's scheme when one is given, ws and
+// sse without security and with their ticket parameter; without Authn
+// nothing authenticates and the document has no security — and the
+// access log has
 // one line per connection, when it ends: 101 for a WebSocket, 200 for a
 // stream, with the connection's duration.
 func TestMount_OpenAPIAndAccessLog(t *testing.T) {
@@ -255,13 +257,17 @@ func TestMount_OpenAPIAndAccessLog(t *testing.T) {
 			t.Fatal(err)
 		}
 		ticket, ws, sse := doc.Paths["/realtime/ticket"]["post"], doc.Paths["/realtime/ws"]["get"], doc.Paths["/realtime/sse"]["get"]
-		if ticket.Security == nil || (len(*ticket.Security) == 1) != withAuthn {
+		if withAuthn && (ticket.Security == nil || len(*ticket.Security) != 1 || (*ticket.Security)[0]["bearerAuth"] == nil) ||
+			!withAuthn && ticket.Security != nil {
 			t.Fatalf("authn %v: ticket security %v", withAuthn, ticket.Security)
 		}
 		for name, op := range map[string]openAPIOp{"ws": ws, "sse": sse} {
-			if op.Security == nil || len(*op.Security) != 0 || !strings.Contains(op.Summary, "needs a ticket") ||
+			// With a scheme in the document a route without one says
+			// "security": []; with none, nothing says anything.
+			empty, absent := op.Security != nil && len(*op.Security) == 0, op.Security == nil
+			if withAuthn && !empty || !withAuthn && !absent || !strings.Contains(op.Summary, "needs a ticket") ||
 				len(op.Parameters) == 0 || op.Parameters[0].Name != "ticket" {
-				t.Fatalf("%s: %+v", name, op)
+				t.Fatalf("authn %v: %s: %+v", withAuthn, name, op)
 			}
 		}
 		if _, ok := ws.Responses["101"]; !ok {

@@ -158,7 +158,7 @@ func TestApp_LifecycleInProcess(t *testing.T) {
 			a.Use(comp)
 			chok.GET(a.Router(), "/hello", func(_ context.Context, req *hello) (map[string]string, error) {
 				return map[string]string{"hello": req.Name}, nil
-			}, chok.Public())
+			})
 		})
 		if !comp.started.Load() || !comp.healthy.Load() {
 			t.Fatal("App returned before the start phase ended")

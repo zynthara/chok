@@ -11,7 +11,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 
 | Package | Declarations |
 |---|---|
-| [`chok`](#chok) | 61 |
+| [`chok`](#chok) | 60 |
 | [`db`](#db) | 28 |
 | [`store`](#store) | 29 |
 | [`store/where`](#storewhere) | 27 |
@@ -27,7 +27,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 231 |
+| total | 230 |
 
 ## chok
 
@@ -89,7 +89,6 @@ full documentation is on pkg.go.dev and in `go doc`.
 | ↳ `func Created() RouteOption` | Created is Status(201). |
 | ↳ `func Deprecated() RouteOption` | Deprecated marks the route deprecated in the OpenAPI document. |
 | ↳ `func MaxBody(n int64) RouteOption` | MaxBody caps this route's request body in bytes, instead of http.max_body_bytes. |
-| ↳ `func Public() RouteOption` | Public documents the route as needing no bearer token. |
 | ↳ `func Status(code int) RouteOption` | Status sets the success status code. |
 | ↳ `func Summary(s string) RouteOption` | Summary is the route's one-line description in the OpenAPI document; without it chok derives one such as "Create post" or "List posts". |
 | ↳ `func Tags(tags ...string) RouteOption` | Tags groups the route in the OpenAPI document; the default is its resource segment. |

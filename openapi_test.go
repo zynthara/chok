@@ -19,7 +19,8 @@ import (
 var update = flag.Bool("update", false, "rewrite golden files")
 
 // The golden route set: a path parameter, query and header fields, a
-// validated JSON body, a named response type, a list and a public route.
+// validated JSON body, a named response type, a list, routes behind an
+// authentication middleware and one without.
 type author struct {
 	Name  string `json:"name"`
 	Email string `json:"email" validate:"omitempty,email"`
@@ -70,15 +71,28 @@ func goldenApp(t *testing.T) *App {
 	base := testBase(t)
 	base.HTTP.OpenAPI.Title = "Golden API"
 	app := New(base, Logger(quiet()), Version("1.2.3"))
-	api := app.Group("/api/v1")
+	api := app.Group("/api/v1", fakeAuthn(openapi.BearerAuth))
 	POST(api, "/articles", func(context.Context, *createArticle) (*article, error) { return nil, nil }, Created())
 	List(api, "/articles", articles{})
 	GET(api, "/articles/{id}", func(context.Context, *articleID) (*article, error) { return nil, nil })
 	PATCH(api, "/articles/{id}", func(context.Context, *updateArticle) (*article, error) { return nil, nil }, Deprecated())
 	DELETE(api, "/articles/{id}", func(context.Context, *articleID) (None, error) { return None{}, nil }, Tags("admin"))
 	POST(app.Group("/auth"), "/refresh-token", func(context.Context, *None) (map[string]string, error) { return nil, nil },
-		Public(), Summary("Refresh the access token"))
+		Summary("Refresh the access token"))
 	return app
+}
+
+// securer is the handler an authentication middleware returns, as
+// identity's Authn does: it reports the schemes it accepts.
+type securer struct {
+	http.Handler
+	schemes []openapi.Scheme
+}
+
+func (s securer) OpenAPISecurity() []openapi.Scheme { return s.schemes }
+
+func fakeAuthn(schemes ...openapi.Scheme) Middleware {
+	return func(next http.Handler) http.Handler { return securer{next, schemes} }
 }
 
 func TestOpenAPI_Golden(t *testing.T) {
@@ -137,7 +151,8 @@ type oaDoc struct {
 		} `json:"responses"`
 	} `json:"paths"`
 	Components struct {
-		Schemas map[string]map[string]any `json:"schemas"`
+		Schemas         map[string]map[string]any `json:"schemas"`
+		SecuritySchemes map[string]map[string]any `json:"securitySchemes"`
 	} `json:"components"`
 }
 
@@ -146,39 +161,75 @@ func spec(t *testing.T, app *App) oaDoc {
 	return decode[oaDoc](t, do(t, app.Handler(), call{method: http.MethodGet, path: "/openapi.json"}))
 }
 
-func TestOpenAPI_PublicRouteHasEmptySecurity(t *testing.T) {
+func TestOpenAPI_RouteWithoutAuthnHasEmptySecurity(t *testing.T) {
 	d := spec(t, goldenApp(t))
 	refresh := d.Paths["/auth/refresh-token"]["post"]
 	if refresh.Security == nil || len(*refresh.Security) != 0 {
-		t.Fatalf("public: %+v", refresh.Security)
+		t.Fatalf("no authentication middleware: %+v", refresh.Security)
 	}
 	create := d.Paths["/api/v1/articles"]["post"]
-	if create.Security == nil || len(*create.Security) != 1 {
-		t.Fatalf("secured: %+v", create.Security)
+	if create.Security == nil || len(*create.Security) != 1 || (*create.Security)[0]["bearerAuth"] == nil {
+		t.Fatalf("behind one: %+v", create.Security)
 	}
 }
 
-func TestOpenAPI_WithoutBearerAuthHasNoSecurity(t *testing.T) {
-	base := testBase(t)
-	base.HTTP.OpenAPI.BearerAuth = false
-	app := New(base, Logger(quiet()))
-	GET(app.Router(), "/x", func(context.Context, *None) (None, error) { return None{}, nil })
-	if op := spec(t, app).Paths["/x"]["get"]; op.Security != nil {
-		t.Fatalf("got %+v", op.Security)
-	}
-}
-
-// TestOpenAPI_CookieAuthHook: the internal hook identity calls in cookie
-// mode adds the cookie scheme to the App behind a router, a group's
-// included; a foreign router is ignored.
-func TestOpenAPI_CookieAuthHook(t *testing.T) {
+func TestOpenAPI_NoAuthnAnywhereHasNoSecurity(t *testing.T) {
 	app := New(testBase(t), Logger(quiet()))
 	GET(app.Router(), "/x", func(context.Context, *None) (None, error) { return None{}, nil })
-	openapi.UseCookieAuth(app.Group("/auth"), "sid")
-	openapi.UseCookieAuth(http.NewServeMux(), "ignored")
-	op := spec(t, app).Paths["/x"]["get"]
-	if op.Security == nil || len(*op.Security) != 2 || (*op.Security)[1]["cookieAuth"] == nil {
-		t.Fatalf("security %+v", op.Security)
+	GET(app.Group("/g", func(next http.Handler) http.Handler { return next }), "/y", func(context.Context, *None) (None, error) { return None{}, nil })
+	d := spec(t, app)
+	if op := d.Paths["/x"]["get"]; op.Security != nil || d.Components.SecuritySchemes != nil {
+		t.Fatalf("got %+v %+v", op.Security, d.Components.SecuritySchemes)
+	}
+}
+
+// TestOpenAPI_SecurityFollowsTheAuthnMiddleware: a route's security is
+// what the authentication middleware of its chain accepts — the group's,
+// the route's Use — in chain order without repeats; the components hold
+// the union.
+func TestOpenAPI_SecurityFollowsTheAuthnMiddleware(t *testing.T) {
+	app := New(testBase(t), Logger(quiet()))
+	ok := func(context.Context, *None) (None, error) { return None{}, nil }
+	both := fakeAuthn(openapi.BearerAuth, openapi.CookieAuth("sid"))
+	api := app.Group("/api", fakeAuthn(openapi.CookieAuth("sid")))
+	GET(api, "/a", ok)
+	GET(api, "/b", ok, Use(both))
+	GET(app.Group("/nested").Group("/deeper", both), "/c", ok)
+	GET(app.Router(), "/d", ok)
+	d := spec(t, app)
+	for path, want := range map[string][]string{
+		"/api/a": {"cookieAuth"}, "/api/b": {"cookieAuth", "bearerAuth"}, "/nested/deeper/c": {"bearerAuth", "cookieAuth"}, "/d": {},
+	} {
+		op := d.Paths[path]["get"]
+		if op.Security == nil || len(*op.Security) != len(want) {
+			t.Errorf("%s: %+v, want %v", path, op.Security, want)
+			continue
+		}
+		for i, name := range want {
+			if (*op.Security)[i][name] == nil {
+				t.Errorf("%s: %+v, want %v", path, op.Security, want)
+			}
+		}
+	}
+	if s := d.Components.SecuritySchemes; len(s) != 2 || s["cookieAuth"]["name"] != "sid" || s["bearerAuth"]["bearerFormat"] != "JWT" {
+		t.Fatalf("schemes %+v", s)
+	}
+}
+
+// TestOpenAPI_WrapAuthnCoversEveryRoute: an authentication middleware
+// given to Wrap runs on every route, so every route lists it, before the
+// route's own.
+func TestOpenAPI_WrapAuthnCoversEveryRoute(t *testing.T) {
+	app := New(testBase(t), Logger(quiet()), Wrap(fakeAuthn(openapi.CookieAuth("sid"))))
+	ok := func(context.Context, *None) (None, error) { return None{}, nil }
+	GET(app.Router(), "/x", ok)
+	GET(app.Group("/y", fakeAuthn(openapi.BearerAuth)), "/z", ok)
+	d := spec(t, app)
+	if op := d.Paths["/x"]["get"]; op.Security == nil || len(*op.Security) != 1 || (*op.Security)[0]["cookieAuth"] == nil {
+		t.Fatalf("/x: %+v", op.Security)
+	}
+	if op := d.Paths["/y/z"]["get"]; op.Security == nil || len(*op.Security) != 2 || (*op.Security)[1]["bearerAuth"] == nil {
+		t.Fatalf("/y/z: %+v", op.Security)
 	}
 }
 

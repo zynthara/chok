@@ -96,9 +96,6 @@ type OpenAPIConfig struct {
 	Version  string `yaml:"version"`
 	Path     string `yaml:"path" default:"/openapi.json"`
 	DocsPath string `yaml:"docs_path" default:"/docs"`
-	// BearerAuth marks every route not declared Public as requiring a
-	// bearer token in the document.
-	BearerAuth bool `yaml:"bearer_auth" default:"true"`
 }
 
 // HealthConfig is http.health.

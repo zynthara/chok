@@ -20,6 +20,7 @@ import (
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok/v3/internal/openapi"
 )
 
 // The helpers serve a hub through a chok App — its default middleware,
@@ -69,17 +70,22 @@ func appHandler(t testing.TB, h *Hub, adjust ...func(*chok.Base)) http.Handler {
 }
 
 // fakeAuthn admits a request with an X-User header as that user, and
-// answers 401 otherwise.
-func fakeAuthn(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-User")
-		if id == "" {
-			chok.WriteError(w, r, chok.ErrUnauthorized.Msgf("no X-User"))
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(chok.WithPrincipal(r.Context(), chok.Principal{UserID: id, Email: id + "@example.com"})))
-	})
+// answers 401 otherwise. Like identity's Authn, it tells the OpenAPI
+// document that it accepts a bearer token.
+func fakeAuthn(next http.Handler) http.Handler { return authnHandler{next} }
+
+type authnHandler struct{ next http.Handler }
+
+func (h authnHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	id := r.Header.Get("X-User")
+	if id == "" {
+		chok.WriteError(w, r, chok.ErrUnauthorized.Msgf("no X-User"))
+		return
+	}
+	h.next.ServeHTTP(w, r.WithContext(chok.WithPrincipal(r.Context(), chok.Principal{UserID: id, Email: id + "@example.com"})))
 }
+
+func (authnHandler) OpenAPISecurity() []openapi.Scheme { return []openapi.Scheme{openapi.BearerAuth} }
 
 // openTopics is an Authorize that admits every topic starting with
 // public., and refuses the others with a Forbidden of its own.

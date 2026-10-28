@@ -35,7 +35,7 @@ func serveApp(t *testing.T) *httptest.Server {
 		app = a
 		chok.GET(a.Router(), "/things/{id}", func(_ context.Context, req *thingID) (*exportedThing, error) {
 			return &exportedThing{ID: req.ID}, nil
-		}, chok.Public(), chok.Summary("Get a thing"))
+		}, chok.Summary("Get a thing"))
 	})
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)

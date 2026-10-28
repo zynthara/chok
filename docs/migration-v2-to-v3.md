@@ -133,7 +133,8 @@ v3 的段名由应用的 Config struct 决定；下表右列用 `examples/blog` 
 | `http.*`（addr、各超时、`drain_delay`、`trusted_proxies`、`h2c`） | `http.*` | 同名 |
 | — | `http.max_body_bytes`、`http.cors.*`、`http.csrf` | 新增（v2 在代码里配） |
 | `health.enabled` / `path` / `probe_timeout` | `http.health.enabled` / `path` / `probe_timeout` | |
-| `swagger.enabled` / `title` / `version` / `bearer_auth` | `http.openapi.enabled` / `title` / `version` / `bearer_auth` | `version` 不再缺省 1.0.0 |
+| `swagger.enabled` / `title` / `version` | `http.openapi.enabled` / `title` / `version` | `version` 不再缺省 1.0.0 |
+| `swagger.bearer_auth` | — | 删除：一条路由的 security 由它经过的认证中间件决定，identity 的 `Authn()` 报告 `bearerAuth`（cookie 模式另报 `cookieAuth`）；公开路由不用标 |
 | `swagger.prefix`（`/swagger`，文档在 `/swagger/doc.json`） | `http.openapi.path`（`/openapi.json`）、`http.openapi.docs_path`（`/docs`） | |
 | `debug.enabled` | `app.debug` | 只挂 `/debug/pprof/*`；`/componentz` 删除 |
 | `debug.path` / `event_history` | — | 删除 |
@@ -191,7 +192,8 @@ v3 的段名由应用的 Config struct 决定；下表右列用 `examples/blog` 
 | `handler.HandleRequest(fn, opts...)` + `r.Handle(...)` | `chok.GET` 等一行注册 |
 | `handler.HandleList[T](lister)` | `chok.List(r, pattern, lister)`；`store.Store` 实现 `chok.Lister` |
 | `handler.WithSuccessCode(201)` | `chok.Created()` 或 `chok.Status(code)` |
-| `handler.WithSummary` / `WithTags` / `WithPublic` / `WithMaxBodySize` | `chok.Summary` / `chok.Tags` / `chok.Public` / `chok.MaxBody` |
+| `handler.WithSummary` / `WithTags` / `WithMaxBodySize` | `chok.Summary` / `chok.Tags` / `chok.MaxBody` |
+| `handler.WithPublic` | 删除：文档按路由经过的认证中间件标 security，没有认证中间件的路由就是公开的 |
 | — | `chok.Use(mw...)`（路由级中间件）、`chok.Deprecated()` |
 | `handler.Validated(fn, validators...)`、自定义 `Binder` | 删除：用 `validate` tag，或请求类型的 `Default()`，或在 handler 里检查 |
 | `web.Module(web.WithMiddleware(mw...))` | `chok.New(base, chok.Wrap(mw...))` |

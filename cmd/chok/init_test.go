@@ -74,7 +74,7 @@ func TestInit_GeneratedProjectBoots(t *testing.T) {
 	addr := p.listening(t, 60*time.Second)
 	base := "http://" + addr
 
-	expect := func(method, path, body string, status int, contains string) {
+	expect := func(method, path, body string, status int, contains string) string {
 		t.Helper()
 		req, _ := http.NewRequest(method, base+path, strings.NewReader(body))
 		if body != "" {
@@ -89,12 +89,16 @@ func TestInit_GeneratedProjectBoots(t *testing.T) {
 		if resp.StatusCode != status || !strings.Contains(string(got), contains) {
 			t.Fatalf("%s %s = %d %s; want %d containing %q", method, path, resp.StatusCode, got, status, contains)
 		}
+		return string(got)
 	}
 	expect(http.MethodGet, "/healthz", "", http.StatusOK, `"status":"up"`)
 	expect(http.MethodPost, "/api/v1/notes", `{"title":"hello","body":"from the scaffold"}`, http.StatusCreated, `"id":"note_`)
 	expect(http.MethodGet, "/api/v1/notes?title=hello", "", http.StatusOK, `"total":1`)
 	expect(http.MethodPost, "/api/v1/notes", `{"body":"no title"}`, http.StatusBadRequest, `"reason":"Validation"`)
-	expect(http.MethodGet, "/openapi.json", "", http.StatusOK, `"/api/v1/notes/{id}"`)
+	// Nothing in the scaffold authenticates: its document has no security.
+	if doc := expect(http.MethodGet, "/openapi.json", "", http.StatusOK, `"/api/v1/notes/{id}"`); strings.Contains(doc, "security") {
+		t.Fatalf("the scaffold's document lists security: %s", doc)
+	}
 
 	// The note is in the lane's database: the environment, not chok.yaml,
 	// chose it.

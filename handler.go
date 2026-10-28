@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+
+	"github.com/zynthara/chok/v3/internal/openapi"
 )
 
 // HandlerFunc is a typed handler: chok binds and validates *T from the
@@ -147,10 +149,6 @@ func Status(code int) RouteOption { return func(c *routeConfig) { c.status = cod
 // Created is Status(201).
 func Created() RouteOption { return Status(http.StatusCreated) }
 
-// Public documents the route as needing no bearer token. It changes the
-// OpenAPI document only: authentication is whatever middleware runs.
-func Public() RouteOption { return func(c *routeConfig) { c.public = true } }
-
 // Use adds middleware to this route only.
 func Use(mw ...Middleware) RouteOption {
 	return func(c *routeConfig) { c.mw = append(c.mw, mw...) }
@@ -168,7 +166,6 @@ type routeConfig struct {
 	summary    string
 	tags       []string
 	status     int
-	public     bool
 	deprecated bool
 	maxBody    int64
 	mw         []Middleware
@@ -180,6 +177,8 @@ type routeDoc struct {
 	cfg          routeConfig
 	status       int
 	req, resp    reflect.Type
+	// security is what the route's authentication middleware accepts.
+	security []openapi.Scheme
 	// List routes: the item type and its filter fields.
 	list    bool
 	item    reflect.Type

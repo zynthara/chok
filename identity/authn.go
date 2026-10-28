@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/internal/openapi"
 	"github.com/zynthara/chok/v3/store"
 )
 
@@ -24,22 +25,40 @@ const maxAuthorizationLen = 8 << 10
 // The request then carries the chok.Principal — UserID is the user's id
 // (usr_…), which a store's owner scope writes to owner_id — and anything
 // else is a 401 envelope.
+//
+// The OpenAPI document lists the routes behind it with the schemes it
+// accepts: bearerAuth, and in cookie mode cookieAuth.
 func (idn *Identity) Authn() chok.Middleware {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			raw, err := idn.credential(r)
-			if err != nil {
-				chok.WriteError(w, r, err)
-				return
-			}
-			ctx, err := idn.authenticate(r.Context(), raw)
-			if err != nil {
-				chok.WriteError(w, r, err)
-				return
-			}
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
+	return func(next http.Handler) http.Handler { return &authnHandler{idn: idn, next: next} }
+}
+
+// authnHandler is a route behind Authn.
+type authnHandler struct {
+	idn  *Identity
+	next http.Handler
+}
+
+func (h *authnHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	raw, err := h.idn.credential(r)
+	if err != nil {
+		chok.WriteError(w, r, err)
+		return
 	}
+	ctx, err := h.idn.authenticate(r.Context(), raw)
+	if err != nil {
+		chok.WriteError(w, r, err)
+		return
+	}
+	h.next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// OpenAPISecurity is what the route accepts: the bearer token, and the
+// session cookie in cookie mode.
+func (h *authnHandler) OpenAPISecurity() []openapi.Scheme {
+	if h.idn.cfg.Cookie.Enabled {
+		return []openapi.Scheme{openapi.BearerAuth, openapi.CookieAuth(h.idn.cfg.Cookie.Name)}
+	}
+	return []openapi.Scheme{openapi.BearerAuth}
 }
 
 // credential is the request's access token: the Authorization header's

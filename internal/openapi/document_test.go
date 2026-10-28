@@ -190,9 +190,9 @@ func TestParameters(t *testing.T) {
 }
 
 func TestBuild_DocumentShape(t *testing.T) {
-	doc, err := Build(Info{Title: "T", BearerAuth: true}, []Operation{
-		{Method: "GET", Path: "/things/{id}", Request: reflect.TypeFor[params](), Response: reflect.TypeFor[node](), Status: 200},
-		{Method: "POST", Path: "/login", Public: true},
+	doc, err := Build(Info{Title: "T"}, []Operation{
+		{Method: "GET", Path: "/things/{id}", Request: reflect.TypeFor[params](), Response: reflect.TypeFor[node](), Status: 200, Security: []Scheme{BearerAuth}},
+		{Method: "POST", Path: "/login"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -209,31 +209,47 @@ func TestBuild_DocumentShape(t *testing.T) {
 	}
 }
 
-// TestBuild_CookieAuth: a session cookie is a second scheme, apiKey in
-// the cookie, that every route not declared Public accepts next to the
-// bearer token — or alone, without bearer auth.
-func TestBuild_CookieAuth(t *testing.T) {
-	ops := []Operation{{Method: "GET", Path: "/me"}, {Method: "POST", Path: "/login", Public: true}}
-	doc, err := Build(Info{BearerAuth: true, CookieAuth: "chok_token"}, ops)
+// TestBuild_SecurityFromTheRoutes: each route lists the schemes its
+// authentication accepts, any one sufficing and in the order reported; a
+// route without one says "security": [] once any route has one; the
+// components hold the union; a document without schemes says nothing.
+func TestBuild_SecurityFromTheRoutes(t *testing.T) {
+	ops := []Operation{
+		{Method: "GET", Path: "/me", Security: []Scheme{BearerAuth, CookieAuth("chok_token")}},
+		{Method: "GET", Path: "/admin", Security: []Scheme{CookieAuth("chok_token")}},
+		{Method: "POST", Path: "/login"},
+	}
+	doc, err := Build(Info{}, ops)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(doc)
 	for _, want := range []string{
 		`"securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer","bearerFormat":"JWT"},"cookieAuth":{"type":"apiKey","in":"cookie","name":"chok_token"}}`,
-		`"security":[{"bearerAuth":[]},{"cookieAuth":[]}]`, `"security":[]`,
+		`"security":[{"bearerAuth":[]},{"cookieAuth":[]}]`, `"security":[{"cookieAuth":[]}]`, `"security":[]`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("document lacks %s:\n%s", want, s)
 		}
 	}
-	doc, err = Build(Info{CookieAuth: "sid"}, ops)
+	doc, err = Build(Info{}, []Operation{{Method: "GET", Path: "/me"}, {Method: "POST", Path: "/login"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := string(doc); !strings.Contains(s, `"securitySchemes":{"cookieAuth":{"type":"apiKey","in":"cookie","name":"sid"}}`) ||
-		!strings.Contains(s, `"security":[{"cookieAuth":[]}]`) || strings.Contains(s, "bearerAuth") {
-		t.Errorf("cookie only:\n%s", s)
+	if s := string(doc); strings.Contains(s, "security") {
+		t.Errorf("no authentication anywhere, no security:\n%s", s)
+	}
+}
+
+// TestCollect_KeepsChainOrderWithoutRepeats: the schemes of a chain are
+// its layers', outermost first, each once.
+func TestCollect_KeepsChainOrderWithoutRepeats(t *testing.T) {
+	got := Collect(nil, []Scheme{CookieAuth("sid")}, []Scheme{BearerAuth, CookieAuth("other")}, nil)
+	if len(got) != 2 || got[0].Name != "cookieAuth" || got[0].Param != "sid" || got[1].Name != "bearerAuth" {
+		t.Fatalf("got %+v", got)
+	}
+	if Collect() != nil || Collect(nil, nil) != nil {
+		t.Fatal("no layer reports a scheme: nil")
 	}
 }
 

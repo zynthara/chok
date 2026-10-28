@@ -350,7 +350,7 @@ func TestErrors_ResolutionOrder(t *testing.T) {
 	var logs bytes.Buffer
 	app := New(testBase(t), Logger(slog.New(slog.NewJSONHandler(&logs, nil))))
 	r := app.Router()
-	GET(r, "/api", func(context.Context, *None) (None, error) { return None{}, ErrForbidden.Msgf("no") }, Public())
+	GET(r, "/api", func(context.Context, *None) (None, error) { return None{}, ErrForbidden.Msgf("no") })
 	GET(r, "/wrapped", func(context.Context, *None) (None, error) {
 		return None{}, errors.Join(errors.New("context"), ErrNotFound.With("id", "7"))
 	})

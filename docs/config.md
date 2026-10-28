@@ -48,7 +48,6 @@ Embedded without a tag in every application's Config, so its sections `app`, `ht
 | `http.health.probe_timeout` | duration | `3s` |  | ProbeTimeout bounds each component's Health call. |
 | `http.idle_timeout` | duration | `120s` |  |  |
 | `http.max_body_bytes` | int64 | `4194304` | `gte=0` | MaxBodyBytes caps a request body; a route can change it with MaxBody. |
-| `http.openapi.bearer_auth` | bool | `true` |  | BearerAuth marks every route not declared Public as requiring a bearer token in the document. |
 | `http.openapi.docs_path` | string | `/docs` |  |  |
 | `http.openapi.enabled` | bool | `true` |  |  |
 | `http.openapi.path` | string | `/openapi.json` |  |  |

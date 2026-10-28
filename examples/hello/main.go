@@ -20,6 +20,6 @@ func main() {
 	app := chok.New(chok.MustLoad[chok.Base]("hello"))
 	chok.GET(app.Router(), "/hello", func(_ context.Context, req *greeting) (map[string]string, error) {
 		return map[string]string{"hello": req.Name}, nil
-	}, chok.Public())
+	})
 	app.Execute()
 }

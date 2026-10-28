@@ -16,8 +16,10 @@ func (a *App) openAPIDocument() ([]byte, error) {
 		op := openapi.Operation{
 			Method: d.method, Path: d.path,
 			Summary: d.cfg.summary, Tags: d.cfg.tags, Status: d.status,
-			Public: d.cfg.public, Deprecated: d.cfg.deprecated,
-			Request: d.req, Response: d.resp,
+			Deprecated: d.cfg.deprecated,
+			Request:    d.req, Response: d.resp,
+			// Wrap's middleware runs outside every route's chain.
+			Security: openapi.Collect(a.wrapSecurity, d.security),
 		}
 		if d.list {
 			op.ListItem, op.Filters = d.item, d.filters
@@ -28,24 +30,7 @@ func (a *App) openAPIDocument() ([]byte, error) {
 	if version == "" {
 		version = a.version
 	}
-	cookie := ""
-	if p := a.cookieAuth.Load(); p != nil {
-		cookie = *p
-	}
-	return openapi.Build(openapi.Info{Title: c.Title, Version: version, BearerAuth: c.BearerAuth, CookieAuth: cookie}, ops)
-}
-
-// identity documents its session cookie through the internal hook: a
-// battery cannot reach the App, and the document has no public option
-// for it.
-func init() {
-	openapi.UseCookieAuth = func(router any, cookie string) {
-		if r, ok := router.(Router); ok {
-			if a := appOf(r); a != nil {
-				a.cookieAuth.Store(&cookie)
-			}
-		}
-	}
+	return openapi.Build(openapi.Info{Title: c.Title, Version: version}, ops)
 }
 
 func (a *App) mountOpenAPI() {

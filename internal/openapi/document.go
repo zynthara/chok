@@ -19,8 +19,10 @@ type Operation struct {
 	Summary      string
 	Tags         []string
 	Status       int
-	Public       bool
 	Deprecated   bool
+	// Security is the schemes the route's authentication middleware
+	// accepts, any one of them; none for a route without one.
+	Security []Scheme
 	// Request is the bound request type; nil or chok.None documents no
 	// parameters and no body.
 	Request reflect.Type
@@ -34,22 +36,52 @@ type Operation struct {
 
 // Info is the document-level metadata.
 type Info struct {
-	Title      string
-	Version    string
-	BearerAuth bool
-	// CookieAuth, when set, names a cookie that authenticates as the bearer
-	// token does: the document gains the scheme cookieAuth, an apiKey in
-	// that cookie, and the routes not declared Public list it next to
-	// bearerAuth, either one sufficing.
-	CookieAuth string
+	Title   string
+	Version string
 }
 
-// UseCookieAuth makes the OpenAPI document of the App behind router (a
-// chok.Router) document the session cookie named cookie, as
-// Info.CookieAuth does. Package chok sets it when it initializes, and
-// identity calls it from Mount in cookie mode: neither exports anything
-// for it.
-var UseCookieAuth func(router any, cookie string)
+// Scheme is a security scheme: Name is its key in
+// components.securitySchemes, the rest its definition.
+type Scheme struct {
+	Name         string
+	Type         string // http or apiKey
+	Scheme       string // http: bearer
+	BearerFormat string // http bearer: the token's format
+	In           string // apiKey: cookie, header or query
+	Param        string // apiKey: the cookie's, header's or parameter's name
+}
+
+// Securer is implemented by the handler an authentication middleware
+// returns: the schemes the middleware accepts, in order. chok collects
+// them from each route's middleware chain into the route's security, so
+// the document says a route is protected exactly when a middleware that
+// authenticates runs on it. identity's Authn implements it; nothing
+// exported does, so an application's own middleware is not recognized.
+type Securer interface {
+	OpenAPISecurity() []Scheme
+}
+
+// BearerAuth is the scheme of a JWT in the Authorization header.
+var BearerAuth = Scheme{Name: "bearerAuth", Type: "http", Scheme: "bearer", BearerFormat: "JWT"}
+
+// CookieAuth is the scheme of a session token in the cookie named name.
+func CookieAuth(name string) Scheme {
+	return Scheme{Name: "cookieAuth", Type: "apiKey", In: "cookie", Param: name}
+}
+
+// Collect returns the schemes of a middleware chain's layers, outermost
+// first, without repeats: a scheme reported twice keeps its first place.
+func Collect(layers ...[]Scheme) []Scheme {
+	var out []Scheme
+	for _, layer := range layers {
+		for _, s := range layer {
+			if !slices.ContainsFunc(out, func(o Scheme) bool { return o.Name == s.Name }) {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
 
 type document struct {
 	OpenAPI    string               `json:"openapi"`
@@ -92,8 +124,9 @@ type operation struct {
 	Parameters  []*parameter         `json:"parameters,omitzero"`
 	RequestBody *requestBody         `json:"requestBody,omitzero"`
 	Responses   map[string]*response `json:"responses"`
-	// Security is nil without bearer or cookie auth, and points to an
-	// empty list for a public route so the document says "security": [].
+	// Security is nil when no route has a scheme, and points to an
+	// empty list for a route without one, so the document says
+	// "security": [].
 	Security *[]map[string][]string `json:"security,omitzero"`
 }
 
@@ -128,13 +161,15 @@ func Build(in Info, ops []Operation) ([]byte, error) {
 		Info:    info{Title: or(in.Title, "API"), Version: or(in.Version, "0.0.0")},
 		Paths:   map[string]*pathItem{},
 	}
-	// The schemes a route not declared Public accepts, any one of them.
-	var schemes []string
-	if in.BearerAuth {
-		schemes = append(schemes, "bearerAuth")
-	}
-	if in.CookieAuth != "" {
-		schemes = append(schemes, "cookieAuth")
+	// The document's schemes are the union of the routes'; with none,
+	// it says nothing about security at all.
+	schemes := map[string]*securityScheme{}
+	for _, op := range ops {
+		for _, s := range op.Security {
+			if _, seen := schemes[s.Name]; !seen {
+				schemes[s.Name] = &securityScheme{Type: s.Type, Scheme: s.Scheme, BearerFormat: s.BearerFormat, In: s.In, Name: s.Param}
+			}
+		}
 	}
 	ids := map[string]int{}
 	for _, op := range ops {
@@ -143,10 +178,8 @@ func Build(in Info, ops []Operation) ([]byte, error) {
 		o.OperationID = uniqueID(ids, operationID(op.Method, o.Summary))
 		if len(schemes) > 0 {
 			sec := []map[string][]string{}
-			if !op.Public {
-				for _, name := range schemes {
-					sec = append(sec, map[string][]string{name: {}})
-				}
+			for _, s := range op.Security {
+				sec = append(sec, map[string][]string{s.Name: {}})
 			}
 			o.Security = &sec
 		}
@@ -170,13 +203,7 @@ func Build(in Info, ops []Operation) ([]byte, error) {
 	}
 	doc.Components.Schemas = g.schemas
 	if len(schemes) > 0 {
-		doc.Components.SecuritySchemes = map[string]*securityScheme{}
-	}
-	if in.BearerAuth {
-		doc.Components.SecuritySchemes["bearerAuth"] = &securityScheme{Type: "http", Scheme: "bearer", BearerFormat: "JWT"}
-	}
-	if in.CookieAuth != "" {
-		doc.Components.SecuritySchemes["cookieAuth"] = &securityScheme{Type: "apiKey", In: "cookie", Name: in.CookieAuth}
+		doc.Components.SecuritySchemes = schemes
 	}
 	return json.Marshal(doc, json.Deterministic(true))
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/zynthara/chok/v3/internal/openapi"
 	"github.com/zynthara/chok/v3/internal/reqinfo"
 )
 
@@ -45,22 +46,34 @@ func (r *router) Group(prefix string, mw ...Middleware) Router {
 }
 
 // register adds a route to the mux and, for the typed routes, to the
-// table the OpenAPI document is built from.
+// table the OpenAPI document is built from, with the schemes the
+// authentication middleware in its chain accepts.
 func (r *router) register(method, pattern string, h http.Handler, mw []Middleware, doc *routeDoc) {
 	full := joinPath(r.prefix, pattern)
 	chain := append(slices.Clone(r.mw), mw...)
-	for _, m := range slices.Backward(chain) {
-		h = m(h)
-	}
+	h, security := wrap(h, chain)
 	key := full
 	if method != "" {
 		key = method + " " + full
 	}
 	r.app.mux.Handle(key, routeMarker(full, h))
 	if doc != nil {
-		doc.method, doc.path = method, full
+		doc.method, doc.path, doc.security = method, full, security
 		r.app.routes.add(doc)
 	}
+}
+
+// wrap applies chain to h, outermost first, and collects the OpenAPI
+// schemes of the layers that authenticate.
+func wrap(h http.Handler, chain []Middleware) (http.Handler, []openapi.Scheme) {
+	layers := make([][]openapi.Scheme, len(chain))
+	for i, m := range slices.Backward(chain) {
+		h = m(h)
+		if s, ok := h.(openapi.Securer); ok {
+			layers[i] = s.OpenAPISecurity()
+		}
+	}
+	return h, openapi.Collect(layers...)
 }
 
 func joinPath(prefix, pattern string) string {

@@ -15,26 +15,26 @@ import (
 //	GET  {Path}/ws       a WebSocket, opened with ?ticket=…[&topics=a,b]
 //	GET  {Path}/sse      a server-sent event stream: ?ticket=…&topics=a,b
 //
-// The ws and sse routes are public in the OpenAPI document: the ticket in
-// their query is what admits a client, so a browser's WebSocket and
-// EventSource never carry the long-lived token, nor does any URL.
+// The ws and sse routes run no authentication middleware, so the OpenAPI
+// document lists them without security: the ticket in their query is
+// what admits a client, so a browser's WebSocket and EventSource never
+// carry the long-lived token, nor does any URL. The ticket route lists
+// the schemes of the Authn given, if any.
 func (h *Hub) Mount(r chok.Router) {
 	g := r.Group(h.cfg.Path)
 	tag := chok.Tags("realtime")
 	ticket := []chok.RouteOption{tag, chok.Summary("Issue a one-time ticket for the ws and sse endpoints")}
 	if h.authn != nil {
 		ticket = append(ticket, chok.Use(h.authn))
-	} else {
-		ticket = append(ticket, chok.Public())
 	}
 	chok.POST(g, "/ticket", h.issue, ticket...)
 	// The two streams are typed routes so that the OpenAPI document lists
 	// them with their parameters; the route middleware serves them, as a
 	// stream cannot be a handler's return value.
-	chok.GET(g, "/ws", notServed[wsQuery, chok.None], chok.Use(serve(h.serveWS)), chok.Public(), tag,
+	chok.GET(g, "/ws", notServed[wsQuery, chok.None], chok.Use(serve(h.serveWS)), tag,
 		chok.Status(http.StatusSwitchingProtocols),
 		chok.Summary("Open a WebSocket of events (needs a ticket): frames subscribe and unsubscribe, each event comes as a JSON frame"))
-	chok.GET(g, "/sse", notServed[sseQuery, Event], chok.Use(serve(h.serveSSE)), chok.Public(), tag,
+	chok.GET(g, "/sse", notServed[sseQuery, Event], chok.Use(serve(h.serveSSE)), tag,
 		chok.Summary("Stream events as text/event-stream (needs a ticket): each data line is an Event"))
 }
 

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/zynthara/chok/v3/internal/openapi"
 )
 
 func tag(name string, log *[]string, mu *sync.Mutex) Middleware {
@@ -113,10 +115,11 @@ func TestRouter_AccessLogUsesRoutePattern(t *testing.T) {
 
 func TestRouter_RouteTableCollectsTypedRoutes(t *testing.T) {
 	app := newTestApp(t)
-	GET(app.Group("/api"), "/x/{id}", echoItem, Summary("Read x"), Public())
+	GET(app.Group("/api"), "/x/{id}", echoItem, Summary("Read x"), Use(fakeAuthn(openapi.BearerAuth)))
 	app.Router().Handle(http.MethodGet, "/raw", http.NotFoundHandler())
 	docs := app.routes.all()
-	if len(docs) != 1 || docs[0].path != "/api/x/{id}" || docs[0].method != http.MethodGet || docs[0].cfg.summary != "Read x" || !docs[0].cfg.public {
+	if len(docs) != 1 || docs[0].path != "/api/x/{id}" || docs[0].method != http.MethodGet || docs[0].cfg.summary != "Read x" ||
+		len(docs[0].security) != 1 || docs[0].security[0].Name != "bearerAuth" {
 		t.Fatalf("docs: %+v", docs)
 	}
 }

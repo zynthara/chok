@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/zynthara/chok/v3/internal/apptest"
+	"github.com/zynthara/chok/v3/internal/openapi"
 )
 
 // App is one application: its configuration, the components registered
@@ -45,9 +46,9 @@ type App struct {
 	draining atomic.Bool
 	addr     atomic.Pointer[string]
 
-	// cookieAuth names the session cookie the OpenAPI document lists
-	// next to the bearer token; identity sets it in cookie mode.
-	cookieAuth atomic.Pointer[string]
+	// wrapSecurity is what the Wrap middleware's authentication accepts,
+	// on every route; buildHandler records it.
+	wrapSecurity []openapi.Scheme
 }
 
 type component struct {
