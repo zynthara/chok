@@ -40,21 +40,31 @@
 // # Delivery
 //
 // A worker sweeps its topic every PollInterval and hands each committed
-// message to its function in (created_at, id) order. Delivery is at least
-// once: a message the function failed on is retried on the next sweep,
-// and the messages younger than the settle window are delivered again
-// after a restart. So the function must be idempotent — dedupe on
-// Message.ID, or on a business key in the payload. A failing message
-// blocks the messages behind it in its topic until it succeeds (nothing
-// is skipped); the other topics' workers keep their own pace.
+// message to its function in (created_at, id) order, the payload decoded
+// into the worker's type. Delivery is at least once: a message the
+// function failed on comes again, and after a crash the messages younger
+// than the settle window come again. So the function must be idempotent
+// — dedupe on Message.ID, or on a business key in the payload. A graceful
+// stop saves what was delivered, so a restart does not repeat it.
+//
+// A failing message blocks the messages behind it in its topic (they keep
+// their order); the other topics' workers keep their own pace. The worker
+// tries it again after RetryBackoff, doubling the wait up to MaxBackoff,
+// and counts the failures on the message's row, so a restart goes on
+// from the count. The MaxAttempts-th failure parks the message in the
+// dead letters, chok_jobs_dead, and the topic moves on; a payload that
+// does not decode is parked at once. Dead lists the parked messages,
+// Requeue enqueues them again once the cause is fixed, Discard drops
+// them — from any process, the jobs enabled or not.
 //
 // Each worker keeps its position, a watermark, in chok_jobs_watermarks.
 // The watermark never passes messages younger than SettleWindow: a
 // transaction that enqueued earlier but commits later is still found. The
 // guarantee holds while every enqueuing transaction commits within
 // SettleWindow of its Enqueue and the processes that enqueue keep their
-// clocks in sync. With Retention set, messages every worker has passed are
-// deleted once older than Retention.
+// clocks in sync. Retention (a week, from a configuration file) deletes
+// the messages every worker has passed once they are older than it; the
+// dead letters stay until Requeue or Discard.
 //
 // Workers and periodic jobs run in the processes where Config.Enabled is
 // true; run them in one process of a deployment and set enabled: false in
@@ -63,8 +73,9 @@
 // # Watching the runs
 //
 // Stats is a snapshot; Observe is the stream. Its function receives an
-// Event as each run starts, finishes or fails and as a trigger is
-// skipped, so a dashboard can show the background work live — hand the
+// Event as each run starts, finishes or fails, as a trigger is skipped
+// and as a worker parks a message, so a dashboard can show the background
+// work live — hand the
 // events to the realtime battery, in the application, since batteries do
 // not import each other:
 //

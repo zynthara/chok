@@ -407,21 +407,35 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   秒、`@hourly`、`@every 10m`、逐条 `CRON_TZ=`），解析器移植进
   `jobs/internal/cron`（来源与许可见仓库根 `NOTICE`）。`OverlapSkip` 丢弃运行
   中到来的触发，`OverlapQueue` 至多排一次，`OverlapAllow` 并发运行。
-- `jobs.Worker(topic, fn)` + `j.Enqueue(txCtx, topic, payload)`：事务性
+- `jobs.Worker[T](topic, fn)` + `j.Enqueue(txCtx, topic, payload)`：事务性
   outbox。Enqueue 必须在同一个 `*db.DB` 的 `RunInTx` 里（否则
-  `ErrOutsideTx`），消息与业务写入同生共死；worker 以 `(created_at, id)` 顺序
-  **至少一次**投递，每个 topic 一个水位，失败只阻塞自己的 topic。handler 必须
-  幂等（按 `Message.ID` 去重）。保证的前提：enqueue 事务在 `settle_window` 内
-  提交，各进程时钟同步。
+  `ErrOutsideTx`），消息与业务写入同生共死；worker 把 payload 按 `T` 用
+  `encoding/json/v2` 解码（要原始 JSON 用 `Worker[jsontext.Value]`），以
+  `(created_at, id)` 顺序**至少一次**投递，每个 topic 一个水位，失败只阻塞自己的
+  topic。handler 必须幂等（按 `Message.ID` 去重）。保证的前提：enqueue 事务在
+  `settle_window` 内提交，各进程时钟同步。
+- 失败与死信：handler 返回错误或 panic，这条消息的失败次数 +1 并写在消息行上
+  （重启不清零），`retry_backoff` 后重试、每次翻倍、不超过 `max_backoff`，等待期间
+  不再每轮重试；第 `max_attempts` 次（默认 10）仍失败就**停放**进死信表
+  `chok_jobs_dead`，算作已投递，topic 继续往下走；payload 解码失败直接停放。
+  `j.Dead(ctx, topic, limit)` 列出、`j.Requeue(ctx, ids...)` 重新入队成新消息、
+  `j.Discard(ctx, ids...)` 删除，只用数据库，`enabled: false` 的进程也能调。
+  优雅停止时，各 worker 已投递、水位还没越过的消息写进 `chok_jobs_delivered`，
+  重启后的第一轮读回、不再投递；崩溃没有这一步，仍可能重投。retention 清理只删
+  消息表，不碰死信；配置文件不写 `retention` 时默认 168h，代码里构造的 Config
+  不写就是 0（永久）。
 
 部署假设：所有 worker 与周期任务跑在**一个** `jobs.enabled: true` 的进程里，
 其余进程 `enabled: false` 只 Enqueue。`Stats()` 给出每个作业的运行统计；
-`Health` 恒 nil——毒消息不该把实例拉出轮转，失败看统计与日志。
+`Health` 恒 nil——毒消息不该把实例拉出轮转，失败看统计与日志：worker 的统计另有
+`parked`（本进程停放的条数）、`head_attempts` 与 `next_retry`（topic 卡在一条失败
+消息上时，它的失败次数与下次重试时间）。
 
 `jobs.Observe(fn)` 是统计的流式版本：每次运行（周期任务、worker 的一轮 sweep、
 retention 清理）开始、结束、失败，以及因运行中而被跳过的触发，都同步交给 fn 一个
 `jobs.Event{Kind, Job, Type, StartedAt, Duration, Error, Next, Messages}`——
-`Kind` 是 run.started / run.finished / run.failed / run.skipped，`Type` 是
+`Kind` 是 run.started / run.finished / run.failed / run.skipped，worker 停放
+一条消息时还有 message.parked（`Error` 是它最后的错误），`Type` 是
 periodic / worker / cleanup。fn 在运行的 goroutine 里调用，要快；它的 panic 被
 recover 并记 Warn，不影响运行与统计。典型用法是交给 realtime 做实时的任务面板。
 

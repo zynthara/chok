@@ -12,13 +12,14 @@ import (
 //
 //	jobs:
 //	  enabled: true
-//	  poll_interval: 1s
-//	  retention: 168h
+//	  max_attempts: 5
+//	  retention: 720h
 //
-// New gives a zero PollInterval, BatchSize, SettleWindow, CleanupInterval
-// or StopBudget the defaults below, whether the Config comes from a file
-// or from code. Enabled has no zero-value default: a Config built in code
-// sets it.
+// New gives a zero PollInterval, BatchSize, SettleWindow, MaxAttempts,
+// RetryBackoff, MaxBackoff, CleanupInterval or StopBudget the defaults
+// below, whether the Config comes from a file or from code. Enabled and
+// Retention have no zero-value default: a Config built in code sets them
+// (a zero Retention keeps the messages forever).
 type Config struct {
 	// Enabled runs the periodic jobs and the workers in this process.
 	// False makes an enqueue-only process: Enqueue works, nothing runs.
@@ -37,11 +38,22 @@ type Config struct {
 	// enqueueing transactions run longer, and keep the clocks of the
 	// processes that enqueue in sync.
 	SettleWindow time.Duration `yaml:"settle_window" default:"30s"`
+	// MaxAttempts is how many times a worker delivers a message, the
+	// first time included: a message its function still fails on then is
+	// parked in the dead letters (Jobs.Dead) and the topic moves on.
+	MaxAttempts int `yaml:"max_attempts" default:"10"`
+	// RetryBackoff is how long a worker waits after a message's first
+	// failure before it tries the message again; the wait doubles with
+	// every failure. The topic's later messages wait with it.
+	RetryBackoff time.Duration `yaml:"retry_backoff" default:"1s"`
+	// MaxBackoff caps the wait between two tries of a message.
+	MaxBackoff time.Duration `yaml:"max_backoff" default:"5m"`
 	// Retention deletes, every CleanupInterval, the messages older than
-	// Retention that every worker has delivered; 0 keeps them forever.
-	// The cleanup goes by the watermarks of the workers of its own
-	// process: one without workers deletes nothing.
-	Retention time.Duration `yaml:"retention"`
+	// Retention that every worker has delivered; 0 keeps them forever,
+	// and is what a Config built in code without it gets. The cleanup
+	// goes by the watermarks of the workers of its own process: one
+	// without workers deletes nothing. It never deletes the dead letters.
+	Retention time.Duration `yaml:"retention" default:"168h"`
 	// CleanupInterval is how often the retention cleanup runs.
 	CleanupInterval time.Duration `yaml:"cleanup_interval" default:"1h"`
 	// StopBudget is how long stopping waits for runs in flight, after
@@ -54,6 +66,9 @@ const (
 	defaultPollInterval    = time.Second
 	defaultBatchSize       = 100
 	defaultSettleWindow    = 30 * time.Second
+	defaultMaxAttempts     = 10
+	defaultRetryBackoff    = time.Second
+	defaultMaxBackoff      = 5 * time.Minute
 	defaultCleanupInterval = time.Hour
 	defaultStopBudget      = 15 * time.Second
 	maxBatchSize           = 10_000
@@ -70,6 +85,15 @@ func (c Config) withDefaults() Config {
 	}
 	if c.SettleWindow == 0 {
 		c.SettleWindow = defaultSettleWindow
+	}
+	if c.MaxAttempts == 0 {
+		c.MaxAttempts = defaultMaxAttempts
+	}
+	if c.RetryBackoff == 0 {
+		c.RetryBackoff = defaultRetryBackoff
+	}
+	if c.MaxBackoff == 0 {
+		c.MaxBackoff = defaultMaxBackoff
 	}
 	if c.CleanupInterval == 0 {
 		c.CleanupInterval = defaultCleanupInterval
@@ -101,6 +125,21 @@ func (c *Config) Validate() error {
 	}
 	if c.Retention < 0 {
 		errs = append(errs, fmt.Sprintf("retention must not be negative (0 keeps messages forever), got %s", c.Retention))
+	}
+	if c.MaxAttempts < 0 {
+		errs = append(errs, fmt.Sprintf("max_attempts must be at least 1 (0 takes the default), got %d", c.MaxAttempts))
+	}
+	switch {
+	case c.RetryBackoff < 0:
+		errs = append(errs, fmt.Sprintf("retry_backoff must not be negative, got %s", c.RetryBackoff))
+	case c.MaxBackoff < 0:
+		errs = append(errs, fmt.Sprintf("max_backoff must not be negative, got %s", c.MaxBackoff))
+	default:
+		// A zero takes its default in New: compare what will run.
+		d := c.withDefaults()
+		if d.RetryBackoff > d.MaxBackoff {
+			errs = append(errs, fmt.Sprintf("retry_backoff (%s) must not exceed max_backoff (%s)", d.RetryBackoff, d.MaxBackoff))
+		}
 	}
 	if len(errs) == 0 {
 		return nil

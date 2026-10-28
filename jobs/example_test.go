@@ -2,7 +2,6 @@ package jobs_test
 
 import (
 	"context"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -27,13 +26,10 @@ func Example() {
 
 	delivered := make(chan string)
 	j := jobs.MustNew(jobs.Config{Enabled: true, PollInterval: 10 * time.Millisecond}, d,
-		// A message can come twice, with the same ID: keep the effect idempotent.
-		jobs.Worker("order.placed", func(ctx context.Context, m jobs.Message) error {
-			var e orderPlaced
-			if err := json.Unmarshal(m.Payload, &e); err != nil {
-				return err
-			}
-			delivered <- e.OrderID
+		// The payload arrives decoded. A message can come twice, with the
+		// same ID: keep the effect idempotent.
+		jobs.Worker("order.placed", func(ctx context.Context, m jobs.Message[orderPlaced]) error {
+			delivered <- m.Payload.OrderID
 			return nil
 		}),
 		jobs.Periodic("purge-carts", "@hourly", func(ctx context.Context) error { return nil }, jobs.OverlapSkip),

@@ -8,8 +8,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/zynthara/chok/v3/db"
 )
@@ -26,24 +28,66 @@ import (
 // watermark never advances into the unsettled window where late commits
 // could still reorder ties), and mem remembers rows delivered in earlier
 // sweeps that are not yet settled enough to advance the watermark over.
+//
+// v3 adds the failure handling around the handler call (attempt): a
+// failure is counted on the message row and retried after a backoff,
+// the last allowed failure parks the message in chok_jobs_dead and the
+// sweep goes on; and mem outlives a graceful restart through
+// chok_jobs_delivered (restore, saveDelivered).
 type relay struct {
 	topic   string
-	handler func(ctx context.Context, m Message) error
+	handler func(ctx context.Context, m rawMessage) error
 	states  *stateStore
 	d       *db.DB
 	logger  *slog.Logger
+	retry   retryPolicy
+	observe func(ctx context.Context, ev Event) // reports message.parked; nil without observers
 
 	settle   time.Duration
 	batch    int
 	now      func() time.Time // injectable clock for settle tests
 	maxPages int              // one sweep's page budget (maxSweepPages; test-tunable)
 
-	delivered atomic.Int64 // messages handed to the handler, for Stats
+	delivered atomic.Int64 // messages the handler took, for Stats
+	parked    atomic.Int64 // messages parked in the dead letters, for Stats
 
-	// mu guards mem. The scheduler never overlaps a worker's sweeps; the
-	// TryLock turns an overlap into an error instead of a race.
-	mu  sync.Mutex
-	mem map[uint64]time.Time // delivered but not yet settled: id → created_at
+	// mu guards mem and restored. The scheduler never overlaps a
+	// worker's sweeps; the TryLock turns an overlap into an error instead
+	// of a race.
+	mu       sync.Mutex
+	mem      map[uint64]time.Time // delivered (or parked) but not yet settled: id → created_at
+	restored bool                 // the first sweep read the delivered set back
+
+	headMu sync.Mutex
+	head   headState // where the last sweep stopped on a failing message, for Stats
+}
+
+// retryPolicy is what a worker does with a message its function fails
+// on: try again after delay(n), park it at the maxAttempts-th failure.
+type retryPolicy struct {
+	maxAttempts         int
+	backoff, maxBackoff time.Duration
+}
+
+// delay is the wait after a message's n-th failure: backoff doubled n-1
+// times, at most maxBackoff. A zero backoff tries again on the next sweep.
+func (p retryPolicy) delay(n int) time.Duration {
+	d := p.backoff
+	for i := 1; i < n && d < p.maxBackoff; i++ {
+		if d > p.maxBackoff/2 {
+			return p.maxBackoff
+		}
+		d *= 2
+	}
+	return min(d, p.maxBackoff)
+}
+
+// headState is the message a worker's last sweep stopped on because it
+// failed: its failed deliveries so far and when it is tried next. Zero
+// while the topic flows.
+type headState struct {
+	attempts int
+	next     time.Time
 }
 
 // scanPos is the in-sweep cursor: the created_at boundary plus how many
@@ -59,7 +103,39 @@ type scanPos struct {
 // worker is in flight.
 var errSweepRunning = errors.New("jobs: a sweep of this worker is already running")
 
-func newRelay(topic string, handler func(ctx context.Context, m Message) error, c *core, settle time.Duration, batch int) (*relay, error) {
+// errRetryLater ends a sweep quietly at a message whose next try is not
+// due yet: the topic waits without calling the handler.
+var errRetryLater = errors.New("jobs: the next try of the head message is not due")
+
+// loggedError is a delivery failure the relay has logged itself, with the
+// message's attempt and next try: the scheduler counts the failed sweep
+// without logging it again.
+type loggedError struct{ error }
+
+func (e loggedError) Unwrap() error { return e.error }
+
+// maxErrorLen bounds the error stored with a failing or parked message:
+// an error can carry a whole response body.
+const maxErrorLen = 2000
+
+// errorText is err's message, cut to maxErrorLen bytes on a rune
+// boundary.
+func errorText(err error) string {
+	s := err.Error()
+	if len(s) <= maxErrorLen {
+		return s
+	}
+	s = s[:maxErrorLen]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// newRelay builds the relay of a worker. Its retry policy tries a failed
+// message again on the next sweep and parks it at the default
+// MaxAttempts; New sets the Config's.
+func newRelay(topic string, handler func(ctx context.Context, m rawMessage) error, c *core, settle time.Duration, batch int) (*relay, error) {
 	if err := checkTopic(topic); err != nil {
 		return nil, fmt.Errorf("jobs: worker %q: %w", topic, err)
 	}
@@ -72,6 +148,7 @@ func newRelay(topic string, handler func(ctx context.Context, m Message) error, 
 		states:   c.states,
 		d:        c.d,
 		logger:   c.logger.With("topic", topic),
+		retry:    retryPolicy{maxAttempts: defaultMaxAttempts},
 		settle:   settle,
 		batch:    batch,
 		now:      time.Now,
@@ -91,13 +168,41 @@ func newRelay(topic string, handler func(ctx context.Context, m Message) error, 
 const maxSweepPages = 100
 
 // run is one sweep. Any error aborted the sweep with the watermark parked
-// before the failed row.
+// before the failed row; a message whose next try is not due ends it
+// quietly, with nil.
 func (r *relay) run(ctx context.Context) error {
 	if !r.mu.TryLock() {
 		return errSweepRunning
 	}
 	defer r.mu.Unlock()
 
+	if !r.restored {
+		if err := r.restore(ctx); err != nil {
+			return err
+		}
+		r.restored = true
+	}
+	var head headState
+	err := r.sweep(ctx, &head)
+	r.headMu.Lock()
+	r.head = head
+	r.headMu.Unlock()
+	if errors.Is(err, errRetryLater) {
+		return nil
+	}
+	return err
+}
+
+// headStats returns where the last sweep stopped on a failing message.
+func (r *relay) headStats() headState {
+	r.headMu.Lock()
+	defer r.headMu.Unlock()
+	return r.head
+}
+
+// sweep scans and delivers; it sets *head when it stops on a failing
+// message.
+func (r *relay) sweep(ctx context.Context, head *headState) error {
 	w, err := r.states.load(ctx, r.topic)
 	if err != nil {
 		return err
@@ -164,7 +269,7 @@ func (r *relay) run(ctx context.Context) error {
 			for i := range page {
 				at, id := page[i].CreatedAt, page[i].ID
 				lastID = id
-				if err := r.deliver(ctx, &page[i], at, id, w, &cand, cutoff); err != nil {
+				if err := r.deliver(ctx, &page[i], at, id, w, &cand, cutoff, head); err != nil {
 					r.persist(ctx, &w, cand)
 					return err
 				}
@@ -204,7 +309,7 @@ func (r *relay) run(ctx context.Context) error {
 			} else {
 				pos = scanPos{ts: at, offset: 1}
 			}
-			if err := r.deliver(ctx, &items[i], at, id, w, &cand, cutoff); err != nil {
+			if err := r.deliver(ctx, &items[i], at, id, w, &cand, cutoff, head); err != nil {
 				r.persist(ctx, &w, cand)
 				return err
 			}
@@ -290,11 +395,11 @@ func (r *relay) scanForward(ctx context.Context, pos scanPos, batch int, strict 
 }
 
 // deliver handles one scanned row: dedup (persisted-watermark keyset,
-// then process memory), the handler, and the settled-candidate advance.
-// Everything up to and including this row is delivered when it returns
-// nil (head-of-line: an error aborts the sweep above, so the prefix stays
-// contiguous).
-func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint64, w watermark, cand *watermark, cutoff time.Time) error {
+// then process memory), the attempt, and the settled-candidate advance.
+// Everything up to and including this row is delivered (or parked) when
+// it returns nil (head-of-line: an error aborts the sweep above, so the
+// prefix stays contiguous).
+func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint64, w watermark, cand *watermark, cutoff time.Time, head *headState) error {
 	delivered := w.covers(at, id)
 	if !delivered {
 		if _, seen := r.mem[id]; seen {
@@ -302,11 +407,9 @@ func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint
 		}
 	}
 	if !delivered {
-		if err := r.handler(ctx, row.toMessage()); err != nil {
-			return fmt.Errorf("jobs: worker %q: deliver message %d (created_at %s): %w",
-				r.topic, id, at.UTC().Format(time.RFC3339Nano), err)
+		if err := r.attempt(ctx, row, head); err != nil {
+			return err
 		}
-		r.delivered.Add(1)
 		r.mem[id] = at
 	}
 	if !at.After(cutoff) {
@@ -314,6 +417,160 @@ func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint
 	}
 	return nil
 }
+
+// attempt delivers row, unless it was parked already or its next try is
+// not due (errRetryLater). nil means the topic moves past row: the
+// handler took it, or it is parked. A failure below MaxAttempts is
+// counted on the row and stops the sweep there; the last one parks it.
+func (r *relay) attempt(ctx context.Context, row *message, head *headState) error {
+	if row.Attempts > 0 {
+		// It failed before. A crash between parking it and the watermark
+		// passing it leaves it parked and still ahead of the watermark.
+		parked, err := r.isParked(ctx, row.ID)
+		if err != nil || parked {
+			return err
+		}
+	}
+	if row.RetryAt != nil && row.RetryAt.After(r.now()) {
+		*head = headState{attempts: row.Attempts, next: row.RetryAt.UTC()}
+		return errRetryLater
+	}
+	err := r.call(ctx, row.toMessage())
+	if err == nil {
+		r.delivered.Add(1)
+		return nil
+	}
+	if ctx.Err() != nil {
+		return err // stopped by shutdown: not a failure of the message
+	}
+	n := row.Attempts + 1
+	if _, undecodable := errors.AsType[decodeError](err); undecodable || n >= r.retry.maxAttempts {
+		return r.park(ctx, row, n, err)
+	}
+	return r.fail(ctx, row, n, err, head)
+}
+
+// call runs the handler on m. A panic is a failed delivery: its stack
+// goes to the log at Error, as the scheduler logs a run's.
+func (r *relay) call(ctx context.Context, m rawMessage) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("panic: %v", p)
+			r.logger.ErrorContext(ctx, "jobs: a worker function panicked", "id", m.ID, "panic", fmt.Sprint(p), "stack", panicStack())
+		}
+	}()
+	return r.handler(ctx, m)
+}
+
+// fail records the n-th failure of row on its message row: the count,
+// when to try next and the error. The sweep stops at row; the sweeps
+// until the next try leave it alone.
+func (r *relay) fail(ctx context.Context, row *message, n int, cause error, head *headState) error {
+	text := errorText(cause)
+	var retryAt *time.Time
+	var next time.Time
+	if d := r.retry.delay(n); d > 0 {
+		next = r.now().Add(d).UTC()
+		retryAt = &next
+	}
+	err := r.d.Unsafe(ctx).Model(&message{}).Where("id = ?", row.ID).
+		Updates(map[string]any{"attempts": n, "retry_at": retryAt, "last_error": text}).Error
+	if err != nil {
+		return fmt.Errorf("jobs: worker %q: record the failure of message %d: %w (the failure: %v)", r.topic, row.ID, err, cause)
+	}
+	*head = headState{attempts: n, next: next}
+	r.logger.WarnContext(ctx, "jobs: a message failed; the topic waits for its next try",
+		"id", row.ID, "attempt", n, "max_attempts", r.retry.maxAttempts, "next_try", next, "error", text)
+	return loggedError{fmt.Errorf("jobs: worker %q: message %d failed (attempt %d of %d): %w", r.topic, row.ID, n, r.retry.maxAttempts, cause)}
+}
+
+// park copies row into the dead letters and records its last failure on
+// the message row in one transaction, so a crash leaves it either
+// failing or parked, then logs and reports it. Parking twice (a crash
+// before the watermark passed it) keeps the first copy.
+func (r *relay) park(ctx context.Context, row *message, n int, cause error) error {
+	text := errorText(cause)
+	parkedAt := r.now().UTC()
+	err := r.d.RunInTx(ctx, func(txCtx context.Context) error {
+		tx := r.d.Unsafe(txCtx)
+		dead := deadRow{
+			ID: row.ID, Topic: row.Topic, Payload: row.Payload, CreatedAt: row.CreatedAt,
+			ParkedAt: parkedAt, Attempts: n, LastError: text,
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&dead).Error; err != nil {
+			return err
+		}
+		return tx.Model(&message{}).Where("id = ?", row.ID).
+			Updates(map[string]any{"attempts": n, "retry_at": nil, "last_error": text}).Error
+	})
+	if err != nil {
+		return fmt.Errorf("jobs: worker %q: park message %d: %w (the failure: %v)", r.topic, row.ID, err, cause)
+	}
+	r.parked.Add(1)
+	r.logger.ErrorContext(ctx, "jobs: a message is parked in the dead letters; the topic moves on",
+		"id", row.ID, "attempts", n, "error", text)
+	if r.observe != nil {
+		r.observe(ctx, Event{Kind: kindParked, Job: r.topic, Type: typeWorker, StartedAt: parkedAt, Error: text})
+	}
+	return nil
+}
+
+// isParked reports whether the message id is in the dead letters.
+func (r *relay) isParked(ctx context.Context, id uint64) (bool, error) {
+	var n int64
+	if err := r.d.Unsafe(ctx).Model(&deadRow{}).Where("id = ?", id).Count(&n).Error; err != nil {
+		return false, fmt.Errorf("jobs: worker %q: look for message %d in the dead letters: %w", r.topic, id, err)
+	}
+	return n > 0, nil
+}
+
+// restore reads back the delivered set the worker saved when the jobs
+// last stopped — what it had delivered or parked that its watermark had
+// not passed — into mem, so this process does not deliver it again, and
+// deletes it: the next stop saves mem anew.
+func (r *relay) restore(ctx context.Context) error {
+	var rows []deliveredRow
+	if err := r.d.Unsafe(ctx).Where("topic = ?", r.topic).Find(&rows).Error; err != nil {
+		return fmt.Errorf("jobs: worker %q: read the delivered set: %w", r.topic, err)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	for _, row := range rows {
+		r.mem[row.MessageID] = row.CreatedAt
+	}
+	if err := r.d.Unsafe(ctx).Where("topic = ?", r.topic).Delete(&deliveredRow{}).Error; err != nil {
+		r.logger.WarnContext(ctx, "jobs: deleting the delivered set failed; the next start reads it again", "error", err)
+	}
+	return nil
+}
+
+// saveDelivered writes mem to chok_jobs_delivered for restore. It runs
+// when the jobs stop, after the last sweep: a sweep still in flight
+// keeps its set (errSweepRunning), and the next start may deliver it
+// again, as after a crash.
+func (r *relay) saveDelivered(ctx context.Context) (int, error) {
+	if !r.mu.TryLock() {
+		return 0, errSweepRunning
+	}
+	defer r.mu.Unlock()
+	if len(r.mem) == 0 {
+		return 0, nil
+	}
+	rows := make([]deliveredRow, 0, len(r.mem))
+	for id, at := range r.mem {
+		rows = append(rows, deliveredRow{Topic: r.topic, MessageID: id, CreatedAt: at.UTC()})
+	}
+	// A row may be there already when restore could not delete it.
+	err := r.d.Unsafe(ctx).Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, deliveredBatch).Error
+	if err != nil {
+		return 0, fmt.Errorf("jobs: worker %q: save the delivered set: %w", r.topic, err)
+	}
+	return len(rows), nil
+}
+
+// deliveredBatch is how many delivered-set rows one insert writes.
+const deliveredBatch = 500
 
 // persist advances the stored watermark to cand when it moved, then
 // prunes the mem entries the new watermark covers. Pruning rides every

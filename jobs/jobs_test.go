@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -25,9 +26,14 @@ import (
 // Start / Close and Stats, on the lane's database. v2's scheduler and
 // outbox module tests land here under v3 names; the report maps them.
 
-// fastConfig sweeps every 10ms, so a test sees a delivery quickly.
+// fastConfig sweeps every 10ms, so a test sees a delivery quickly, and
+// tries a failed message again 10ms later, without ever parking it: the
+// tests of parking set MaxAttempts themselves.
 func fastConfig() Config {
-	return Config{Enabled: true, PollInterval: 10 * time.Millisecond}
+	return Config{
+		Enabled: true, PollInterval: 10 * time.Millisecond,
+		RetryBackoff: 10 * time.Millisecond, MaxBackoff: 10 * time.Millisecond, MaxAttempts: 1000,
+	}
 }
 
 func newJobs(t *testing.T, d *db.DB, cfg Config, opts ...Option) *Jobs {
@@ -89,10 +95,10 @@ func enqueueTx(t *testing.T, d *db.DB, j *Jobs, topic string, payload any) {
 // inbox is a worker function that records what it got.
 type inbox struct {
 	mu   sync.Mutex
-	msgs []Message
+	msgs []Message[jsontext.Value]
 }
 
-func (in *inbox) handle(_ context.Context, m Message) error {
+func (in *inbox) handle(_ context.Context, m Message[jsontext.Value]) error {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	in.msgs = append(in.msgs, m)
@@ -164,7 +170,7 @@ func TestNew_RefusesBadOptions(t *testing.T) {
 		{Periodic("odd", "@hourly", noop, Overlap(7)), "Overlap(7) is not an Overlap"},
 		{Worker("", in.handle), "a topic must be 1 to 200 bytes"},
 		{Worker(strings.Repeat("t", 201), in.handle), "a topic must be 1 to 200 bytes"},
-		{Worker("nil", nil), `worker "nil" has a nil function`},
+		{Worker[jsontext.Value]("nil", nil), `worker "nil" has a nil function`},
 		{Observe(nil), "Observe with a nil function"},
 	} {
 		if _, err := New(fastConfig(), d, c.opt); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -201,6 +207,12 @@ func TestConfig_Validate(t *testing.T) {
 		"retention":        func(c *Config) { c.Retention = -time.Second },
 		"cleanup_interval": func(c *Config) { c.CleanupInterval = 0 },
 		"stop_budget":      func(c *Config) { c.StopBudget = -time.Second },
+		"max_attempts":     func(c *Config) { c.MaxAttempts = -1 },
+		"retry_backoff":    func(c *Config) { c.RetryBackoff = -time.Second },
+		"max_backoff":      func(c *Config) { c.MaxBackoff = -time.Second },
+		// A zero max_backoff takes its default (5m), which a longer
+		// first wait exceeds.
+		"retry_backoff above max_backoff": func(c *Config) { c.RetryBackoff = 10 * time.Minute },
 	}
 	for name, mutate := range cases {
 		c := base()
@@ -217,13 +229,15 @@ func TestConfig_LoadsWithDefaults(t *testing.T) {
 		chok.Base
 		Jobs Config `yaml:"jobs"`
 	}
-	t.Setenv("JBT_JOBS_RETENTION", "168h")
+	// Retention's default comes with the file: a week. (A Config built
+	// in code keeps everything: TestNew_DefaultsZeroFields.)
 	cfg, err := chok.Load[appConfig]("jbt", chok.Args(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Config{
 		Enabled: true, PollInterval: time.Second, BatchSize: 100, SettleWindow: 30 * time.Second,
+		MaxAttempts: 10, RetryBackoff: time.Second, MaxBackoff: 5 * time.Minute,
 		Retention: 168 * time.Hour, CleanupInterval: time.Hour, StopBudget: 15 * time.Second,
 	}
 	if cfg.Jobs != want {
@@ -238,7 +252,13 @@ func TestConfig_LoadsWithDefaults(t *testing.T) {
 
 func TestNew_DefaultsZeroFields(t *testing.T) {
 	j := newJobs(t, dbtest.Open(t), Config{Enabled: true})
-	want := Config{Enabled: true, PollInterval: time.Second, BatchSize: 100, SettleWindow: 30 * time.Second, CleanupInterval: time.Hour, StopBudget: 15 * time.Second}
+	// Retention has no zero-value default: built in code, 0 keeps the
+	// messages forever.
+	want := Config{
+		Enabled: true, PollInterval: time.Second, BatchSize: 100, SettleWindow: 30 * time.Second,
+		MaxAttempts: 10, RetryBackoff: time.Second, MaxBackoff: 5 * time.Minute,
+		CleanupInterval: time.Hour, StopBudget: 15 * time.Second,
+	}
 	if j.cfg != want {
 		t.Fatalf("defaults in code: %+v", j.cfg)
 	}
@@ -387,7 +407,7 @@ func TestWorker_FailureBlocksOnlyItsTopic(t *testing.T) {
 	a, b := &inbox{}, &inbox{}
 	poison := errors.New("poison")
 	j := newJobs(t, d, fastConfig(),
-		Worker("a", func(ctx context.Context, m Message) error {
+		Worker("a", func(ctx context.Context, m Message[jsontext.Value]) error {
 			if string(m.Payload) == `"a1"` && !healed.Load() {
 				return poison
 			}
@@ -418,9 +438,11 @@ func TestWorker_FailureBlocksOnlyItsTopic(t *testing.T) {
 // TestWorker_DeliversAtLeastOnce_HandlersDedupeByID documents why a
 // worker function must be idempotent. A message is delivered again (1)
 // after the function fails on it, even if it had done its work before
-// failing, and (2) after a restart, when it is younger than the settle
-// window. Both redeliveries carry the same Message.ID, which is what an
-// idempotent function dedupes on.
+// failing, and (2) after a crash, when it is younger than the settle
+// window. A graceful restart does not deliver it again: the stop saved
+// what was delivered. The redeliveries carry the same Message.ID, which
+// is what an idempotent function dedupes on; Message.Attempt counts the
+// failed deliveries before.
 func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 	cfg := dbtest.Config(t)
 	d1 := dbtest.OpenConfig(t, cfg)
@@ -428,17 +450,21 @@ func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 	var mu sync.Mutex
 	calls := map[uint64]int{} // deliveries per message
 	done := map[uint64]int{}  // effects per message: must stay at 1
+	var attempts []int        // Message.Attempt of m1's deliveries
 	failOnce := true
-	worker := func(_ context.Context, m Message) error {
+	worker := func(_ context.Context, m Message[jsontext.Value]) error {
 		mu.Lock()
 		defer mu.Unlock()
 		calls[m.ID]++
 		if done[m.ID] == 0 { // the dedupe: work done once per Message.ID
 			done[m.ID]++
 		}
-		if string(m.Payload) == `"m1"` && failOnce {
-			failOnce = false
-			return errors.New("the acknowledgement was lost") // after the work was done
+		if string(m.Payload) == `"m1"` {
+			attempts = append(attempts, m.Attempt)
+			if failOnce {
+				failOnce = false
+				return errors.New("the acknowledgement was lost") // after the work was done
+			}
 		}
 		return nil
 	}
@@ -448,7 +474,7 @@ func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 		return maps.Clone(calls), maps.Clone(done)
 	}
 	cfg1 := fastConfig()
-	cfg1.SettleWindow = time.Hour // nothing settles: a restart replays everything
+	cfg1.SettleWindow = time.Hour // nothing settles: the watermark passes no message
 	j1 := newJobs(t, d1, cfg1, Worker("orders", worker))
 	stop1 := run(t, j1)
 	enqueueTx(t, d1, j1, "orders", "m1")
@@ -461,18 +487,44 @@ func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The restart: another process on the same database. Within the
-	// settle window it has no watermark to go by, so both come again.
+	// A graceful restart: another process on the same database. It has
+	// no watermark to go by, but it reads back what the first one
+	// delivered, so m3 comes and m1 and m2 do not come again.
 	d2 := dbtest.OpenConfig(t, cfg)
 	j2 := newJobs(t, d2, cfg1, Worker("orders", worker))
-	run(t, j2)
-	eventually(t, "the replay after the restart", func() bool {
+	stop2 := run(t, j2)
+	enqueueTx(t, d2, j2, "orders", "m3")
+	eventually(t, "m3 after the graceful restart", func() bool { c, _ := snapshot(); return c[3] == 1 })
+	if err := stop2(); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := snapshot(); c[1] != 2 || c[2] != 1 {
+		t.Fatalf("deliveries after the graceful restart %v: m1 and m2 came again", c)
+	}
+
+	// A crash: the process dies without stopping, so it saves nothing —
+	// here the saved set is dropped. Within the settle window all three
+	// come again.
+	if err := d2.Unsafe(t.Context()).Where("1 = 1").Delete(&deliveredRow{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	d3 := dbtest.OpenConfig(t, cfg)
+	j3 := newJobs(t, d3, cfg1, Worker("orders", worker))
+	run(t, j3)
+	eventually(t, "the replay after the crash", func() bool {
 		c, _ := snapshot()
-		return c[1] == 3 && c[2] == 2
+		return c[1] == 3 && c[2] == 2 && c[3] == 2
 	})
 	c, effects := snapshot()
-	if effects[1] != 1 || effects[2] != 1 || len(effects) != 2 {
+	if effects[1] != 1 || effects[2] != 1 || effects[3] != 1 || len(effects) != 3 {
 		t.Fatalf("deliveries %v, effects %v: the dedupe on Message.ID keeps one effect per message", c, effects)
+	}
+	// m1 failed once, so its retry was attempt 2; the replay repeats the
+	// delivery it repeats, and its number.
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(attempts, []int{1, 2, 2}) {
+		t.Fatalf("m1's attempts %v, want [1 2 2]", attempts)
 	}
 }
 
@@ -539,7 +591,7 @@ func TestObserve_WorkersAndCleanup(t *testing.T) {
 	cfg.SettleWindow, cfg.Retention, cfg.CleanupInterval = 50*time.Millisecond, time.Millisecond, 20*time.Millisecond
 	j := newJobs(t, d, cfg,
 		Worker("orders", in.handle),
-		Worker("flaky", func(context.Context, Message) error {
+		Worker("flaky", func(context.Context, Message[jsontext.Value]) error {
 			if !healed.Load() {
 				return errors.New("not yet")
 			}
@@ -683,7 +735,7 @@ func TestClose_ReturnsWithinStopBudget(t *testing.T) {
 	var once sync.Once
 	cfg := fastConfig()
 	cfg.StopBudget = 200 * time.Millisecond
-	j := newJobs(t, d, cfg, Worker("stuck", func(context.Context, Message) error {
+	j := newJobs(t, d, cfg, Worker("stuck", func(context.Context, Message[jsontext.Value]) error {
 		once.Do(func() { close(started) })
 		<-release // ignores its context
 		return nil

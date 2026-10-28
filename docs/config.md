@@ -168,8 +168,11 @@ Periodic jobs and transactional-outbox workers; `jobs.New` takes it.
 | `jobs.batch_size` | int | `100` |  | BatchSize is how many messages a sweep reads per query, and how many the cleanup deletes per statement; a sweep reads at most 100 batches, the rest wait for the next one. At most 10000. |
 | `jobs.cleanup_interval` | duration | `1h` |  | CleanupInterval is how often the retention cleanup runs. |
 | `jobs.enabled` | bool | `true` |  | Enabled runs the periodic jobs and the workers in this process. False makes an enqueue-only process: Enqueue works, nothing runs. Run the workers in one process (one replica) of a deployment. |
+| `jobs.max_attempts` | int | `10` |  | MaxAttempts is how many times a worker delivers a message, the first time included: a message its function still fails on then is parked in the dead letters (Jobs.Dead) and the topic moves on. |
+| `jobs.max_backoff` | duration | `5m` |  | MaxBackoff caps the wait between two tries of a message. |
 | `jobs.poll_interval` | duration | `1s` |  | PollInterval is how often each worker sweeps its topic for new messages: the delivery latency while it keeps up. |
-| `jobs.retention` | duration |  |  | Retention deletes, every CleanupInterval, the messages older than Retention that every worker has delivered; 0 keeps them forever. The cleanup goes by the watermarks of the workers of its own process: one without workers deletes nothing. |
+| `jobs.retention` | duration | `168h` |  | Retention deletes, every CleanupInterval, the messages older than Retention that every worker has delivered; 0 keeps them forever, and is what a Config built in code without it gets. The cleanup goes by the watermarks of the workers of its own process: one without workers deletes nothing. It never deletes the dead letters. |
+| `jobs.retry_backoff` | duration | `1s` |  | RetryBackoff is how long a worker waits after a message's first failure before it tries the message again; the wait doubles with every failure. The topic's later messages wait with it. |
 | `jobs.settle_window` | duration | `30s` |  | SettleWindow bounds how long a transaction that calls Enqueue may take to commit: a worker's watermark never passes messages younger than this, so a late commit is still delivered. Raise it if enqueueing transactions run longer, and keep the clocks of the processes that enqueue in sync. |
 | `jobs.stop_budget` | duration | `15s` |  | StopBudget is how long stopping waits for runs in flight, after telling them to stop through their context. |
 

@@ -17,7 +17,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`store/where`](#storewhere) | 27 |
 | [`identity`](#identity) | 19 |
 | [`identity/rbac`](#identityrbac) | 8 |
-| [`jobs`](#jobs) | 16 |
+| [`jobs`](#jobs) | 17 |
 | [`telemetry`](#telemetry) | 6 |
 | [`cache`](#cache) | 6 |
 | [`choktest`](#choktest) | 5 |
@@ -27,7 +27,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 231 |
+| total | 232 |
 
 ## chok
 
@@ -250,18 +250,19 @@ full documentation is on pkg.go.dev and in `go doc`.
 | Declaration | |
 |---|---|
 | `var ErrOutsideTx error = outsideTxError{}` | ErrOutsideTx is what Enqueue returns when its context does not carry a transaction of the database the jobs run on: the message must commit or roll back with the writes it describes, so an autocommit insert, or one riding another handle's transaction, is refused. |
-| `func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error)` | New builds the jobs battery on d: it checks cfg and every option, then registers the tables chok_jobs_messages and chok_jobs_watermarks under the owner "jobs" (created now in migrate: auto; from its embedded SQL files in migrate: versioned). |
+| `func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error)` | New builds the jobs battery on d: it checks cfg and every option, then registers the tables chok_jobs_messages, chok_jobs_watermarks, chok_jobs_dead and chok_jobs_delivered under the owner "jobs" (created now in migrate: auto; from its embedded SQL files in migrate: versioned). |
 | `type Config struct{ ... }` | Config is the jobs section of an application's configuration: |
-| `type Event struct{ ... }` | Event is one moment of a run that Observe reports: a periodic job's run, a worker's sweep of its topic or the retention cleanup's run starting, finishing or failing, or a trigger skipped while a run was in flight. |
+| `type DeadMessage struct{ ... }` | DeadMessage is a message parked in the dead letters, chok_jobs_dead: its worker failed on it MaxAttempts times, or could not decode its payload. |
+| `type Event struct{ ... }` | Event is one moment of a run that Observe reports: a periodic job's run, a worker's sweep of its topic or the retention cleanup's run starting, finishing or failing, a trigger skipped while a run was in flight, or a worker parking a message in the dead letters. |
 | `type JobStats struct{ ... }` | JobStats counts the runs of a periodic job, a worker's sweeps, or the retention cleanup's runs. |
 | `type Jobs struct{ ... }` | Jobs is the jobs battery: periodic jobs on cron schedules, and workers that deliver the messages Enqueue writes. |
 | ↳ `func MustNew(cfg Config, d *db.DB, opts ...Option) *Jobs` | MustNew is New that panics on error. |
-| `type Message struct{ ... }` | Message is an enqueued message as a worker receives it. |
+| `type Message[T any] struct{ ... }` | Message is an enqueued message as a worker receives it, its payload decoded into T. |
 | `type Option func(*options)` | Option configures New. |
 | ↳ `func Logger(l *slog.Logger) Option` | Logger is where the jobs log; the default is the database handle's logger. |
 | ↳ `func Observe(fn func(ev Event)) Option` | Observe calls fn at every run's start, end and failure, and at every trigger skipped because a run was in flight — of the periodic jobs, the workers' sweeps and the cleanup alike. |
 | ↳ `func Periodic(name, spec string, fn func(ctx context.Context) error, overlap Overlap) Option` | Periodic runs fn on the cron schedule spec — five fields (minute hour day-of-month month day-of-week), six with leading seconds, or a descriptor such as @hourly or "@every 10m" — in the machine's time zone unless spec starts with CRON_TZ=&lt;zone&gt;. |
-| ↳ `func Worker(topic string, fn func(ctx context.Context, m Message) error) Option` | Worker delivers the messages enqueued under topic to fn, one at a time in (created_at, id) order, at least once: a message is redelivered after fn fails on it, and after a restart within the settle window, so fn must be idempotent — dedupe on Message.ID or on a key in the payload. |
+| ↳ `func Worker[T any](topic string, fn func(ctx context.Context, m Message[T]) error) Option` | Worker delivers the messages enqueued under topic to fn, one at a time in (created_at, id) order, the payload decoded into T with encoding/json/v2 (Worker[jsontext.Value] hands on the JSON as stored). |
 | `type Overlap int` | Overlap says what a periodic job does when its schedule fires while its previous run is still going. |
 | ↳ `const OverlapSkip Overlap = iota ...` | OverlapSkip, OverlapQueue, OverlapAllow: OverlapSkip drops the trigger: for frequent jobs, where the next trigger comes soon anyway. |
 | `type Stats struct{ ... }` | Stats is a snapshot of the background work of this process. |

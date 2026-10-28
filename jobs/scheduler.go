@@ -259,12 +259,7 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 		defer func() {
 			if p := recover(); p != nil {
 				err = fmt.Errorf("panic: %v", p)
-				const maxStack = 8 << 10
-				stack := debug.Stack()
-				if len(stack) > maxStack {
-					stack = stack[:maxStack]
-				}
-				s.logger.ErrorContext(runCtx, "jobs: a run panicked", append(e.attrs, "panic", fmt.Sprint(p), "stack", string(stack))...)
+				s.logger.ErrorContext(runCtx, "jobs: a run panicked", append(e.attrs, "panic", fmt.Sprint(p), "stack", panicStack())...)
 			}
 		}()
 		err = e.fn(runCtx)
@@ -305,7 +300,11 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 	}
 
 	attrs := append(e.attrs, "duration", dur)
+	_, logged := errors.AsType[loggedError](err)
 	switch {
+	case err != nil && logged:
+		// The worker logged the failed message at Warn already.
+		s.logger.DebugContext(ctx, "jobs: run failed", append(attrs, "error", err.Error())...)
 	case err != nil:
 		s.logger.WarnContext(ctx, "jobs: run failed", append(attrs, "error", err.Error())...)
 	case stopped:
@@ -315,4 +314,15 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 	default:
 		s.logger.InfoContext(ctx, "jobs: run ok", attrs...)
 	}
+}
+
+// panicStack is the stack of a recovered panic for the log, cut to 8 KiB
+// to keep the line bounded.
+func panicStack() string {
+	const maxStack = 8 << 10
+	stack := debug.Stack()
+	if len(stack) > maxStack {
+		stack = stack[:maxStack]
+	}
+	return string(stack)
 }

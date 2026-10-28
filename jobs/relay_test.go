@@ -61,11 +61,11 @@ func insertAt(t *testing.T, c *core, at time.Time, id uint64, topic, payload str
 // to fail.
 type capture struct {
 	mu   sync.Mutex
-	got  []Message
-	fail func(Message) error
+	got  []rawMessage
+	fail func(rawMessage) error
 }
 
-func (cp *capture) handle(_ context.Context, m Message) error {
+func (cp *capture) handle(_ context.Context, m rawMessage) error {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
 	if cp.fail != nil {
@@ -219,7 +219,7 @@ func TestRelay_AtLeastOnce_FailedHandlerRetriesInOrder(t *testing.T) {
 		enqueue(t, c, "retry", fmt.Sprintf("m%d", i))
 	}
 	boom := errors.New("downstream down")
-	cp := &capture{fail: func(m Message) error {
+	cp := &capture{fail: func(m rawMessage) error {
 		if string(m.Payload) == "m2" {
 			return boom
 		}
@@ -270,7 +270,7 @@ func TestRelay_CrashRecovery_RedeliversUnsettledOnceEach(t *testing.T) {
 	// consumer-side dedup key absorbs the duplicates.
 	seen := map[string]int{}
 	var mu sync.Mutex
-	restarted, err := newRelay("crashy", func(_ context.Context, m Message) error {
+	restarted, err := newRelay("crashy", func(_ context.Context, m rawMessage) error {
 		mu.Lock()
 		defer mu.Unlock()
 		seen[string(m.Payload)]++
@@ -403,7 +403,7 @@ func TestRelay_ConcurrentEnqueue_NoLoss(t *testing.T) {
 	const settle = 2 * time.Second
 	var mu sync.Mutex
 	seen := map[string]int{}
-	r, err := newRelay("concurrent", func(_ context.Context, m Message) error {
+	r, err := newRelay("concurrent", func(_ context.Context, m rawMessage) error {
 		mu.Lock()
 		defer mu.Unlock()
 		seen[string(m.Payload)]++
@@ -512,7 +512,7 @@ func TestRelay_OverlappingSweepIsRefused(t *testing.T) {
 
 	release := make(chan struct{})
 	started := make(chan struct{})
-	r, err := newRelay("busy", func(_ context.Context, _ Message) error {
+	r, err := newRelay("busy", func(_ context.Context, _ rawMessage) error {
 		close(started)
 		<-release
 		return nil
@@ -639,7 +639,7 @@ func TestRelay_Round1MemPrunedOnEveryAdvance(t *testing.T) {
 		enqueue(t, c, "pruned", fmt.Sprintf("m%d", i))
 	}
 	boom := errors.New("poison")
-	cp := &capture{fail: func(m Message) error {
+	cp := &capture{fail: func(m rawMessage) error {
 		if string(m.Payload) == "m5" {
 			return boom
 		}
@@ -826,7 +826,7 @@ func TestRelay_Round3LateCommitDuringLongSweepNotSkipped(t *testing.T) {
 	clock := s
 	var mu sync.Mutex
 	var got []string
-	r, err := newRelay("long-sweep", func(_ context.Context, m Message) error {
+	r, err := newRelay("long-sweep", func(_ context.Context, m rawMessage) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if string(m.Payload) == "b1" {

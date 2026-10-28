@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,6 +36,9 @@ type Jobs struct {
 	closed   bool
 	cancel   context.CancelFunc // ends the run context of Start
 	deadline time.Time          // when the stop budget of the first stop runs out
+
+	saveMu sync.Mutex
+	saved  bool // the workers' delivered sets are written
 }
 
 // Option configures New.
@@ -55,7 +59,7 @@ type periodicOption struct {
 
 type workerOption struct {
 	topic string
-	fn    func(ctx context.Context, m Message) error
+	fn    func(ctx context.Context, m rawMessage) error
 }
 
 // Overlap says what a periodic job does when its schedule fires while
@@ -102,14 +106,40 @@ func Periodic(name, spec string, fn func(ctx context.Context) error, overlap Ove
 }
 
 // Worker delivers the messages enqueued under topic to fn, one at a time
-// in (created_at, id) order, at least once: a message is redelivered after
-// fn fails on it, and after a restart within the settle window, so fn must
-// be idempotent — dedupe on Message.ID or on a key in the payload. While
-// fn fails on a message, the messages behind it in the topic wait;
-// other topics keep flowing. One worker per topic.
-func Worker(topic string, fn func(ctx context.Context, m Message) error) Option {
-	return func(o *options) { o.workers = append(o.workers, workerOption{topic: topic, fn: fn}) }
+// in (created_at, id) order, the payload decoded into T with
+// encoding/json/v2 (Worker[jsontext.Value] hands on the JSON as stored).
+// Delivery is at least once: a message comes again after fn fails on it,
+// and after a crash within the settle window, so fn must be idempotent —
+// dedupe on Message.ID or on a key in the payload. A graceful stop
+// (Close) remembers what was delivered, so a restart does not repeat it.
+//
+// While fn fails on a message (returns an error or panics), the messages
+// behind it in the topic wait; other topics keep flowing. The worker
+// tries the message again after Config.RetryBackoff, doubling the wait
+// up to Config.MaxBackoff; the Config.MaxAttempts-th failure parks the
+// message in the dead letters (see Jobs.Dead) and the topic moves on. A
+// payload that does not decode into T is parked at once, without calling
+// fn. One worker per topic.
+func Worker[T any](topic string, fn func(ctx context.Context, m Message[T]) error) Option {
+	w := workerOption{topic: topic}
+	if fn != nil {
+		w.fn = func(ctx context.Context, m rawMessage) error {
+			var payload T
+			if err := json.Unmarshal(m.Payload, &payload); err != nil {
+				return decodeError{err}
+			}
+			return fn(ctx, Message[T]{ID: m.ID, Topic: m.Topic, Payload: payload, CreatedAt: m.CreatedAt, Attempt: m.Attempt})
+		}
+	}
+	return func(o *options) { o.workers = append(o.workers, w) }
 }
+
+// decodeError is a payload Worker[T] could not decode into T: retrying
+// cannot help, so the message is parked at once.
+type decodeError struct{ err error }
+
+func (e decodeError) Error() string { return "decode: " + e.err.Error() }
+func (e decodeError) Unwrap() error { return e.err }
 
 // Logger is where the jobs log; the default is the database handle's
 // logger.
@@ -129,20 +159,22 @@ func Observe(fn func(ev Event)) Option {
 
 // Event is one moment of a run that Observe reports: a periodic job's
 // run, a worker's sweep of its topic or the retention cleanup's run
-// starting, finishing or failing, or a trigger skipped while a run was in
-// flight. Kind and Type are its two enumerations, as strings so an
-// observer can pass the event on as it is.
+// starting, finishing or failing, a trigger skipped while a run was in
+// flight, or a worker parking a message in the dead letters. Kind and
+// Type are its two enumerations, as strings so an observer can pass the
+// event on as it is.
 type Event struct {
-	// Kind is run.started, run.finished, run.failed or run.skipped. A run
-	// that returned an error or panicked failed; one stopped by shutdown
-	// finished.
+	// Kind is run.started, run.finished, run.failed, run.skipped or
+	// message.parked. A run that returned an error or panicked failed;
+	// one stopped by shutdown finished. A sweep in which the worker
+	// failed on a message failed; one that parked a message goes on.
 	Kind string `json:"kind"`
 	// Job is the periodic job's name, the worker's topic, or "cleanup".
 	Job string `json:"job"`
 	// Type is periodic, worker or cleanup.
 	Type string `json:"type"`
 	// StartedAt is when the run started, in UTC; for run.skipped, when
-	// the trigger fired.
+	// the trigger fired; for message.parked, when the message was parked.
 	StartedAt time.Time `json:"started_at"`
 	// Duration is how long the run took, on run.finished and run.failed.
 	// Like JobStats.AvgDuration it has no default representation in
@@ -150,6 +182,7 @@ type Event struct {
 	// ("1.5s").
 	Duration time.Duration `json:"duration,omitzero"`
 	// Error is the run's error on run.failed: "panic: ..." for a panic.
+	// On message.parked it is the message's last error.
 	Error string `json:"error,omitzero"`
 	// Next is a periodic job's next trigger after the event, in UTC; zero
 	// for the workers and the cleanup.
@@ -166,6 +199,7 @@ const (
 	kindFinished = "run.finished"
 	kindFailed   = "run.failed"
 	kindSkipped  = "run.skipped"
+	kindParked   = "message.parked"
 
 	typePeriodic = "periodic"
 	typeWorker   = "worker"
@@ -217,13 +251,23 @@ type JobStats struct {
 	// (returned nil for) since New; for the cleanup, the messages it
 	// deleted.
 	Messages int64 `json:"messages"`
+	// Parked counts, for a worker, the messages it parked in the dead
+	// letters since New.
+	Parked int64 `json:"parked,omitzero"`
+	// HeadAttempts is, for a worker whose topic waits on a failing
+	// message, that message's failed deliveries so far; 0 while the
+	// topic flows.
+	HeadAttempts int `json:"head_attempts,omitzero"`
+	// NextRetry is when that message is tried next; zero while the
+	// topic flows.
+	NextRetry time.Time `json:"next_retry,omitzero"`
 }
 
 // New builds the jobs battery on d: it checks cfg and every option, then
-// registers the tables chok_jobs_messages and chok_jobs_watermarks under
-// the owner "jobs" (created now in migrate: auto; from its embedded SQL
-// files in migrate: versioned). Nothing runs until Start. One Jobs per
-// database handle.
+// registers the tables chok_jobs_messages, chok_jobs_watermarks,
+// chok_jobs_dead and chok_jobs_delivered under the owner "jobs" (created
+// now in migrate: auto; from its embedded SQL files in migrate:
+// versioned). Nothing runs until Start. One Jobs per database handle.
 func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error) {
 	if d == nil {
 		return nil, errors.New("jobs: nil *db.DB")
@@ -289,9 +333,13 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error) {
 		if err != nil {
 			return nil, err // unreachable: the topic and fn were checked above
 		}
+		r.retry = retryPolicy{maxAttempts: cfg.MaxAttempts, backoff: cfg.RetryBackoff, maxBackoff: cfg.MaxBackoff}
 		j.relays = append(j.relays, r)
 		e := newEntry(typeWorker, w.topic, sweep, every(cfg.PollInterval), OverlapSkip, r.run)
 		e.quiet, e.count = true, r.delivered.Load
+		if len(o.observers) > 0 {
+			r.observe = func(ctx context.Context, ev Event) { j.sched.observe(ctx, e, ev) }
+		}
 		j.workers = append(j.workers, e)
 		workerTopics = append(workerTopics, w.topic)
 	}
@@ -348,8 +396,11 @@ func (j *Jobs) Stats() Stats {
 		st.Periodic = append(st.Periodic, e.snapshot())
 	}
 	for i, e := range j.workers {
+		r := j.relays[i]
 		ws := e.snapshot()
-		ws.Messages = j.relays[i].delivered.Load()
+		ws.Messages, ws.Parked = r.delivered.Load(), r.parked.Load()
+		head := r.headStats()
+		ws.HeadAttempts, ws.NextRetry = head.attempts, head.next
 		st.Workers = append(st.Workers, ws)
 	}
 	if j.cleanup != nil {
@@ -402,7 +453,8 @@ func (j *Jobs) Close(ctx context.Context) error {
 }
 
 // stop ends the run context and waits for the loops and runs, until the
-// stop budget of the first stop runs out or ctx ends.
+// stop budget of the first stop runs out or ctx ends; once they have
+// stopped, it saves the workers' delivered sets.
 func (j *Jobs) stop(ctx context.Context) error {
 	j.mu.Lock()
 	if !j.started {
@@ -424,7 +476,31 @@ func (j *Jobs) stop(ctx context.Context) error {
 		}
 		return fmt.Errorf("jobs: stop: %w, with runs still going: %s", ctx.Err(), running)
 	}
+	j.saveDelivered(wctx)
 	return nil
+}
+
+// saveDelivered writes, once, what each worker delivered that its
+// watermark has not passed, for its first sweep after a restart (see
+// relay.saveDelivered). A failure costs those messages a second delivery.
+func (j *Jobs) saveDelivered(ctx context.Context) {
+	j.saveMu.Lock()
+	defer j.saveMu.Unlock()
+	if j.saved {
+		return
+	}
+	j.saved = true
+	for _, r := range j.relays {
+		n, err := r.saveDelivered(ctx)
+		if err != nil {
+			j.logger.WarnContext(ctx, "jobs: saving the delivered set failed; the next start may deliver it again",
+				"worker", r.topic, "error", err)
+			continue
+		}
+		if n > 0 {
+			j.logger.DebugContext(ctx, "jobs: saved the delivered set", "worker", r.topic, "messages", n)
+		}
+	}
 }
 
 // Health reports nil: a failing job or worker does not make the process

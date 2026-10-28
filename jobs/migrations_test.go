@@ -10,7 +10,7 @@ import (
 	"github.com/zynthara/chok/v3/internal/dbtest"
 )
 
-var jobsTables = []string{"chok_jobs_messages", "chok_jobs_watermarks"}
+var jobsTables = []string{"chok_jobs_messages", "chok_jobs_watermarks", "chok_jobs_dead", "chok_jobs_delivered"}
 
 // describeSchema renders tables as the database reports them: each
 // column's type, length, full type, nullability, default and key, and
@@ -83,13 +83,15 @@ func TestMigrations_VersionedMatchesAuto(t *testing.T) {
 	for _, index := range []string{
 		"idx_chok_jobs_messages_scan [created_at id] unique=false",
 		"idx_chok_jobs_messages_topic [created_at id topic] unique=false",
+		"idx_chok_jobs_dead_parked [id parked_at] unique=false",
+		"idx_chok_jobs_dead_topic [id parked_at topic] unique=false",
 	} {
 		if !strings.Contains(want, index) {
 			t.Fatalf("the scan indexes:\n%s", want)
 		}
 	}
 	// Auto migrating over the versioned schema finds nothing to change.
-	if err := versioned.Unsafe(t.Context()).AutoMigrate(&message{}, &watermarkRow{}); err != nil {
+	if err := versioned.Unsafe(t.Context()).AutoMigrate(&message{}, &watermarkRow{}, &deadRow{}, &deliveredRow{}); err != nil {
 		t.Fatal(err)
 	}
 	if again := describeSchema(t, versioned, jobsTables...); again != got {

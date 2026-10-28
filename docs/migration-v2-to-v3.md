@@ -410,7 +410,9 @@ chok migrate status --battery identity --battery rbac   # 全部 applied
 | `outbox.Module(outbox.WithRelay(name, h, outbox.OnTopics(t)))` | `jobs.Worker(t, fn)`：一个 topic 一个 worker，名字就是 topic |
 | `outbox.From(k).EnqueueJSON(txCtx, topic, v)` | `j.Enqueue(txCtx, topic, v)`（payload 用 `encoding/json/v2` 编码；已有 JSON 传 `jsontext.Value`） |
 | `outbox.Enqueue(txCtx, topic, []byte)` | 传 `jsontext.Value` |
-| `func(ctx, outbox.Record) error` | `func(ctx, jobs.Message) error`（`ID uint64`、`Topic`、`Payload`、`CreatedAt` UTC） |
+| `func(ctx, outbox.Record) error` | `func(ctx, jobs.Message[T]) error`：payload 已按 `T` 解码（`ID uint64`、`Topic`、`Payload T`、`CreatedAt` UTC、`Attempt`）；要原始 JSON 用 `jobs.Message[jsontext.Value]` |
+| 失败的消息每轮重试，直到成功 | 退避重试（`retry_backoff` 起、翻倍、不超过 `max_backoff`），第 `max_attempts` 次（默认 10）仍失败就停放进死信表 `chok_jobs_dead`，topic 继续；`j.Dead` / `j.Requeue` / `j.Discard` 处理死信 |
+| 消息保留：不配置就永久 | `jobs.retention` 在配置文件里不写时默认 168h；代码里构造的 `jobs.Config` 不写仍是 0（永久） |
 | `outbox.WithRelayFor[T]`、不过滤 topic 的 relay | 删除 |
 | `outbox.ErrOutsideTx` | `jobs.ErrOutsideTx`（实现 `chok.Coder`，对客户端是通用 500） |
 

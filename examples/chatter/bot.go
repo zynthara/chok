@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json/v2"
 	"fmt"
 	"strings"
 
@@ -14,11 +13,8 @@ import (
 // botReply is the worker of bot.reply: it answers the message in the
 // payload and pushes the answer to the room. A worker gets a message at
 // least once, so an answer already written is not written again.
-func (c *chat) botReply(ctx context.Context, msg jobs.Message) error {
-	var m Message
-	if err := json.Unmarshal(msg.Payload, &m); err != nil {
-		return err
-	}
+func (c *chat) botReply(ctx context.Context, msg jobs.Message[Message]) error {
+	m := msg.Payload
 	if answered, err := c.messages.Exists(ctx, store.Where(where.Eq("reply_to", m.RID))); answered || err != nil {
 		return err
 	}
@@ -45,10 +41,11 @@ func (c *chat) stats(ctx context.Context) error {
 	return c.hub.Publish(ctx, "jobs", "stats", map[string]int64{"rooms": rooms, "messages": messages})
 }
 
-// observe hands every run of the jobs to the panel's topic, skipping the
-// bot worker's sweeps that found nothing to do (one per poll_interval).
+// observe hands every run of the jobs to the panel's topic, and every
+// message the bot worker gives up on, skipping the worker's sweeps that
+// found nothing to do (one per poll_interval).
 func (c *chat) observe(ev jobs.Event) {
-	if ev.Type == "worker" && ev.Kind != "run.failed" && ev.Messages == 0 {
+	if ev.Type == "worker" && ev.Kind != "run.failed" && ev.Kind != "message.parked" && ev.Messages == 0 {
 		return
 	}
 	_ = c.hub.Publish(context.Background(), "jobs", ev.Kind, ev)

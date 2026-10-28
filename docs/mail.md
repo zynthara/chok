@@ -179,7 +179,10 @@ m := mail.MustNew(cfg.Mail, mail.Templates(templates), mail.Sender(func(ctx cont
 
 A Send is one attempt. When a mail must arrive — and a relay can be down
 — enqueue it in the transaction that calls for it and send it from a
-`jobs` worker, which retries until the send succeeds:
+`jobs` worker, which retries with a growing wait (`jobs.retry_backoff`,
+doubling up to `jobs.max_backoff`) and, after `jobs.max_attempts` failed
+sends (10), parks the mail in the dead letters, where `j.Dead` shows it
+and `j.Requeue` sends it again once the relay is back:
 
 ```go fragment
 type outgoing struct {
@@ -188,11 +191,8 @@ type outgoing struct {
 	Order    Order
 }
 
-j := jobs.MustNew(cfg.Jobs, d, jobs.Worker("mail.send", func(ctx context.Context, msg jobs.Message) error {
-	var o outgoing
-	if err := json.Unmarshal(msg.Payload, &o); err != nil {
-		return err
-	}
+j := jobs.MustNew(cfg.Jobs, d, jobs.Worker("mail.send", func(ctx context.Context, msg jobs.Message[outgoing]) error {
+	o := msg.Payload
 	return m.Send(ctx, mail.Message{To: []string{o.To}, Template: o.Template, Data: o.Order})
 }))
 
