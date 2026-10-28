@@ -120,7 +120,7 @@ func TestNew_RefusesBadConfig(t *testing.T) {
 	if _, err := New(Config{SigningKey: testKey, Passwordless: PasswordlessConfig{CodeLength: 11}}, d); err == nil || !strings.Contains(err.Error(), "code_length") {
 		t.Fatalf("an 11-digit code fails New: %v", err)
 	}
-	if _, err := New(Config{SigningKey: testKey, Passwordless: PasswordlessConfig{Only: true}}, d, Sender(newMockSender())); err == nil || !strings.Contains(err.Error(), "passwordless.only needs passwordless.enabled") {
+	if _, err := New(Config{SigningKey: testKey, Passwordless: PasswordlessConfig{Only: true}}, d, Sender(newMockSender().send)); err == nil || !strings.Contains(err.Error(), "passwordless.only needs passwordless.enabled") {
 		t.Fatalf("only without enabled fails New: %v", err)
 	}
 	defer func() {

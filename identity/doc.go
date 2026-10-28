@@ -26,11 +26,12 @@
 //
 // # Mail and passwordless sign-in
 //
-// With Sender(s), identity asks the application to send mail: a
+// With Sender(fn), identity asks the application to send mail: a
 // password-reset token from forgot-password, and — with
-// auth.passwordless.enabled — a sign-in code. Each is a Mail whose Kind
-// picks the application's template; the send runs in the background and
-// Close waits for it. POST {prefix}/passwordless/start {email} always
+// auth.passwordless.enabled — a sign-in code. fn gets the address, the
+// template's name — the Mail's Kind — and the Mail as its data, so the
+// mail battery plugs in as identity.Sender(mailer.SendTemplate); the send
+// runs in the background and Close waits for it. POST {prefix}/passwordless/start {email} always
 // answers 202 and mails a code and a magic-link token, unless an unused
 // one went out within auth.passwordless.resend_after;
 // POST {prefix}/passwordless/verify with {email, code} or {token} answers

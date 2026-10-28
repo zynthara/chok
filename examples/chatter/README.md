@@ -11,9 +11,10 @@ and the bridge from the jobs to the hub.
 How the pieces meet:
 
 - Signing in takes an address and the code mailed to it: identity's
-  passwordless routes ask the app's `MailSender` — a few lines in
-  `main.go` — for a mail, which the mail battery renders from
-  `templates/login-code.html` and `.txt`. Here `chok.yaml` sets the mail
+  passwordless routes hand each mail to `mailer.SendTemplate` — one line
+  in `main.go`, `identity.Sender(mailer.SendTemplate)` — and the mail
+  battery renders it from `templates/login-code.html` and `.txt`, the
+  template named after the mail's kind. Here `chok.yaml` sets the mail
   transport to `dir`: every mail becomes an `.eml` file in
   `/tmp/chatter-mail` instead of leaving the machine. A first sign-in
   creates the account, and `auth.passwordless.only` leaves the code the

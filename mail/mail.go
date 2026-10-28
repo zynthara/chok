@@ -176,6 +176,14 @@ func (m *Mailer) Send(ctx context.Context, msg Message) error {
 	return nil
 }
 
+// SendTemplate sends one address the template named template, rendered
+// with data: Send(ctx, Message{To: []string{to}, Template: template,
+// Data: data}). It has the shape of identity's Sender, so a mailer wires
+// into identity in one line: identity.Sender(mailer.SendTemplate).
+func (m *Mailer) SendTemplate(ctx context.Context, to, template string, data any) error {
+	return m.Send(ctx, Message{To: []string{to}, Template: template, Data: data})
+}
+
 // log is the mailer's logger, with the request id when ctx has one.
 func (m *Mailer) log(ctx context.Context) *slog.Logger {
 	if id := chok.RequestID(ctx); id != "" {

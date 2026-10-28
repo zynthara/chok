@@ -20,7 +20,7 @@ func pwIdentity(t *testing.T, cfg Config) (*Identity, *mockSender) {
 	t.Helper()
 	cfg.Passwordless.Enabled = true
 	sender := newMockSender()
-	return newIdentity(t, cfg, Sender(sender)), sender
+	return newIdentity(t, cfg, Sender(sender.send)), sender
 }
 
 // startCode asks for a code for email and returns the mail it came in.
@@ -208,7 +208,7 @@ func TestPasswordless_IgnoresDisableRegister(t *testing.T) {
 // still create accounts and set passwords.
 func TestPasswordless_Only(t *testing.T) {
 	sender := newMockSender()
-	idn := newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true, Only: true}, Cookie: CookieConfig{Enabled: true}}, Sender(sender))
+	idn := newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true, Only: true}, Cookie: CookieConfig{Enabled: true}}, Sender(sender.send))
 	c := serve(t, idn)
 	gone := [][2]string{
 		{http.MethodPost, "/auth/register"}, {http.MethodPost, "/auth/login"}, {http.MethodPost, "/auth/forgot-password"},
@@ -510,7 +510,7 @@ func TestPasswordless_NeedsASenderAndEnabled(t *testing.T) {
 	if _, err := New(cfg, newIdentity(t, Config{}).d); err == nil || !strings.Contains(err.Error(), "needs a Sender") {
 		t.Fatalf("New without a Sender: %v", err)
 	}
-	c := serve(t, newIdentity(t, Config{}, Sender(newMockSender())))
+	c := serve(t, newIdentity(t, Config{}, Sender(newMockSender().send)))
 	for _, path := range []string{"/auth/passwordless/start", "/auth/passwordless/verify"} {
 		if code := c.PostJSON(path, map[string]string{"email": "a@test.com"}, nil); code != http.StatusNotFound {
 			t.Fatalf("%s without passwordless = %d", path, code)
@@ -523,7 +523,7 @@ func TestPasswordless_NeedsASenderAndEnabled(t *testing.T) {
 func TestPasswordless_MailFailureAndClose(t *testing.T) {
 	sender := newMockSender()
 	sender.err = errors.New("relay down")
-	idn := newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true}}, Sender(sender))
+	idn := newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true}}, Sender(sender.send))
 	h, logs := loggedApp(t, idn)
 	if rec := serveJSON(t, h, http.MethodPost, "/auth/passwordless/start", map[string]string{"email": "alice@test.com"}); rec.Code != http.StatusAccepted || rec.Body.Len() != 0 {
 		t.Fatalf("start = %d %q", rec.Code, rec.Body)
@@ -534,7 +534,7 @@ func TestPasswordless_MailFailureAndClose(t *testing.T) {
 	}
 
 	blocking := newBlockingSender()
-	idn = newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true}}, Sender(blocking))
+	idn = newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true}}, Sender(blocking.send))
 	h, _ = loggedApp(t, idn)
 	if rec := serveJSON(t, h, http.MethodPost, "/auth/passwordless/start", map[string]string{"email": "alice@test.com"}); rec.Code != http.StatusAccepted {
 		t.Fatalf("start = %d", rec.Code)

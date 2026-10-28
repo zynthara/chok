@@ -224,7 +224,7 @@ func TestChangePassword_RefusesAWrongOldPassword(t *testing.T) {
 
 func TestForgotAndResetPassword(t *testing.T) {
 	sender := newMockSender()
-	c := serve(t, newIdentity(t, Config{}, Sender(sender)))
+	c := serve(t, newIdentity(t, Config{}, Sender(sender.send)))
 	register(t, c, "alice@test.com", "password123")
 	if code := c.PostJSON("/auth/forgot-password", map[string]string{"email": "Alice@test.com"}, nil); code != http.StatusNoContent {
 		t.Fatalf("forgot = %d", code)
@@ -252,7 +252,7 @@ func TestForgotAndResetPassword(t *testing.T) {
 
 func TestForgotPassword_UnknownEmailDoesNotLeak(t *testing.T) {
 	sender := newMockSender()
-	c := serve(t, newIdentity(t, Config{}, Sender(sender)))
+	c := serve(t, newIdentity(t, Config{}, Sender(sender.send)))
 	if code := c.PostJSON("/auth/forgot-password", map[string]string{"email": "nobody@test.com"}, nil); code != http.StatusNoContent {
 		t.Fatalf("forgot for an unknown email = %d", code)
 	}
@@ -262,7 +262,7 @@ func TestForgotPassword_UnknownEmailDoesNotLeak(t *testing.T) {
 }
 
 func TestResetPassword_RefusesBadTokens(t *testing.T) {
-	idn := newIdentity(t, Config{}, Sender(newMockSender()))
+	idn := newIdentity(t, Config{}, Sender(newMockSender().send))
 	c := serve(t, idn)
 	register(t, c, "alice@test.com", "password123")
 	u := userByEmail(t, idn, "alice@test.com")

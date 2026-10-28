@@ -348,7 +348,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | `auth.Principal`、`auth.PrincipalFrom` | `chok.Principal`、`chok.PrincipalFrom(ctx)`；`UserID` 是用户的 RID（`usr_…`） |
 | `account.WithExpiration` / `WithResetExpiration` / `WithLoginRateLimit` … | `auth.*` 配置键（§2.2） |
 | `account.WithPasswordCost` | 删除（bcrypt cost 12；测试经 choktest 自动降低） |
-| `account.Sender`：`Send(ctx, to, code string) error`，`WithSender` | `identity.MailSender`：`Send(ctx, identity.Mail) error`，`identity.Sender(s)`；`Mail` 带 `Kind`（`password-reset` / `login-code`）、`To`、`Token`、`Code`、`Link`、`ExpiresAt`，按 `Kind` 选模板，通常交给新的 `mail` 电池发（见 [mail.md](mail.md)）。发信在后台进行，失败只记 Warn，`Close` 会等在途的发送 |
+| `account.Sender`：`Send(ctx, to, code string) error`，`WithSender` | `identity.Sender(fn)`，`fn(ctx, to, template string, data any) error`：identity 以 `fn(ctx, m.To, m.Kind, m)` 调用——模板名是 `Mail.Kind`（`password-reset` / `login-code`），数据是 `identity.Mail`（`To`、`Token`、`Code`、`Link`、`ExpiresAt`）。新的 `mail` 电池直接接上：`identity.Sender(mailer.SendTemplate)`（见 [mail.md](mail.md)）。发信在后台进行，失败只记 Warn，`Close` 会等在途的发送 |
 | `account.WithOAuthSessionStore` / `WithAuthCodeStore`、`MemorySessionStore`、`CookieCarrier` | 删除：OAuth 进行中的状态只在进程内（多副本须会话粘滞） |
 | `auth/jwt` 的可插拔 `TokenParser` / `PrincipalResolver` | 删除：`Authn` 只认本 Identity 签发的 HS256 token，每个请求按主键读一次用户 |
 | `account/providers/{google,github,apple,facebook}` | `identity/{google,github,apple,facebook}`，各只导出 `New(identity.ProviderConfig)` |

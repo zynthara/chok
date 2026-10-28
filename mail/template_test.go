@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -84,6 +85,24 @@ func TestTemplates_TextAlone(t *testing.T) {
 	}
 	if err := m.Send(t.Context(), Message{To: []string{"ada@example.com"}, Template: "_page", Data: nil}); err == nil || !strings.Contains(err.Error(), `no template "_page" among code`) {
 		t.Fatalf("a partial is not a template: %v", err)
+	}
+}
+
+// TestSendTemplate: SendTemplate is Send with one address, a Template and
+// its Data — the shape identity's Sender takes (examples/chatter passes
+// it to identity.Sender).
+func TestSendTemplate(t *testing.T) {
+	m, c := capture(t, Config{}, Templates(fstest.MapFS{"welcome.html": {Data: []byte(`{{define "subject"}}Hi{{end}}<p>Hi {{.Name}}</p>`)}}))
+	send := m.SendTemplate
+	if err := send(t.Context(), "ada@example.com", "welcome", order{Name: "Ada"}); err != nil {
+		t.Fatal(err)
+	}
+	msg, _ := c.last(t)
+	if !slices.Equal(msg.To, []string{"ada@example.com"}) || msg.Template != "welcome" || msg.Subject != "Hi" || msg.HTML != "<p>Hi Ada</p>" {
+		t.Fatalf("sent %+v", msg)
+	}
+	if err := send(t.Context(), "ada@example.com", "nope", nil); err == nil || !strings.Contains(err.Error(), `no template "nope"`) {
+		t.Fatalf("an unknown template: %v", err)
 	}
 }
 

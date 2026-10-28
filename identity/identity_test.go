@@ -25,7 +25,7 @@ type spec struct {
 }
 
 func TestOpenAPI_AuthRoutes(t *testing.T) {
-	idn := newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true}}, Sender(newMockSender()))
+	idn := newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true}}, Sender(newMockSender().send))
 	c := serve(t, idn)
 	var s spec
 	if code := c.GetJSON("/openapi.json", &s); code != http.StatusOK {

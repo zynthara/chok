@@ -17,7 +17,7 @@ func TestForgotPassword_MailsTheResetLink(t *testing.T) {
 		"https://app.example/reset?lang=en": "https://app.example/reset?lang=en&token=",
 	} {
 		sender := newMockSender()
-		c := serve(t, newIdentity(t, Config{ResetURL: base}, Sender(sender)))
+		c := serve(t, newIdentity(t, Config{ResetURL: base}, Sender(sender.send)))
 		register(t, c, "alice@test.com", "password123")
 		if code := c.PostJSON("/auth/forgot-password", map[string]string{"email": "alice@test.com"}, nil); code != http.StatusNoContent {
 			t.Fatalf("forgot = %d", code)
@@ -31,12 +31,48 @@ func TestForgotPassword_MailsTheResetLink(t *testing.T) {
 	}
 }
 
+// TestSender_GetsAddressTemplateAndMail: the Sender is called with the
+// address, the template's name — the Mail's Kind — and the Mail itself as
+// the template's data, for both kinds of mail.
+func TestSender_GetsAddressTemplateAndMail(t *testing.T) {
+	sender := newMockSender()
+	c := serve(t, newIdentity(t, Config{Passwordless: PasswordlessConfig{Enabled: true}}, Sender(sender.send)))
+	register(t, c, "alice@test.com", "password123")
+	if code := c.PostJSON("/auth/forgot-password", map[string]string{"email": "alice@test.com"}, nil); code != http.StatusNoContent {
+		t.Fatalf("forgot = %d", code)
+	}
+	if !sender.wait(5 * time.Second) {
+		t.Fatal("no reset mail")
+	}
+	if code := c.PostJSON("/auth/passwordless/start", map[string]string{"email": "bob@test.com"}, nil); code != http.StatusAccepted {
+		t.Fatalf("start = %d", code)
+	}
+	if !sender.wait(5 * time.Second) {
+		t.Fatal("no code mail")
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.calls) != 2 {
+		t.Fatalf("calls: %+v", sender.calls)
+	}
+	for i, want := range []struct{ to, template string }{{"alice@test.com", "password-reset"}, {"bob@test.com", "login-code"}} {
+		call := sender.calls[i]
+		m, ok := call.data.(Mail)
+		if call.to != want.to || call.template != want.template || !ok || m.To != want.to || m.Kind != want.template || m.Token == "" || m.ExpiresAt.IsZero() {
+			t.Errorf("call %d: %q %q %#v", i, call.to, call.template, call.data)
+		}
+	}
+	if m := sender.calls[1].data.(Mail); len(m.Code) != 6 {
+		t.Errorf("the login code is in the data: %+v", m)
+	}
+}
+
 // TestMail_FailureIsAWarning: a Sender that fails costs the response
 // nothing; the failure is a warning in the log, with the address masked.
 func TestMail_FailureIsAWarning(t *testing.T) {
 	sender := newMockSender()
 	sender.err = errors.New("the relay is down")
-	idn := newIdentity(t, Config{}, Sender(sender))
+	idn := newIdentity(t, Config{}, Sender(sender.send))
 	h, logs := loggedApp(t, idn)
 	if _, err := idn.Users().Create(t.Context(), "alice@test.com", "password123", "Alice"); err != nil {
 		t.Fatal(err)
@@ -68,8 +104,8 @@ func newBlockingSender() *blockingSender {
 	return &blockingSender{started: make(chan Mail, 8), release: make(chan struct{}), ended: make(chan error, 8)}
 }
 
-func (s *blockingSender) Send(ctx context.Context, m Mail) error {
-	s.started <- m
+func (s *blockingSender) send(ctx context.Context, _, _ string, data any) error {
+	s.started <- data.(Mail)
 	select {
 	case <-s.release:
 		s.ended <- nil
@@ -85,7 +121,7 @@ func (s *blockingSender) Send(ctx context.Context, m Mail) error {
 // the send is canceled. After Close no mail starts.
 func TestClose_WaitsForTheMailsInFlight(t *testing.T) {
 	forgot := func(t *testing.T, sender *blockingSender) (*Identity, http.Handler, *syncBuffer) {
-		idn := newIdentity(t, Config{}, Sender(sender))
+		idn := newIdentity(t, Config{}, Sender(sender.send))
 		h, logs := loggedApp(t, idn)
 		if _, err := idn.Users().Create(t.Context(), "alice@test.com", "password123", "Alice"); err != nil {
 			t.Fatal(err)

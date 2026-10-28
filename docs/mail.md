@@ -41,21 +41,15 @@ type Config struct {
 	Mail mail.Config     `yaml:"mail"`
 }
 
-// mailer is identity's MailSender: each mail identity asks for is the
-// template named after its kind, templates/login-code.html or
-// templates/password-reset.html, rendered with the identity.Mail.
-type mailer struct{ m *mail.Mailer }
-
-func (s mailer) Send(ctx context.Context, m identity.Mail) error {
-	return s.m.Send(ctx, mail.Message{To: []string{m.To}, Template: m.Kind, Data: m})
-}
-
 func main() {
 	cfg := chok.MustLoad[Config]("shop")
 	app := chok.New(cfg.Base)
 	d := db.MustOpen(cfg.DB)
 	m := mail.MustNew(cfg.Mail, mail.Templates(os.DirFS("templates")))
-	auth := identity.MustNew(cfg.Auth, d, identity.Sender(mailer{m}))
+	// Each mail identity asks for is the template named after its kind,
+	// templates/login-code.html or templates/password-reset.html,
+	// rendered with the identity.Mail.
+	auth := identity.MustNew(cfg.Auth, d, identity.Sender(m.SendTemplate))
 	app.Use(d, auth) // /auth/passwordless/start and /verify, /auth/logout, ...
 
 	chok.GET(app.Group("/api", auth.Authn()), "/hello", func(ctx context.Context, _ *chok.None) (string, error) {
@@ -85,13 +79,15 @@ mail:
   dir: mail-out
 ```
 
-`identity.Sender` takes any `MailSender`; `Send(ctx, identity.Mail)` gets
-the mail's `Kind` (`login-code` or `password-reset`), the address, the
-`Code`, the `Token`, a `Link` when `magic_link_url` or `reset_url` is
-set, and `ExpiresAt`. identity calls it in the background — a response
-never waits on a mail, so it takes as long whether or not the address
-has an account — logs a failure as a warning, and waits for the mails in
-flight when it closes.
+`identity.Sender` takes a function of the address, the template's name
+and its data — `m.SendTemplate` is one, `mail.Message{To: []string{to},
+Template: template, Data: data}` sent. identity names the template after
+the mail's `Kind` (`login-code` or `password-reset`) and gives the
+`identity.Mail` as the data: `{{.Code}}`, `{{.Token}}`, `{{.Link}}` (set
+when `magic_link_url` or `reset_url` is) and `{{.ExpiresAt}}`. identity
+calls it in the background — a response never waits on a mail, so it
+takes as long whether or not the address has an account — logs a
+failure as a warning, and waits for the mails in flight when it closes.
 
 ## Templates
 
@@ -214,8 +210,8 @@ answer and the worker's bookkeeping, a mail can go out twice. While a
 message fails, the ones behind it on its topic wait, so give mail a topic
 of its own, and check the addresses before you enqueue (a request's
 `validate:"email"` does): then the worker's errors are the relay's, which
-a retry can fix. identity's mails can take the same road — the
-`MailSender` enqueues instead of sending, in a transaction of its own
+a retry can fix. identity's mails can take the same road — the `Sender`
+function enqueues instead of sending, in a transaction of its own
 (`d.RunInTx(ctx, …)` around `Enqueue`), and the worker sends — but the
 payload then keeps a sign-in code or a reset token in the jobs table, in
 the clear, until `jobs.retention` removes it, where identity itself only

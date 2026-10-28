@@ -16,7 +16,7 @@ func cookieIdentity(t *testing.T, cookie CookieConfig) (*Identity, *mockSender, 
 	t.Helper()
 	cookie.Enabled = true
 	sender := newMockSender()
-	idn := newIdentity(t, Config{Cookie: cookie, Passwordless: PasswordlessConfig{Enabled: true}}, Sender(sender))
+	idn := newIdentity(t, Config{Cookie: cookie, Passwordless: PasswordlessConfig{Enabled: true}}, Sender(sender.send))
 	return idn, sender, serve(t, idn)
 }
 

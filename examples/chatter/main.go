@@ -13,7 +13,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"net/http"
 
@@ -62,7 +61,7 @@ func setup(app *chok.App, cfg Config, d *db.DB) {
 	// Sign-in by a mailed code, the session in a cookie (chok.yaml); the
 	// mails go out through the mail battery, as .eml files here.
 	mailer := mail.MustNew(cfg.Mail, mail.Templates(templates))
-	auth := identity.MustNew(cfg.Auth, d, identity.Sender(mailSender{mailer})) // /auth/passwordless/start, .../verify, /auth/logout, ...
+	auth := identity.MustNew(cfg.Auth, d, identity.Sender(mailer.SendTemplate)) // /auth/passwordless/start, .../verify, /auth/logout, ...
 	c := &chat{d: d, rooms: store.New[Room](d), members: store.New[Member](d), messages: store.New[Message](d)}
 	// The hub: a ticket from /realtime/ticket carries the signed-in user,
 	// and mayWatch decides which topics that user may follow.
@@ -87,12 +86,4 @@ func setup(app *chok.App, cfg Config, d *db.DB) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(page)
 	}))
-}
-
-// mailSender is identity's MailSender: each mail identity asks for goes
-// out through the mailer, with the template named after its kind.
-type mailSender struct{ m *mail.Mailer }
-
-func (s mailSender) Send(ctx context.Context, m identity.Mail) error {
-	return s.m.Send(ctx, mail.Message{To: []string{m.To}, Template: m.Kind, Data: m})
 }

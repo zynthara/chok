@@ -356,9 +356,11 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   Roles, Extra}`，store 的 owner 隔离就读它。
 - **会话上限**：`refresh_ttl` 从登录起算，refresh-token 不能无限续。
 - **登录限速**：按 email 与客户端 IP 两维、只记失败，429 带 `retry_after`。
-- **发信**：identity 不发信，只把 `identity.Mail{Kind, To, Token, Code, Link,
-  ExpiresAt}` 交给应用的 `MailSender`（`Sender` 选项）；应用按 `Kind`
-  （password-reset / login-code）选模板，通常经 mail 电池发出。发信在后台
+- **发信**：identity 不发信，只调应用给的函数（`Sender(fn)`）：
+  `fn(ctx, m.To, m.Kind, m)`——模板名就是 `Mail.Kind`（password-reset /
+  login-code），数据是 `identity.Mail{Kind, To, Token, Code, Link, ExpiresAt}`
+  值；mail 电池的 `SendTemplate` 正是这个形状，装配一行
+  `identity.Sender(mailer.SendTemplate)`。发信在后台
   goroutine 里做，响应不等它（是否有这个账户也就从时长上看不出来），失败只记
   Warn；`Close` 在 ctx 内等在途的发送，超时则取消它们。`reset_url` /
   `passwordless.magic_link_url` 配了，`Mail.Link` 就是带 `?token=` 的页面地址。
@@ -528,8 +530,9 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   text/html）、只有 `{name}.txt`（text/template，发 text/plain），或两者都有（发
   multipart/alternative）；`_*.html` / `_*.txt` 是同类模板共用的局部，只有局部、
   没有正文的名字不是模板；`{{define "subject"}}` 是主题（.txt 的优先，html 的
-  反转义），`Message.Subject` 非空时覆盖。解析失败、同名文件、只有局部、给两次
-  Templates 都让 New 失败，坏模板不会等到第一封信才暴露。
+  反转义），`Message.Subject` 非空时覆盖。`SendTemplate(ctx, to, template, data)`
+  是单收件人模板信的简写。解析失败、同名文件、只有局部、给两次 Templates 都让
+  New 失败，坏模板不会等到第一封信才暴露。
 - **传输**：`smtp` 每次 Send 拨号 → EHLO → STARTTLS（中继不提供就报错，不降级）或
   隐式 TLS → AUTH PLAIN（有 username 时）→ MAIL → 每个收件人（含 Bcc）一个 RCPT →
   DATA → QUIT，整次受 `mail.timeout` 约束（连接的截止时间 + ctx 取消即断）；
@@ -538,8 +541,8 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   Debug：正文）。`Sender(fn)` 整个替换传输（HTTP API、测试捕获），收到渲染后的
   Message 与组好的全文，此时 Transport 与它的字段一律不查。
 - **可靠投递不在本包**：Send 是一次尝试；要重试就在业务事务里 `jobs.Enqueue`、由
-  该 topic 的 Worker 调 Send（docs/mail.md 有配方）。给 identity 用时应用写一个
-  `MailSender` 适配器，按 `Mail.Kind` 选模板。
+  该 topic 的 Worker 调 Send（docs/mail.md 有配方）。给 identity 用时直接传
+  `identity.Sender(mailer.SendTemplate)`，不用适配器。
 
 ## 8. 测试
 

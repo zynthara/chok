@@ -223,7 +223,6 @@ see, guarded by `http.csrf`, which is on by default.
 package main
 
 import (
-	"context"
 	"os"
 
 	"github.com/zynthara/chok/v3"
@@ -239,20 +238,14 @@ type Config struct {
 	Mail mail.Config     `yaml:"mail"`
 }
 
-// sender is identity's MailSender: a mail is the template named after
-// its kind, templates/login-code.html or templates/password-reset.html.
-type sender struct{ m *mail.Mailer }
-
-func (s sender) Send(ctx context.Context, m identity.Mail) error {
-	return s.m.Send(ctx, mail.Message{To: []string{m.To}, Template: m.Kind, Data: m})
-}
-
 func main() {
 	cfg := chok.MustLoad[Config]("shop")
 	app := chok.New(cfg.Base)
 	d := db.MustOpen(cfg.DB)
 	m := mail.MustNew(cfg.Mail, mail.Templates(os.DirFS("templates")))
-	auth := identity.MustNew(cfg.Auth, d, identity.Sender(sender{m}))
+	// A mail is the template named after its kind:
+	// templates/login-code.html, templates/password-reset.html.
+	auth := identity.MustNew(cfg.Auth, d, identity.Sender(m.SendTemplate))
 	app.Use(d, auth) // + POST /auth/passwordless/start, /auth/passwordless/verify, /auth/logout
 	app.Execute()
 }

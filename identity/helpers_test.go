@@ -100,19 +100,29 @@ func userByEmail(t testing.TB, idn *Identity, email string) *User {
 	return &u
 }
 
-// mockSender records the mails identity hands it, and answers err.
+// mockSender records the mails identity hands it, and answers err. Its
+// send method is the Sender.
 type mockSender struct {
 	mu     sync.Mutex
 	mails  []Mail
+	calls  []sendCall
 	err    error
 	called chan struct{}
 }
 
+// sendCall is one call of the Sender, as identity made it.
+type sendCall struct {
+	to, template string
+	data         any
+}
+
 func newMockSender() *mockSender { return &mockSender{called: make(chan struct{}, 64)} }
 
-func (s *mockSender) Send(_ context.Context, m Mail) error {
+func (s *mockSender) send(_ context.Context, to, template string, data any) error {
+	m, _ := data.(Mail)
 	s.mu.Lock()
 	s.mails = append(s.mails, m)
+	s.calls = append(s.calls, sendCall{to, template, data})
 	err := s.err
 	s.mu.Unlock()
 	select {

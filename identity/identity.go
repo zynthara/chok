@@ -27,7 +27,7 @@ type Identity struct {
 	cfg    Config
 	d      *db.DB
 	logger *slog.Logger
-	sender MailSender
+	sender func(ctx context.Context, to, template string, data any) error
 
 	users *store.Store[User]
 	links *store.Store[linkedIdentity]
@@ -67,7 +67,7 @@ type Option func(*options)
 
 type options struct {
 	providers []Provider
-	sender    MailSender
+	sender    func(ctx context.Context, to, template string, data any) error
 	logger    *slog.Logger
 }
 
@@ -79,23 +79,26 @@ func Providers(p ...Provider) Option {
 
 // Sender gives identity a way to mail: it enables the forgot-password and
 // reset-password routes, which are not mounted without it, and
-// passwordless sign-in needs it.
-func Sender(s MailSender) Option { return func(o *options) { o.sender = s } }
+// passwordless sign-in needs it. For each mail identity calls
+// fn(ctx, m.To, m.Kind, m): the template is named after the Mail's Kind
+// and the Mail is its data ({{.Code}}, {{.Link}}, {{.ExpiresAt}}), which
+// is the shape of the mail battery's SendTemplate:
+//
+//	identity.Sender(mailer.SendTemplate)
+//
+// identity calls fn in the background, so a response never waits on it;
+// an error is logged as a warning, and Close waits for the sends in
+// flight. ctx carries the request's values, not its cancellation.
+func Sender(fn func(ctx context.Context, to, template string, data any) error) Option {
+	return func(o *options) { o.sender = fn }
+}
 
 // Logger is where identity logs outside requests; the default is
 // slog.Default(). On a request it logs with chok.LoggerFrom.
 func Logger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
 
-// MailSender sends the mails identity asks for, typically through the
-// mail battery with a template per Mail.Kind. identity calls it in the
-// background, so a response never waits on it; an error is logged as a
-// warning. ctx carries the request's values, not its cancellation.
-type MailSender interface {
-	Send(ctx context.Context, m Mail) error
-}
-
-// Mail is a mail identity asks the application to send; the application's
-// MailSender picks the template by Kind.
+// Mail is a mail identity asks the application to send: the Sender gets
+// it as the data of the template named after its Kind.
 type Mail struct {
 	// Kind is what the mail is for: "password-reset" or "login-code".
 	Kind string
@@ -268,10 +271,10 @@ func (idn *Identity) sendMail(ctx context.Context, m Mail) {
 		defer stop()
 		defer func() {
 			if p := recover(); p != nil {
-				logger.ErrorContext(ctx, "identity: the MailSender panicked", "kind", m.Kind, "panic", p)
+				logger.ErrorContext(ctx, "identity: the Sender panicked", "kind", m.Kind, "panic", p)
 			}
 		}()
-		if err := idn.sender.Send(ctx, m); err != nil {
+		if err := idn.sender(ctx, m.To, m.Kind, m); err != nil {
 			logger.WarnContext(ctx, "identity: mail not sent", "kind", m.Kind, "to", maskEmail(m.To), "error", err)
 		}
 	}()

@@ -15,7 +15,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`db`](#db) | 28 |
 | [`store`](#store) | 29 |
 | [`store/where`](#storewhere) | 27 |
-| [`identity`](#identity) | 20 |
+| [`identity`](#identity) | 19 |
 | [`identity/rbac`](#identityrbac) | 7 |
 | [`jobs`](#jobs) | 16 |
 | [`telemetry`](#telemetry) | 6 |
@@ -27,7 +27,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 230 |
+| total | 229 |
 
 ## chok
 
@@ -216,12 +216,11 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `type Identity struct{ ... }` | Identity is the identity battery: accounts with passwords and OAuth sign-in, the tokens that prove them, the middleware that checks those tokens, and the audit log. |
 | ↳ `func MustNew(cfg Config, d *db.DB, opts ...Option) *Identity` | MustNew is New that panics on error. |
 | ↳ `func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error)` | New builds the identity battery on d: it registers the users, identities, audit_logs and auth_login_codes tables under the owner "identity" (created now in migrate: auto; from its embedded SQL files in migrate: versioned) and checks cfg and every provider. |
-| `type Mail struct{ ... }` | Mail is a mail identity asks the application to send; the application's MailSender picks the template by Kind. |
-| `type MailSender interface{ ... }` | MailSender sends the mails identity asks for, typically through the mail battery with a template per Mail.Kind. |
+| `type Mail struct{ ... }` | Mail is a mail identity asks the application to send: the Sender gets it as the data of the template named after its Kind. |
 | `type Option func(*options)` | Option configures New. |
 | ↳ `func Logger(l *slog.Logger) Option` | Logger is where identity logs outside requests; the default is slog.Default(). |
 | ↳ `func Providers(p ...Provider) Option` | Providers enables OAuth sign-in through the given providers, from identity/google, identity/github, identity/apple and identity/facebook. |
-| ↳ `func Sender(s MailSender) Option` | Sender gives identity a way to mail: it enables the forgot-password and reset-password routes, which are not mounted without it, and passwordless sign-in needs it. |
+| ↳ `func Sender(fn func(ctx context.Context, to, template string, data any) error) Option` | Sender gives identity a way to mail: it enables the forgot-password and reset-password routes, which are not mounted without it, and passwordless sign-in needs it. |
 | `type PasswordlessConfig struct{ ... }` | PasswordlessConfig is auth.passwordless: signing in with a code mailed to the address, no password. |
 | `type Provider interface{ ... }` | Provider is an OAuth identity provider: what identity/google, identity/github, identity/apple and identity/facebook return from their New. |
 | `type ProviderConfig struct{ ... }` | ProviderConfig is one OAuth provider's section, auth.providers.&lt;name&gt;. |
