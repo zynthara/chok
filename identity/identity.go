@@ -189,7 +189,11 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 		}
 		return nil, fmt.Errorf("identity: %w", err)
 	}
-	idn.users = store.New[User](d)
+	// The user list pages 20 at a time, at most 100, whatever db.store
+	// sets for the application's own stores.
+	pol := d.StorePolicy()
+	pol.DefaultPageSize, pol.MaxPageSize = userPageSize, userMaxPage
+	idn.users = store.New[User](d, store.Policy(pol))
 	idn.links = store.New[linkedIdentity](d)
 	if cfg.LoginRateWindow > 0 && cfg.LoginRateLimit > 0 {
 		idn.limiter = newLoginLimiter(cfg.LoginRateWindow, cfg.LoginRateLimit)

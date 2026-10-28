@@ -1,8 +1,11 @@
 package identity
 
 import (
+	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -226,5 +229,107 @@ func TestUsers_MissingUserIs404(t *testing.T) {
 		if !errors.Is(err, chok.ErrBadRequest) {
 			t.Errorf("%s with no id: %v", name, err)
 		}
+	}
+}
+
+func TestUsers_GetByEmail(t *testing.T) {
+	idn := newIdentity(t, Config{})
+	alice, err := idn.Users().Create(t.Context(), "alice@test.com", "password123", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := idn.Users().GetByEmail(t.Context(), "  Alice@TEST.com ")
+	if err != nil || got.RID != alice.RID {
+		t.Fatalf("by email = %+v %v", got, err)
+	}
+	_, err = idn.Users().GetByEmail(t.Context(), "nobody@test.com")
+	_, getErr := idn.Users().Get(t.Context(), "usr_missing")
+	if !errors.Is(err, chok.ErrNotFound) || err.Error() != getErr.Error() {
+		t.Fatalf("a missing address is Get's 404: %v vs %v", err, getErr)
+	}
+	if _, err := idn.Users().GetByEmail(t.Context(), " "); !errors.Is(err, chok.ErrBadRequest) {
+		t.Fatalf("no address: %v", err)
+	}
+}
+
+func TestUsers_ListFromQuery(t *testing.T) {
+	var _ chok.Lister[User] = (*UserService)(nil)
+	idn := newIdentity(t, Config{})
+	users := idn.Users()
+	ctx := t.Context()
+	for i := range 25 {
+		u, err := users.Create(ctx, fmt.Sprintf("u%02d@test.com", i), "password123", fmt.Sprintf("user %02d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i%5 == 0 {
+			if err := users.MarkEmailVerified(ctx, u.RID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if i < 2 {
+			if err := users.SetActive(ctx, u.RID, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if got := users.QueryFields(); !slices.Equal(got, []string{"active", "created_at", "email", "email_verified", "name"}) {
+		t.Fatalf("query fields = %v", got)
+	}
+	list := func(raw string) (*chok.Page[User], error) {
+		t.Helper()
+		q, err := url.ParseQuery(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return users.ListFromQuery(ctx, q)
+	}
+	page, err := list("")
+	if err != nil || len(page.Items) != 20 || page.Total != 25 || !page.HasMore {
+		t.Fatalf("the default page: %d items, total %d, more %v, %v", len(page.Items), page.Total, page.HasMore, err)
+	}
+	if page, err = list("size=1000"); err != nil || len(page.Items) != 25 || page.Size != 100 {
+		t.Fatalf("size is capped at 100: %d items, size %d, %v", len(page.Items), page.Size, err)
+	}
+	if page, err = list("page=2&size=10&order=email:desc"); err != nil || len(page.Items) != 10 || page.Items[0].Email != "u14@test.com" {
+		t.Fatalf("page 2 by email desc: %+v %v", page, err)
+	}
+	for raw, want := range map[string]int64{
+		"email=U03@Test.com":                    1,
+		"email=u03@test.com&email=u04@test.com": 2,
+		"email_verified=true":                   5,
+		"email_verified=1":                      5,
+		"active=false":                          2,
+		"active=true&email_verified=false":      19,
+		"name=user 07":                          1,
+	} {
+		page, err := list(raw)
+		if err != nil || page.Total != want {
+			t.Errorf("%s: total %v, want %d, %v", raw, page, want, err)
+		}
+	}
+	for _, raw := range []string{"roles=admin", "id=usr_1", "updated_at=x", "order=roles", "active=maybe", "password_hash=x"} {
+		if _, err := list(raw); !errors.Is(err, chok.ErrBadRequest) {
+			t.Errorf("%s: %v, want a 400", raw, err)
+		}
+	}
+	// The items are User's JSON: no roles, no active flag, no secrets.
+	b, err := json.Marshal(page.Items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"roles", "active", "password_hash", "password_version"} {
+		if strings.Contains(string(b), `"`+key+`"`) {
+			t.Fatalf("an item shows %s: %s", key, b)
+		}
+	}
+	// One line serves it, behind the application's admin check.
+	c := serve(t, idn, func(app *chok.App) {
+		chok.List(app.Group("/admin", idn.Authn()), "/users", idn.Users())
+	})
+	tok := register(t, c, "admin@test.com", "password123")
+	var got chok.Page[User]
+	if code := c.WithBearer(tok).GetJSON("/admin/users?email=u05@test.com", &got); code != http.StatusOK || got.Total != 1 || got.Items[0].Email != "u05@test.com" {
+		t.Fatalf("GET /admin/users = %d %+v", code, got)
 	}
 }

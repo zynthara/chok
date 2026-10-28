@@ -3,12 +3,17 @@ package identity
 import (
 	"context"
 	"errors"
+	"maps"
+	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok/v3/store/where"
 )
 
 // UserService is the administration of accounts — what an operator does
@@ -33,7 +38,22 @@ const (
 // identity/rbac lets it do everything, and auth.admins grants it.
 const adminRole = "admin"
 
-var errNoUserID = chok.ErrBadRequest.Msgf("a user id is required")
+// The user list's pages: ListFromQuery.
+const (
+	userPageSize = 20
+	userMaxPage  = 100
+)
+
+// userFields are the fields ListFromQuery filters and orders on, by
+// their names in the query string.
+var userFields = map[string]string{
+	"active": "active", "created_at": "created_at", "email": "email", "email_verified": "email_verified", "name": "name",
+}
+
+var (
+	errNoUserID = chok.ErrBadRequest.Msgf("a user id is required")
+	errNoEmail  = chok.ErrBadRequest.Msgf("an email is required")
+)
 
 func notFoundUser(err error) error {
 	if errors.Is(err, chok.ErrNotFound) {
@@ -58,6 +78,82 @@ func (s *UserService) Get(ctx context.Context, id string) (*User, error) {
 		return nil, notFoundUser(err)
 	}
 	return u, nil
+}
+
+// GetByEmail returns the user with the email address, compared as
+// identity stores addresses: trimmed and in lower case.
+func (s *UserService) GetByEmail(ctx context.Context, email string) (*User, error) {
+	email = normalizeEmail(email)
+	if email == "" {
+		return nil, errNoEmail
+	}
+	u, err := s.idn.users.Get(ctx, store.Where(where.Eq("email", email)))
+	if err != nil {
+		return nil, notFoundUser(err)
+	}
+	return u, nil
+}
+
+// QueryFields lists the fields ListFromQuery filters and orders on.
+func (s *UserService) QueryFields() []string {
+	return slices.Sorted(maps.Keys(userFields))
+}
+
+// ListFromQuery returns a page of every account, for an administration
+// page: q holds page and size (default 20, at most 100), cursor,
+// order=field:asc|desc and equality filters on the fields QueryFields
+// lists — email compared as identity stores it, email_verified and
+// active as true or false. An unknown or malformed parameter is a 400.
+// The items are User's JSON, which leaves out the roles and the active
+// flag.
+//
+// It lets the UserService serve a chok.List route, and that route lists
+// every user: mount it only behind an administrator's authorization —
+// rbac's Require, or a middleware of the application's — never behind
+// Authn alone:
+//
+//	admin := app.Group("/admin", auth.Authn(), rb.Require("user", "read"))
+//	chok.List(admin, "/users", auth.Users())
+func (s *UserService) ListFromQuery(ctx context.Context, q url.Values) (*chok.Page[User], error) {
+	q = maps.Clone(q)
+	var flags []where.Option
+	for _, key := range []string{"active", "email_verified"} {
+		vals, ok := q[key]
+		if !ok {
+			continue
+		}
+		delete(q, key)
+		var in []any
+		for _, v := range vals {
+			if v == "" {
+				continue
+			}
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return nil, chok.ErrBadRequest.Msgf("%s is true or false, got %q", key, v).With("field", key)
+			}
+			in = append(in, b)
+		}
+		switch len(in) {
+		case 0:
+		case 1:
+			flags = append(flags, where.Eq(key, in[0]))
+		default:
+			flags = append(flags, where.In(key, in...))
+		}
+	}
+	if emails, ok := q["email"]; ok {
+		normalized := make([]string, len(emails))
+		for i, e := range emails {
+			normalized[i] = normalizeEmail(e)
+		}
+		q["email"] = normalized
+	}
+	opts, err := where.FromQuery(q, userFields, true)
+	if err != nil {
+		return nil, chok.ErrBadRequest.Msgf("%s", strings.TrimPrefix(err.Error(), "where: ")).Wrap(err)
+	}
+	return s.idn.users.List(ctx, slices.Concat(opts, flags, []where.Option{where.Count()})...)
 }
 
 // SetActive enables or disables the account. Either way its tokens stop
