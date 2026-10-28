@@ -229,7 +229,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 
 ## identity/rbac
 
-`import "github.com/zynthara/chok/v3/identity/rbac"` — Package rbac is role-based access control for identity's users, on casbin: roles and permissions stored in the application's database, decided per request by Require.
+`import "github.com/zynthara/chok/v3/identity/rbac"` — Package rbac is role-based access control for identity's users, on casbin: what each role may do, stored in the application's database and decided per request by Require.
 
 | Declaration | |
 |---|---|
@@ -237,7 +237,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | ↳ `func Model(text string) Option` | Model replaces the default model — roles with domains, see PolicyService — with casbin model text. |
 | ↳ `func Watcher(client *goredis.Client) Option` | Watcher makes policy changes reach the other replicas: each change is announced on the Redis channel chok:authz:policy, and a replica that hears one reloads its policies. |
 | `type Permission struct{ ... }` | Permission is an object and an action a role may perform on it. |
-| `type PolicyService struct{ ... }` | PolicyService manages the policies: which roles a user holds, globally or in a domain (a tenant: a workspace, an organization), which permissions — an object and an action — a role or a user has, and the first administrator. |
+| `type PolicyService struct{ ... }` | PolicyService manages the policies: which permissions — an object and an action — a role or a user has, globally or in a domain (a tenant: a workspace, an organization), and which roles a user holds within a domain. |
 | `type RBAC struct{ ... }` | RBAC decides who may do what. |
 | ↳ `func MustNew(idn *identity.Identity, d *db.DB, opts ...Option) *RBAC` | MustNew is New that panics on error. |
 | ↳ `func New(idn *identity.Identity, d *db.DB, opts ...Option) (*RBAC, error)` | New builds the access control of idn's users on d: it registers the casbin_rule table under the owner "rbac", loads the policies, subscribes the watcher and, when idn's audit log is on, checks that it can write and records policy changes and denials in it. |
