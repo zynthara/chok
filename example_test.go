@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"testing/fstest"
 
 	"github.com/zynthara/chok/v3"
 )
@@ -90,4 +91,21 @@ func ExampleWriteError() {
 	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/ping", nil))
 	fmt.Println(rec.Code)
 	// Output: 401
+}
+
+// SPA serves a built front end next to the API: the API's routes win,
+// and every other page path gets index.html for the front end's router.
+func ExampleSPA() {
+	// In an application: //go:embed dist, then fs.Sub(dist, "dist").
+	web := fstest.MapFS{"index.html": {Data: []byte("<!doctype html><div id=app></div>")}}
+	app := chok.New(chok.MustLoad[chok.Base]("example", chok.Args(nil)), chok.Logger(slog.New(slog.DiscardHandler)))
+	chok.GET(app.Group("/api"), "/ping", func(context.Context, *chok.None) (string, error) { return "pong", nil })
+	chok.SPA(app.Router(), "/", web)
+
+	req := httptest.NewRequest(http.MethodGet, "/orders/42", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, req)
+	fmt.Println(rec.Code, rec.Body.String())
+	// Output: 200 <!doctype html><div id=app></div>
 }

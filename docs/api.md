@@ -11,7 +11,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 
 | Package | Declarations |
 |---|---|
-| [`chok`](#chok) | 60 |
+| [`chok`](#chok) | 61 |
 | [`db`](#db) | 28 |
 | [`store`](#store) | 29 |
 | [`store/where`](#storewhere) | 27 |
@@ -27,7 +27,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 230 |
+| total | 231 |
 
 ## chok
 
@@ -47,6 +47,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `func POST[T, R any](r Router, pattern string, fn HandlerFunc[T, R], opts ...RouteOption)` | POST registers fn for POST pattern on r; see GET for binding. |
 | `func PUT[T, R any](r Router, pattern string, fn HandlerFunc[T, R], opts ...RouteOption)` | PUT registers fn for PUT pattern on r; see GET for binding. |
 | `func RequestID(ctx context.Context) string` | RequestID returns the request's ID: the X-Request-Id it arrived with (sanitized) or a generated one. |
+| `func SPA(r Router, prefix string, fsys fs.FS)` | SPA serves the single-page application in fsys under prefix: a file as it is, and index.html for a page path that names no file, so the application's own router takes the path over. |
 | `func WithPrincipal(ctx context.Context, p Principal) context.Context` | WithPrincipal returns a context that carries p. |
 | `func WriteError(w http.ResponseWriter, r *http.Request, err error)` | WriteError renders err as the error envelope, the way a handler's returned error is rendered: the App's ErrorHook first, then \*Error, Coder, validation errors and expired deadlines, anything else a 500; request_id in the body and, when the metadata carries retry_after, a Retry-After header. |
 | `type App struct{ ... }` | App is one application: its configuration, the components registered with Use, and the HTTP handler its routes build. |
