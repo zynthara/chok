@@ -98,7 +98,7 @@ func TestNewEngine_LoadsThePoliciesOnce(t *testing.T) {
 	if n := counting.loads.Load(); n != 1 {
 		t.Fatalf("newEngine loaded the policies %d times, want 1", n)
 	}
-	if ok, err := (&PolicyService{e: e}).HasPermission(ctx, "usr_1", "task", "read"); err != nil || !ok {
+	if ok, err := e.decide("usr_1", nil, "", "task", "read"); err != nil || !ok {
 		t.Fatalf("the stored grant is in force after one load: %v, %v", ok, err)
 	}
 }

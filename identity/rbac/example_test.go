@@ -34,23 +34,28 @@ func ExampleNew() {
 	// Output: rbac
 }
 
-// Roles carry permissions; users carry roles, globally or in a domain.
+// Roles carry permissions. A user's global roles are identity's — admin
+// passes everything — and casbin binds the roles within a domain.
 func ExamplePolicyService() {
 	d := db.MustOpen(db.Config{Driver: "sqlite", SQLite: db.SQLiteConfig{Path: ":memory:"}})
-	rb, err := rbac.New(identity.MustNew(identity.Config{SigningKey: strings.Repeat("k", 32)}, d), d)
+	auth := identity.MustNew(identity.Config{SigningKey: strings.Repeat("k", 32)}, d)
+	rb, err := rbac.New(auth, d)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	ctx := context.Background()
-	p := rb.Policy()
-	_ = p.BootstrapAdmin(ctx, "usr_root")
-	_ = p.GrantRoleInDomain(ctx, "member", "post", "read", "ws_1")
-	_ = p.AddUserToRoleInDomain(ctx, "usr_alice", "member", "ws_1")
+	alice, _ := auth.Users().Create(ctx, "alice@example.com", "password123", "")
+	root, _ := auth.Users().Create(ctx, "root@example.com", "password123", "")
+	_ = auth.Users().SetRoles(ctx, root.RID, []string{"admin"})
 
-	inWS1, _ := p.HasPermissionInDomain(ctx, "usr_alice", "post", "read", "ws_1")
-	inWS2, _ := p.HasPermissionInDomain(ctx, "usr_alice", "post", "read", "ws_2")
-	root, _ := p.HasPermissionInDomain(ctx, "usr_root", "post", "delete", "ws_2")
-	fmt.Println(inWS1, inWS2, root)
+	p := rb.Policy()
+	_ = p.GrantRoleInDomain(ctx, "member", "post", "read", "ws_1")
+	_ = p.AddUserToRoleInDomain(ctx, alice.RID, "member", "ws_1")
+
+	inWS1, _ := p.HasPermissionInDomain(ctx, alice.RID, "post", "read", "ws_1")
+	inWS2, _ := p.HasPermissionInDomain(ctx, alice.RID, "post", "read", "ws_2")
+	admin, _ := p.HasPermissionInDomain(ctx, root.RID, "post", "delete", "ws_2")
+	fmt.Println(inWS1, inWS2, admin)
 	// Output: true false true
 }

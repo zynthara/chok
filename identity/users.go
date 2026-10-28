@@ -29,6 +29,10 @@ const (
 	roleForbidden = ","
 )
 
+// adminRole is the built-in administrator role: it reads the audit log,
+// identity/rbac lets it do everything, and auth.admins grants it.
+const adminRole = "admin"
+
 var errNoUserID = chok.ErrBadRequest.Msgf("a user id is required")
 
 func notFoundUser(err error) error {

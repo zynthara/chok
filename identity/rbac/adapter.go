@@ -46,7 +46,7 @@ const maxRuleColumns = 6
 // Casbin's persist.Adapter interface (LoadPolicy / SavePolicy /
 // AddPolicy / RemovePolicy / RemoveFilteredPolicy) plus the optional
 // persist.BatchAdapter (AddPolicies / RemovePolicies) so SyncedEnforcer
-// can batch-write during Bootstrap and avoid one round-trip per row.
+// can batch-write a seed of many policies without one round-trip per row.
 //
 // All methods are safe to call from multiple goroutines; the
 // underlying *gorm.DB connection pool serialises access, and Casbin
@@ -167,7 +167,7 @@ func (a *gormAdapter) SavePolicy(m model.Model) error {
 //
 // The composite unique index on (ptype, v0..v5) plus
 // clause.OnConflict{DoNothing: true} make this idempotent at the
-// database layer: re-running Bootstrap or two pods racing to insert
+// database layer: re-running a seed or two pods racing to insert
 // the same tuple converge to a single row instead of growing
 // duplicates that LoadPolicy would later have to dedupe.
 func (a *gormAdapter) AddPolicy(_, ptype string, rule []string) error {
@@ -249,11 +249,10 @@ func hasAnyMappedConstraint(fieldIndex int, fieldValues []string) bool {
 }
 
 // AddPolicies (BatchAdapter) inserts many rows in one transaction.
-// Bootstrap-style writes hit this path; without it, seeding 100
-// permissions would issue 100 INSERTs and 100 round-trips. Like
-// AddPolicy, this uses OnConflict{DoNothing:true} so concurrent
-// instances bootstrapping the same admin permissions converge on a
-// single row per tuple.
+// Seeding writes hit this path; without it, seeding 100 permissions
+// would issue 100 INSERTs and 100 round-trips. Like AddPolicy, this
+// uses OnConflict{DoNothing:true} so concurrent instances seeding the
+// same permissions converge on a single row per tuple.
 func (a *gormAdapter) AddPolicies(_, ptype string, rules [][]string) error {
 	if len(rules) == 0 {
 		return nil

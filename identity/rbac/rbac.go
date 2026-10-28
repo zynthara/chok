@@ -1,23 +1,29 @@
 // Package rbac is role-based access control for identity's users, on
-// casbin: roles and permissions stored in the application's database,
+// casbin: what each role may do, stored in the application's database and
 // decided per request by Require.
 //
 //	auth := identity.MustNew(cfg.Auth, d)
-//	rb, err := rbac.New(auth, d)
+//	rb := rbac.MustNew(auth, d)
 //	app.Use(d, auth, rb)
 //	api := app.Group("/api", auth.Authn())
 //	chok.POST(api, "/posts", createPost, chok.Use(rb.Require("post", "write")))
 //
-//	rb.Policy().BootstrapAdmin(ctx, adminID)        // the first grant
-//	rb.Policy().GrantRole(ctx, "editor", "post", "write")
-//	rb.Policy().AddUserToRole(ctx, userID, "editor")
+//	rb.Policy().GrantRole(ctx, "editor", "post", "write")  // what the role may do
+//	auth.Users().SetRoles(ctx, userID, []string{"editor"})  // who holds it
 //
-// The subject of a decision is the principal's UserID. The policies live
-// in the table casbin_rule, registered under the owner "rbac": migrate
-// auto creates it, versioned applies the SQL embedded in this package.
-// With identity's audit log on, every policy change and every denied
-// request is recorded in it, and the audit log's admin API asks this
-// package for audit/read.
+// There is one set of global roles, identity's: a user's roles are the
+// chok.Principal's Roles, which Authn reads from the database on every
+// request. A decision admits the principal when its roles hold admin —
+// the built-in role that may do everything, everywhere, and the one
+// auth.admins grants — or when a policy allows its UserID (GrantUser, a
+// role bound in the domain) or any of its roles (GrantRole). Roles within
+// a tenant are casbin's: AddUserToRoleInDomain.
+//
+// The policies live in the table casbin_rule, registered under the owner
+// "rbac": migrate auto creates it, versioned applies the SQL embedded in
+// this package. With identity's audit log on, every policy change and
+// every denied request is recorded in it, and the audit log's admin API
+// asks this package for audit/read.
 //
 // casbin is imported here and nowhere else in chok: an application that
 // does not import identity/rbac does not link it.
@@ -122,7 +128,7 @@ func New(idn *identity.Identity, d *db.DB, opts ...Option) (*RBAC, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &RBAC{idn: idn, e: e, policy: &PolicyService{e: e}}
+	r := &RBAC{idn: idn, e: e, policy: &PolicyService{e: e, idn: idn}}
 	if o.watcher != nil {
 		if err := e.attachRedisWatcher(context.Background(), o.watcher, watcherChannel); err != nil {
 			e.close()
@@ -142,7 +148,9 @@ func New(idn *identity.Identity, d *db.DB, opts ...Option) (*RBAC, error) {
 			})
 		})
 	}
-	authz.Attach(idn, func(_ context.Context, sub, obj, act string) (bool, error) { return e.authorize(sub, obj, act) })
+	authz.Attach(idn, func(_ context.Context, p chok.Principal, obj, act string) (bool, error) {
+		return e.decide(p.UserID, p.Roles, "", obj, act)
+	})
 	return r, nil
 }
 
@@ -158,17 +166,20 @@ func MustNew(idn *identity.Identity, d *db.DB, opts ...Option) *RBAC {
 // Policy manages the roles and permissions.
 func (r *RBAC) Policy() *PolicyService { return r.policy }
 
-// Require is the middleware that admits the principal when its roles, in
-// the global scope, allow act on obj: no principal is a 401, a refusal a
-// 403, a failed decision a 500. Put it behind identity's Authn.
+// Require is the middleware that admits the request's chok.Principal to
+// act on obj: when its Roles hold admin, or a global policy allows its
+// UserID or one of its Roles. No principal is a 401, a refusal a 403, a
+// failed decision a 500. Put it behind identity's Authn — any middleware
+// that stores a principal with a UserID will do.
 func (r *RBAC) Require(obj, act string) chok.Middleware {
 	return r.require(obj, act, "")
 }
 
 // RequireInDomain is Require within a tenant: the domain is the path
-// parameter domainParam ({wsid} in /workspaces/{wsid}/posts), and a
-// global grant counts in every domain. A route without the parameter is
-// a 400.
+// parameter domainParam ({wsid} in /workspaces/{wsid}/posts). The roles a
+// user holds in the domain (AddUserToRoleInDomain) count there, a global
+// policy counts in every domain, and admin passes in all of them. A route
+// without the parameter is a 400.
 func (r *RBAC) RequireInDomain(obj, act, domainParam string) chok.Middleware {
 	if domainParam == "" {
 		panic("rbac.RequireInDomain: name the path parameter that holds the domain")
@@ -185,20 +196,14 @@ func (r *RBAC) require(obj, act, domainParam string) chok.Middleware {
 				chok.WriteError(w, req, chok.ErrUnauthorized)
 				return
 			}
-			var (
-				dom     string
-				allowed bool
-				err     error
-			)
-			if domainParam == "" {
-				allowed, err = r.e.authorize(p.UserID, obj, act)
-			} else {
+			var dom string
+			if domainParam != "" {
 				if dom = req.PathValue(domainParam); dom == "" {
 					chok.WriteError(w, req, chok.ErrBadRequest.Msgf("the path has no domain parameter %q", domainParam))
 					return
 				}
-				allowed, err = r.e.authorizeInDomain(p.UserID, dom, obj, act)
 			}
+			allowed, err := r.e.decide(p.UserID, p.Roles, dom, obj, act)
 			if err != nil {
 				chok.LoggerFrom(ctx).ErrorContext(ctx, "rbac: the decision failed", "error", err, "subject", p.UserID, "domain", dom, "obj", obj, "act", act)
 				chok.WriteError(w, req, chok.ErrInternal.Wrap(err))

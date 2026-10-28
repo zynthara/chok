@@ -1116,10 +1116,11 @@ func TestAdapter_AddPolicies_DuplicateInBatch(t *testing.T) {
 	}
 }
 
-// TestAdapter_MultiInstance_BootstrapIdempotent: two replicas on one
-// database seed the same administrator at once; the unique index and the
-// adapter's ON CONFLICT DO NOTHING leave one row of each.
-func TestAdapter_MultiInstance_BootstrapIdempotent(t *testing.T) {
+// TestAdapter_MultiInstance_GrantsIdempotent: two replicas on one
+// database write the same grant and the same domain binding at once; the
+// unique index and the adapter's ON CONFLICT DO NOTHING leave one row of
+// each.
+func TestAdapter_MultiInstance_GrantsIdempotent(t *testing.T) {
 	db := newAdapterDB(t)
 	build := func() *PolicyService {
 		adapter, err := newGormAdapter(db)
@@ -1132,14 +1133,20 @@ func TestAdapter_MultiInstance_BootstrapIdempotent(t *testing.T) {
 		}
 		return &PolicyService{e: e}
 	}
+	grant := func(svc *PolicyService) error {
+		if err := svc.AddUserToRoleInDomain(context.Background(), "usr_root", "owner", "ws_1"); err != nil {
+			return err
+		}
+		return svc.GrantRole(context.Background(), "owner", "*", "*")
+	}
 	svc1, svc2 := build(), build()
 	var wg sync.WaitGroup
 	var err1, err2 error
-	wg.Go(func() { err1 = svc1.BootstrapAdmin(context.Background(), "usr_root") })
-	wg.Go(func() { err2 = svc2.BootstrapAdmin(context.Background(), "usr_root") })
+	wg.Go(func() { err1 = grant(svc1) })
+	wg.Go(func() { err2 = grant(svc2) })
 	wg.Wait()
 	if err1 != nil || err2 != nil {
-		t.Fatalf("bootstrap: %v / %v", err1, err2)
+		t.Fatalf("grant: %v / %v", err1, err2)
 	}
 	var rows []casbinRule
 	if err := db().Find(&rows).Error; err != nil {
@@ -1150,46 +1157,12 @@ func TestAdapter_MultiInstance_BootstrapIdempotent(t *testing.T) {
 		if r.Ptype == "g" && r.V0 == "usr_root" {
 			gCount++
 		}
-		if r.Ptype == "p" && r.V0 == "admin" {
+		if r.Ptype == "p" && r.V0 == "owner" {
 			pCount++
 		}
 	}
 	if gCount != 1 || pCount != 1 {
-		t.Fatalf("g(usr_root, admin, *) = %d, p(admin, *, *, *) = %d; want 1 each (rows: %+v)", gCount, pCount, rows)
-	}
-}
-
-// TestBootstrap_BatchPath: BootstrapAdmin writes the admin permission
-// through the batch path, and running it again adds nothing.
-func TestBootstrap_BatchPath(t *testing.T) {
-	db := newAdapterDB(t)
-	adapter, err := newGormAdapter(db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e, err := newEngine(rbacWithDomainsModel, adapter, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	perms := []Permission{{Object: "task", Action: "read"}, {Object: "task", Action: "write"}, {Object: "audit", Action: "read"}, {Object: "user", Action: "list"}}
-	for range 2 { // the second run is a no-op
-		if err := e.grantRoleBatch(context.Background(), "admin", perms); err != nil {
-			t.Fatal(err)
-		}
-		var pCount int64
-		if err := db().Model(&casbinRule{}).Where("ptype = ? AND v0 = ?", "p", "admin").Count(&pCount).Error; err != nil {
-			t.Fatal(err)
-		}
-		if pCount != 4 {
-			t.Fatalf("admin policy rows = %d, want 4", pCount)
-		}
-	}
-	svc := &PolicyService{e: e}
-	if err := svc.BootstrapAdmin(context.Background(), "usr_root"); err != nil {
-		t.Fatal(err)
-	}
-	if ok, _ := svc.HasPermission(context.Background(), "usr_root", "anything", "delete"); !ok {
-		t.Fatal("the bootstrapped admin may do everything")
+		t.Fatalf("g(usr_root, owner, ws_1) = %d, p(owner, *, *, *) = %d; want 1 each (rows: %+v)", gCount, pCount, rows)
 	}
 }
 

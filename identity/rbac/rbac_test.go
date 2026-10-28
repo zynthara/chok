@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,86 +41,138 @@ func setup(t *testing.T, cfg identity.Config, opts ...rbac.Option) (*identity.Id
 	return idn, rb, d
 }
 
-func policy(t *testing.T) *rbac.PolicyService {
+func policy(t *testing.T) (*identity.Identity, *rbac.PolicyService) {
 	t.Helper()
-	_, rb, _ := setup(t, identity.Config{})
-	return rb.Policy()
+	idn, rb, _ := setup(t, identity.Config{})
+	return idn, rb.Policy()
 }
 
+// user creates an identity account holding roles and returns its id.
+func user(t *testing.T, idn *identity.Identity, email string, roles ...string) string {
+	t.Helper()
+	u, err := idn.Users().Create(t.Context(), email, "password123", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roles) > 0 {
+		if err := idn.Users().SetRoles(t.Context(), u.RID, roles); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return u.RID
+}
+
+// TestPolicy_GrantRoleAndAuthorize: a permission granted to a role
+// reaches the users identity gives the role.
 func TestPolicy_GrantRoleAndAuthorize(t *testing.T) {
-	p, ctx := policy(t), context.Background()
-	if ok, err := p.HasPermission(ctx, "usr_alice", "task", "read"); err != nil || ok {
+	idn, p := policy(t)
+	ctx := context.Background()
+	alice, bob := user(t, idn, "alice@test.com", "editor"), user(t, idn, "bob@test.com")
+	if ok, err := p.HasPermission(ctx, alice, "task", "read"); err != nil || ok {
 		t.Fatalf("no policies deny: %v %v", ok, err)
 	}
-	if err := p.AddUserToRole(ctx, "usr_alice", "admin"); err != nil {
+	if err := p.GrantRole(ctx, "editor", "task", "read"); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.GrantRole(ctx, "admin", "task", "read"); err != nil {
-		t.Fatal(err)
+	if ok, _ := p.HasPermission(ctx, alice, "task", "read"); !ok {
+		t.Fatal("alice reads tasks through the editor role")
 	}
-	if ok, _ := p.HasPermission(ctx, "usr_alice", "task", "read"); !ok {
-		t.Fatal("alice reads tasks through the admin role")
-	}
-	if ok, _ := p.HasPermission(ctx, "usr_alice", "task", "delete"); ok {
+	if ok, _ := p.HasPermission(ctx, alice, "task", "delete"); ok {
 		t.Fatal("no policy grants delete")
 	}
-	if ok, _ := p.HasPermission(ctx, "usr_bob", "task", "read"); ok {
+	if ok, _ := p.HasPermission(ctx, bob, "task", "read"); ok {
 		t.Fatal("bob holds no role")
 	}
-}
-
-func TestPolicy_DomainScopedRoles(t *testing.T) {
-	p, ctx := policy(t), context.Background()
-	if err := p.AddUserToRoleInDomain(ctx, "usr_alice", "admin", "ws_abc"); err != nil {
+	// Roles are identity's: taking the role away takes the permission.
+	if err := idn.Users().SetRoles(ctx, alice, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.GrantRoleInDomain(ctx, "admin", "task", "read", "ws_abc"); err != nil {
-		t.Fatal(err)
-	}
-	if ok, _ := p.HasPermissionInDomain(ctx, "usr_alice", "task", "read", "ws_abc"); !ok {
-		t.Fatal("alice is admin in ws_abc")
-	}
-	if ok, _ := p.HasPermissionInDomain(ctx, "usr_alice", "task", "read", "ws_def"); ok {
-		t.Fatal("a tenant's role does not leak into another tenant")
-	}
-	if ok, _ := p.HasPermission(ctx, "usr_alice", "task", "read"); ok {
-		t.Fatal("nor into the global scope")
+	if ok, _ := p.HasPermission(ctx, alice, "task", "read"); ok {
+		t.Fatal("without the role alice reads nothing")
 	}
 }
 
-func TestPolicy_GlobalAdminPassesThroughDomains(t *testing.T) {
-	p, ctx := policy(t), context.Background()
-	if err := p.AddUserToRole(ctx, "usr_admin", "superadmin"); err != nil {
+// TestPolicy_UnknownUserHasNoPermission: HasPermission reads the user's
+// roles from identity; a user it does not know has none, and no error.
+func TestPolicy_UnknownUserHasNoPermission(t *testing.T) {
+	_, p := policy(t)
+	ctx := context.Background()
+	if err := p.GrantUser(ctx, "usr_ghost", "task", "read"); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.GrantRole(ctx, "superadmin", "*", "*"); err != nil {
-		t.Fatal(err)
-	}
-	for _, dom := range []string{"ws_abc", "ws_def", "tenant_42"} {
-		if ok, err := p.HasPermissionInDomain(ctx, "usr_admin", "task", "read", dom); err != nil || !ok {
-			t.Errorf("a global superadmin in %s: %v %v", dom, ok, err)
+	for _, id := range []string{"usr_ghost", ""} {
+		if ok, err := p.HasPermission(ctx, id, "task", "read"); ok || err != nil {
+			t.Errorf("HasPermission(%q) = %v %v", id, ok, err)
+		}
+		if ok, err := p.HasPermissionInDomain(ctx, id, "task", "read", "ws_1"); ok || err != nil {
+			t.Errorf("HasPermissionInDomain(%q) = %v %v", id, ok, err)
 		}
 	}
 }
 
-func TestPolicy_GrantUserDirect(t *testing.T) {
-	p, ctx := policy(t), context.Background()
-	if err := p.GrantUser(ctx, "usr_bob", "task", "read"); err != nil {
+func TestPolicy_DomainScopedRoles(t *testing.T) {
+	idn, p := policy(t)
+	ctx := context.Background()
+	alice := user(t, idn, "alice@test.com")
+	if err := p.AddUserToRoleInDomain(ctx, alice, "owner", "ws_abc"); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := p.HasPermission(ctx, "usr_bob", "task", "read"); !ok {
+	if err := p.GrantRoleInDomain(ctx, "owner", "task", "read", "ws_abc"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := p.HasPermissionInDomain(ctx, alice, "task", "read", "ws_abc"); !ok {
+		t.Fatal("alice is owner in ws_abc")
+	}
+	if ok, _ := p.HasPermissionInDomain(ctx, alice, "task", "read", "ws_def"); ok {
+		t.Fatal("a tenant's role does not leak into another tenant")
+	}
+	if ok, _ := p.HasPermission(ctx, alice, "task", "read"); ok {
+		t.Fatal("nor into the global scope")
+	}
+}
+
+// TestPolicy_GlobalRolesPassThroughDomains: a global role's grants count
+// in every domain, and the built-in admin needs no grant at all.
+func TestPolicy_GlobalRolesPassThroughDomains(t *testing.T) {
+	idn, p := policy(t)
+	ctx := context.Background()
+	super, admin := user(t, idn, "super@test.com", "superadmin"), user(t, idn, "admin@test.com", "admin")
+	if err := p.GrantRole(ctx, "superadmin", "*", "*"); err != nil {
+		t.Fatal(err)
+	}
+	for _, dom := range []string{"ws_abc", "ws_def", "tenant_42"} {
+		for who, id := range map[string]string{"superadmin": super, "admin": admin} {
+			if ok, err := p.HasPermissionInDomain(ctx, id, "task", "read", dom); err != nil || !ok {
+				t.Errorf("a global %s in %s: %v %v", who, dom, ok, err)
+			}
+		}
+	}
+	if ok, err := p.HasPermission(ctx, admin, "anything", "delete"); err != nil || !ok {
+		t.Fatalf("admin may do anything: %v %v", ok, err)
+	}
+}
+
+func TestPolicy_GrantUserDirect(t *testing.T) {
+	idn, p := policy(t)
+	ctx := context.Background()
+	bob := user(t, idn, "bob@test.com")
+	if err := p.GrantUser(ctx, bob, "task", "read"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := p.HasPermission(ctx, bob, "task", "read"); !ok {
 		t.Fatal("a direct grant authorizes without a role")
 	}
-	if err := p.RevokeUser(ctx, "usr_bob", "task", "read"); err != nil {
+	if err := p.RevokeUser(ctx, bob, "task", "read"); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := p.HasPermission(ctx, "usr_bob", "task", "read"); ok {
+	if ok, _ := p.HasPermission(ctx, bob, "task", "read"); ok {
 		t.Fatal("revoked")
 	}
 }
 
 func TestPolicy_RejectsGlobalAsTenant(t *testing.T) {
-	p, ctx := policy(t), context.Background()
+	_, p := policy(t)
+	ctx := context.Background()
 	for name, fn := range map[string]func() error{
 		"AddUserToRoleInDomain":      func() error { return p.AddUserToRoleInDomain(ctx, "u", "r", "*") },
 		"RemoveUserFromRoleInDomain": func() error { return p.RemoveUserFromRoleInDomain(ctx, "u", "r", "*") },
@@ -133,33 +186,40 @@ func TestPolicy_RejectsGlobalAsTenant(t *testing.T) {
 			t.Errorf("%s with domain *: %v", name, err)
 		}
 	}
+	// Global roles are identity's: the error says where they live.
+	if err := p.AddUserToRoleInDomain(ctx, "u", "r", "*"); err == nil || !strings.Contains(err.Error(), "Users().SetRoles") {
+		t.Errorf("the error points to identity: %v", err)
+	}
 }
 
 func TestPolicy_EmptyDomainIsGlobal(t *testing.T) {
-	p, ctx := policy(t), context.Background()
-	if err := p.AddUserToRoleInDomain(ctx, "usr_x", "admin", ""); err != nil {
+	idn, p := policy(t)
+	ctx := context.Background()
+	x := user(t, idn, "x@test.com")
+	if err := p.AddUserToRoleInDomain(ctx, x, "member", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.GrantRoleInDomain(ctx, "admin", "task", "read", ""); err != nil {
+	if err := p.GrantRoleInDomain(ctx, "member", "task", "read", ""); err != nil {
 		t.Fatal(err)
 	}
-	if roles, err := p.UserRoles(ctx, "usr_x"); err != nil || len(roles) != 1 || roles[0] != "admin" {
+	if roles, err := p.UserRolesInDomain(ctx, x, ""); err != nil || len(roles) != 1 || roles[0] != "member" {
 		t.Fatalf("roles = %v %v", roles, err)
 	}
-	if ok, _ := p.HasPermission(ctx, "usr_x", "task", "read"); !ok {
+	if ok, _ := p.HasPermission(ctx, x, "task", "read"); !ok {
 		t.Fatal("a grant in domain \"\" is global")
 	}
 }
 
 func TestPolicy_ListsAndRevokes(t *testing.T) {
-	p, ctx := policy(t), context.Background()
+	_, p := policy(t)
+	ctx := context.Background()
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	must(p.AddUserToRole(ctx, "usr_a", "editor"))
+	must(p.AddUserToRoleInDomain(ctx, "usr_a", "editor", "ws_2"))
 	must(p.AddUserToRoleInDomain(ctx, "usr_a", "owner", "ws_1"))
 	must(p.GrantRole(ctx, "editor", "post", "write"))
 	must(p.GrantRoleInDomain(ctx, "owner", "ws", "manage", "ws_1"))
@@ -176,7 +236,7 @@ func TestPolicy_ListsAndRevokes(t *testing.T) {
 		t.Fatalf("roles in ws_1 = %v", roles)
 	}
 	must(p.RevokeRole(ctx, "editor", "post", "write"))
-	must(p.RemoveUserFromRole(ctx, "usr_a", "editor"))
+	must(p.RemoveUserFromRoleInDomain(ctx, "usr_a", "editor", "ws_2"))
 	must(p.RemoveUserFromRoleInDomain(ctx, "usr_a", "owner", "ws_1"))
 	must(p.RevokeRoleInDomain(ctx, "owner", "ws", "manage", "ws_1"))
 	if doms, _ := p.DomainsForUser(ctx, "usr_a"); len(doms) != 0 {
@@ -185,21 +245,14 @@ func TestPolicy_ListsAndRevokes(t *testing.T) {
 	must(p.ReloadPolicy(ctx))
 }
 
-func TestBootstrapAdmin(t *testing.T) {
-	p, ctx := policy(t), context.Background()
-	for range 2 { // idempotent
-		if err := p.BootstrapAdmin(ctx, "usr_root"); err != nil {
-			t.Fatal(err)
+// TestPolicy_NoGlobalRoleAPI: the global role bindings and BootstrapAdmin
+// are gone — global roles are identity's, and auth.admins seeds admin.
+func TestPolicy_NoGlobalRoleAPI(t *testing.T) {
+	typ := reflect.TypeFor[*rbac.PolicyService]()
+	for _, name := range []string{"AddUserToRole", "RemoveUserFromRole", "UserRoles", "BootstrapAdmin"} {
+		if _, ok := typ.MethodByName(name); ok {
+			t.Errorf("PolicyService still has %s", name)
 		}
-	}
-	if ok, _ := p.HasPermission(ctx, "usr_root", "anything", "read"); !ok {
-		t.Fatal("the bootstrapped admin may do anything")
-	}
-	if ok, _ := p.HasPermissionInDomain(ctx, "usr_root", "anything", "write", "ws_1"); !ok {
-		t.Fatal("in every domain")
-	}
-	if err := p.BootstrapAdmin(ctx, ""); err == nil {
-		t.Fatal("an empty user id is refused")
 	}
 }
 
@@ -276,7 +329,7 @@ func TestNew_MigrateOffOnAPreparedSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrate off on a migrated database: %v", err)
 	}
-	if err := rb.Policy().BootstrapAdmin(context.Background(), "usr_root"); err != nil {
+	if err := rb.Policy().GrantRole(context.Background(), "editor", "post", "write"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -325,6 +378,59 @@ func TestRequire(t *testing.T) {
 	var body string
 	if code := c.WithBearer(tok).GetJSON("/api/tasks", &body); code != http.StatusOK || body != "ok" {
 		t.Fatalf("granted = %d %q", code, body)
+	}
+}
+
+// asPrincipal stores p on every request, as an application's own
+// authentication would: rbac decides on any principal, not only one
+// identity stored.
+func asPrincipal(p chok.Principal) chok.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(chok.WithPrincipal(r.Context(), p)))
+		})
+	}
+}
+
+// TestRequire_RolesFromThePrincipal: Require reads the principal's Roles —
+// admin passes everything in every domain, a role passes with what
+// GrantRole gave it — and its UserID for the direct grants.
+func TestRequire_RolesFromThePrincipal(t *testing.T) {
+	idn, rb, _ := setup(t, identity.Config{})
+	ctx := context.Background()
+	if err := rb.Policy().GrantRole(ctx, "editor", "task", "write"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rb.Policy().GrantUser(ctx, "usr_direct", "task", "write"); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		p    chok.Principal
+		want int
+	}{
+		{"admin", chok.Principal{UserID: "usr_admin", Roles: []string{"admin"}}, http.StatusOK},
+		{"a granted role", chok.Principal{UserID: "usr_editor", Roles: []string{"viewer", "editor"}}, http.StatusOK},
+		{"a direct grant", chok.Principal{UserID: "usr_direct"}, http.StatusOK},
+		{"no role", chok.Principal{UserID: "usr_nobody"}, http.StatusForbidden},
+		{"a role without the grant", chok.Principal{UserID: "usr_viewer", Roles: []string{"viewer"}}, http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := choktest.App(t, chok.Base{}, func(app *chok.App) {
+				app.Use(idn, rb)
+				api := app.Group("/api", asPrincipal(tc.p))
+				chok.POST(api, "/tasks", ok, chok.Use(rb.Require("task", "write")))
+				chok.POST(api, "/workspaces/{ws}/tasks", ok, chok.Use(rb.RequireInDomain("task", "write", "ws")))
+			})
+			if code := c.PostJSON("/api/tasks", nil, nil); code != tc.want {
+				t.Errorf("Require = %d, want %d", code, tc.want)
+			}
+			// Global grants and admin count in every domain.
+			if code := c.PostJSON("/api/workspaces/ws_9/tasks", nil, nil); code != tc.want {
+				t.Errorf("RequireInDomain = %d, want %d", code, tc.want)
+			}
+		})
 	}
 }
 
@@ -410,7 +516,7 @@ func TestRequireInDomain(t *testing.T) {
 func TestAudit_RecordsPolicyChangesAndDenials(t *testing.T) {
 	idn, rb, _ := setup(t, identity.Config{Audit: identity.AuditConfig{Enabled: true}})
 	ctx := context.Background()
-	if err := rb.Policy().BootstrapAdmin(ctx, "usr_root"); err != nil {
+	if err := rb.Policy().AddUserToRoleInDomain(ctx, "usr_root", "owner", "ws_1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := rb.Policy().GrantRole(ctx, "editor", "post", "write"); err != nil {
@@ -440,8 +546,8 @@ func TestAudit_RecordsPolicyChangesAndDenials(t *testing.T) {
 	if probe := find(url.Values{"action": {"authz.audit.enabled"}}); len(probe) != 1 || probe[0].ActorType != identity.ActorSystem {
 		t.Fatalf("the switch-on probe: %+v", probe)
 	}
-	if boot := find(url.Values{"action": {"authz.AddUserToRole"}}); len(boot) != 1 || boot[0].Metadata["role"] != "admin" {
-		t.Fatalf("the bootstrap is recorded: %+v", boot)
+	if bind := find(url.Values{"action": {"authz.AddUserToRoleInDomain"}}); len(bind) != 1 || bind[0].Metadata["role"] != "owner" {
+		t.Fatalf("the binding is recorded: %+v", bind)
 	}
 	grants := find(url.Values{"action": {"authz.GrantRole"}})
 	editor := false
@@ -485,17 +591,38 @@ func TestAudit_AdminAPIAsksRBAC(t *testing.T) {
 	if code := c.WithBearer(tok).GetJSON("/audit/logs?action=authz.audit.enabled", &page); code != http.StatusOK || page.Total != 1 {
 		t.Fatalf("with audit/read = %d %+v", code, page)
 	}
+	// The admin role reads the log without a grant: rbac lets it do
+	// everything.
+	if err := rb.Policy().RevokeUser(context.Background(), uid, "audit", "read"); err != nil {
+		t.Fatal(err)
+	}
+	if err := idn.Users().SetRoles(context.Background(), uid, []string{"admin"}); err != nil {
+		t.Fatal(err)
+	}
+	var fresh struct {
+		Token string `json:"token"`
+	}
+	if code := c.PostJSON("/auth/login", map[string]string{"email": "alice@test.com", "password": "password123"}, &fresh); code != http.StatusOK {
+		t.Fatalf("login = %d", code)
+	}
+	if code := c.WithBearer(fresh.Token).GetJSON("/audit/logs", nil); code != http.StatusOK {
+		t.Fatalf("an admin = %d", code)
+	}
 }
 
 func TestWatcher_PeersReload(t *testing.T) {
 	mr := miniredis.RunT(t)
 	cfg := dbtest.Config(t)
 	// Two replicas: two handles on one database, one Redis.
+	var idnA *identity.Identity
 	replica := func() *rbac.RBAC {
 		d := dbtest.OpenConfig(t, cfg)
 		idn, err := identity.New(identity.Config{SigningKey: key}, d)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if idnA == nil {
+			idnA = idn
 		}
 		t.Cleanup(func() { _ = idn.Close(context.Background()) })
 		client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
@@ -509,12 +636,13 @@ func TestWatcher_PeersReload(t *testing.T) {
 	}
 	a, b := replica(), replica()
 	ctx := context.Background()
-	if err := a.Policy().GrantUser(ctx, "usr_alice", "task", "read"); err != nil {
+	alice := user(t, idnA, "alice@test.com")
+	if err := a.Policy().GrantUser(ctx, alice, "task", "read"); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if ok, _ := b.Policy().HasPermission(ctx, "usr_alice", "task", "read"); ok {
+		if ok, _ := b.Policy().HasPermission(ctx, alice, "task", "read"); ok {
 			break
 		}
 		if time.Now().After(deadline) {

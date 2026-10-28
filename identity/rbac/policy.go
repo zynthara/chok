@@ -4,16 +4,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok/v3/identity"
 )
 
-// PolicyService manages the policies: which roles a user holds, globally
-// or in a domain (a tenant: a workspace, an organization), which
-// permissions — an object and an action — a role or a user has, and the
-// first administrator. Domain "" is the global scope; "*" is reserved for
-// it and refused as a tenant. Changes reach the other replicas through
-// the Watcher option and, with identity's audit log on, are recorded in
-// it.
-type PolicyService struct{ e *engine }
+// PolicyService manages the policies: which permissions — an object and
+// an action — a role or a user has, globally or in a domain (a tenant: a
+// workspace, an organization), and which roles a user holds within a
+// domain. A user's global roles are identity's, not this service's:
+// identity's Users().SetRoles sets them, and Require reads them from the
+// chok.Principal. Domain "" is the global scope; "*" is reserved for it
+// and refused as a tenant. Changes reach the other replicas through the
+// Watcher option and, with identity's audit log on, are recorded in it.
+type PolicyService struct {
+	e   *engine
+	idn *identity.Identity
+}
 
 // Permission is an object and an action a role may perform on it. Object
 // patterns follow casbin's keyMatch: "post.*" covers "post.read"; "*"
@@ -21,52 +28,6 @@ type PolicyService struct{ e *engine }
 type Permission struct {
 	Object string
 	Action string
-}
-
-// BootstrapAdmin makes userID an administrator: the role admin, holding
-// every action on every object. It is idempotent — the first grant on a
-// fresh database — and additive: it never revokes what an earlier run or
-// an operator granted.
-func (p *PolicyService) BootstrapAdmin(ctx context.Context, userID string) error {
-	if userID == "" {
-		return errors.New("rbac: BootstrapAdmin needs a user id")
-	}
-	if err := p.AddUserToRole(ctx, userID, adminRole); err != nil {
-		return fmt.Errorf("rbac: bootstrap %s as %s: %w", userID, adminRole, err)
-	}
-	return p.e.grantRoleBatch(ctx, adminRole, []Permission{{Object: "*", Action: "*"}})
-}
-
-// adminRole is the role BootstrapAdmin binds.
-const adminRole = "admin"
-
-// AddUserToRole binds userID to role in the global scope.
-func (p *PolicyService) AddUserToRole(ctx context.Context, userID, role string) error {
-	added, err := p.e.enforcer.AddRoleForUserInDomain(userID, role, globalDomain)
-	if err != nil {
-		return err
-	}
-	if added {
-		p.e.fireAudit(ctx, "AddUserToRole", role, userID, globalDomain)
-	}
-	return nil
-}
-
-// RemoveUserFromRole removes a global binding.
-func (p *PolicyService) RemoveUserFromRole(ctx context.Context, userID, role string) error {
-	removed, err := p.e.enforcer.DeleteRoleForUserInDomain(userID, role, globalDomain)
-	if err != nil {
-		return err
-	}
-	if removed {
-		p.e.fireAudit(ctx, "RemoveUserFromRole", role, userID, globalDomain)
-	}
-	return nil
-}
-
-// UserRoles lists the roles bound to userID globally.
-func (p *PolicyService) UserRoles(ctx context.Context, userID string) ([]string, error) {
-	return p.e.enforcer.GetRolesForUserInDomain(userID, globalDomain), nil
 }
 
 // AddUserToRoleInDomain binds userID to role in domain.
@@ -109,9 +70,10 @@ func (p *PolicyService) UserRolesInDomain(ctx context.Context, userID, domain st
 	return p.e.enforcer.GetRolesForUserInDomain(userID, normalizeDomain(domain)), nil
 }
 
-// DomainsForUser lists the domains where userID holds a role, "*" for a
-// global one. Casbin does not expose it, so it filters the grouping
-// policies.
+// DomainsForUser lists the domains where userID holds a role bound by
+// AddUserToRoleInDomain, "*" for one bound in domain "", the global
+// scope; the roles identity keeps are not here. Casbin does not expose
+// it, so it filters the grouping policies.
 func (p *PolicyService) DomainsForUser(ctx context.Context, userID string) ([]string, error) {
 	policies, err := p.e.enforcer.GetGroupingPolicy()
 	if err != nil {
@@ -252,18 +214,35 @@ func (p *PolicyService) RevokeUser(ctx context.Context, userID, obj, act string)
 	return nil
 }
 
-// HasPermission decides as Require does: userID's roles and grants,
-// global ones included.
+// HasPermission decides as Require does, for the identity user userID:
+// it reads the user's roles, then admin passes, and the policies of the
+// user and of its roles decide. A user that does not exist has no
+// permission: false and no error.
 func (p *PolicyService) HasPermission(ctx context.Context, userID, obj, act string) (bool, error) {
-	return p.e.authorize(userID, obj, act)
+	return p.hasPermission(ctx, userID, "", obj, act)
 }
 
-// HasPermissionInDomain decides as RequireInDomain does.
+// HasPermissionInDomain decides as RequireInDomain does, for the identity
+// user userID.
 func (p *PolicyService) HasPermissionInDomain(ctx context.Context, userID, obj, act, domain string) (bool, error) {
 	if err := rejectGlobalAsTenant(domain, "HasPermissionInDomain"); err != nil {
 		return false, err
 	}
-	return p.e.authorizeInDomain(userID, domain, obj, act)
+	return p.hasPermission(ctx, userID, domain, obj, act)
+}
+
+func (p *PolicyService) hasPermission(ctx context.Context, userID, dom, obj, act string) (bool, error) {
+	if userID == "" {
+		return false, nil
+	}
+	u, err := p.idn.Users().Get(ctx, userID)
+	if err != nil {
+		if errors.Is(err, chok.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("rbac: read the user %s: %w", userID, err)
+	}
+	return p.e.decide(userID, u.RoleList(), dom, obj, act)
 }
 
 // ReloadPolicy reads the policies from the database again — after a
@@ -297,15 +276,14 @@ func rejectGlobalAsTenant(domain, methodName string) error {
 }
 
 // globalAlternative names the global-equivalent method so the error
-// from rejectGlobalAsTenant points to the fix.
+// from rejectGlobalAsTenant points to the fix: global roles are
+// identity's.
 func globalAlternative(methodName string) string {
 	switch methodName {
-	case "AddUserToRoleInDomain":
-		return "AddUserToRole"
-	case "RemoveUserFromRoleInDomain":
-		return "RemoveUserFromRole"
+	case "AddUserToRoleInDomain", "RemoveUserFromRoleInDomain":
+		return "identity's Users().SetRoles"
 	case "UserRolesInDomain":
-		return "UserRoles"
+		return "the user's Roles (identity's Users().Get)"
 	case "GrantRoleInDomain":
 		return "GrantRole"
 	case "RevokeRoleInDomain":

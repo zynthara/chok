@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -114,34 +115,30 @@ func (e *engine) fireAudit(ctx context.Context, action, role, obj, act string) {
 	}
 }
 
-// authorize decides globally: domain "*" is the global scope, which
-// global policies (p.dom = "*") match.
-func (e *engine) authorize(sub, obj, act string) (bool, error) {
-	return e.enforcer.Enforce(sub, globalDomain, obj, act)
-}
+// adminRole is the built-in administrator role: a user whose roles hold
+// it passes every decision, in every domain, without a policy.
+const adminRole = "admin"
 
-// authorizeInDomain decides in a tenant; "" means global.
-func (e *engine) authorizeInDomain(sub, dom, obj, act string) (bool, error) {
-	return e.enforcer.Enforce(sub, normalizeDomain(dom), obj, act)
-}
-
-// grantRoleBatch is BootstrapAdmin's fast path: one AddPolicies, which
-// the adapter writes as one INSERT.
-func (e *engine) grantRoleBatch(ctx context.Context, role string, perms []Permission) error {
-	if len(perms) == 0 {
-		return nil
+// decide admits a user with roles — the global roles identity keeps, the
+// chok.Principal's Roles — to act on obj in dom ("" is the global scope):
+// the role admin always; otherwise a policy casbin matches for the user
+// (a direct grant, or a role bound in dom) or for any of the roles. A
+// global policy counts in every domain.
+func (e *engine) decide(userID string, roles []string, dom, obj, act string) (bool, error) {
+	if slices.Contains(roles, adminRole) {
+		return true, nil
 	}
-	rules := make([][]string, 0, len(perms))
-	for _, p := range perms {
-		rules = append(rules, []string{role, globalDomain, p.Object, p.Action})
+	dom = normalizeDomain(dom)
+	for _, sub := range append([]string{userID}, roles...) {
+		if sub == "" {
+			continue
+		}
+		ok, err := e.enforcer.Enforce(sub, dom, obj, act)
+		if err != nil || ok {
+			return ok, err
+		}
 	}
-	if _, err := e.enforcer.AddPolicies(rules); err != nil {
-		return fmt.Errorf("rbac: grant %s: %w", role, err)
-	}
-	for _, p := range perms {
-		e.fireAudit(ctx, "GrantRole", role, p.Object, p.Action)
-	}
-	return nil
+	return false, nil
 }
 
 // close releases the watcher's subscription and clears the audit hook,

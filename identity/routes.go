@@ -317,8 +317,8 @@ func (idn *Identity) me(ctx context.Context, _ *chok.None) (*meResponse, error) 
 	return &meResponse{ID: u.RID, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Roles: roles, CreatedAt: u.CreatedAt.UTC()}, nil
 }
 
-// requireAuditReader admits the audit log's readers: those identity/rbac
-// grants audit/read, or without rbac the holders of the admin role.
+// requireAuditReader admits the audit log's readers: the holders of the
+// admin role and, with identity/rbac, those it grants audit/read.
 func (idn *Identity) requireAuditReader() chok.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -328,10 +328,10 @@ func (idn *Identity) requireAuditReader() chok.Middleware {
 				chok.WriteError(w, r, chok.ErrUnauthorized)
 				return
 			}
-			allowed := p.HasRole("admin")
-			if fn := idn.authorize.Load(); fn != nil {
+			allowed := p.HasRole(adminRole)
+			if fn := idn.authorize.Load(); fn != nil && !allowed {
 				var err error
-				if allowed, err = (*fn)(ctx, p.UserID, "audit", "read"); err != nil {
+				if allowed, err = (*fn)(ctx, p, "audit", "read"); err != nil {
 					chok.WriteError(w, r, err)
 					return
 				}

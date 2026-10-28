@@ -3,10 +3,14 @@
 // before the audit log's admin API answers.
 package authz
 
-import "context"
+import (
+	"context"
 
-// Func decides whether subject may perform action on object.
-type Func func(ctx context.Context, subject, object, action string) (bool, error)
+	"github.com/zynthara/chok/v3"
+)
+
+// Func decides whether the principal may perform action on object.
+type Func func(ctx context.Context, p chok.Principal, object, action string) (bool, error)
 
 // Attach, set by package identity when it initializes, installs fn on
 // idn, an *identity.Identity.
