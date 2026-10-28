@@ -524,11 +524,12 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   MIME-Version / Content-*，值不能跨行。地址不合法、模板不存在、Template 与正文
   同时给，都是发出前的普通错误（不是 Coder，handler 自己包装）。
 - **模板**：`Templates(fsys)` 在 New 时解析 fs 里任意深度的 `.html` / `.txt`，模板
-  名即文件名去扩展名；`{name}.html` 是 html/template，同名 `.txt`（text/template）
-  可选、给了就一起发成 alternative；`_*.html` / `_*.txt` 是同类模板共用的局部；
-  `{{define "subject"}}` 是主题（.txt 的优先，html 的反转义），`Message.Subject`
-  非空时覆盖。解析失败、同名文件、孤立的 `.txt`、给两次 Templates 都让 New 失败，
-  坏模板不会等到第一封信才暴露。
+  名即文件名去扩展名；一个模板可以只有 `{name}.html`（html/template，发
+  text/html）、只有 `{name}.txt`（text/template，发 text/plain），或两者都有（发
+  multipart/alternative）；`_*.html` / `_*.txt` 是同类模板共用的局部，只有局部、
+  没有正文的名字不是模板；`{{define "subject"}}` 是主题（.txt 的优先，html 的
+  反转义），`Message.Subject` 非空时覆盖。解析失败、同名文件、只有局部、给两次
+  Templates 都让 New 失败，坏模板不会等到第一封信才暴露。
 - **传输**：`smtp` 每次 Send 拨号 → EHLO → STARTTLS（中继不提供就报错，不降级）或
   隐式 TLS → AUTH PLAIN（有 username 时）→ MAIL → 每个收件人（含 Bcc）一个 RCPT →
   DATA → QUIT，整次受 `mail.timeout` 约束（连接的截止时间 + ctx 取消即断）；

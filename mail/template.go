@@ -19,10 +19,10 @@ type templates struct {
 	byName map[string]*page
 }
 
-// page is one template: {name}.html and, when given, {name}.txt, each
-// parsed with the partials of its kind.
+// page is one template: {name}.html, {name}.txt or both, each parsed
+// with the partials of its kind.
 type page struct {
-	html *htmltemplate.Template
+	html *htmltemplate.Template // nil without {name}.html
 	text *texttemplate.Template // nil without {name}.txt
 }
 
@@ -69,26 +69,24 @@ func parseTemplates(fsys fs.FS) (*templates, error) {
 		return nil, fmt.Errorf("mail: Templates: %w", err)
 	}
 	if len(pages) == 0 {
-		return nil, errors.New("mail: Templates: the file system has no {name}.html template")
+		return nil, errors.New("mail: Templates: the file system has no template: {name}.html, {name}.txt or both")
 	}
 	t := &templates{byName: map[string]*page{}}
 	for _, name := range slices.Sorted(maps.Keys(pages)) {
 		files := pages[name]
-		htmlSrc, ok := files[".html"]
-		if !ok {
-			return nil, fmt.Errorf("mail: Templates: %s has no %s.html: a template is HTML, with an optional plain-text version", files[".txt"].path, name)
-		}
 		p := &page{}
-		root := htmltemplate.New(path.Base(htmlSrc.path))
-		for _, s := range partials[".html"] {
-			if _, err := root.New(path.Base(s.path)).Parse(s.body); err != nil {
-				return nil, fmt.Errorf("mail: template %s: %w", s.path, err)
+		if htmlSrc, ok := files[".html"]; ok {
+			root := htmltemplate.New(path.Base(htmlSrc.path))
+			for _, s := range partials[".html"] {
+				if _, err := root.New(path.Base(s.path)).Parse(s.body); err != nil {
+					return nil, fmt.Errorf("mail: template %s: %w", s.path, err)
+				}
 			}
+			if _, err := root.Parse(htmlSrc.body); err != nil {
+				return nil, fmt.Errorf("mail: template %s: %w", htmlSrc.path, err)
+			}
+			p.html = root
 		}
-		if _, err := root.Parse(htmlSrc.body); err != nil {
-			return nil, fmt.Errorf("mail: template %s: %w", htmlSrc.path, err)
-		}
-		p.html = root
 		if txtSrc, ok := files[".txt"]; ok {
 			troot := texttemplate.New(path.Base(txtSrc.path))
 			for _, s := range partials[".txt"] {
@@ -106,15 +104,17 @@ func parseTemplates(fsys fs.FS) (*templates, error) {
 	return t, nil
 }
 
-// render executes the page with data: its HTML, its text when it has a
-// plain-text version, and its subject — the text template's
-// {{define "subject"}} first, else the HTML one's, unescaped.
+// render executes the page with data: its HTML and its text, the ones it
+// has, and its subject — the text template's {{define "subject"}} first,
+// else the HTML one's, unescaped.
 func (p *page) render(data any) (subject, text, htmlBody string, err error) {
 	var b bytes.Buffer
-	if err := p.html.Execute(&b, data); err != nil {
-		return "", "", "", err
+	if p.html != nil {
+		if err := p.html.Execute(&b, data); err != nil {
+			return "", "", "", err
+		}
+		htmlBody = b.String()
 	}
-	htmlBody = b.String()
 	if p.text != nil {
 		b.Reset()
 		if err := p.text.Execute(&b, data); err != nil {
@@ -129,7 +129,7 @@ func (p *page) render(data any) (subject, text, htmlBody string, err error) {
 			return b.String(), text, htmlBody, nil
 		}
 	}
-	if p.html.Lookup("subject") != nil {
+	if p.html != nil && p.html.Lookup("subject") != nil {
 		b.Reset()
 		if err := p.html.ExecuteTemplate(&b, "subject", data); err != nil {
 			return "", "", "", err

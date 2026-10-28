@@ -61,6 +61,32 @@ func TestTemplates_TextIsOptional(t *testing.T) {
 	}
 }
 
+// TestTemplates_TextAlone: a template may be {name}.txt alone, sent as
+// text/plain, with the text template's subject; partials alone are not a
+// template.
+func TestTemplates_TextAlone(t *testing.T) {
+	fsys := fstest.MapFS{
+		"code.txt":   {Data: []byte("{{define \"subject\"}}Your code is {{.}}{{end}}Code: {{.}}\n{{template \"sign\"}}")},
+		"_sign.txt":  {Data: []byte(`{{define "sign"}}-- Shop{{end}}`)},
+		"_page.html": {Data: []byte(`<footer>a partial of no template</footer>`)},
+	}
+	m, c := capture(t, Config{}, Templates(fsys))
+	if err := m.Send(t.Context(), Message{To: []string{"ada@example.com"}, Template: "code", Data: "123 456"}); err != nil {
+		t.Fatal(err)
+	}
+	msg, raw := c.last(t)
+	if msg.Subject != "Your code is 123 456" || msg.Text != "Code: 123 456\n-- Shop" || msg.HTML != "" {
+		t.Fatalf("rendered %+v", msg)
+	}
+	e := parseMail(t, raw)
+	if e.mediaType != "text/plain" || e.get("Subject") != "Your code is 123 456" || len(e.parts) != 0 {
+		t.Fatalf("%s %v", e.mediaType, e.header)
+	}
+	if err := m.Send(t.Context(), Message{To: []string{"ada@example.com"}, Template: "_page", Data: nil}); err == nil || !strings.Contains(err.Error(), `no template "_page" among code`) {
+		t.Fatalf("a partial is not a template: %v", err)
+	}
+}
+
 // TestTemplates_Partials: _*.html and _*.txt files are the partials of
 // every template of their kind, and templates are found by file name in
 // any directory.
@@ -100,8 +126,7 @@ func TestTemplates_Errors(t *testing.T) {
 	}{
 		"given twice":       {[]Option{Templates(good), Templates(good)}, "Templates is given twice"},
 		"nil":               {[]Option{Templates(nil)}, "Templates(nil)"},
-		"no template":       {[]Option{Templates(fstest.MapFS{"_partial.html": {Data: []byte("p")}, "x.css": {}})}, "no {name}.html template"},
-		"a text alone":      {[]Option{Templates(fstest.MapFS{"a.html": {Data: []byte("a")}, "b.txt": {Data: []byte("b")}})}, "b.txt has no b.html"},
+		"no template":       {[]Option{Templates(fstest.MapFS{"_partial.html": {Data: []byte("p")}, "_p.txt": {Data: []byte("p")}, "x.css": {}})}, "has no template: {name}.html, {name}.txt or both"},
 		"a parse error":     {[]Option{Templates(fstest.MapFS{"a.html": {Data: []byte("{{.Name")}})}, "a.html"},
 		"a text parse":      {[]Option{Templates(fstest.MapFS{"a.html": {Data: []byte("a")}, "a.txt": {Data: []byte("{{end}}")}})}, "a.txt"},
 		"a partial's error": {[]Option{Templates(fstest.MapFS{"a.html": {Data: []byte("a")}, "_p.html": {Data: []byte("{{if}}")}})}, "_p.html"},

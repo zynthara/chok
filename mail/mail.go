@@ -44,15 +44,16 @@ type options struct {
 	logger       *slog.Logger
 }
 
-// Templates gives the mails their templates: in fsys, each {name}.html is
-// an html/template, and {name}.txt, a text/template, is its optional
-// plain-text version, sent with it as multipart/alternative. Message
-// names one by {name}, without the extension, wherever it sits in fsys
-// (an embed.FS of a templates directory works as it is). Files named
-// _*.html, or _*.txt, are partials every template of their kind can
-// call; {{define "subject"}}…{{end}} in a template is the subject, unless
-// Message.Subject is set. A template that does not parse fails New, and
-// so does giving Templates twice.
+// Templates gives the mails their templates: in fsys, a template {name}
+// is {name}.html, an html/template sent as text/html, {name}.txt, a
+// text/template sent as text/plain, or both, sent as
+// multipart/alternative. Message names one by {name}, without the
+// extension, wherever it sits in fsys (an embed.FS of a templates
+// directory works as it is). Files named _*.html, or _*.txt, are partials
+// every template of their kind can call; {{define "subject"}}…{{end}} in
+// a template is the subject — the .txt one's when both define it —
+// unless Message.Subject is set. A template that does not parse fails
+// New, and so does giving Templates twice.
 func Templates(fsys fs.FS) Option {
 	return func(o *options) {
 		o.templates = fsys

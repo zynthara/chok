@@ -107,17 +107,17 @@ reads them from disk.
 {{if .Link}}<p>Or <a href="{{.Link}}">sign in with this link</a>.</p>{{end}}
 ```
 
-- `{name}.html` is an `html/template`; `{name}.txt`, a `text/template`, is
-  its optional plain-text version, and the two go out together as
-  `multipart/alternative`.
+- A template is `{name}.html`, an `html/template` sent as `text/html`;
+  `{name}.txt`, a `text/template` sent as `text/plain`; or both, which go
+  out together as `multipart/alternative`.
 - `{{define "subject"}}…{{end}}` is the subject (the `.txt` one when both
   define it); a non-empty `Message.Subject` replaces it.
 - Files whose name starts with `_` are partials: every `.html` template
   can call the `_*.html` ones, every `.txt` the `_*.txt` ones — a footer, a
   layout with `{{template "content" .}}` blocks.
 - Every template parses when the mailer is built: a broken one fails
-  startup, not the first mail. Two files with one name, or a `.txt`
-  without its `.html`, fail it too.
+  startup, not the first mail. Two files with one name fail it too, and
+  so does a file system with partials alone.
 
 ## Sending one
 

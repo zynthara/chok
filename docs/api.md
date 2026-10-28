@@ -336,7 +336,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `type Option func(*options)` | Option configures New. |
 | ↳ `func Logger(l *slog.Logger) Option` | Logger is where the mailer logs; the default is slog.Default(). |
 | ↳ `func Sender(fn func(ctx context.Context, m *Message, raw []byte) error) Option` | Sender replaces the transport, Config.Transport and its settings included: fn gets each composed message — m as rendered, its Subject, Text and HTML filled from the template — and raw, its RFC 5322 text, ready for an HTTP API or a test to take. |
-| ↳ `func Templates(fsys fs.FS) Option` | Templates gives the mails their templates: in fsys, each {name}.html is an html/template, and {name}.txt, a text/template, is its optional plain-text version, sent with it as multipart/alternative. |
+| ↳ `func Templates(fsys fs.FS) Option` | Templates gives the mails their templates: in fsys, a template {name} is {name}.html, an html/template sent as text/html, {name}.txt, a text/template sent as text/plain, or both, sent as multipart/alternative. |
 | `type SMTPConfig struct{ ... }` | SMTPConfig is mail.smtp: the relay a transport smtp mail goes through, such as Resend's, Postmark's or Amazon SES's. |
 
 ## identity/google

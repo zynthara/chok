@@ -25,10 +25,11 @@
 //
 // # Templates
 //
-// With Templates, Message.Template names {name}.html (html/template) and
-// its optional {name}.txt (text/template): both go out together as
-// multipart/alternative. _*.html and _*.txt files are partials, and
-// {{define "subject"}} sets the subject.
+// With Templates, Message.Template names a template: {name}.html
+// (html/template, sent as text/html), {name}.txt (text/template, sent as
+// text/plain) or both, which go out together as multipart/alternative.
+// _*.html and _*.txt files are partials, and {{define "subject"}} sets
+// the subject.
 //
 // # Composition
 //
