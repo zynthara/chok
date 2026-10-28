@@ -160,7 +160,9 @@ func TestCount_FiltersAndSoftDelete(t *testing.T) {
 	if n, _ := s.Count(ctx); n != 3 {
 		t.Fatalf("after restore: %d", n)
 	}
-	if _, err := s.Count(ctx, where.Eq("nope", 1)); !errors.Is(err, where.ErrUnknownField) || !errors.Is(err, chok.ErrBadRequest) {
+	// A field the code names wrong is the code's bug: a 500, not a 400.
+	var coder chok.Coder
+	if _, err := s.Count(ctx, where.Eq("nope", 1)); !errors.Is(err, where.ErrUnknownField) || errors.As(err, &coder) {
 		t.Fatalf("unknown field: %v", err)
 	}
 }
@@ -334,11 +336,14 @@ func TestUpdate_RefusesEmptyAndUnknownChanges(t *testing.T) {
 			t.Fatalf("empty changes: %v", err)
 		}
 	}
-	for _, field := range []string{"version", "nope", "id"} {
+	for field, want := range map[string]string{"version": "managed column", "id": "managed column", "nope": `unknown field "nope"`} {
 		err := s.Update(ctx, store.RID(p.RID), store.Set(map[string]any{field: 9}))
 		var coder chok.Coder
-		if err == nil || !strings.Contains(err.Error(), "not an update field") || errors.As(err, &coder) {
+		if err == nil || !strings.Contains(err.Error(), want) || errors.As(err, &coder) {
 			t.Fatalf("Set %s is a programming error (500): %v", field, err)
+		}
+		if field == "nope" && !errors.Is(err, where.ErrUnknownField) {
+			t.Fatalf("Set %s: %v; want where.ErrUnknownField", field, err)
 		}
 	}
 	if got, _ := s.Get(ctx, store.RID(p.RID)); got.Version != 1 {

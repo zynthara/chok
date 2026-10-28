@@ -141,7 +141,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `type AggValue struct{ ... }` | AggValue is one aggregate of a Group. |
 | `type Aggregate struct{ ... }` | Aggregate is one value GroupBy computes per group. |
 | `type Changes struct{ ... }` | Changes is the set of columns an Update writes: from Patch(...).Onto, or from Set. |
-| ↳ `func Set(kv map[string]any) *Changes` | Set writes the given fields, named by their public names, with no optimistic lock unless the Update adds where.Version. |
+| ↳ `func Set(kv map[string]any) *Changes` | Set writes the given fields by public name: any column of the model but the managed ones (id, version, the timestamps, the owner, the soft-delete columns). |
 | `type DuplicateError struct{ ... }` | DuplicateError is a write that a unique constraint refused. |
 | `type EmptyChangesError struct{}` | EmptyChangesError is an update that changes nothing. |
 | `type Group[K comparable] struct{ ... }` | Group is one bucket of GroupBy: the key and the aggregates, in the order they were asked for. |

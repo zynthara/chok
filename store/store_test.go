@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -84,6 +85,15 @@ func titles(items []post) []string {
 	return out
 }
 
+func mustQuery(t *testing.T, raw string) url.Values {
+	t.Helper()
+	q, err := url.ParseQuery(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return q
+}
+
 func mustPanic(t *testing.T, want string, fn func()) {
 	t.Helper()
 	defer func() {
@@ -112,26 +122,33 @@ func TestNew_DeclaresFieldsFromTags(t *testing.T) {
 	if page, err := s.List(ctx, where.Eq("id", p.RID)); err != nil || len(page.Items) != 1 || page.Items[0].ID != p.ID {
 		t.Fatalf("filter on id: %+v %v", page, err)
 	}
-	// An update-only field is not a filter or an order, an untagged one
-	// is neither a filter nor an update field.
-	for name, opt := range map[string]where.Option{
-		"filter on update-only": where.Eq("body", "x"),
-		"order by update-only":  where.Order("body"),
-		"filter on untagged":    where.Eq("internal", "x"),
-	} {
-		if _, err := s.List(ctx, opt); !errors.Is(err, where.ErrUnknownField) {
-			t.Errorf("%s: %v", name, err)
+	// The tags fence the URL: an update-only or untagged field is not a
+	// filter or an order there, a 400.
+	for _, query := range []string{"body=x", "order=body", "internal=x"} {
+		if _, err := s.ListFromQuery(ctx, mustQuery(t, query)); !errors.Is(err, chok.ErrBadRequest) || !errors.Is(err, where.ErrUnknownField) {
+			t.Errorf("?%s: %v", query, err)
 		}
 	}
-	for _, field := range []string{"internal", "created_at", "id"} {
-		if err := s.Update(ctx, store.Where(where.Eq("title", "a")), store.Set(map[string]any{field: "x"})); err == nil || !strings.Contains(err.Error(), "not an update field") {
+	// The code is not fenced: it filters and orders on any column.
+	for name, opt := range map[string]where.Option{
+		"filter on update-only": where.Eq("body", ""),
+		"order by update-only":  where.Order("body"),
+		"filter on untagged":    where.Eq("internal", ""),
+	} {
+		if page, err := s.List(ctx, opt); err != nil || len(page.Items) != 2 {
+			t.Errorf("%s: %+v %v", name, page, err)
+		}
+	}
+	// Set writes any column but the managed ones.
+	for _, field := range []string{"created_at", "id", "version"} {
+		if err := s.Update(ctx, store.Where(where.Eq("title", "a")), store.Set(map[string]any{field: "x"})); err == nil || !strings.Contains(err.Error(), "managed column") {
 			t.Errorf("set %s: %v", field, err)
 		}
 	}
-	if err := s.Update(ctx, store.Where(where.Eq("title", "a")), store.Set(map[string]any{"body": "b"})); err != nil {
-		t.Fatalf("set an update field: %v", err)
+	if err := s.Update(ctx, store.Where(where.Eq("title", "a")), store.Set(map[string]any{"body": "b", "internal": "x"})); err != nil {
+		t.Fatalf("set an update field and an untagged one: %v", err)
 	}
-	if got, _ := s.Get(ctx, store.RID(p.RID)); got.Body != "b" || got.Internal != "" {
+	if got, _ := s.Get(ctx, store.RID(p.RID)); got.Body != "b" || got.Internal != "x" {
 		t.Fatalf("stored %+v", got)
 	}
 }

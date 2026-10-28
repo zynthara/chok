@@ -114,6 +114,17 @@ func (e *MissingConditionsError) Error() string {
 // APIError is a 500: the request is fine, the code is not.
 func (e *MissingConditionsError) APIError() *chok.Error { return chok.ErrInternal.Wrap(e) }
 
+// codeError is queryError for the options and field names the code
+// passed: an unknown field there is a programming error, a 500 whose log
+// names the model and the field and whose response names neither. It
+// still matches where.ErrUnknownField.
+func (s *Store[T]) codeError(err error) error {
+	if errors.Is(err, where.ErrUnknownField) {
+		return fmt.Errorf("store: %s: %w", s.schema.Name, err)
+	}
+	return queryError(err)
+}
+
 // queryError turns a malformed query option into a 400; anything else
 // passes through.
 func queryError(err error) error {

@@ -226,4 +226,15 @@ func TestQueryError_Classification(t *testing.T) {
 	if queryError(other) != other || queryError(nil) != nil {
 		t.Fatal("other errors pass through")
 	}
+	// An unknown field the code named is the code's bug: no Coder, so a
+	// 500 whose log names the model and the field.
+	s := fencedStore(t)
+	out := s.codeError(fmt.Errorf("%w %q", where.ErrUnknownField, "nope"))
+	var coder chok.Coder
+	if errors.As(out, &coder) || !errors.Is(out, where.ErrUnknownField) || !strings.Contains(out.Error(), `fenced: where: unknown field "nope"`) {
+		t.Errorf("code's unknown field → %#v", out)
+	}
+	if e, ok := errors.AsType[*chok.Error](s.codeError(fmt.Errorf("%w: page 0", where.ErrInvalidParam))); !ok || e.Code != 400 {
+		t.Errorf("code's invalid parameter → %#v", e)
+	}
 }

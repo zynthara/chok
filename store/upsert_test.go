@@ -36,7 +36,8 @@ func manyItems(n int) []*batchItem {
 }
 
 // TestUpsert_ValidationPrecedesHooks: a conflict target that is not a
-// distinct query field fails before any hook runs or any row is written.
+// distinct column fails before any hook runs or any row is written; an
+// unknown field is the code's where.ErrUnknownField.
 func TestUpsert_ValidationPrecedesHooks(t *testing.T) {
 	hooks := 0
 	s := batchItems(t, store.Hooks(store.HookSet[batchItem]{
@@ -44,13 +45,14 @@ func TestUpsert_ValidationPrecedesHooks(t *testing.T) {
 	}))
 	ctx := t.Context()
 	for name, call := range map[string]func() error{
-		"unknown field":      func() error { return s.Upsert(ctx, &batchItem{Code: "x", Alt: "x"}, "nope") },
-		"repeated field":     func() error { return s.Upsert(ctx, &batchItem{Code: "x", Alt: "x"}, "code", "code") },
-		"batch, bad target":  func() error { return s.BatchUpsert(ctx, manyItems(3), "nope") },
-		"batch, repeated":    func() error { return s.BatchUpsert(ctx, manyItems(3), "alt", "alt") },
-		"batch, update-only": func() error { return s.BatchUpsert(ctx, manyItems(3), "version") },
+		"unknown field":     func() error { return s.Upsert(ctx, &batchItem{Code: "x", Alt: "x"}, "nope") },
+		"repeated field":    func() error { return s.Upsert(ctx, &batchItem{Code: "x", Alt: "x"}, "code", "code") },
+		"batch, bad target": func() error { return s.BatchUpsert(ctx, manyItems(3), "nope") },
+		"batch, repeated":   func() error { return s.BatchUpsert(ctx, manyItems(3), "alt", "alt") },
 	} {
-		if err := call(); err == nil || !strings.Contains(err.Error(), "conflict field") {
+		err := call()
+		unknown := strings.Contains(name, "unknown") || strings.Contains(name, "bad target")
+		if err == nil || unknown != errors.Is(err, where.ErrUnknownField) || (!unknown && !strings.Contains(err.Error(), "repeats column")) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}

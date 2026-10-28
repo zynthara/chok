@@ -250,15 +250,15 @@ func TestChanges_DefendManagedColumns(t *testing.T) {
 	}
 	d := dbtest.Open(t, db.Tables(db.Table(&row{})))
 	s := New[row](d)
-	s.updateFields["title"] = "version" // as a regression might
-	if _, err := Set(map[string]any{"title": 9}).build(t.Context(), s.updateFields, s.schema); err == nil || !strings.Contains(err.Error(), "managed column") {
+	s.columns["title"] = "version" // as a regression might
+	if _, err := Set(map[string]any{"title": 9}).build(t.Context(), s.updateFields, s.columns, s.schema); err == nil || !strings.Contains(err.Error(), "managed column") {
 		t.Fatalf("Set: %v", err)
 	}
 	s.updateFields["title"] = "owner_id"
 	req := &struct {
 		Title *string `json:"title"`
 	}{new("mallory")}
-	if _, err := Patch(req).Onto(nil).build(t.Context(), s.updateFields, s.schema); err == nil || !strings.Contains(err.Error(), "managed column") {
+	if _, err := Patch(req).Onto(nil).build(t.Context(), s.updateFields, s.columns, s.schema); err == nil || !strings.Contains(err.Error(), "managed column") {
 		t.Fatalf("Patch: %v", err)
 	}
 }

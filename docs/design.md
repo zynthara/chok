@@ -261,9 +261,19 @@ MySQL 的 DDL 隐式提交，所以 MySQL 上一条语句一条语句地执行�
 `store.New[T](d, opts...)` 校验模型（必须有 `store` tag、字段名拼写、
 SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
 
-- **字段只认 tag**：`store:"query"`（可过滤、排序）、`store:"update"`（可被
-  Patch 写）、`store:"query,update"`；基座的 `id` / `created_at` /
-  `updated_at` 默认可查询。没有 tag 的模型在 New 时 panic，并提示怎么写。
+- **tag 管客户端，不管代码**：`store:"query"` 只管 URL——`ListFromQuery` /
+  `chok.List` 的过滤与排序、`QueryFields()`、OpenAPI 的过滤参数；
+  `store:"update"` 只管 Patch；基座的 `id` / `created_at` / `updated_at` 默认
+  可查询。没有 tag 的模型在 New 时 panic，并提示怎么写。代码路径——where 选项、
+  `store.Where`、聚合与投影、`ListIn`、Upsert 的冲突字段、`where.Order`、
+  `store.Set`——按公开名接受模型的每一列：公开名是 JSON 名，没有 JSON 名、
+  `json:"-"` 或字段在具名结构体里时用列名；`id` 永远是 RID，数字主键不能按名字
+  寻址（用 `store.ID` / `PluckIDs`）。托管列（version、时间戳、owner_id、软删
+  两列）可以出现在读条件里，`Set` 与 Patch 仍然不写它们。两个字段同名不同列，
+  New panic。URL 里的未知字段是 400，并列出可用字段；代码里的未知字段是程序
+  错误，500，日志里有模型名与字段、响应里没有，`errors.Is(err,
+  where.ErrUnknownField)` 照样成立。所以把客户端给的字段名交给 `where.*` 之前，
+  先用 `QueryFields()` 核对。
 - **owner 隔离，失败关闭**：嵌入 Owned 基座就自动启用；principal 从
   `chok.PrincipalFrom(ctx)` 读。没有 principal：读返回空、写返回
   `NoPrincipalError`（401）。admin 角色由 `db.store.admin_roles` /
@@ -287,8 +297,8 @@ SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
   `EmptyChangesError`（400）、`NoPrincipalError`（401）、`MissingConditionsError`
   （500，程序错误）。都实现 `chok.Coder`，`errors.Is` 对应 `chok.Err*`。
 
-`store/where` 是查询 DSL：字段名一律是模型的公开名，由 store 映射到列，未声明
-的字段 400。`Contains` / `StartsWith` / `EndsWith` 是字面匹配（转义字符 `!`，
+`store/where` 是查询 DSL：字段名一律是模型的公开名，由 store 映射到列，未知
+字段按来源分 400 与 500（见上）。`Contains` / `StartsWith` / `EndsWith` 是字面匹配（转义字符 `!`，
 因为反斜杠会被 MySQL 吞掉）；`In` 至多 500 个值；`Preload` 对带 Owned 基座的
 关联按本 store 的策略用关联表自己的 owner_id 围栏。标识符不加引号，所以模型的
 列名要避开 MySQL 保留字（`key`、`order`、`group`……）。

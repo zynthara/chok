@@ -20,8 +20,8 @@ import (
 	"github.com/zynthara/chok/v3/store/where"
 )
 
-// Aggregates and projections read like Count: query fields only, the
-// scopes and soft delete apply, and the filters narrow the rows. Results
+// Aggregates and projections read like Count: any column of the model,
+// the scopes and soft delete apply, and the filters narrow the rows. Results
 // converge on the Go type asked for, whatever the dialect returns: Sum as
 // int64 is exact and fails past the int64 range rather than wrapping, Avg
 // is always float64, and time columns compare by instant (on SQLite
@@ -226,9 +226,9 @@ func (s *Store[T]) GroupBy[K comparable](ctx context.Context, field string, aggs
 // order. Unlike List it takes every row unless where.Limit or where.Page
 // says otherwise.
 func (s *Store[T]) Pluck[F any](ctx context.Context, field string, opts ...where.Option) ([]F, error) {
-	col, err := q.Column(s.queryFields, field)
+	col, err := q.Column(s.columns, field)
 	if err != nil {
-		return nil, queryError(err)
+		return nil, s.codeError(err)
 	}
 	return pluck[F](ctx, s, s.qualify(col), opts)
 }
@@ -371,9 +371,9 @@ func single[N Scalar, T db.Modeler](ctx context.Context, s *Store[T], fn, field 
 // Go type; the column type the model declares only refuses what would
 // compute wrongly — JSON, or text under a number or a time.
 func (s *Store[T]) aggField(fn, field string) (string, fieldSpec, error) {
-	col, err := q.Column(s.queryFields, field)
+	col, err := q.Column(s.columns, field)
 	if err != nil {
-		return "", fieldSpec{}, queryError(err)
+		return "", fieldSpec{}, s.codeError(err)
 	}
 	if table, _, qualified := strings.Cut(col, "."); qualified && table != s.table() {
 		return "", fieldSpec{}, fmt.Errorf("store: %s: %s is column %q of another table; aggregates read the store's own table %s", fn, field, col, s.table())

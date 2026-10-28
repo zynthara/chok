@@ -36,9 +36,9 @@ func (s *Store[T]) apply(ctx context.Context, tx *gorm.DB, cfg *where.Config, op
 		if o == nil {
 			continue
 		}
-		next, err := o(tx, cfg, s.queryFields)
+		next, err := o(tx, cfg, s.columns)
 		if err != nil {
-			return nil, queryError(err)
+			return nil, s.codeError(err)
 		}
 		if next == nil {
 			return nil, errors.New("store: a where.Option returned a nil *gorm.DB")
@@ -160,7 +160,7 @@ func (s *Store[T]) get(ctx context.Context, loc Locator, opts []where.Option, lo
 		return nil, errors.New("store: GetForUpdate cannot preload: the association queries would run outside the lock")
 	}
 	if tx, err = loc.apply(s, tx); err != nil {
-		return nil, queryError(err)
+		return nil, s.codeError(err)
 	}
 	if lock && s.dialect != "sqlite" {
 		tx = tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate})
@@ -190,7 +190,7 @@ func (s *Store[T]) Exists(ctx context.Context, loc Locator) (bool, error) {
 func (s *Store[T]) exists(tx *gorm.DB, loc Locator) (bool, error) {
 	tx, err := loc.apply(s, tx)
 	if err != nil {
-		return false, queryError(err)
+		return false, s.codeError(err)
 	}
 	var one int
 	res := tx.Select("1").Limit(1).Scan(&one)

@@ -66,4 +66,4 @@ func (w whereLocator) apply(s locatorTarget, tx *gorm.DB) (*gorm.DB, error) {
 func (w whereLocator) String() string { return fmt.Sprintf("where (%d conditions)", len(w)) }
 
 func (s *Store[T]) table() string             { return s.schema.Table }
-func (s *Store[T]) fields() map[string]string { return s.queryFields }
+func (s *Store[T]) fields() map[string]string { return s.columns }

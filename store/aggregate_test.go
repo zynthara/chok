@@ -113,8 +113,12 @@ func TestAggregate_KindGates(t *testing.T) {
 			t.Errorf("%s: want a plain error, got %v", name, err)
 		}
 	}
-	if _, _, err := s.Sum[int64](ctx, "body"); !errors.Is(err, where.ErrUnknownField) {
-		t.Fatalf("an update-only field: %v", err)
+	var coder chok.Coder
+	if _, _, err := s.Sum[int64](ctx, "nope"); !errors.Is(err, where.ErrUnknownField) || errors.As(err, &coder) {
+		t.Fatalf("an unknown field is the code's bug (500): %v", err)
+	}
+	if n, ok, err := s.Max[int64](ctx, "version"); err != nil || !ok || n < 1 {
+		t.Fatalf("a column without a store tag aggregates: %d %v %v", n, ok, err)
 	}
 }
 
@@ -286,8 +290,12 @@ func TestPluck(t *testing.T) {
 	if err != nil || none == nil || len(none) != 0 {
 		t.Fatalf("empty %#v %v", none, err)
 	}
-	if _, err := s.Pluck[string](ctx, "body"); !errors.Is(err, chok.ErrBadRequest) {
-		t.Fatalf("undeclared field: %v", err)
+	var coder chok.Coder
+	if _, err := s.Pluck[string](ctx, "nope"); !errors.Is(err, where.ErrUnknownField) || errors.As(err, &coder) {
+		t.Fatalf("unknown field: %v", err)
+	}
+	if bodies, err := s.Pluck[string](ctx, "body", where.Eq("title", "zzz")); err != nil || len(bodies) != 0 {
+		t.Fatalf("an update-only field plucks: %v %v", bodies, err)
 	}
 	// Pluck takes every row, not a page: a projection for server code is
 	// not clamped by the policy's page sizes, which guard client lists.
@@ -366,15 +374,24 @@ func TestListIn(t *testing.T) {
 		t.Fatalf("by id, one deleted, one missing: %+v %v", byID, err)
 	}
 	for name, err := range map[string]error{
-		"order":               errOf(s.ListIn(ctx, "title", []string{"t0001"}, where.Order("title"))),
-		"page":                errOf(s.ListIn(ctx, "title", []string{"t0001"}, where.Page(1, 1))),
-		"count":               errOf(s.ListIn(ctx, "title", []string{"t0001"}, where.Count())),
+		"order":        errOf(s.ListIn(ctx, "title", []string{"t0001"}, where.Order("title"))),
+		"page":         errOf(s.ListIn(ctx, "title", []string{"t0001"}, where.Page(1, 1))),
+		"count":        errOf(s.ListIn(ctx, "title", []string{"t0001"}, where.Count())),
+		"empty, order": errOf(s.ListIn(ctx, "title", []string{}, where.Order("title"))),
+	} {
+		if !errors.Is(err, chok.ErrBadRequest) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// A field the code names wrong is its bug: a 500 that still matches
+	// where.ErrUnknownField.
+	for name, err := range map[string]error{
 		"unknown field":       errOf(s.ListIn(ctx, "nope", []string{"x"})),
-		"empty, order":        errOf(s.ListIn(ctx, "title", []string{}, where.Order("title"))),
 		"empty, unknown":      errOf(s.ListIn(ctx, "nope", []string{})),
 		"unknown extra field": errOf(s.ListIn(ctx, "title", []string{"t0001"}, where.Eq("nope", 1))),
 	} {
-		if !errors.Is(err, chok.ErrBadRequest) {
+		var coder chok.Coder
+		if !errors.Is(err, where.ErrUnknownField) || errors.As(err, &coder) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}

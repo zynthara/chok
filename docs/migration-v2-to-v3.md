@@ -302,7 +302,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | v2 | v3 |
 |---|---|
 | `store.New[T](h, logger, opts...)` | `store.New[T](d, opts...)` |
-| `store.WithQueryFields(...)` / `WithUpdateFields(...)` / `WithAllQueryFields` / `WithAllUpdateFields`、按 JSON tag 自动发现 | 模型字段上的 `store:"query"` / `store:"update"` / `store:"query,update"`；没有任何 tag 的模型在 New 时 panic |
+| `store.WithQueryFields(...)` / `WithUpdateFields(...)` / `WithAllQueryFields` / `WithAllUpdateFields`、按 JSON tag 自动发现 | 模型字段上的 `store:"query"`（URL 的过滤与排序）/ `store:"update"`（Patch）/ `store:"query,update"`；没有任何 tag 的模型在 New 时 panic。代码里的 where 选项、聚合、`Pluck`、`ListIn`、Upsert 冲突字段与 `store.Set` 不受 tag 限制，接受模型的每一列；代码里的未知字段是 500（同 v2），URL 里的是 400 |
 | `WithRequirePrincipal` / `WithoutRequirePrincipal` / `WithAdminRoles` / `WithDefaultPageSize` / `WithMaxPageSize` / `WithoutOwnerScope` | `db.store.*` 配置，或 `store.Policy(db.StorePolicy{…})` |
 | `store.SetDefaultAdminRoles(...)` | 删除：`db.store.admin_roles` |
 | `WithScope(fn)`、`OwnerScope(...)` | `store.Scope(fn)`；owner scope 由 Owned 基座自动启用 |

@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm/schema"
 
 	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/v3/store/internal/q"
 )
 
 // Changes is the set of columns an Update writes: from Patch(...).Onto, or
@@ -21,9 +22,11 @@ type Changes struct {
 	patch *PatchBuilder
 }
 
-// Set writes the given fields, named by their public names, with no
-// optimistic lock unless the Update adds where.Version. It is the escape
-// hatch; a request DTO goes through Patch.
+// Set writes the given fields by public name: any column of the model
+// but the managed ones (id, version, the timestamps, the owner, the
+// soft-delete columns). It locks on no version unless the Update adds
+// where.Version. It is the code's own write; a request DTO goes through
+// Patch, which writes only store:"update" fields.
 func Set(kv map[string]any) *Changes { return &Changes{set: kv} }
 
 // PatchBuilder is a partial update read from a request: Onto turns it
@@ -98,25 +101,27 @@ type built struct {
 	model   *db.Model      // the object Onto named, whose Version advances
 }
 
-func (c *Changes) build(ctx context.Context, fields map[string]string, sch *schema.Schema) (built, error) {
+// build resolves the changes: a patch against the update fields, Set
+// against every column.
+func (c *Changes) build(ctx context.Context, update, columns map[string]string, sch *schema.Schema) (built, error) {
 	if c == nil {
 		return built{}, &EmptyChangesError{}
 	}
 	if c.patch == nil {
-		return buildSet(c.set, fields)
+		return buildSet(c.set, columns, sch)
 	}
-	return c.patch.build(ctx, fields, sch)
+	return c.patch.build(ctx, update, sch)
 }
 
-func buildSet(kv map[string]any, fields map[string]string) (built, error) {
+func buildSet(kv map[string]any, columns map[string]string, sch *schema.Schema) (built, error) {
 	if len(kv) == 0 {
 		return built{}, &EmptyChangesError{}
 	}
 	b := built{payload: map[string]any{}, fields: map[string]any{}}
 	for name, v := range kv {
-		col, ok := fields[name]
-		if !ok {
-			return built{}, fmt.Errorf("store: Set: %q is not an update field of this store (declare it with store:\"update\")", name)
+		col, err := q.Column(columns, name)
+		if err != nil {
+			return built{}, fmt.Errorf("store: Set: %s: %w", sch.Name, err)
 		}
 		if protectedColumns[col] {
 			return built{}, fmt.Errorf("store: Set: %q writes the managed column %q", name, col)

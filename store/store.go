@@ -9,11 +9,24 @@
 //
 // # Fields
 //
-// A model declares what the API may touch with store tags:
-// store:"query" (filter and order), store:"update" (Patch and Set) or
-// both. id, created_at and updated_at are always queryable. A model with
-// no store tag at all is refused by New: the whitelist is never implicit.
-// Field names are the JSON names; Alias maps one to another column.
+// A field is named by its public name: its JSON name, or its column when
+// the model's JSON has no name for it (json:"-", or a field inside a
+// named struct). id is the RID; the numeric key has no name (store.ID,
+// PluckIDs).
+//
+// The store tags say what a client may touch: store:"query" is what a
+// URL filters and orders on (ListFromQuery and chok.List, QueryFields,
+// the OpenAPI filters), store:"update" what Patch writes from a request.
+// id, created_at and updated_at are always queryable. A model with no
+// store tag at all is refused by New: the whitelist is never implicit.
+//
+// The code is not fenced by the tags: where options, store.Where,
+// aggregates, Pluck, ListIn, Upsert's conflict fields and Set take every
+// column of the model, the managed ones too (Set and Patch never write
+// those). A field name that the code got from a client must be checked
+// against QueryFields first; an unknown name in code is a programming
+// error, a 500 that still matches where.ErrUnknownField. Alias maps a
+// field to another column.
 //
 // # Owner scope
 //
@@ -52,8 +65,9 @@ import (
 type Store[T db.Modeler] struct {
 	d            *db.DB
 	schema       *schema.Schema
-	queryFields  map[string]string // public name → column, for filters and order
-	updateFields map[string]string // public name → column, for Patch and Set
+	queryFields  map[string]string // public name → column: what a URL filters and orders on
+	updateFields map[string]string // public name → column: what Patch writes
+	columns      map[string]string // public name → column: every column, for the code
 	constraints  map[string]string // constraint or index name → public field
 	soft         bool
 	owned        bool
@@ -161,21 +175,18 @@ func New[T db.Modeler](d *db.DB, opts ...Option) *Store[T] {
 		panic(fmt.Sprintf("store.New: parse %s: %v", t.Name(), err))
 	}
 	s := &Store[T]{d: d, schema: stmt.Schema, dialect: stmt.Name()}
-	s.queryFields, s.updateFields = declaredFields(t, stmt.Schema)
+	s.queryFields, s.updateFields, s.columns = declaredFields(t, stmt.Schema)
 	for field, col := range cfg.aliases {
-		_, inQuery := s.queryFields[field]
-		_, inUpdate := s.updateFields[field]
-		if !inQuery && !inUpdate {
+		if _, ok := s.columns[field]; !ok {
 			panic(fmt.Sprintf("store.New: Alias(%q, %q): %s declares no field %q", field, col, t.Name(), field))
 		}
 		if !q.SafeIdent(col) {
 			panic(fmt.Sprintf("store.New: Alias(%q, %q): not a plain column name", field, col))
 		}
-		if inQuery {
-			s.queryFields[field] = col
-		}
-		if inUpdate {
-			s.updateFields[field] = col
+		for _, m := range []map[string]string{s.queryFields, s.updateFields, s.columns} {
+			if _, ok := m[field]; ok {
+				m[field] = col
+			}
 		}
 	}
 	for field, col := range s.updateFields {
@@ -257,18 +268,24 @@ var protectedColumns = map[string]bool{
 	"deleted_at": true, "delete_token": true, "owner_id": true,
 }
 
-// declaredFields reads the store tags. id (the RID), created_at and
-// updated_at are queryable on every model.
-func declaredFields(t reflect.Type, s *schema.Schema) (query, update map[string]string) {
-	query, update = map[string]string{}, map[string]string{}
+// declaredFields reads the model's columns by public name, and the store
+// tags' subsets of them. id is the RID: the numeric key has no name.
+// created_at and updated_at join id among the query fields of every
+// model.
+func declaredFields(t reflect.Type, s *schema.Schema) (query, update, columns map[string]string) {
+	query, update, columns = map[string]string{}, map[string]string{}, map[string]string{}
 	tagged := false
 	for _, f := range s.Fields {
+		if f.DBName == "" || f.DBName == "id" {
+			continue
+		}
+		name := publicName(t, f)
+		addField(t, columns, name, f)
 		tag, ok := f.StructField.Tag.Lookup("store")
-		if !ok || f.DBName == "" {
+		if !ok {
 			continue
 		}
 		tagged = true
-		name := publicName(f)
 		for part := range strings.SplitSeq(tag, ",") {
 			switch strings.TrimSpace(part) {
 			case "query":
@@ -285,14 +302,14 @@ func declaredFields(t reflect.Type, s *schema.Schema) (query, update map[string]
 			"\tTitle string `json:\"title\" store:\"query,update\"`\n"+
 			"id, created_at and updated_at are always queryable.", t.Name()))
 	}
-	for name, goName := range map[string]string{"id": "RID", "created_at": "CreatedAt", "updated_at": "UpdatedAt"} {
-		if _, set := query[name]; !set {
-			if f := s.LookUpField(goName); f != nil && f.DBName != "" {
-				query[name] = f.DBName
+	for _, name := range []string{"id", "created_at", "updated_at"} {
+		if col, ok := columns[name]; ok {
+			if _, set := query[name]; !set {
+				query[name] = col
 			}
 		}
 	}
-	return query, update
+	return query, update, columns
 }
 
 func addField(t reflect.Type, m map[string]string, name string, f *schema.Field) {
@@ -302,13 +319,43 @@ func addField(t reflect.Type, m map[string]string, name string, f *schema.Field)
 	m[name] = f.DBName
 }
 
-// publicName is a field's JSON name, or its column without one.
-func publicName(f *schema.Field) string {
+// publicName is the name the model's JSON gives a field: its JSON name
+// when the field shows at the top level, else its column — for
+// json:"-", no JSON name, or a field inside a named struct.
+func publicName(t reflect.Type, f *schema.Field) string {
+	if !promoted(t, f.BindNames) {
+		return f.DBName
+	}
 	name, _, _ := strings.Cut(f.StructField.Tag.Get("json"), ",")
 	if name == "" || name == "-" {
 		return f.DBName
 	}
 	return name
+}
+
+// promoted reports whether each struct on the path to a field embeds
+// into the JSON of the model, as encoding/json/v2 has it: Go embedding
+// without a JSON name, or the embed option.
+func promoted(t reflect.Type, path []string) bool {
+	for _, name := range path[:max(len(path)-1, 0)] {
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if t.Kind() != reflect.Struct {
+			return false
+		}
+		sf, ok := t.FieldByName(name)
+		if !ok {
+			return false
+		}
+		jname, opts, _ := strings.Cut(sf.Tag.Get("json"), ",")
+		embedded := sf.Anonymous && jname == ""
+		if !embedded && !slices.Contains(strings.Split(opts, ","), "embed") {
+			return false
+		}
+		t = sf.Type
+	}
+	return true
 }
 
 // fieldOfColumns names the field a unique index guards: its first column
@@ -328,15 +375,21 @@ func (s *Store[T]) fieldOfColumns(cols []string) string {
 				return name
 			}
 		}
+		for name, col := range s.columns {
+			if col == c {
+				return name
+			}
+		}
 		if f := s.schema.LookUpField(c); f != nil {
-			return publicName(f)
+			return publicName(s.schema.ModelType, f)
 		}
 		return c
 	}
 	return ""
 }
 
-// QueryFields lists the fields List and ListFromQuery filter and order on.
+// QueryFields lists the fields a URL filters and orders on: those
+// ListFromQuery and chok.List accept, and the OpenAPI document lists.
 func (s *Store[T]) QueryFields() []string {
 	names := make([]string, 0, len(s.queryFields))
 	for n := range s.queryFields {

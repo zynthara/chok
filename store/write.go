@@ -79,7 +79,7 @@ func (s *Store[T]) write(ctx context.Context, loc Locator, opts []where.Option) 
 		return nil, nil, err
 	}
 	if tx, err = loc.apply(s, tx); err != nil {
-		return nil, nil, queryError(err)
+		return nil, nil, s.codeError(err)
 	}
 	return tx, cfg, nil
 }
@@ -91,7 +91,7 @@ func (s *Store[T]) write(ctx context.Context, loc Locator, opts []where.Option) 
 // updated_at, ready to return. A row the caller may not see is a
 // NotFoundError.
 func (s *Store[T]) Update(ctx context.Context, loc Locator, ch *Changes, opts ...where.Option) error {
-	b, err := ch.build(ctx, s.updateFields, s.schema)
+	b, err := ch.build(ctx, s.updateFields, s.columns, s.schema)
 	if err != nil {
 		return err
 	}
@@ -296,9 +296,12 @@ func (s *Store[T]) conflictTarget(fields []string) ([]string, error) {
 	}
 	cols := make([]string, 0, len(fields)+1)
 	for _, f := range fields {
-		col, err := q.Column(s.queryFields, f)
-		if err != nil || slices.Contains(cols, col) {
-			return nil, fmt.Errorf("store: Upsert: conflict field %q is not a distinct query field of %s", f, s.schema.Name)
+		col, err := q.Column(s.columns, f)
+		if err != nil {
+			return nil, fmt.Errorf("store: Upsert: %s: conflict %w", s.schema.Name, err)
+		}
+		if slices.Contains(cols, col) {
+			return nil, fmt.Errorf("store: Upsert: %s: conflict field %q repeats column %q", s.schema.Name, f, col)
 		}
 		cols = append(cols, col)
 	}

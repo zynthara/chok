@@ -29,7 +29,9 @@ const (
 var (
 	// ErrInvalidParam reports a bad page, size, order or cursor.
 	ErrInvalidParam = errors.New("where: invalid parameter")
-	// ErrUnknownField reports a field the store does not expose for queries.
+	// ErrUnknownField reports a field name the store does not know: in a
+	// URL, one without store:"query" (a 400); in the code, one that is no
+	// column of the model (a 500).
 	ErrUnknownField = q.ErrUnknownField
 )
 
