@@ -146,6 +146,15 @@ func New(idn *identity.Identity, d *db.DB, opts ...Option) (*RBAC, error) {
 	return r, nil
 }
 
+// MustNew is New that panics on error.
+func MustNew(idn *identity.Identity, d *db.DB, opts ...Option) *RBAC {
+	r, err := New(idn, d, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 // Policy manages the roles and permissions.
 func (r *RBAC) Policy() *PolicyService { return r.policy }
 

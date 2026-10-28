@@ -2,6 +2,7 @@ package rbac_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -210,6 +211,27 @@ func TestNew_RefusesNil(t *testing.T) {
 	idn, _, _ := setup(t, identity.Config{})
 	if _, err := rbac.New(idn, nil); err == nil {
 		t.Fatal("nil database")
+	}
+}
+
+// TestMustNew_PanicsOnError: MustNew is New that panics, as the other
+// batteries' are.
+func TestMustNew_PanicsOnError(t *testing.T) {
+	d := dbtest.Open(t)
+	func() {
+		defer func() {
+			if p := recover(); p == nil || !strings.Contains(fmt.Sprint(p), "rbac: New needs the Identity and the database") {
+				t.Fatalf("recovered %v", p)
+			}
+		}()
+		rbac.MustNew(nil, d)
+	}()
+	idn := identity.MustNew(identity.Config{SigningKey: key}, d)
+	t.Cleanup(func() { _ = idn.Close(context.Background()) })
+	rb := rbac.MustNew(idn, d)
+	t.Cleanup(func() { _ = rb.Close(context.Background()) })
+	if rb.Name() != "rbac" {
+		t.Fatalf("MustNew = %v", rb)
 	}
 }
 
