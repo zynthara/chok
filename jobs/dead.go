@@ -22,14 +22,16 @@ const deadChunk = 500
 
 // Dead returns the messages parked in the dead letters under topic, or
 // under every topic for "", the longest parked first: at most limit of
-// them, 1 to 1000, or 100 for 0. It reads only the database, so it works
-// in a process whose Config.Enabled is false.
+// them, 1 to 1000, or 100 for 0. Any other limit fails the call: a
+// handler that passes a client's limit on and returns that error answers
+// 400. It reads only the database, so it works in a process whose
+// Config.Enabled is false.
 func (j *Jobs) Dead(ctx context.Context, topic string, limit int) ([]DeadMessage, error) {
 	switch {
 	case limit == 0:
 		limit = defaultDeadLimit
 	case limit < 0 || limit > maxDeadLimit:
-		return nil, fmt.Errorf("jobs: Dead: limit must be between 1 and %d (0 takes %d), got %d", maxDeadLimit, defaultDeadLimit, limit)
+		return nil, limitError(limit)
 	}
 	q := j.core.d.Unsafe(ctx).Order("parked_at").Order("id").Limit(limit)
 	if topic != "" {
@@ -123,6 +125,22 @@ func (j *Jobs) takeDead(ctx context.Context, op string, ids []uint64, then func(
 		}
 		return then(txCtx, rows)
 	})
+}
+
+// limitError is a limit Dead does not take. It answers 400.
+type limitError int
+
+func (e limitError) Error() string {
+	return "jobs: Dead: " + e.reason()
+}
+
+// APIError is the 400.
+func (e limitError) APIError() *chok.Error {
+	return chok.ErrBadRequest.Msgf("%s", e.reason()).Wrap(e)
+}
+
+func (e limitError) reason() string {
+	return fmt.Sprintf("limit must be between 1 and %d (0 takes %d), got %d", maxDeadLimit, defaultDeadLimit, int(e))
 }
 
 // notParkedError names the ids Requeue or Discard found no parked message

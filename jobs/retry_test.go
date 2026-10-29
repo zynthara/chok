@@ -355,18 +355,21 @@ func TestDeadLetters_RequeueAndDiscard(t *testing.T) {
 	if one, err := admin.Dead(ctx, "", 1); err != nil || len(one) != 1 || one[0].ID != dead[0].ID {
 		t.Fatalf("Dead with limit 1: %+v, %v", one, err)
 	}
+	answers := func(err error, code int) bool {
+		c, ok := errors.AsType[interface {
+			error
+			chok.Coder
+		}](err)
+		return ok && c.APIError().Code == code
+	}
 	for _, limit := range []int{-1, 1001} {
-		if _, err := admin.Dead(ctx, "", limit); err == nil || !strings.Contains(err.Error(), "limit") {
+		if _, err := admin.Dead(ctx, "", limit); !answers(err, 400) || !strings.Contains(err.Error(), "jobs: Dead: limit") {
 			t.Fatalf("Dead with limit %d: %v", limit, err)
 		}
 	}
 	a, b := dead[0], dead[1]
 	is404 := func(err error, id uint64) bool {
-		c, ok := errors.AsType[interface {
-			error
-			chok.Coder
-		}](err)
-		return ok && c.APIError().Code == 404 && strings.Contains(err.Error(), fmt.Sprint(id))
+		return answers(err, 404) && strings.Contains(err.Error(), fmt.Sprint(id))
 	}
 
 	if err := admin.Requeue(ctx, a.ID, 4242); !is404(err, 4242) || strings.Contains(err.Error(), fmt.Sprint(a.ID)+",") {
