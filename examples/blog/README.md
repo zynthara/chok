@@ -72,8 +72,11 @@ curl -s localhost:8080/openapi.json
 curl -s localhost:8080/metrics | grep -E '^(http_server_request|db_client_operation)_duration_seconds_count'
 ```
 
-Stop the server with Ctrl-C: `/readyz` turns 503, in-flight requests
-drain, components close in reverse order and the process exits 0.
+Stop the server with Ctrl-C. Since `/healthz` has been requested, it
+and `/readyz` first answer 503 for `http.drain_delay` (5s by default),
+the pause a load balancer needs to move traffic away, and the log says
+so; a second Ctrl-C ends it. Then in-flight requests finish, components
+close in reverse order and the process exits 0.
 `go run . --check-config` validates the configuration and prints it with
 secrets masked, without starting anything.
 

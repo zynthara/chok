@@ -255,23 +255,39 @@ func TestStop_FastStopCapsBudget(t *testing.T) {
 	})
 }
 
-func TestStop_DrainDelayHoldsReadyz503(t *testing.T) {
+// TestStop_DrainDelayHolds503: through http.drain_delay /readyz and the
+// health endpoint answer 503; the health report says down and lists no
+// component, as the checks are not run.
+func TestStop_DrainDelayHolds503(t *testing.T) {
 	base := testBase(t)
 	base.HTTP.Enabled = true
 	base.HTTP.Addr = "127.0.0.1:0"
-	base.HTTP.DrainDelay = 300 * time.Millisecond
+	base.HTTP.DrainDelay = 500 * time.Millisecond
 	app := New(base, Logger(quiet()))
+	app.Use(&recorder{name: "db", log: &eventLog{}})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runAsync(app, ctx)
 	waitFor(t, app.ready.Load, "ready")
-	url := "http://" + app.Addr() + "/readyz"
-	if code := get(t, url); code != http.StatusOK {
-		t.Fatalf("readyz while running = %d", code)
+	root := "http://" + app.Addr()
+	for _, path := range []string{"/readyz", "/healthz"} {
+		if code := get(t, root+path); code != http.StatusOK {
+			t.Fatalf("%s while running = %d", path, code)
+		}
 	}
 	cancel()
 	waitFor(t, app.draining.Load, "draining")
-	if code := get(t, url); code != http.StatusServiceUnavailable {
+	if code := get(t, root+"/readyz"); code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz during the drain delay = %d, want 503", code)
+	}
+	resp, err := http.Get(root + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report healthReport
+	err = json.UnmarshalRead(resp.Body, &report)
+	_ = resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusServiceUnavailable || report.Status != statusDown || len(report.Components) != 0 {
+		t.Fatalf("healthz during the drain delay = %d %+v (%v), want 503, down and no component", resp.StatusCode, report, err)
 	}
 	if err := await(t, done); err != nil {
 		t.Fatal(err)
@@ -279,32 +295,44 @@ func TestStop_DrainDelayHoldsReadyz503(t *testing.T) {
 }
 
 // TestStop_DrainOnlyWhenProbed: http.drain_delay is waited only when
-// /readyz has been requested since the start — a load balancer or a
-// Kubernetes probe watches; with nobody probing the stop skips it and
-// says so at debug level.
+// /readyz or the health endpoint, wherever http.health.path puts it, has
+// been requested since the start — a load balancer or a Kubernetes probe
+// watches — and says so at info level; with nobody probing the stop skips
+// it and says so at debug level.
 func TestStop_DrainOnlyWhenProbed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		for _, probed := range []bool{false, true} {
+		for _, probe := range []string{"", "/readyz", "/healthz", "/status"} {
 			base := testBase(t)
 			base.HTTP.DrainDelay = 5 * time.Second
+			if probe == "/status" {
+				base.HTTP.Health.Path = probe
+			}
 			var logs syncBuffer
 			app := New(base, Logger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))))
-			if probed {
-				app.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			if probe != "" {
+				rec := httptest.NewRecorder()
+				app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, probe, nil))
+				if rec.Code != http.StatusOK && rec.Code != http.StatusServiceUnavailable {
+					t.Fatalf("%s = %d", probe, rec.Code)
+				}
 			}
 			begin := time.Now()
 			if err := app.stop(context.Background(), &http.Server{}, func() {}, &sync.WaitGroup{}, nil, false); err != nil {
 				t.Fatal(err)
 			}
+			probed := probe != ""
 			want := time.Duration(0)
 			if probed {
 				want = 5 * time.Second
 			}
 			if d := time.Since(begin); d != want {
-				t.Errorf("probed=%v: the stop took %s, want %s", probed, d, want)
+				t.Errorf("probe %q: the stop took %s, want %s", probe, d, want)
 			}
-			if skipped := strings.Contains(logs.String(), "chok: drain skipped: /readyz was never requested"); skipped == probed {
-				t.Errorf("probed=%v: the skip logged: %v\n%s", probed, skipped, logs.String())
+			if skipped := strings.Contains(logs.String(), "chok: drain skipped: neither /readyz nor the health endpoint was requested"); skipped == probed {
+				t.Errorf("probe %q: the skip logged: %v\n%s", probe, skipped, logs.String())
+			}
+			if drained := strings.Contains(logs.String(), "chok: draining before the HTTP server stops"); drained != probed {
+				t.Errorf("probe %q: the drain logged: %v\n%s", probe, drained, logs.String())
 			}
 		}
 	})

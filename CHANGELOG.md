@@ -34,9 +34,10 @@ package, configuration key, API, table and metric to its v3 form.
   Health, Mount and the telemetry slot by interface), `Run` / `Execute`
   with a start phase gated on health, drain, and SIGINT / SIGTERM /
   SIGQUIT / SIGHUP (which applies `log.level` only). The drain waits only
-  once `/readyz` has been probed, and a second SIGINT or SIGTERM during
-  the stop stops fast. `Load`'s warnings reach the App's logger, as JSON
-  under `log.format: json`.
+  once `/readyz` or `/healthz` has been probed, and both answer 503
+  while it lasts; a second SIGINT or SIGTERM during the stop stops fast.
+  `Load`'s warnings reach the App's logger, as JSON under
+  `log.format: json`.
 - **`chok`**: typed handlers `GET` / `POST` / `PUT` / `PATCH` / `DELETE`
   and `List`, binding `path` / `query` / `header` / `json` tags with
   `encoding/json/v2` and `validate` rules; errors that describe their HTTP

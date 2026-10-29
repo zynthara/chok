@@ -97,11 +97,15 @@ app.Execute()                              // Run + 信号
 body 列出每个组件的状态与耗时）；`/livez` 只说明进程活着。就绪后某个 Start
 返回错误 → App 停机，`Run` 返回该错误。
 
-**停机相**：`/readyz` 改 503 → 等 `http.drain_delay`（给负载均衡摘流）→
-`http.Server.Shutdown(http.shutdown_timeout)` → 取消 Starter 的 ctx 并等待 →
-逆序 `Close`，整个停机相受 `app.shutdown_timeout` 总预算约束。drain 按需：只在
-进程启动以来 `/readyz` 被请求过时才等（有人在看就绪状态——Kubernetes 探针、
-负载均衡的健康检查）；从没被请求过就跳过并记一条 Debug，开发时 Ctrl-C 立即停。
+**停机相**：`/readyz` 与 `/healthz` 改 503 → 等 `http.drain_delay`（给负载均衡
+摘流）→ `http.Server.Shutdown(http.shutdown_timeout)` → 取消 Starter 的 ctx 并
+等待 → 逆序 `Close`，整个停机相受 `app.shutdown_timeout` 总预算约束。drain 期间
+`/healthz` 不再跑检查，直接答 503、status 为 down、不列组件。drain 按需：只在
+进程启动以来 `/readyz` 或 `/healthz`（`http.health.path` 配到哪就是哪）被请求过
+时才等（有人在看——Kubernetes 探针、负载均衡的健康检查，后者常指向
+`/healthz`），等之前记一条 Info；都没被请求过就跳过并记一条 Debug，开发时
+Ctrl-C 立即停。开发时手动 curl 过 `/healthz` 也会等，再按一次 Ctrl-C 即可结束
+（见下面的信号）。`/livez` 不算：存活探针不决定流量往哪去。
 所有停机路径从 `context.WithoutCancel(ctx)` 派生，trace id 与 request id 保持
 关联。
 

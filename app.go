@@ -45,8 +45,8 @@ type App struct {
 	ready    atomic.Bool
 	draining atomic.Bool
 	addr     atomic.Pointer[string]
-	// probed is set once /readyz has been requested: someone watches the
-	// readiness, so a stop waits out http.drain_delay.
+	// probed is set once /readyz or the health endpoint has been
+	// requested: someone watches, so a stop waits out http.drain_delay.
 	probed atomic.Bool
 	// hurry is closed when a stop under way turns fast (a second signal).
 	hurry     chan struct{}
@@ -231,12 +231,12 @@ func init() {
 // (a Start that fails first aborts the start). Only then does the HTTP
 // server listen and /readyz turn 200.
 //
-// Stop phase, under one app.shutdown_timeout budget: /readyz turns 503,
-// http.drain_delay passes — only when /readyz has been requested since
-// the start, so a stop nobody's probes watch does not wait — the HTTP
-// server shuts down within http.shutdown_timeout, the Starters' context
-// is canceled and Run waits for them, then every Closer is closed in
-// reverse Use order.
+// Stop phase, under one app.shutdown_timeout budget: /readyz and the
+// health endpoint turn 503, http.drain_delay passes — only when one of
+// them has been requested since the start, so a stop nobody's probes
+// watch does not wait — the HTTP server shuts down within
+// http.shutdown_timeout, the Starters' context is canceled and Run waits
+// for them, then every Closer is closed in reverse Use order.
 //
 // Run returns nil when ctx is canceled, ctx.Err() when its deadline
 // expires, and the failure otherwise. It can be called once.
@@ -424,8 +424,9 @@ func (a *App) stop(ctx context.Context, srv *http.Server, cancelRun context.Canc
 		switch d := a.base.HTTP.DrainDelay; {
 		case d <= 0 || fast:
 		case !a.probed.Load():
-			a.logger.Debug("chok: drain skipped: /readyz was never requested", "drain_delay", d)
+			a.logger.Debug("chok: drain skipped: neither /readyz nor the health endpoint was requested", "drain_delay", d)
 		default:
+			a.logger.Info("chok: draining before the HTTP server stops", "drain_delay", d)
 			select {
 			case <-time.After(d):
 			case <-a.hurry:

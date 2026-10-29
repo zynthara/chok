@@ -113,6 +113,14 @@ func (a *App) mountBuiltins() {
 		path = "/healthz"
 	}
 	a.handleBuiltin(http.MethodGet, path, func(w http.ResponseWriter, r *http.Request) {
+		// A load balancer may watch this path instead of /readyz: it too
+		// makes a stop drain, and it turns 503 while the stop drains,
+		// without the checks.
+		a.probed.Store(true)
+		if a.draining.Load() {
+			writeJSON(w, r, http.StatusServiceUnavailable, healthReport{Status: statusDown, Version: a.version, Components: []healthEntry{}})
+			return
+		}
 		report := a.checkHealth(r.Context(), a.snapshot())
 		code := http.StatusOK
 		if report.Status != statusUp {
