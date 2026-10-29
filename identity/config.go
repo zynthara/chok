@@ -59,7 +59,10 @@ type Config struct {
 	// LinkByEmail lets a first OAuth sign-in join the local account with
 	// the same email, when that account's email is verified and the
 	// provider vouches for the address and does not alias it. Facebook,
-	// which does not say whether an address is confirmed, never joins.
+	// which does not say whether an address is confirmed, never joins. An
+	// account Facebook made, its address only assumed, is taken over by
+	// the join: the providers linked before are unlinked, the password is
+	// cleared and the tokens are revoked.
 	LinkByEmail bool `yaml:"link_by_email"`
 	// AllowedRedirectBacks lists the absolute URLs an OAuth sign-in may
 	// return to through ?redirect_back: an entry ending in / allows its
@@ -87,7 +90,9 @@ type Config struct {
 	// so whoever registers a listed address first gains no power by it,
 	// and loses the account once the owner proves the address with a
 	// mailed reset token or code. Facebook, which does not say whether an
-	// address is confirmed, cannot create the account of a listed one.
+	// address is confirmed, cannot create the account of a listed one, and
+	// an account it made before the address was listed gets nothing until
+	// its user confirms the address with a mailed code in a session.
 	// Users().MarkEmailVerified keeps the registrant's password: an
 	// application that verifies addresses that way should have the owners
 	// register the listed ones, or turn registration off.

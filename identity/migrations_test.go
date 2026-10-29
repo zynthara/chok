@@ -99,6 +99,7 @@ func TestMigrations_VersionedUsesTheLedger(t *testing.T) {
 		"identity 20261024000001_create_users_and_identities applied",
 		"identity 20261024000002_create_audit_logs applied",
 		"identity 20261025000002_create_auth_login_codes applied",
+		"identity 20261029000001_add_users_email_assumed applied",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("ledger:\n%s", strings.Join(got, "\n"))
@@ -152,7 +153,7 @@ func TestMigrations_AutoCreatesTheTables(t *testing.T) {
 		t.Fatal("the SoftUnique indexes")
 	}
 	// auto mode records nothing in the ledger: the tables follow the models.
-	if sts, err := d.MigrationStatus(t.Context()); err != nil || len(sts) != 3 || sts[0].State != "pending" {
+	if sts, err := d.MigrationStatus(t.Context()); err != nil || len(sts) != 4 || sts[0].State != "pending" {
 		t.Fatalf("status in auto mode: %+v %v", sts, err)
 	}
 	// Registering twice on one database is refused.

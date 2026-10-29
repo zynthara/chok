@@ -34,6 +34,9 @@ type oauthFlow struct {
 	allowed     []allowedRedirect
 	frontend    string
 	linkByEmail bool
+	// assumesEmail: a provider only implies that its addresses are
+	// verified (Facebook), so accounts with assumed addresses come about.
+	assumesEmail bool
 }
 
 // The names of the flow's cookies: the session id across the provider's
@@ -71,6 +74,7 @@ func newOAuthFlow(idn *Identity, providers []Provider) (*oauthFlow, error) {
 		}
 		f.providers[name] = p
 		f.names = append(f.names, name)
+		f.assumesEmail = f.assumesEmail || p.Capabilities().AssumesEmail
 		if i == 0 {
 			// An http callback on localhost means local development, where
 			// browsers drop Secure cookies.
@@ -455,8 +459,10 @@ func (f *oauthFlow) unlink(ctx context.Context, req *unlinkRequest) (chok.None, 
 // linked to; else, with link_by_email, the existing user with the same
 // verified email; else a new user without a password. A new link needs
 // an email the provider vouches for and does not alias; one it only
-// implies is verified (Facebook's) makes a new account, but joins none
-// and makes none for an address auth.admins lists.
+// implies is verified (Facebook's) makes a new account, the address
+// assumed, but joins none and makes none for an address auth.admins
+// lists. Joining an account whose address is assumed is the address's
+// first proof: the account is taken over clean.
 func (f *oauthFlow) resolve(ctx context.Context, ext *oauth.Identity) (*User, *linkedIdentity, error) {
 	if ext.Provider == "" || ext.ProviderAccountID == "" {
 		return nil, nil, errors.New("identity: the provider's identity has no provider or account id")
@@ -489,13 +495,24 @@ func (f *oauthFlow) resolve(ctx context.Context, ext *oauth.Identity) (*User, *l
 	}
 	var user *User
 	var link *linkedIdentity
+	tookOver := false
 	// A user and its link are written together: a failed link leaves no
 	// orphan user.
 	err = f.idn.d.RunInTx(ctx, func(ctx context.Context) error {
+		tookOver = false
 		if f.linkByEmail && !ext.EmailVerifiedAssumed {
 			u, err := f.idn.users.Get(ctx, store.Where(where.Eq("email", ext.Email)))
 			switch {
 			case err == nil && u.EmailVerified:
+				// Facebook's word made the account, and this provider states
+				// that the address is the signer's: whoever holds the account
+				// need not own the address, so it goes to the signer clean.
+				if u.EmailAssumed {
+					if err := f.idn.takeOver(ctx, u); err != nil {
+						return err
+					}
+					tookOver = true
+				}
 				l, err := f.linkTx(ctx, u.RID, ext)
 				if err != nil {
 					return err
@@ -514,7 +531,7 @@ func (f *oauthFlow) resolve(ctx context.Context, ext *oauth.Identity) (*User, *l
 			return err
 		}
 		u := &User{
-			Email: ext.Email, EmailVerified: true, PasswordHash: hash, HasPassword: false,
+			Email: ext.Email, EmailVerified: true, EmailAssumed: ext.EmailVerifiedAssumed, PasswordHash: hash, HasPassword: false,
 			Name: firstNonEmpty(ext.Name, maskEmail(ext.Email)), Active: true,
 		}
 		if err := f.idn.users.Create(ctx, u); err != nil {
@@ -533,11 +550,17 @@ func (f *oauthFlow) resolve(ctx context.Context, ext *oauth.Identity) (*User, *l
 	if err != nil {
 		return nil, nil, err
 	}
+	if tookOver {
+		chok.LoggerFrom(ctx).InfoContext(ctx, "identity: a provider that states the address took over the account Facebook's word made; its earlier sign-ins and tokens no longer work",
+			"user_id", user.RID, "provider", ext.Provider)
+	}
 	return user, link, nil
 }
 
 // link attaches a provider's account to an existing user, for a signed-in
-// user linking one more provider. The user's address must be verified.
+// user linking one more provider. The user's address must be verified. A
+// provider that states the account's own address, linked from the
+// account's session, confirms an address that was only assumed.
 func (f *oauthFlow) link(ctx context.Context, userID string, ext *oauth.Identity) (*linkedIdentity, error) {
 	if userID == "" || ext.Provider == "" || ext.ProviderAccountID == "" {
 		return nil, errors.New("identity: a link needs the user and the provider's account")
@@ -551,10 +574,21 @@ func (f *oauthFlow) link(ctx context.Context, userID string, ext *oauth.Identity
 		if !u.EmailVerified {
 			return errLinkUnverified
 		}
-		l, err = f.linkTx(ctx, userID, ext)
-		return err
+		if l, err = f.linkTx(ctx, userID, ext); err != nil {
+			return err
+		}
+		if u.EmailAssumed && statesAddress(ext, u.Email) {
+			return f.idn.users.Update(ctx, store.RID(userID), store.Set(map[string]any{"email_assumed": false}))
+		}
+		return nil
 	})
 	return l, err
+}
+
+// statesAddress reports that the provider states email is its user's: the
+// same address, verified in so many words, not a relay.
+func statesAddress(ext *oauth.Identity, email string) bool {
+	return ext.EmailVerified && !ext.EmailVerifiedAssumed && !ext.IsAliasedEmail && normalizeEmail(ext.Email) == email
 }
 
 // linkTx writes the link in the caller's transaction; a provider account

@@ -389,7 +389,9 @@ audit_logs、auth_login_codes 四张表（owner `identity`），并挂 `{prefix}
 refresh-token、change-password、me，以及有 `Sender` 时的 forgot / reset
 password；`auth.passwordless.enabled` 时的 passwordless/start 与 /verify；
 `auth.cookie.enabled` 时的 logout；有 provider 时加 OAuth 的 start / callback /
-exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/logs`。
+exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook）且有
+`Sender` 时再加 confirm-email/start 与 confirm-email；审计开着且 `admin_api` 时挂
+`GET /audit/logs`。
 
 - **`Authn()`**：Bearer HS256 JWT，**每个请求按主键读一次用户**：存在、
   active、token 的 `pv` 等于当前 `password_version`——禁用、改密、改角色、
@@ -435,9 +437,13 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   配置了却没在代码里链接的 provider 让 `New` 失败。进行中的 OAuth 状态只在进程
   内：多副本须会话粘滞。Facebook 返回邮箱却不说是否已确认（Graph API 的参考只
   说「有效」），它的邮箱只算推定已验证：能新建账户，但不按 `link_by_email` 并入
-  已有账户，也不能新建 `auth.admins` 列出的邮箱的账户。账户若在邮箱列进
-  `auth.admins` 之前已由 Facebook 建好，之后的请求仍会让它得到 `admin`：先列邮
-  箱，再开 Facebook 登录。
+  已有账户，也不能新建 `auth.admins` 列出的邮箱的账户。它建的账户记下邮箱是推定
+  的（`users.email_assumed`，`/me` 与用户列表里的 `email_assumed`）：平时与已验证
+  无异，但 `auth.admins` 不授予（邮箱列进名单之前就建好的账户也一样）；之后第一次
+  从账户外证明这个邮箱——reset-password、passwordless 的码、开了 `link_by_email`
+  时用明说已验证的 provider 登录而并入——就接管这个账户：同一事务里解绑此前的所有
+  绑定、清掉密码、吊销 token，用 Facebook 注册的人（不一定是邮箱的主人）被踢出去。
+  用户在自己的会话里确认邮箱则一切保留，见下面「在会话里确认邮箱」。
 - **审计**：`Audit().Log`（异步入队，不进调用方事务）/ `LogSync`（同步，随 ctx
   事务）；trace id 由 telemetry 经内部钩子补上。
 - **角色只有一套**：全局角色只存在 identity——`users.roles` → `Principal.Roles`，
@@ -445,35 +451,54 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   `admin` 在 rbac 里无所不能，在 identity 里可读审计；store 的
   `db.store.admin_roles` 默认仍为空，要让管理员越过 owner 隔离须显式写
   `admin_roles: [admin]`。
-- **首个管理员**：`auth.admins` 是邮箱列表（规范化后比较）。列表里**且已验证**
-  的用户，在签发 token（register、login、refresh-token、passwordless verify、
-  OAuth exchange）或 `Authn` 读到他时，角色里还没有 `admin` 就加上并落库：按行的
-  version 乐观锁，并发请求只写一次；这次写与审计记录 `user.role.grant`（actor
-  是 system，`LogSync`）在同一事务里提交，记录写不进去就不授予。不吊销已有
-  token；写失败只记 Warn、请求照常，下个请求再试。只增不删：
-  从列表里删掉邮箱不撤销角色（要撤用 `SetRoles`）。未验证的邮箱不授予——开放注册
-  时，抢注管理员邮箱的人拿不到权限。reset-password 成功即证明邮箱可达，置
-  `email_verified`，所以用密码登录的应用也能走 `auth.admins`；运维调用的
-  `Users().ResetPassword` 不置。
+- **首个管理员**：`auth.admins` 是邮箱列表（规范化后比较）。列表里**且已证明**
+  （已验证，且不只是 Facebook 推定）的用户，在签发 token（register、login、
+  refresh-token、passwordless verify、OAuth exchange）或 `Authn` 读到他时，
+  角色里还没有 `admin` 就加上并落库：按行的 version 乐观锁，并发请求只写一次；
+  这次写与审计记录 `user.role.grant`（actor 是 system，`LogSync`）在同一事务里
+  提交，记录写不进去就不授予。不吊销已有 token；写失败只记 Warn、请求照常，
+  下个请求再试。只增不删：从列表里删掉邮箱不撤销角色（要撤用 `SetRoles`）。
+  未证明的邮箱不授予（未验证的，或 Facebook 推定的）——开放注册时，抢注管理员
+  邮箱的人拿不到权限。reset-password 成功即证明邮箱可达，置 `email_verified`，
+  所以用密码登录的应用也能走 `auth.admins`；运维调用的 `Users().ResetPassword`
+  不置。
 - **绑定要先验证邮箱**：注册邮箱的人不一定是邮箱的主人。未验证邮箱的账户不能
   绑定新的登录方式（`POST {prefix}/identities/link` 与回调都答 403
   `EMAIL_NOT_VERIFIED`）；邮箱第一次被证明时（reset-password、passwordless
   的码、`Users().MarkEmailVerified`），同一事务里解绑此前的所有绑定——v3 不会
   产生这种绑定，v2 的数据里可能有。否则抢注者绑定的登录方式，会在主人接管账户
-  之后留下来。
-- **第一次用码证明邮箱**：passwordless 的码第一次证明一个已有账户的邮箱时，清掉
-  此前设的密码（`has_password` 置 false，hash 换成随机串）并吊销 token（bump
-  `password_version`），抢注者设的密码与拿到的 token 一起失效；之后要密码就走
-  reset-password。reset-password 本来就换密码、吊销 token。
+  之后留下来。Facebook 建的账户（邮箱推定）可以绑定，因为从外面第一次证明邮箱时
+  这些绑定一并解除。
+- **第一次用码证明邮箱**：passwordless 的码第一次证明一个已有账户的邮箱时（未验证
+  的，或 Facebook 推定的），清掉此前设的密码（`has_password` 置 false，hash 换成
+  随机串）并吊销 token（bump `password_version`），抢注者设的密码与拿到的 token
+  一起失效；之后要密码就走 reset-password。reset-password 本来就换密码、吊销
+  token。`link_by_email` 并入 Facebook 建的账户时同样接管。接管只切断抢注者的
+  访问，它在账户里留下的东西（资料、地址等）不会清掉。
   `Users().MarkEmailVerified` 是应用自己的验证（多半是注册后马上点的链接），密码
-  与 token 都不动：`auth.admins` 里的邮箱应由主人自己注册，或者关掉开放注册。
+  与 token 都不动：`auth.admins` 里的邮箱应由主人自己注册，或者关掉开放注册。它不
+  改 Facebook 推定的邮箱：应用分不清是谁打开了邮件，接管会把账户的持有者锁在外面，
+  保留又会把邮箱交给持有者。
+- **在会话里确认邮箱**：有 `Sender`、且有只推定邮箱的 provider（Facebook）时，
+  `Authn` 之后挂 `POST {prefix}/confirm-email/start`（给本人的邮箱发码，202；
+  `resend_after` 内不重发；发码与输错按用户计入登录限速）与
+  `POST {prefix}/confirm-email` `{code}`（204）。码在登录的会话里输入，证明会话的
+  持有者收得到这个邮箱，所以邮箱算已证明（`email_assumed` 清掉、`email_verified`
+  置上），密码、绑定、token 都不动——与从外面证明时的接管相反。前端在需要时（比如
+  要拿 `admin`，或注册后提示一次）按 `/me` 的 `email_assumed` 请用户确认。码借用
+  `auth_login_codes` 表和 `auth.passwordless` 的 code_ttl、code_length、
+  max_attempts、resend_after，但那一行按用户 id 存，无密码登录碰不到；MAC 同时
+  覆盖发往的邮箱。码错或过期答 400（`InvalidCode` 带 `attempts_left` /
+  `CodeExpired`），不用 401：会话本身没问题，前端见 401 会当成登录失效。发信的
+  `Mail.Kind` 是 `confirm-email`（模板名同），不带 Token 与 Link。在会话里绑定一个
+  明说已验证、邮箱与账户相同的 provider（比如 Google）也算确认。
 - **用户管理**：`Users()` 是运维面（Create、Get、`GetByEmail`、SetRoles、
   SetActive、ResetPassword、MarkEmailVerified、RevokeTokens），并实现
   `chok.Lister[User]`：全表、没有 owner 围栏，可按 email、name、email_verified、
-  active、created_at 过滤，每页默认 20、最多 100。管理接口因此是一行
-  `chok.List(admin, "/users", auth.Users())`。列表自己把关，挂在哪个组都一样：
-  只回应持有 `admin` 角色、或装了 `identity/rbac` 时被授予 `user/read` 的
-  principal，其余 principal 403、没有 principal 401，挂错了组（比如只有 Authn
+  email_assumed、active、created_at 过滤，每页默认 20、最多 100。管理接口因此是
+  一行 `chok.List(admin, "/users", auth.Users())`。列表自己把关，挂在哪个组都
+  一样：只回应持有 `admin` 角色、或装了 `identity/rbac` 时被授予 `user/read`
+  的 principal，其余 principal 403、没有 principal 401，挂错了组（比如只有 Authn
   的组）也列不出别人。程序里直接调用 `ListFromQuery`，要先用
   `chok.WithPrincipal` 把 principal 放进 ctx。响应体是 `User` 的 JSON，不含
   roles 与 active，要显示它们的管理页自己写 handler。

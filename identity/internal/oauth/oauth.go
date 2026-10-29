@@ -30,6 +30,10 @@ type Capabilities struct {
 	// RedirectURL is the provider's registered callback; an http URL on
 	// localhost puts the flow's cookies in development mode.
 	RedirectURL string
+	// AssumesEmail marks a provider whose addresses are only implied
+	// verified (Identity.EmailVerifiedAssumed): with a Sender, identity
+	// mounts the routes where a signed-in user confirms the address.
+	AssumesEmail bool
 }
 
 // BeginRequest is what the flow gives a provider to build its
@@ -61,8 +65,9 @@ type Identity struct {
 	EmailVerified bool
 	// EmailVerifiedAssumed marks an EmailVerified the provider implies
 	// but does not state: Facebook returns an address without saying it
-	// is confirmed. Such an address creates an account, but joins none
-	// (link_by_email) and creates none for an address auth.admins lists.
+	// is confirmed. Such an address creates an account, which holds it as
+	// assumed (User.EmailAssumed), but joins none (link_by_email) and
+	// creates none for an address auth.admins lists.
 	EmailVerifiedAssumed bool
 	// IsAliasedEmail marks a relay address (Apple's "hide my email"): it
 	// never links to an existing account, verified or not.

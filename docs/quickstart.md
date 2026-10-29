@@ -138,11 +138,12 @@ curl -s localhost:8080/api/whoami
 ```
 
 `identity` also serves `GET /auth/me` (the account: `id`, `email`, `name`,
-`email_verified`, `roles`, `created_at`), `POST /auth/refresh-token` and
-`PUT /auth/change-password`; forgot and reset password appear once you
-pass `identity.Sender(...)`, which also lets people sign in with a mailed
-code instead of a password, and `auth.cookie` keeps the session in an
-HttpOnly cookie ([docs/mail.md](mail.md)). Tokens last `auth.token_ttl` (2h), a session
+`email_verified`, `email_assumed`, `roles`, `created_at`),
+`POST /auth/refresh-token` and `PUT /auth/change-password`; forgot and
+reset password appear once you pass `identity.Sender(...)`, which also
+lets people sign in with a mailed code instead of a password, and
+`auth.cookie` keeps the session in an HttpOnly cookie
+([docs/mail.md](mail.md)). Tokens last `auth.token_ttl` (2h), a session
 `auth.refresh_ttl` (168h) from its login, and ten failed logins in 15
 minutes, per email or per address, answer 429 — all in
 [docs/config.md](config.md#identityconfig--section-auth).

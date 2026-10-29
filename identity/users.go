@@ -47,7 +47,8 @@ const (
 // userFields are the fields ListFromQuery filters and orders on, by
 // their names in the query string.
 var userFields = map[string]string{
-	"active": "active", "created_at": "created_at", "email": "email", "email_verified": "email_verified", "name": "name",
+	"active": "active", "created_at": "created_at", "email": "email", "email_assumed": "email_assumed",
+	"email_verified": "email_verified", "name": "name",
 }
 
 var (
@@ -102,10 +103,10 @@ func (s *UserService) QueryFields() []string {
 // ListFromQuery returns a page of every account, for an administration
 // page: q holds page and size (default 20, at most 100), cursor,
 // order=field:asc|desc and equality filters on the fields QueryFields
-// lists — email compared as identity stores it, email_verified and
-// active as true or false. An unknown or malformed parameter is a 400.
-// The items are User's JSON, which leaves out the roles and the active
-// flag.
+// lists — email compared as identity stores it, email_verified,
+// email_assumed and active as true or false. An unknown or malformed
+// parameter is a 400. The items are User's JSON, which leaves out the
+// roles and the active flag.
 //
 // It lets the UserService serve a chok.List route, and it answers only
 // the principal in ctx that holds the admin role or, with identity/rbac,
@@ -121,7 +122,7 @@ func (s *UserService) ListFromQuery(ctx context.Context, q url.Values) (*chok.Pa
 	}
 	q = maps.Clone(q)
 	var flags []where.Option
-	for _, key := range []string{"active", "email_verified"} {
+	for _, key := range []string{"active", "email_assumed", "email_verified"} {
 		vals, ok := q[key]
 		if !ok {
 			continue
@@ -204,10 +205,20 @@ func (s *UserService) RevokeTokens(ctx context.Context, id string) error {
 // clicked right after registering — so an address in auth.admins should
 // be registered by its owner, or registration turned off. Calling it
 // again is a no-op.
+//
+// An address only Facebook's word backs (User.EmailAssumed) stays
+// assumed: the application cannot tell who opened its mail, and the
+// account may be someone else's — taking it over would lock its holder
+// out, keeping it would hand the address to whoever holds it. The user
+// confirms the address in a session ({prefix}/confirm-email), or its
+// owner takes the account over with a mailed reset token or code.
 func (s *UserService) MarkEmailVerified(ctx context.Context, id string) error {
 	u, err := s.Get(ctx, id)
 	if err != nil {
 		return err
+	}
+	if u.EmailVerified {
+		return nil
 	}
 	return notFoundUser(s.idn.verifyEmail(ctx, u, map[string]any{}))
 }

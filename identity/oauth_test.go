@@ -354,7 +354,7 @@ func assumed(account, email string) *oauth.Identity {
 // TestOAuth_AssumedEmailJoinsNoAccount: an address the provider only
 // implies is verified never joins an existing account under
 // link_by_email — the sign-in conflicts on the email — but still makes
-// an account of its own, its address verified.
+// an account of its own, its address verified and assumed.
 func TestOAuth_AssumedEmailJoinsNoAccount(t *testing.T) {
 	fx := newOAuthFixture(t, Config{LinkByEmail: true}, nil)
 	alice := verifiedUser(t, fx.idn, "alice@idp.test")
@@ -375,8 +375,8 @@ func TestOAuth_AssumedEmailJoinsNoAccount(t *testing.T) {
 	if resp := fx.signIn(t, "d", ""); resp.StatusCode != http.StatusFound {
 		t.Fatalf("an assumed address of no account = %d", resp.StatusCode)
 	}
-	if !userByEmail(t, fx.idn, "bob@idp.test").EmailVerified {
-		t.Fatal("the new account's address is not verified")
+	if bob := userByEmail(t, fx.idn, "bob@idp.test"); !bob.EmailVerified || !bob.EmailAssumed {
+		t.Fatalf("the new account's address is not verified, and assumed: %+v", bob)
 	}
 }
 

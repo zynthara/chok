@@ -54,7 +54,7 @@ type Identity struct {
 	mailCtx    context.Context
 	stopMail   context.CancelFunc
 
-	stopSweep func() // ends the login code sweep and waits; nil without passwordless
+	stopSweep func() // ends the login code sweep and waits; nil without codes to sweep
 
 	closeOnce sync.Once
 	closeErr  error
@@ -102,7 +102,8 @@ func Logger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
 // Mail is a mail identity asks the application to send: the Sender gets
 // it as the data of the template named after its Kind.
 type Mail struct {
-	// Kind is what the mail is for: "password-reset" or "login-code".
+	// Kind is what the mail is for: "password-reset", "login-code" or
+	// "confirm-email", the code a signed-in user confirms the address with.
 	Kind string
 	// To is the address to send it to.
 	To string
@@ -111,12 +112,13 @@ type Mail struct {
 	// magic-link token, which the sign-in page posts to
 	// {prefix}/passwordless/verify.
 	Token string
-	// Code is the login code, auth.passwordless.code_length digits; empty
-	// for a password reset.
+	// Code is the login or confirmation code,
+	// auth.passwordless.code_length digits; empty for a password reset.
 	Code string
 	// Link is the page that takes Token: auth.reset_url or
 	// auth.passwordless.magic_link_url with ?token= added. Empty without
-	// them, and the application builds its own from Token.
+	// them, and the application builds its own from Token. A confirmation
+	// has neither: its code is entered in the session that asked for it.
 	Link string
 	// ExpiresAt is when Token, and Code, stop working, in UTC.
 	ExpiresAt time.Time
@@ -199,7 +201,7 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 		idn.limiter = newLoginLimiter(cfg.LoginRateWindow, cfg.LoginRateLimit)
 	}
 	idn.audit = newAudit(d, cfg.Audit, o.logger)
-	if cfg.Passwordless.Enabled {
+	if cfg.Passwordless.Enabled || idn.confirms() {
 		idn.startSweep()
 	}
 	return idn, nil

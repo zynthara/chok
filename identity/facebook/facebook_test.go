@@ -100,7 +100,7 @@ func TestNew_RefusesBadConfig(t *testing.T) {
 func TestProvider_NameAndCapabilities(t *testing.T) {
 	p := provider(t, "https://graph.facebook.com/v21.0")
 	c := p.Capabilities()
-	if p.Name() != "facebook" || c.CallbackMethod != http.MethodGet || c.RequiresNonce || !c.SupportsPKCE || c.RedirectURL == "" {
+	if p.Name() != "facebook" || c.CallbackMethod != http.MethodGet || c.RequiresNonce || !c.SupportsPKCE || c.RedirectURL == "" || !c.AssumesEmail {
 		t.Fatalf("%s %+v", p.Name(), c)
 	}
 }

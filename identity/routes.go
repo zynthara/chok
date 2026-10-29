@@ -42,6 +42,12 @@ import (
 //	POST   {prefix}/identities/link   bearer: link another provider, the email verified
 //	DELETE {prefix}/identities/{id}   bearer: unlink one
 //
+// and, with a Sender and a provider that only implies its addresses are
+// verified (Facebook), where a signed-in user confirms the address:
+//
+//	POST   {prefix}/confirm-email/start   bearer: mail a code, 202
+//	POST   {prefix}/confirm-email         bearer: the code, 204
+//
 // and with auth.audit.enabled and admin_api, GET /audit/logs. The OpenAPI
 // document lists the routes behind Authn with its schemes and the others
 // without security.
@@ -76,6 +82,10 @@ func (idn *Identity) Mount(r chok.Router) {
 	}
 	if idn.oauth != nil {
 		idn.oauth.mount(g, authed)
+	}
+	if idn.confirms() {
+		chok.POST(authed, "/confirm-email/start", idn.confirmEmailStart, chok.Status(http.StatusAccepted), tag, chok.Summary("Mail a code that confirms the address"))
+		chok.POST(authed, "/confirm-email", idn.confirmEmail, tag, chok.Summary("Confirm the address with the mailed code"))
 	}
 	if idn.cfg.Audit.Enabled && idn.cfg.Audit.AdminAPI {
 		admin := r.Group("/audit", idn.Authn(), idn.requireAuditReader())
@@ -120,6 +130,7 @@ type meResponse struct {
 	Email         string    `json:"email"`
 	Name          string    `json:"name"`
 	EmailVerified bool      `json:"email_verified"`
+	EmailAssumed  bool      `json:"email_assumed"`
 	Roles         []string  `json:"roles"`
 	CreatedAt     time.Time `json:"created_at"`
 }
@@ -275,15 +286,17 @@ func (idn *Identity) passwordColumns(field, password string) (map[string]any, er
 	}, nil
 }
 
-// verifyEmail writes set to u's row with the address verified. The first
-// verification also unlinks, in the same transaction, every provider
-// linked before it: whoever registered an address need not own it, and a
-// provider it linked would let it back into the account the owner has
-// just taken over. identity links no provider to an unverified account,
-// but data from v2 may hold such links.
+// verifyEmail writes set to u's row with the address proven. The first
+// proof — of an unverified address, or of one only Facebook's word backs
+// — also unlinks, in the same transaction, every provider linked before
+// it: whoever registered an address, or signed up with it through
+// Facebook, need not own it, and a provider it linked would let it back
+// into the account the owner has just taken over. identity links no
+// provider to an unverified account, but data from v2 may hold such
+// links.
 func (idn *Identity) verifyEmail(ctx context.Context, u *User, set map[string]any) error {
-	set["email_verified"] = true
-	if u.EmailVerified {
+	set["email_verified"], set["email_assumed"] = true, false
+	if u.emailProven() {
 		return idn.users.Update(ctx, store.RID(u.RID), store.Set(set))
 	}
 	return idn.d.RunInTx(ctx, func(ctx context.Context) error {
@@ -292,6 +305,24 @@ func (idn *Identity) verifyEmail(ctx context.Context, u *User, set map[string]an
 		}
 		return idn.links.Delete(ctx, store.Where(where.Eq("user_id", u.RID)))
 	})
+}
+
+// takeOver is the first proof of u's address from outside its sessions —
+// a mailed code, a sign-in through a provider that states the address —
+// which hands the account to the prover clean: the address proven, the
+// providers linked before unlinked, the password set before cleared and
+// every token revoked, so whoever held the account keeps no way in. It
+// runs in ctx's transaction, or in one of its own.
+func (idn *Identity) takeOver(ctx context.Context, u *User) error {
+	set := map[string]any{"password_version": bumpVersion}
+	if u.HasPassword {
+		hash, err := hashPassword(randomSecret(), idn.cost)
+		if err != nil {
+			return err
+		}
+		set["password_hash"], set["has_password"] = hash, false
+	}
+	return idn.verifyEmail(ctx, u, set)
 }
 
 func (idn *Identity) forgotPassword(ctx context.Context, req *forgotPasswordRequest) (chok.None, error) {
@@ -350,7 +381,7 @@ func (idn *Identity) me(ctx context.Context, _ *chok.None) (*meResponse, error) 
 	if roles == nil {
 		roles = []string{}
 	}
-	return &meResponse{ID: u.RID, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Roles: roles, CreatedAt: u.CreatedAt.UTC()}, nil
+	return &meResponse{ID: u.RID, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, EmailAssumed: u.EmailAssumed, Roles: roles, CreatedAt: u.CreatedAt.UTC()}, nil
 }
 
 // admit lets the principal in ctx act on obj when it holds the admin

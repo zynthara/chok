@@ -363,17 +363,18 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
   `auth.refresh_ttl`（168h）就 401，用户要重新登录；v2 只要 token 有效就能一直续。
 - **吊销即时**：`Authn` 每个请求读用户（存在、active、`password_version` 与
   token 一致），禁用、改密、改角色、`RevokeTokens` 立即生效。
-- **新路由** `GET {prefix}/me`：`{id, email, name, email_verified, roles,
-  created_at}`。其余路由与请求 / 响应体逐字沿用 v2（register 201、login 200，体都是
-  `{token, expires_at}`；forgot-password 一律 204）。
+- **新路由** `GET {prefix}/me`：`{id, email, name, email_verified, email_assumed,
+  roles, created_at}`。其余路由与请求 / 响应体逐字沿用 v2（register 201、
+  login 200，体都是 `{token, expires_at}`；forgot-password 一律 204）。
 - **登录限速**默认开（15m / 10，按 email 与客户端 IP），429 带 `Retry-After`。
 - **角色只有一套**：v2 的 `users.roles`（进 token 的角色）与 casbin 的全局角色
   成员是两套、互不相通；v3 只留 `users.roles`，rbac 判定时读它：`admin` 全通，
   其余按用户自己的授权（`GrantUser`）与它的角色的授权（`GrantRole`）。casbin
   里留下的全局角色成员 v3 不再认，升级时要搬进 `users.roles`（见下）。
-- **首个管理员**：`auth.admins: [ops@example.com]`。列出的邮箱一旦验证过（无密码
-  登录、OAuth 的已验证邮箱但不含 Facebook 的、或 reset-password），下次签发
-  token 或请求经过 `Authn` 时就加上 `admin` 并落库，只加一次；从列表里删掉不撤销。
+- **首个管理员**：`auth.admins: [ops@example.com]`。列出的邮箱一旦证明过（无密码
+  登录、OAuth 的已验证邮箱但不含 Facebook 的、reset-password、或在会话里用
+  confirm-email 确认），下次签发 token 或请求经过 `Authn` 时就加上 `admin` 并落库，
+  只加一次；从列表里删掉不撤销。
 - **reset-password 成功即置 `email_verified`**（邮件里的 token 证明邮箱可达）；v2
   不改这个字段。
 - **绑定登录方式要先验证邮箱**：未验证邮箱的账户调 `/identities/link` 答 403
@@ -382,7 +383,14 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 - **Facebook 的邮箱不再并入已有账户**：Meta 不说 Graph API 返回的邮箱是否已确认，
   v3 只把它当推定已验证。首次用 Facebook 登录不再按 `link_by_email` 并入同邮箱的
   已有账户（v2 会并入），用户先用别的方式登录，再在账户设置里绑定 Facebook；它也
-  不能新建 `auth.admins` 列出的邮箱的账户。别的新账户照常创建。
+  不能新建 `auth.admins` 列出的邮箱的账户。别的新账户照常创建，但记为推定
+  （`users.email_assumed`）：`auth.admins` 不授予；之后有人从外面证明这个邮箱
+  （reset-password、无密码登录的码、开了 `link_by_email` 时用 Google 等明说已验证
+  的 provider 登录），账户归证明的人，此前的绑定、密码、token 全部作废。用户在
+  自己的会话里确认则一切保留：有 `Sender` 时挂 `POST {prefix}/confirm-email/start`
+  与 `POST {prefix}/confirm-email` `{code}`，模板 `confirm-email` 要应用自己加；在
+  会话里绑定一个明说已验证、邮箱相同的 provider 也算确认。v2 建的 Facebook 账户
+  可以回填成推定，见下。
 - **`/audit/logs`** 路径不变：`users.roles` 含 `admin` 的用户总能读；挂了 rbac 后，
   其余用户由 rbac 判 `audit/read`。
 - **决策审计**跟随 `auth.audit.enabled`；watcher 频道固定 `chok:authz:policy`。
@@ -391,7 +399,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 
 | 表 | 变化 | v2 库怎么升 |
 |---|---|---|
-| `users` | 不变 | — |
+| `users` | 加一列 `email_assumed`（邮箱是否只是 Facebook 推定的） | 跑版本化迁移 `20261029000001`；v2 用 Facebook 建的账户可以回填，见下 |
 | `identities` | `ix_identity_user_provider` 改为真正的 `(user_id, provider)` 复合索引；单列 `idx_identities_user_id` 去掉 | 按 v3 的 SQL（`identity/migrations/<方言>/`）重建这两个索引 |
 | `audit_logs` | `before` / `after` 改名 `before_data` / `after_data`（MySQL 保留字）；`actor_id` / `resource_id` / `request_id` 加宽到 128；`action` / `result` NOT NULL；三个 `*_time` 索引真正包含 `occurred_at` | 改名并加宽列、重建索引 |
 | `casbin_rule` | 表形不变；全局的角色绑定（`ptype = 'g'`、`v2 = '*'`）v3 不再认 | v3 接流量之前，把这些行的角色合并进对应用户的 `users.roles`（`Users().SetRoles`），再删掉这些行，见下 |
@@ -407,7 +415,7 @@ SQL）：
 chok migrate mark-applied 20261024000001   # identity：users、identities
 chok migrate mark-applied 20261024000002   # identity：audit_logs
 chok migrate mark-applied 20261024000003   # rbac：casbin_rule
-chok migrate up --battery identity         # 真正执行 v3 新增的 20261025000002（auth_login_codes）
+chok migrate up --battery identity         # 真正执行 v3 新增的 20261025000002 与 20261029000001
 chok migrate status --battery identity --battery rbac   # 全部 applied
 ```
 
@@ -435,6 +443,46 @@ DELETE FROM casbin_rule WHERE ptype = 'g' AND v2 = '*';
 
 `Bootstrap` 给 `admin` 角色种的 `p` 行（`admin, *, *, *`）留着无害——`admin` 现在
 内置全通——也可以一起删。
+
+v2 用 Facebook 建的账户 `email_verified` 为真（v2 信了 Facebook 的邮箱），升级后
+v3 会把它们当作已证明：邮箱列进 `auth.admins` 就拿 `admin`，主人之后走
+reset-password 也赶不走用 Facebook 抢注的人。要让它们按 v3 的规则来，在跑完
+`20261029000001`（auto 模式是 AutoMigrate 补上列）之后、v3 接流量之前，把它们标成
+推定：
+
+```sql
+UPDATE users SET email_assumed = TRUE
+WHERE email_verified = TRUE
+  AND email_assumed = FALSE
+  AND deleted_at IS NULL
+  AND EXISTS (
+    SELECT 1 FROM identities
+    WHERE identities.user_id = users.rid
+      AND identities.provider = 'facebook'
+      AND identities.deleted_at IS NULL
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM identities
+    WHERE identities.user_id = users.rid
+      AND identities.provider <> 'facebook'
+      AND identities.deleted_at IS NULL
+      AND LOWER(identities.email) = LOWER(users.email)
+  );
+```
+
+条件是绑着 Facebook，且没有别的 provider 的绑定报过同一个邮箱（v3 里，绑定一个明说
+已验证、邮箱相同的 provider 就算确认）。三种数据库都能直接跑，重复跑无害。v2 的数据
+分不清邮箱后来有没有被证明过，所以在 v2 里走过 reset-password 的、或应用调过
+`MarkEmailVerified` 之后才绑 Facebook 的账户也会被标上：这些用户要拿 `admin`，得在
+会话里确认一次；他们下次自己从外面证明邮箱时（比如忘了密码），会按接管处理——绑定
+解除、token 吊销，Facebook 要重新绑。宁可多标：漏掉一个抢注者，它就一直留在主人的
+账户里。
+
+标完看一眼已经有 `admin` 的推定账户：v2 给的角色原样保留，v3 只是不再自动授予。
+
+```sql
+SELECT rid, email, roles FROM users WHERE email_assumed = TRUE AND roles LIKE '%admin%';
+```
 
 ## 6. jobs（scheduler + outbox）
 

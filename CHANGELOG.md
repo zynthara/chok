@@ -69,9 +69,10 @@ package, configuration key, API, table and metric to its v3 form.
   `/audit/logs`; **`identity/rbac`** adds casbin permissions over
   identity's roles — `admin` passes every check — with tenant domains and
   a Redis watcher. `auth.admins` makes the listed addresses admins once
-  they are verified; `Users()` finds a user by email and lists every user
-  for an admin page — to the `admin` role and those `identity/rbac` grants
-  `user/read` only, wherever the list is mounted.
+  they are proven, which Facebook's word alone does not do; `Users()`
+  finds a user by email and lists every user for an admin page — to the
+  `admin` role and those `identity/rbac` grants `user/read` only,
+  wherever the list is mounted.
 - **`identity`**: passwordless sign-in (`auth.passwordless`):
   `POST /auth/passwordless/start` answers 202 whatever the address and
   mails a code and a magic-link token in the background;
@@ -84,6 +85,15 @@ package, configuration key, API, table and metric to its v3 form.
   hourly sweep deletes the expired codes. `auth.passwordless.only` leaves
   the code the only way in: register, login, forgot-password,
   reset-password and change-password are not mounted.
+- **`identity`**: with a `Sender` and `identity/facebook`, a signed-in
+  user confirms an address Facebook only implied:
+  `POST /auth/confirm-email/start` mails a code
+  (`Mail{Kind: "confirm-email"}`, a template the app adds) and
+  `POST /auth/confirm-email` `{code}` takes it — 204, the address
+  proven and the account kept as it is. `InvalidCode` with
+  `attempts_left` and `CodeExpired` are 400s there, since the session is
+  good. Linking a provider that states the same address confirms it too.
+  `/me` and the user list (a filter too) carry `email_assumed`.
 - **`identity`**: cookie mode (`auth.cookie`): register, login,
   refresh-token, passwordless verify and the OAuth exchange set the
   access token in an HttpOnly cookie as well (with `only`, in the cookie
@@ -209,22 +219,34 @@ package, configuration key, API, table and metric to its v3 form.
   A password reset now marks the address verified.
 - **Breaking:** linking a provider needs a verified address:
   `POST {prefix}/identities/link` answers 403 `EMAIL_NOT_VERIFIED` for an
-  account whose address nobody has proven, since whoever registered it
+  account whose address is not verified, since whoever registered it
   need not own it. The first proof of an address — reset-password, a
   passwordless code, `Users().MarkEmailVerified` — unlinks the providers
-  linked before it; v2 let unverified accounts link.
+  linked before it; v2 let unverified accounts link. An account Facebook
+  made may link: the first proof from outside unlinks those too.
 - **Breaking:** Meta does not say whether the address Facebook returns
   is confirmed, so a first Facebook sign-in no longer joins the local
   account with the same email under `auth.link_by_email` — the user
   signs in another way and links Facebook in the account settings — and
-  cannot create the account of an address `auth.admins` lists. It still
-  creates other accounts.
+  cannot create the account of an address `auth.admins` lists. The
+  other accounts it creates hold the address as assumed
+  (`users.email_assumed`, migration `20261029000001`): `auth.admins`
+  grants them nothing, and the first proof of the address from outside
+  the account — reset-password, a passwordless code, a provider that
+  states the address joining it under `link_by_email` — takes the
+  account over: its providers are unlinked, its password cleared and
+  its tokens revoked. A user who confirms the address in the session
+  keeps all of it (`confirm-email`, under Added). v2 counted Facebook's
+  addresses verified; the migration guide has an optional backfill for
+  the accounts it made.
 - **Breaking:** a passwordless code that proves an address for the first
   time takes the account over clean: the password set before it no
   longer logs in (reset-password sets a new one) and the account's tokens
   are revoked, since whoever registered the address need not own it.
   `Users().MarkEmailVerified` keeps both: list in `auth.admins` only
-  addresses their owners registered, or turn registration off.
+  addresses their owners registered, or turn registration off. It leaves
+  an address Facebook only implied as it is: the app cannot tell who
+  opened its mail.
 - **Breaking:** `jobs.Worker` is generic: `Worker[T](topic, fn)` with
   `fn func(ctx, jobs.Message[T]) error`, the payload decoded into `T`
   (`Worker[jsontext.Value]` for the JSON as stored); a payload that does

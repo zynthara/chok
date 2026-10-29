@@ -20,10 +20,20 @@ import (
 type User struct {
 	db.SoftDeleteModel
 	Email string `json:"email" store:"query,update" gorm:"size:200;not null"`
-	// EmailVerified records that the user proved the address: an OAuth
-	// provider vouched for it, or the application called
-	// UserService.MarkEmailVerified.
+	// EmailVerified records that the address is the user's: a mailed reset
+	// token or code proved it, an OAuth provider vouched for it, or the
+	// application called UserService.MarkEmailVerified.
 	EmailVerified bool `json:"email_verified" store:"query,update" gorm:"column:email_verified;default:false;not null"`
+	// EmailAssumed marks an EmailVerified that rests on a provider's word
+	// alone: Facebook returns an address without saying it is confirmed.
+	// The address serves as verified, but auth.admins grants it nothing,
+	// and the first proof of it from outside the account — a mailed reset
+	// token or code, a link_by_email sign-in through a provider that states
+	// it — takes the account over as for an unverified one. The user keeps
+	// the account as it is by confirming the address in a session: a code
+	// mailed by POST {prefix}/confirm-email/start, or a linked provider
+	// that states the same address.
+	EmailAssumed bool `json:"email_assumed" store:"query,update" gorm:"column:email_assumed;default:false;not null"`
 	// PasswordHash is the bcrypt hash; an account created through OAuth
 	// holds the hash of a random secret nobody knows.
 	PasswordHash string `json:"-" store:"update" gorm:"column:password_hash;size:128;not null"`
@@ -41,6 +51,10 @@ type User struct {
 
 // RIDPrefix makes user ids usr_….
 func (User) RIDPrefix() string { return "usr" }
+
+// emailProven reports that the address is the user's on more than
+// Facebook's word: verified, and not merely assumed.
+func (u *User) emailProven() bool { return u.EmailVerified && !u.EmailAssumed }
 
 // RoleList returns the roles.
 func (u *User) RoleList() []string {

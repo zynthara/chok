@@ -273,7 +273,7 @@ func TestUsers_ListFromQuery(t *testing.T) {
 			}
 		}
 	}
-	if got := users.QueryFields(); !slices.Equal(got, []string{"active", "created_at", "email", "email_verified", "name"}) {
+	if got := users.QueryFields(); !slices.Equal(got, []string{"active", "created_at", "email", "email_assumed", "email_verified", "name"}) {
 		t.Fatalf("query fields = %v", got)
 	}
 	// The list answers the admin role only (and what rbac grants

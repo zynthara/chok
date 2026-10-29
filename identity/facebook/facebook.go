@@ -18,7 +18,11 @@
 // address. An email present is taken as verified to create an account,
 // but not to join an existing one (auth.link_by_email) nor to create the
 // account of an address auth.admins lists: such a user signs in another
-// way first and links Facebook in the account settings.
+// way first and links Facebook in the account settings. The account it
+// creates holds the address as assumed (identity.User.EmailAssumed): the
+// address gets no admin role until the user confirms it with a mailed
+// code in a session, and whoever proves it from outside the account
+// first takes the account over.
 package facebook
 
 import (
@@ -102,10 +106,10 @@ func (p *provider) Name() string { return "facebook" }
 
 func (p *provider) Check() error { return nil }
 
-// Capabilities: Facebook takes PKCE, has no nonce in this flow and calls
-// back with GET.
+// Capabilities: Facebook takes PKCE, has no nonce in this flow, calls
+// back with GET and only implies that its addresses are verified.
 func (p *provider) Capabilities() oauth.Capabilities {
-	return oauth.Capabilities{CallbackMethod: http.MethodGet, SupportsPKCE: true, RedirectURL: p.cfg.RedirectURL}
+	return oauth.Capabilities{CallbackMethod: http.MethodGet, SupportsPKCE: true, RedirectURL: p.cfg.RedirectURL, AssumesEmail: true}
 }
 
 // BeginAuth builds the login dialog URL with the state and the PKCE

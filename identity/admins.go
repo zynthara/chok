@@ -16,13 +16,14 @@ import (
 const grantTries = 3
 
 // grantAdmin gives u the admin role when auth.admins lists its address,
-// the address is verified and u does not hold the role yet. The write is
-// conditional on the row's version: of concurrent requests one writes
-// and the others, reading the row again, find the role there. It leaves
-// password_version alone, so u's tokens stay valid. The grant and its
-// audit record commit together: a grant the log cannot record does not
-// happen. A failure is a warning: the request goes on without the role,
-// and the next one tries again. u is updated in place.
+// the address is proven — verified, and not on Facebook's word alone —
+// and u does not hold the role yet. The write is conditional on the
+// row's version: of concurrent requests one writes and the others,
+// reading the row again, find the role there. It leaves password_version
+// alone, so u's tokens stay valid. The grant and its audit record commit
+// together: a grant the log cannot record does not happen. A failure is
+// a warning: the request goes on without the role, and the next one
+// tries again. u is updated in place.
 func (idn *Identity) grantAdmin(ctx context.Context, u *User) {
 	if len(idn.admins) == 0 {
 		return
@@ -30,7 +31,7 @@ func (idn *Identity) grantAdmin(ctx context.Context, u *User) {
 	logger := chok.LoggerFrom(ctx)
 	for try := 1; ; try++ {
 		before := u.RoleList()
-		if !u.EmailVerified || !idn.admins[u.Email] || slices.Contains(before, adminRole) {
+		if !u.emailProven() || !idn.admins[u.Email] || slices.Contains(before, adminRole) {
 			return
 		}
 		if try > grantTries {

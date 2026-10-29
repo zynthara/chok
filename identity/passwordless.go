@@ -24,7 +24,9 @@ import (
 // loginCode is an auth_login_codes row: the code and magic-link token
 // last mailed to an address — their HMACs, never themselves — and the
 // wrong codes tried against them. An address has one row at most; a
-// sign-in deletes it, the hourly sweep the expired ones.
+// sign-in deletes it, the hourly sweep the expired ones. A signed-in
+// user's confirmation code is a row too, keyed by the user's id instead
+// of an address (confirm.go).
 type loginCode struct {
 	ID        string    `gorm:"primaryKey;size:24"`
 	Email     string    `gorm:"size:200;not null;uniqueIndex:uk_login_code_email"`
@@ -177,14 +179,11 @@ func (idn *Identity) passwordlessVerify(ctx context.Context, req *passwordlessVe
 	}
 	attemptsLeft := pw.MaxAttempts - row.Attempts
 	if !byToken {
-		// An attempt is claimed before the comparison, so concurrent
-		// guesses get no more than max_attempts comparisons out of a code.
-		res := idn.d.Unsafe(ctx).Model(&loginCode{}).Where("id = ? AND attempts < ? AND expires_at > ?", row.ID, pw.MaxAttempts, now.UTC()).
-			Update("attempts", gorm.Expr("attempts + 1"))
-		if res.Error != nil {
-			return nil, fmt.Errorf("identity: count the attempt: %w", res.Error)
+		claimed, err := idn.claimAttempt(ctx, &row, now)
+		if err != nil {
+			return nil, err
 		}
-		if res.RowsAffected == 0 {
+		if !claimed {
 			return nil, failed(errCodeExpired)
 		}
 		attemptsLeft--
@@ -204,12 +203,11 @@ func (idn *Identity) passwordlessVerify(ctx context.Context, req *passwordlessVe
 	if known && !user.Active {
 		return nil, errDisabled
 	}
-	// The code is good once: of two requests with it, one deletes it.
-	res := idn.d.Unsafe(ctx).Where("id = ? AND expires_at > ?", row.ID, now.UTC()).Delete(&loginCode{})
-	if res.Error != nil {
-		return nil, fmt.Errorf("identity: use the login code: %w", res.Error)
+	spent, err := idn.spendCode(ctx, &row, now)
+	if err != nil {
+		return nil, err
 	}
-	if res.RowsAffected == 0 {
+	if !spent {
 		return nil, failed(errCodeExpired)
 	}
 	if !known {
@@ -218,18 +216,11 @@ func (idn *Identity) passwordlessVerify(ctx context.Context, req *passwordlessVe
 		}
 	}
 	// The code proved the address. The first proof takes the account over
-	// clean: whoever registered the address need not own it, so the
+	// clean: whoever registered the address, or signed up with it through
+	// Facebook, need not own it, so the providers linked before go, the
 	// password set before stops working and the tokens issued are revoked.
-	if !user.EmailVerified {
-		set := map[string]any{"password_version": bumpVersion}
-		if user.HasPassword {
-			hash, err := hashPassword(randomSecret(), idn.cost)
-			if err != nil {
-				return nil, err
-			}
-			set["password_hash"], set["has_password"] = hash, false
-		}
-		if err := idn.verifyEmail(ctx, user, set); err != nil {
+	if !user.emailProven() {
+		if err := idn.takeOver(ctx, user); err != nil {
 			return nil, err
 		}
 		if user.HasPassword {
@@ -241,6 +232,29 @@ func (idn *Identity) passwordlessVerify(ctx context.Context, req *passwordlessVe
 		}
 	}
 	return idn.issueToken(ctx, user, now.Unix())
+}
+
+// claimAttempt counts an attempt against row's code before the code is
+// compared, so concurrent guesses get no more than max_attempts
+// comparisons out of a code. False: the code expired or was used up
+// meanwhile.
+func (idn *Identity) claimAttempt(ctx context.Context, row *loginCode, now time.Time) (bool, error) {
+	res := idn.d.Unsafe(ctx).Model(&loginCode{}).Where("id = ? AND attempts < ? AND expires_at > ?", row.ID, idn.cfg.Passwordless.MaxAttempts, now.UTC()).
+		Update("attempts", gorm.Expr("attempts + 1"))
+	if res.Error != nil {
+		return false, fmt.Errorf("identity: count the attempt: %w", res.Error)
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// spendCode deletes row: a code is good once, and of two requests with
+// it one deletes it. False: the other request did, or the code expired.
+func (idn *Identity) spendCode(ctx context.Context, row *loginCode, now time.Time) (bool, error) {
+	res := idn.d.Unsafe(ctx).Where("id = ? AND expires_at > ?", row.ID, now.UTC()).Delete(&loginCode{})
+	if res.Error != nil {
+		return false, fmt.Errorf("identity: use the code: %w", res.Error)
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // registerByCode creates the account of an address that proved itself
