@@ -64,8 +64,7 @@ API 的地方，走 `internal/` 下的挂点：`internal/dbx`
 （db 告诉 store 与电池的东西：SoftUnique 索引、无基座的普通表、语句观察者、
 电池的迁移文件）、`internal/logtap`（telemetry 桥接 App 的 logger）、
 `internal/tracectx`（审计记录补 trace id）、`internal/redislog`（go-redis
-日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）、`internal/csrf`
-（电池为自己的路由登记 CSRF 豁免）。挂点都由提供方
+日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）。挂点都由提供方
 在 `init` 里赋值，使用方读取，公开面不变。另有一个内部接口
 `internal/openapi.Securer`：identity 的 `Authn()` 返回的 handler 实现它，报告
 自己接受的认证方案，根包在套中间件时识别它（§5.4）。
@@ -213,10 +212,15 @@ PATCH / DELETE）的 `Sec-Fetch-Site` 与 `Origin`，浏览器从别的网站发
 得 403 信封；curl、移动端、服务间调用不带这两个头，不受影响。
 `http.cors.allow_origins`（`*` 除外）加为可信来源，配了 CORS 的跨域前端照常可用。
 它默认开着，关掉会告警：`http.csrf: false` 而有路由用 cookie 认证（认证中间件
-报告了 cookieAuth，§5.4）时，`Run` 在开始监听前记一条 Warn。电池经
-`internal/csrf` 挂点为自己的路由登记豁免——identity 为每个 OAuth provider 的
-`POST {prefix}/{name}/callback` 登记（Apple 的 `form_post` 回调是
-appleid.apple.com 发起的跨站 POST，防线是 state 参数）；应用没有公开的豁免 API。
+报告了 cookieAuth，§5.4）时，`Run` 在开始监听前记一条 Warn。
+
+第三方用表单把浏览器送回应用的回调（支付网关的回跳、3-D Secure、SAML 的 POST
+绑定）是别的网站发起的 POST，由 `chok.AllowCrossSitePost(r, pattern)` 放行：只放
+这一条路由的 POST，它的其他方法和别的路由照查。这样的路由要用第三方的签名或应用
+自己发的 state 参数验明请求，不能只凭 session cookie 行事；应用自己的表单不用它。
+identity 也用它为每个 OAuth provider 的 `POST {prefix}/{name}/callback` 放行
+（Apple 的 `form_post` 回调是 appleid.apple.com 发起的跨站 POST，防线是 state
+参数）。
 
 ### 5.4 OpenAPI 与内建端点
 

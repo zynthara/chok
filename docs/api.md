@@ -11,7 +11,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 
 | Package | Declarations |
 |---|---|
-| [`chok`](#chok) | 61 |
+| [`chok`](#chok) | 62 |
 | [`db`](#db) | 28 |
 | [`store`](#store) | 29 |
 | [`store/where`](#storewhere) | 27 |
@@ -27,7 +27,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 232 |
+| total | 233 |
 
 ## chok
 
@@ -36,6 +36,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | Declaration | |
 |---|---|
 | `var ErrBadRequest = NewError(http.StatusBadRequest, "BadRequest", "bad request") ...` | ErrBadRequest, ErrValidation, ErrUnauthorized, ErrForbidden, ErrNotFound, ErrConflict, ErrRateLimited, ErrInternal: The errors every application meets. |
+| `func AllowCrossSitePost(r Router, pattern string)` | AllowCrossSitePost lets another site's page POST to pattern below r past http.csrf. |
 | `func ClientIP(ctx context.Context) string` | ClientIP returns the client address, read from forwarding headers only when the direct peer is one of http.trusted_proxies. |
 | `func DELETE[T, R any](r Router, pattern string, fn HandlerFunc[T, R], opts ...RouteOption)` | DELETE registers fn for DELETE pattern on r; see GET for binding. |
 | `func GET[T, R any](r Router, pattern string, fn HandlerFunc[T, R], opts ...RouteOption)` | GET registers fn for GET pattern on r. |

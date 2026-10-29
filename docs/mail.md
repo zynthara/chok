@@ -312,7 +312,11 @@ A front end on another origin goes in `http.cors.allow_origins`, which
 `http.csrf` trusts, with `http.cors.allow_credentials: true`, and fetches
 with `credentials: "include"`; on another site altogether it also needs
 `same_site: none`. The OAuth callbacks are exempt: Apple posts its
-callback from its own site, and the `state` parameter defends it.
+callback from its own site, and the `state` parameter defends it. A
+route of your own that another site's form posts to, such as a payment
+gateway's return, is let through with `chok.AllowCrossSitePost`, and
+checks the request the same way: by the gateway's signature or a state
+you issued, never by the cookie alone.
 
 In the page, `fetch` sends the cookie on its own (same origin needs no
 `credentials` option), and nothing is stored in `localStorage`:

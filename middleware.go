@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/zynthara/chok/v3/internal/clientip"
-	"github.com/zynthara/chok/v3/internal/csrf"
 	"github.com/zynthara/chok/v3/internal/openapi"
 	"github.com/zynthara/chok/v3/internal/reqinfo"
 )
@@ -317,17 +316,21 @@ func (a *App) crossOriginProtection() *http.CrossOriginProtection {
 	return p
 }
 
-// A battery exempts its own route — an OAuth provider's form_post
-// callback — through the internal hook: the App exports no exemption.
-func init() {
-	csrf.Exempt = func(r any, method, pattern string) {
-		if cr, ok := r.(*router); ok {
-			full := joinPath(cr.prefix, pattern)
-			if method != "" {
-				full = method + " " + full
-			}
-			cr.app.exemptCSRF(full)
-		}
+// AllowCrossSitePost lets another site's page POST to pattern below r past
+// http.csrf. It is for a third party's form that brings the user's browser
+// back to the application — a payment gateway's return, 3-D Secure, a
+// SAML POST binding, an OAuth provider's form_post callback — and for
+// nothing else: such a route must check the request another way, by the
+// third party's signature or a state parameter the application issued,
+// and must not act on the session cookie alone. Never use it for the
+// application's own forms. pattern is relative to r, as for POST; the
+// route's other methods and every other route stay checked. Allowing a
+// pattern again is harmless, and a Router that is not an App's is ignored.
+//
+//	chok.AllowCrossSitePost(app.Router(), "/pay/return")
+func AllowCrossSitePost(r Router, pattern string) {
+	if cr, ok := r.(*router); ok {
+		cr.app.exemptCSRF(http.MethodPost + " " + joinPath(cr.prefix, pattern))
 	}
 }
 

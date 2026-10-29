@@ -190,9 +190,10 @@ package, configuration key, API, table and metric to its v3 form.
   included: cross-site POST / PUT / PATCH / DELETE from a browser get a
   403, while same-origin requests, the origins of `http.cors`, and
   clients that send no `Sec-Fetch-Site` or `Origin` (curl, mobile apps,
-  services) pass. identity exempts its OAuth callbacks (Apple posts
-  them). Turning it off while a route takes a cookie session logs a
-  warning at startup.
+  services) pass. `chok.AllowCrossSitePost` lets a third party's form
+  POST to one route — a payment gateway's return; identity uses it for
+  its OAuth callbacks, which Apple posts. Turning it off while a route
+  takes a cookie session logs a warning at startup.
 - **Breaking:** one set of roles. `identity/rbac` decides on the
   principal's `Roles` (identity's `users.roles`, set with
   `Users().SetRoles`): `admin` passes everything, then the user's own

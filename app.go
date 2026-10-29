@@ -59,7 +59,7 @@ type App struct {
 	cookieAuth atomic.Bool
 
 	// crossOrigin is the CSRF protection, in the stack with http.csrf;
-	// exempt is the patterns batteries exempted from it (under mu).
+	// exempt is the patterns AllowCrossSitePost let past it (under mu).
 	crossOrigin *http.CrossOriginProtection
 	exempt      map[string]bool
 }

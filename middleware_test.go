@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/csrf"
 	"github.com/zynthara/chok/v3/internal/openapi"
 	"github.com/zynthara/chok/v3/internal/reqinfo"
 )
@@ -138,23 +137,30 @@ func TestCSRF_OnByDefault(t *testing.T) {
 	}
 }
 
-// TestCSRF_BatteryExemption: a battery exempts its own route through the
-// internal hook, below its router's prefix; other routes stay checked, a
-// repeat is harmless and a foreign router is ignored.
-func TestCSRF_BatteryExemption(t *testing.T) {
+// TestCSRF_AllowCrossSitePost: a route let past the check takes another
+// site's POST below its router's prefix, a repeat is harmless; the
+// route's other methods, other routes and a foreign Router's request stay
+// checked.
+func TestCSRF_AllowCrossSitePost(t *testing.T) {
 	app := New(testBase(t), Logger(quiet()))
-	auth := app.Group("/auth")
-	auth.Handle(http.MethodPost, "/apple/callback", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusFound) }))
-	POST(auth, "/login", func(context.Context, *None) (None, error) { return None{}, nil })
-	csrf.Exempt(auth, http.MethodPost, "/apple/callback")
-	csrf.Exempt(auth, http.MethodPost, "/apple/callback")
-	csrf.Exempt(http.NewServeMux(), http.MethodPost, "/login")
-	crossSite := map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://appleid.apple.com"}
-	if rec := do(t, app.Handler(), call{method: http.MethodPost, path: "/auth/apple/callback", header: crossSite}); rec.Code != http.StatusFound {
-		t.Fatalf("exempted callback: %d", rec.Code)
-	}
-	if rec := do(t, app.Handler(), call{method: http.MethodPost, path: "/auth/login", header: crossSite}); rec.Code != http.StatusForbidden {
-		t.Fatalf("login stays checked: %d", rec.Code)
+	pay := app.Group("/pay")
+	pay.Handle("", "/return", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusSeeOther) }))
+	POST(pay, "/refund", func(context.Context, *None) (None, error) { return None{}, nil })
+	AllowCrossSitePost(pay, "/return")
+	AllowCrossSitePost(pay, "/return")
+	AllowCrossSitePost(struct{ Router }{pay}, "/refund")
+	crossSite := map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://gateway.example"}
+	for _, c := range []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodPost, "/pay/return", http.StatusSeeOther},
+		{http.MethodPut, "/pay/return", http.StatusForbidden},
+		{http.MethodPost, "/pay/refund", http.StatusForbidden},
+	} {
+		if rec := do(t, app.Handler(), call{method: c.method, path: c.path, header: crossSite}); rec.Code != c.want {
+			t.Errorf("%s %s: %d, want %d", c.method, c.path, rec.Code, c.want)
+		}
 	}
 }
 

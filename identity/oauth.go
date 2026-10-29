@@ -17,7 +17,6 @@ import (
 
 	"github.com/zynthara/chok/v3"
 	"github.com/zynthara/chok/v3/identity/internal/oauth"
-	"github.com/zynthara/chok/v3/internal/csrf"
 	"github.com/zynthara/chok/v3/store"
 	"github.com/zynthara/chok/v3/store/where"
 )
@@ -126,9 +125,7 @@ func (f *oauthFlow) mount(g, authed chok.Router) {
 		g.Handle(callbackMethod(p), "/"+name+"/callback", f.handleCallback(p))
 		// A provider may post the callback from its own site (Apple's
 		// form_post): the state parameter, not the origin, defends it.
-		if csrf.Exempt != nil {
-			csrf.Exempt(g, http.MethodPost, "/"+name+"/callback")
-		}
+		chok.AllowCrossSitePost(g, "/"+name+"/callback")
 	}
 	g.Handle(http.MethodPost, "/exchange", http.HandlerFunc(f.handleExchange))
 	chok.GET(authed, "/identities", f.listMethods, tag, chok.Summary("List the login methods"))
