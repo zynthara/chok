@@ -276,13 +276,22 @@ func TestUsers_ListFromQuery(t *testing.T) {
 	if got := users.QueryFields(); !slices.Equal(got, []string{"active", "created_at", "email", "email_verified", "name"}) {
 		t.Fatalf("query fields = %v", got)
 	}
+	// The list answers the admin role only (and what rbac grants
+	// user/read): no principal is a 401, another one a 403.
+	if _, err := users.ListFromQuery(ctx, url.Values{}); !errors.Is(err, chok.ErrUnauthorized) {
+		t.Fatalf("without a principal: %v", err)
+	}
+	if _, err := users.ListFromQuery(chok.WithPrincipal(ctx, chok.Principal{UserID: "usr_x", Roles: []string{"editor"}}), url.Values{}); !errors.Is(err, chok.ErrForbidden) {
+		t.Fatalf("without the admin role: %v", err)
+	}
+	admin := chok.WithPrincipal(ctx, chok.Principal{UserID: "usr_ops", Roles: []string{"admin"}})
 	list := func(raw string) (*chok.Page[User], error) {
 		t.Helper()
 		q, err := url.ParseQuery(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return users.ListFromQuery(ctx, q)
+		return users.ListFromQuery(admin, q)
 	}
 	page, err := list("")
 	if err != nil || len(page.Items) != 20 || page.Total != 25 || !page.HasMore {
@@ -323,13 +332,24 @@ func TestUsers_ListFromQuery(t *testing.T) {
 			t.Fatalf("an item shows %s: %s", key, b)
 		}
 	}
-	// One line serves it, behind the application's admin check.
+	// One line serves it. Behind Authn alone it lists no one to a user
+	// without the admin role.
 	c := serve(t, idn, func(app *chok.App) {
 		chok.List(app.Group("/admin", idn.Authn()), "/users", idn.Users())
 	})
-	tok := register(t, c, "admin@test.com", "password123")
+	tok := register(t, c, "ops@test.com", "password123")
+	if code := c.WithBearer(tok).GetJSON("/admin/users", nil); code != http.StatusForbidden {
+		t.Fatalf("GET /admin/users without the admin role = %d", code)
+	}
+	if err := users.SetRoles(ctx, userByEmail(t, idn, "ops@test.com").RID, []string{"admin"}); err != nil {
+		t.Fatal(err)
+	}
+	code, tok := login(t, c, "ops@test.com", "password123")
+	if code != http.StatusOK {
+		t.Fatalf("login = %d", code)
+	}
 	var got chok.Page[User]
 	if code := c.WithBearer(tok).GetJSON("/admin/users?email=u05@test.com", &got); code != http.StatusOK || got.Total != 1 || got.Items[0].Email != "u05@test.com" {
-		t.Fatalf("GET /admin/users = %d %+v", code, got)
+		t.Fatalf("GET /admin/users as an admin = %d %+v", code, got)
 	}
 }

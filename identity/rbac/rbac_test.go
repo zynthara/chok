@@ -620,6 +620,34 @@ func TestAudit_AdminAPIAsksRBAC(t *testing.T) {
 	}
 }
 
+// TestUsers_ListAsksRBAC: besides the admin role, the user list answers
+// those rbac grants user/read — here through a role.
+func TestUsers_ListAsksRBAC(t *testing.T) {
+	idn, rb, _ := setup(t, identity.Config{})
+	c, tok, uid := serve(t, idn, rb, func(api chok.Router) {
+		chok.List(api, "/users", idn.Users())
+	})
+	if code := c.WithBearer(tok).GetJSON("/api/users", nil); code != http.StatusForbidden {
+		t.Fatalf("without user/read = %d", code)
+	}
+	if err := rb.Policy().GrantRole(context.Background(), "support", "user", "read"); err != nil {
+		t.Fatal(err)
+	}
+	if err := idn.Users().SetRoles(context.Background(), uid, []string{"support"}); err != nil {
+		t.Fatal(err)
+	}
+	var fresh struct {
+		Token string `json:"token"`
+	}
+	if code := c.PostJSON("/auth/login", map[string]string{"email": "alice@test.com", "password": "password123"}, &fresh); code != http.StatusOK {
+		t.Fatalf("login = %d", code)
+	}
+	var page chok.Page[identity.User]
+	if code := c.WithBearer(fresh.Token).GetJSON("/api/users", &page); code != http.StatusOK || page.Total != 1 || page.Items[0].Email != "alice@test.com" {
+		t.Fatalf("with user/read = %d %+v", code, page)
+	}
+}
+
 func TestWatcher_PeersReload(t *testing.T) {
 	mr := miniredis.RunT(t)
 	cfg := dbtest.Config(t)

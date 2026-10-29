@@ -69,7 +69,8 @@ package, configuration key, API, table and metric to its v3 form.
   identity's roles — `admin` passes every check — with tenant domains and
   a Redis watcher. `auth.admins` makes the listed addresses admins once
   they are verified; `Users()` finds a user by email and lists every user
-  for an admin page.
+  for an admin page — to the `admin` role and those `identity/rbac` grants
+  `user/read` only, wherever the list is mounted.
 - **`identity`**: passwordless sign-in (`auth.passwordless`):
   `POST /auth/passwordless/start` answers 202 whatever the address and
   mails a code and a magic-link token in the background;

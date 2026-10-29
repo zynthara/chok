@@ -458,9 +458,12 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   SetActive、ResetPassword、MarkEmailVerified、RevokeTokens），并实现
   `chok.Lister[User]`：全表、没有 owner 围栏，可按 email、name、email_verified、
   active、created_at 过滤，每页默认 20、最多 100。管理接口因此是一行
-  `chok.List(admin, "/users", auth.Users())`，**只能挂在管理员授权之后**（比如
-  `rb.Require("user", "read")` 的组里）；响应体是 `User` 的 JSON，不含 roles 与
-  active，要显示它们的管理页自己写 handler。
+  `chok.List(admin, "/users", auth.Users())`。列表自己把关，挂在哪个组都一样：
+  只回应持有 `admin` 角色、或装了 `identity/rbac` 时被授予 `user/read` 的
+  principal，其余 principal 403、没有 principal 401，挂错了组（比如只有 Authn
+  的组）也列不出别人。程序里直接调用 `ListFromQuery`，要先用
+  `chok.WithPrincipal` 把 principal 放进 ctx。响应体是 `User` 的 JSON，不含
+  roles 与 active，要显示它们的管理页自己写 handler。
 - **`identity/rbac`**：casbin 的 (sub, dom, obj, act) 模型管权限。判定读
   `chok.Principal` 的 UserID 与 Roles（不必是 identity 签发的 principal）：
   `Require(obj, act)` 放行，当且仅当 Roles 含 `admin`，或 casbin 允许这个用户

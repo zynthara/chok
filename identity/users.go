@@ -107,14 +107,18 @@ func (s *UserService) QueryFields() []string {
 // The items are User's JSON, which leaves out the roles and the active
 // flag.
 //
-// It lets the UserService serve a chok.List route, and that route lists
-// every user: mount it only behind an administrator's authorization —
-// rbac's Require, or a middleware of the application's — never behind
-// Authn alone:
+// It lets the UserService serve a chok.List route, and it answers only
+// the principal in ctx that holds the admin role or, with identity/rbac,
+// is granted user/read: any other principal gets a 403 and a context
+// without one a 401, so a route mounted behind Authn alone lists no one
+// to the users it lets in. A caller outside a request puts its principal
+// in ctx with chok.WithPrincipal.
 //
-//	admin := app.Group("/admin", auth.Authn(), rb.Require("user", "read"))
-//	chok.List(admin, "/users", auth.Users())
+//	chok.List(app.Group("/admin", auth.Authn()), "/users", auth.Users())
 func (s *UserService) ListFromQuery(ctx context.Context, q url.Values) (*chok.Page[User], error) {
+	if err := s.idn.admit(ctx, "user", "read"); err != nil {
+		return nil, err
+	}
 	q = maps.Clone(q)
 	var flags []where.Option
 	for _, key := range []string{"active", "email_verified"} {

@@ -353,27 +353,36 @@ func (idn *Identity) me(ctx context.Context, _ *chok.None) (*meResponse, error) 
 	return &meResponse{ID: u.RID, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Roles: roles, CreatedAt: u.CreatedAt.UTC()}, nil
 }
 
+// admit lets the principal in ctx act on obj when it holds the admin
+// role or, with identity/rbac, is granted act on obj. Else it is a 401
+// without a principal and a 403 with one.
+func (idn *Identity) admit(ctx context.Context, obj, act string) error {
+	p, ok := chok.PrincipalFrom(ctx)
+	if !ok {
+		return chok.ErrUnauthorized
+	}
+	if p.HasRole(adminRole) {
+		return nil
+	}
+	if fn := idn.authorize.Load(); fn != nil {
+		allowed, err := (*fn)(ctx, p, obj, act)
+		if err != nil {
+			return err
+		}
+		if allowed {
+			return nil
+		}
+	}
+	return chok.ErrForbidden
+}
+
 // requireAuditReader admits the audit log's readers: the holders of the
 // admin role and, with identity/rbac, those it grants audit/read.
 func (idn *Identity) requireAuditReader() chok.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
-			p, ok := chok.PrincipalFrom(ctx)
-			if !ok {
-				chok.WriteError(w, r, chok.ErrUnauthorized)
-				return
-			}
-			allowed := p.HasRole(adminRole)
-			if fn := idn.authorize.Load(); fn != nil && !allowed {
-				var err error
-				if allowed, err = (*fn)(ctx, p, "audit", "read"); err != nil {
-					chok.WriteError(w, r, err)
-					return
-				}
-			}
-			if !allowed {
-				chok.WriteError(w, r, chok.ErrForbidden)
+			if err := idn.admit(r.Context(), "audit", "read"); err != nil {
+				chok.WriteError(w, r, err)
 				return
 			}
 			next.ServeHTTP(w, r)

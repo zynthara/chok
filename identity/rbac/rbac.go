@@ -22,8 +22,8 @@
 // The policies live in the table casbin_rule, registered under the owner
 // "rbac": migrate auto creates it, versioned applies the SQL embedded in
 // this package. With identity's audit log on, every policy change and
-// every denied request is recorded in it, and the audit log's admin API
-// asks this package for audit/read.
+// every denied request is recorded in it. The audit log's admin API asks
+// this package for audit/read, and identity's user list for user/read.
 //
 // casbin is imported here and nowhere else in chok: an application that
 // does not import identity/rbac does not link it.
