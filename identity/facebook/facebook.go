@@ -13,8 +13,12 @@
 // stale; the current one is in the Graph API changelog). It refuses
 // hosted_domain, team_id and key_id.
 //
-// Facebook returns an email only when the user granted it, and only a
-// confirmed one: an email present is taken as verified.
+// Facebook returns an email only when the user granted it, and does not
+// say whether it is confirmed: its Graph API reference promises a "valid"
+// address. An email present is taken as verified to create an account,
+// but not to join an existing one (auth.link_by_email) nor to create the
+// account of an address auth.admins lists: such a user signs in another
+// way first and links Facebook in the account settings.
 package facebook
 
 import (
@@ -145,7 +149,8 @@ func (p *provider) CompleteAuth(ctx context.Context, req *oauth.CompleteRequest)
 		return nil, fmt.Errorf("facebook: fetch /me: %w", err)
 	}
 	return &oauth.Identity{
-		Provider: "facebook", ProviderAccountID: u.ID, Email: u.Email, EmailVerified: u.Email != "",
+		Provider: "facebook", ProviderAccountID: u.ID, Email: u.Email,
+		EmailVerified: u.Email != "", EmailVerifiedAssumed: u.Email != "",
 		Name: u.Name, Picture: u.Picture.Data.URL,
 		Raw: map[string]any{"id": u.ID, "name": u.Name, "graph": p.graph, "picture_data": u.Picture.Data},
 	}, nil

@@ -454,7 +454,9 @@ func (f *oauthFlow) unlink(ctx context.Context, req *unlinkRequest) (chok.None, 
 // resolve maps a provider's identity to a user: the user it is already
 // linked to; else, with link_by_email, the existing user with the same
 // verified email; else a new user without a password. A new link needs
-// an email the provider vouches for and does not alias.
+// an email the provider vouches for and does not alias; one it only
+// implies is verified (Facebook's) makes a new account, but joins none
+// and makes none for an address auth.admins lists.
 func (f *oauthFlow) resolve(ctx context.Context, ext *oauth.Identity) (*User, *linkedIdentity, error) {
 	if ext.Provider == "" || ext.ProviderAccountID == "" {
 		return nil, nil, errors.New("identity: the provider's identity has no provider or account id")
@@ -477,7 +479,10 @@ func (f *oauthFlow) resolve(ctx context.Context, ext *oauth.Identity) (*User, *l
 	case !errors.Is(err, chok.ErrNotFound):
 		return nil, nil, err
 	}
-	if ext.Email == "" || !ext.EmailVerified || ext.IsAliasedEmail {
+	// The admin role hangs on the address: an assumed vouch is not enough
+	// to make its account.
+	assumedAdmin := ext.EmailVerifiedAssumed && f.idn.admins[ext.Email]
+	if ext.Email == "" || !ext.EmailVerified || ext.IsAliasedEmail || assumedAdmin {
 		return nil, nil, chok.NewError(http.StatusBadRequest, "OAUTH_EMAIL_REQUIRED",
 			"an account cannot be created through "+ext.Provider+" without a verified, non-relay email").
 			With("provider", ext.Provider).With("missing", missingFor(ext)).With("next_actions", nextActions(ext.Provider))
@@ -487,7 +492,7 @@ func (f *oauthFlow) resolve(ctx context.Context, ext *oauth.Identity) (*User, *l
 	// A user and its link are written together: a failed link leaves no
 	// orphan user.
 	err = f.idn.d.RunInTx(ctx, func(ctx context.Context) error {
-		if f.linkByEmail {
+		if f.linkByEmail && !ext.EmailVerifiedAssumed {
 			u, err := f.idn.users.Get(ctx, store.Where(where.Eq("email", ext.Email)))
 			switch {
 			case err == nil && u.EmailVerified:
@@ -658,6 +663,9 @@ func missingFor(ext *oauth.Identity) string {
 		return "verified"
 	case ext.IsAliasedEmail:
 		return "non_aliased"
+	case ext.EmailVerifiedAssumed:
+		// An address auth.admins lists, which an assumed vouch cannot make.
+		return "verified"
 	}
 	return ""
 }

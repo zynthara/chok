@@ -59,6 +59,11 @@ type Identity struct {
 	Email             string
 	// EmailVerified is the provider vouching that the user controls Email.
 	EmailVerified bool
+	// EmailVerifiedAssumed marks an EmailVerified the provider implies
+	// but does not state: Facebook returns an address without saying it
+	// is confirmed. Such an address creates an account, but joins none
+	// (link_by_email) and creates none for an address auth.admins lists.
+	EmailVerifiedAssumed bool
 	// IsAliasedEmail marks a relay address (Apple's "hide my email"): it
 	// never links to an existing account, verified or not.
 	IsAliasedEmail bool

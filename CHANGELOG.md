@@ -213,6 +213,12 @@ package, configuration key, API, table and metric to its v3 form.
   need not own it. The first proof of an address — reset-password, a
   passwordless code, `Users().MarkEmailVerified` — unlinks the providers
   linked before it; v2 let unverified accounts link.
+- **Breaking:** Meta does not say whether the address Facebook returns
+  is confirmed, so a first Facebook sign-in no longer joins the local
+  account with the same email under `auth.link_by_email` — the user
+  signs in another way and links Facebook in the account settings — and
+  cannot create the account of an address `auth.admins` lists. It still
+  creates other accounts.
 - **Breaking:** a passwordless code that proves an address for the first
   time takes the account over clean: the password set before it no
   longer logs in (reset-password sets a new one) and the account's tokens

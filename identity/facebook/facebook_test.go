@@ -147,6 +147,24 @@ func TestCompleteAuth_NoEmailScope(t *testing.T) {
 	}
 }
 
+// TestCompleteAuth_EmailVerifiedIsAssumed: Facebook does not say whether
+// the address is confirmed, so an address present is verified by
+// assumption only.
+func TestCompleteAuth_EmailVerifiedIsAssumed(t *testing.T) {
+	m := newMockGraph(t)
+	p := provider(t, m.srv.URL+"/v21.0")
+	m.stage("code-a", "tok-a", map[string]any{"id": "fb-1", "name": "Alice", "email": "alice@example.com"})
+	with, err := p.CompleteAuth(context.Background(), &oauth.CompleteRequest{Code: "code-a"})
+	if err != nil || !with.EmailVerified || !with.EmailVerifiedAssumed {
+		t.Fatalf("with an email: %+v %v", with, err)
+	}
+	m.stage("code-b", "tok-b", map[string]any{"id": "fb-2", "name": "Bob"})
+	without, err := p.CompleteAuth(context.Background(), &oauth.CompleteRequest{Code: "code-b"})
+	if err != nil || without.EmailVerified || without.EmailVerifiedAssumed {
+		t.Fatalf("without an email: %+v %v", without, err)
+	}
+}
+
 func TestCompleteAuth_EndpointCarriesTheVersion(t *testing.T) {
 	m := newMockGraph(t)
 	m.stage("code-3", "tok-3", map[string]any{"id": "fb-x", "email": "x@example.com"})

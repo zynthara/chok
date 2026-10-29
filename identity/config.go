@@ -58,7 +58,8 @@ type Config struct {
 	DisableRegister bool `yaml:"disable_register"`
 	// LinkByEmail lets a first OAuth sign-in join the local account with
 	// the same email, when that account's email is verified and the
-	// provider vouches for the address and does not alias it.
+	// provider vouches for the address and does not alias it. Facebook,
+	// which does not say whether an address is confirmed, never joins.
 	LinkByEmail bool `yaml:"link_by_email"`
 	// AllowedRedirectBacks lists the absolute URLs an OAuth sign-in may
 	// return to through ?redirect_back: an entry ending in / allows its
@@ -85,10 +86,11 @@ type Config struct {
 	// nothing (Users().SetRoles does). An unverified address gets nothing,
 	// so whoever registers a listed address first gains no power by it,
 	// and loses the account once the owner proves the address with a
-	// mailed reset token or code. Users().MarkEmailVerified keeps the
-	// registrant's password: an application that verifies addresses that
-	// way should have the owners register the listed ones, or turn
-	// registration off.
+	// mailed reset token or code. Facebook, which does not say whether an
+	// address is confirmed, cannot create the account of a listed one.
+	// Users().MarkEmailVerified keeps the registrant's password: an
+	// application that verifies addresses that way should have the owners
+	// register the listed ones, or turn registration off.
 	Admins []string `yaml:"admins"`
 }
 

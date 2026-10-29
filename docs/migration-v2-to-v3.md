@@ -372,13 +372,17 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
   其余按用户自己的授权（`GrantUser`）与它的角色的授权（`GrantRole`）。casbin
   里留下的全局角色成员 v3 不再认，升级时要搬进 `users.roles`（见下）。
 - **首个管理员**：`auth.admins: [ops@example.com]`。列出的邮箱一旦验证过（无密码
-  登录、OAuth 的已验证邮箱、或 reset-password），下次签发 token 或请求经过
-  `Authn` 时就加上 `admin` 并落库，只加一次；从列表里删掉不撤销。
+  登录、OAuth 的已验证邮箱但不含 Facebook 的、或 reset-password），下次签发
+  token 或请求经过 `Authn` 时就加上 `admin` 并落库，只加一次；从列表里删掉不撤销。
 - **reset-password 成功即置 `email_verified`**（邮件里的 token 证明邮箱可达）；v2
   不改这个字段。
 - **绑定登录方式要先验证邮箱**：未验证邮箱的账户调 `/identities/link` 答 403
   `EMAIL_NOT_VERIFIED`（v2 允许）。v2 库里已有的这类绑定，在邮箱第一次被证明时
   （reset-password、passwordless 的码、`Users().MarkEmailVerified`）自动解绑。
+- **Facebook 的邮箱不再并入已有账户**：Meta 不说 Graph API 返回的邮箱是否已确认，
+  v3 只把它当推定已验证。首次用 Facebook 登录不再按 `link_by_email` 并入同邮箱的
+  已有账户（v2 会并入），用户先用别的方式登录，再在账户设置里绑定 Facebook；它也
+  不能新建 `auth.admins` 列出的邮箱的账户。别的新账户照常创建。
 - **`/audit/logs`** 路径不变：`users.roles` 含 `admin` 的用户总能读；挂了 rbac 后，
   其余用户由 rbac 判 `audit/read`。
 - **决策审计**跟随 `auth.audit.enabled`；watcher 频道固定 `chok:authz:policy`。

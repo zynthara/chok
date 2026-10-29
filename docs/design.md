@@ -433,7 +433,11 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
 - **OAuth**：Google / Apple 走 OIDC（自实现校验）、GitHub、Facebook；
   `Provider` 是封闭接口，四个子包各只导出 `New(identity.ProviderConfig)`。
   配置了却没在代码里链接的 provider 让 `New` 失败。进行中的 OAuth 状态只在进程
-  内：多副本须会话粘滞。
+  内：多副本须会话粘滞。Facebook 返回邮箱却不说是否已确认（Graph API 的参考只
+  说「有效」），它的邮箱只算推定已验证：能新建账户，但不按 `link_by_email` 并入
+  已有账户，也不能新建 `auth.admins` 列出的邮箱的账户。账户若在邮箱列进
+  `auth.admins` 之前已由 Facebook 建好，之后的请求仍会让它得到 `admin`：先列邮
+  箱，再开 Facebook 登录。
 - **审计**：`Audit().Log`（异步入队，不进调用方事务）/ `LogSync`（同步，随 ctx
   事务）；trace id 由 telemetry 经内部钩子补上。
 - **角色只有一套**：全局角色只存在 identity——`users.roles` → `Principal.Roles`，

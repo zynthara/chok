@@ -343,6 +343,67 @@ func TestOAuth_AliasedEmailNeverLinks(t *testing.T) {
 	}
 }
 
+// assumed is a provider's identity whose address the provider only
+// implies is verified, as Facebook's.
+func assumed(account, email string) *oauth.Identity {
+	ext := verified(account, email)
+	ext.EmailVerifiedAssumed = true
+	return ext
+}
+
+// TestOAuth_AssumedEmailJoinsNoAccount: an address the provider only
+// implies is verified never joins an existing account under
+// link_by_email — the sign-in conflicts on the email — but still makes
+// an account of its own, its address verified.
+func TestOAuth_AssumedEmailJoinsNoAccount(t *testing.T) {
+	fx := newOAuthFixture(t, Config{LinkByEmail: true}, nil)
+	alice := verifiedUser(t, fx.idn, "alice@idp.test")
+	fx.p.seed("c", assumed("acct", "alice@idp.test"))
+	resp := fx.signIn(t, "c", "")
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("an assumed address of an account = %d", resp.StatusCode)
+	}
+	var e envelope
+	decodeBody(t, resp, &e)
+	if e.Metadata["field"] != "email" {
+		t.Fatalf("the conflict: %+v", e)
+	}
+	if links, _ := fx.idn.oauth.links(t.Context(), alice.RID); len(links) != 0 {
+		t.Fatalf("joined the account: %+v", links)
+	}
+	fx.p.seed("d", assumed("acct-bob", "bob@idp.test"))
+	if resp := fx.signIn(t, "d", ""); resp.StatusCode != http.StatusFound {
+		t.Fatalf("an assumed address of no account = %d", resp.StatusCode)
+	}
+	if !userByEmail(t, fx.idn, "bob@idp.test").EmailVerified {
+		t.Fatal("the new account's address is not verified")
+	}
+}
+
+// TestOAuth_AssumedEmailCreatesNoListedAccount: an address auth.admins
+// lists gets its account only from a provider that states the address is
+// verified; the refusal names what is missing, as for an unverified one.
+func TestOAuth_AssumedEmailCreatesNoListedAccount(t *testing.T) {
+	fx := newOAuthFixture(t, adminsConfig(), nil)
+	fx.p.seed("c", assumed("acct", "ROOT@test.com"))
+	resp := fx.signIn(t, "c", "")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an assumed listed address = %d", resp.StatusCode)
+	}
+	var e envelope
+	decodeBody(t, resp, &e)
+	if e.Reason != "OAUTH_EMAIL_REQUIRED" || e.Metadata["missing"] != "verified" {
+		t.Fatalf("the refusal: %+v", e)
+	}
+	if _, err := fx.idn.Users().GetByEmail(t.Context(), "root@test.com"); !errors.Is(err, chok.ErrNotFound) {
+		t.Fatalf("the account was made: %v", err)
+	}
+	fx.p.seed("d", verified("acct-2", "root@test.com"))
+	if resp := fx.signIn(t, "d", ""); resp.StatusCode != http.StatusFound {
+		t.Fatalf("a stated listed address = %d", resp.StatusCode)
+	}
+}
+
 func TestOAuth_LinkByEmail(t *testing.T) {
 	fx := newOAuthFixture(t, Config{LinkByEmail: true}, nil)
 	u, err := fx.idn.Users().Create(t.Context(), "alice@idp.test", "password123", "Alice")
