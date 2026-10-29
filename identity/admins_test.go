@@ -245,6 +245,44 @@ func TestAdmins_ConcurrentRequestsWriteOnce(t *testing.T) {
 	}
 }
 
+// TestAdmins_GrantCommitsWithItsRecord: the grant and its audit record
+// commit together — the record is there when the response is — and a
+// grant whose record cannot be written does not happen; the next request
+// tries again.
+func TestAdmins_GrantCommitsWithItsRecord(t *testing.T) {
+	idn := newIdentity(t, adminsConfig())
+	c := serve(t, idn)
+	u := verifiedUser(t, idn, "root@test.com")
+	rename := func(from, to string) {
+		t.Helper()
+		if err := idn.d.Unsafe(t.Context()).Exec("ALTER TABLE " + from + " RENAME TO " + to).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	rename("audit_logs", "audit_logs_away")
+	code, tok := login(t, c, "root@test.com", "password123")
+	if code != http.StatusOK {
+		t.Fatalf("login while the log cannot record = %d", code)
+	}
+	if got := tokenRoles(t, idn, tok); len(got) != 0 {
+		t.Fatalf("the token's roles = %v without the grant's record", got)
+	}
+	if roles := userByEmail(t, idn, "root@test.com").Roles; roles != "" {
+		t.Fatalf("granted %q without its record", roles)
+	}
+	rename("audit_logs_away", "audit_logs")
+	if code, tok = login(t, c, "root@test.com", "password123"); code != http.StatusOK {
+		t.Fatalf("login once the log records = %d", code)
+	}
+	if got := tokenRoles(t, idn, tok); !slices.Equal(got, adminOnly) {
+		t.Fatalf("the token's roles = %v once the log records", got)
+	}
+	// Counted before Close flushes the queue: the record came with the grant.
+	if n := count(t, idn, "action = ? AND resource_id = ?", "user.role.grant", u.RID); n != 1 {
+		t.Fatalf("grant records = %d, want 1", n)
+	}
+}
+
 func TestResetPassword_VerifiesTheAddress(t *testing.T) {
 	sender := newMockSender()
 	cfg := adminsConfig()

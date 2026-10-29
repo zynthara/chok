@@ -19,9 +19,10 @@ const grantTries = 3
 // the address is verified and u does not hold the role yet. The write is
 // conditional on the row's version: of concurrent requests one writes
 // and the others, reading the row again, find the role there. It leaves
-// password_version alone, so u's tokens stay valid, and records one
-// audit event. A failure is a warning: the request goes on without the
-// role, and the next one tries again. u is updated in place.
+// password_version alone, so u's tokens stay valid. The grant and its
+// audit record commit together: a grant the log cannot record does not
+// happen. A failure is a warning: the request goes on without the role,
+// and the next one tries again. u is updated in place.
 func (idn *Identity) grantAdmin(ctx context.Context, u *User) {
 	if len(idn.admins) == 0 {
 		return
@@ -42,15 +43,19 @@ func (idn *Identity) grantAdmin(ctx context.Context, u *User) {
 			return
 		}
 		roles := strings.Join(after, ",")
-		err := idn.users.Update(ctx, store.RID(u.RID), store.Set(map[string]any{"roles": roles}), where.Version(u.Version))
-		if err == nil {
-			u.Roles, u.Version = roles, u.Version+1
-			logger.InfoContext(ctx, "identity: auth.admins granted the admin role", "user_id", u.RID)
-			idn.audit.Log(ctx, Event{
+		err := idn.d.RunInTx(ctx, func(ctx context.Context) error {
+			if err := idn.users.Update(ctx, store.RID(u.RID), store.Set(map[string]any{"roles": roles}), where.Version(u.Version)); err != nil {
+				return err
+			}
+			return idn.audit.LogSync(ctx, Event{
 				Action: "user.role.grant", Resource: "user", ResourceID: u.RID, ActorType: ActorSystem,
 				Before: map[string]any{"roles": nonNilRoles(before)}, After: map[string]any{"roles": after},
 				Reason: "auth.admins lists the user's verified email",
 			})
+		})
+		if err == nil {
+			u.Roles, u.Version = roles, u.Version+1
+			logger.InfoContext(ctx, "identity: auth.admins granted the admin role", "user_id", u.RID)
 			return
 		}
 		if !errors.As(err, new(*store.VersionConflictError)) {

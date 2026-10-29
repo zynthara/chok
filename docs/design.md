@@ -444,8 +444,9 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
 - **首个管理员**：`auth.admins` 是邮箱列表（规范化后比较）。列表里**且已验证**
   的用户，在签发 token（register、login、refresh-token、passwordless verify、
   OAuth exchange）或 `Authn` 读到他时，角色里还没有 `admin` 就加上并落库：按行的
-  version 乐观锁，并发请求只写一次，记一条审计 `user.role.grant`（actor 是
-  system），不吊销已有 token；写失败只记 Warn、请求照常，下个请求再试。只增不删：
+  version 乐观锁，并发请求只写一次；这次写与审计记录 `user.role.grant`（actor
+  是 system，`LogSync`）在同一事务里提交，记录写不进去就不授予。不吊销已有
+  token；写失败只记 Warn、请求照常，下个请求再试。只增不删：
   从列表里删掉邮箱不撤销角色（要撤用 `SetRoles`）。未验证的邮箱不授予——开放注册
   时，抢注管理员邮箱的人拿不到权限。reset-password 成功即证明邮箱可达，置
   `email_verified`，所以用密码登录的应用也能走 `auth.admins`；运维调用的
