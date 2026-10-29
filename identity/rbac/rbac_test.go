@@ -110,6 +110,37 @@ func TestPolicy_UnknownUserHasNoPermission(t *testing.T) {
 	}
 }
 
+// TestPolicy_DisabledUserHasNoPermission: HasPermission refuses a
+// disabled user, as Authn does before Require — admin and the user's own
+// grants included — and admits it again once enabled.
+func TestPolicy_DisabledUserHasNoPermission(t *testing.T) {
+	idn, p := policy(t)
+	ctx := context.Background()
+	root, alice := user(t, idn, "root@test.com", "admin"), user(t, idn, "alice@test.com")
+	if err := p.GrantUser(ctx, alice, "task", "read"); err != nil {
+		t.Fatal(err)
+	}
+	check := func(active bool) {
+		t.Helper()
+		for _, id := range []string{root, alice} {
+			if err := idn.Users().SetActive(ctx, id, active); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for who, id := range map[string]string{"admin": root, "granted": alice} {
+			if ok, err := p.HasPermission(ctx, id, "task", "read"); err != nil || ok != active {
+				t.Errorf("active %v, %s: HasPermission = %v %v", active, who, ok, err)
+			}
+			if ok, err := p.HasPermissionInDomain(ctx, id, "task", "read", "ws_1"); err != nil || ok != active {
+				t.Errorf("active %v, %s: HasPermissionInDomain = %v %v", active, who, ok, err)
+			}
+		}
+	}
+	check(true)
+	check(false)
+	check(true)
+}
+
 func TestPolicy_DomainScopedRoles(t *testing.T) {
 	idn, p := policy(t)
 	ctx := context.Background()

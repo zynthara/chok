@@ -480,7 +480,8 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   角色由 `AddUserToRoleInDomain` 管——域不能是 "" 或 `*`（全局角色用
   `Users().SetRoles`）；v2 在 casbin_rule 里留下的全局角色绑定（域 `*`）不算数，
   升级时要搬进 `users.roles`（迁移文档 §5）。`HasPermission(ctx, userID, …)`
-  按 userID 读 identity 的用户后同规则判定，用户不存在 → false。`New` /
+  按 userID 读 identity 的用户后同规则判定，用户不存在或已停用（`SetActive`）
+  → false。`New` /
   `MustNew`、策略服务、Redis watcher 同步多副本。不 import rbac 的应用不链接
   casbin，也不建 casbin_rule 表。
 

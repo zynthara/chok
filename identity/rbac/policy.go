@@ -218,8 +218,8 @@ func (p *PolicyService) RevokeUser(ctx context.Context, userID, obj, act string)
 
 // HasPermission decides as Require does, for the identity user userID:
 // it reads the user's roles, then admin passes, and the policies of the
-// user and of its roles decide. A user that does not exist has no
-// permission: false and no error.
+// user and of its roles decide. A user that does not exist, or that
+// Users().SetActive disabled, has no permission: false and no error.
 func (p *PolicyService) HasPermission(ctx context.Context, userID, obj, act string) (bool, error) {
 	return p.hasPermission(ctx, userID, "", obj, act)
 }
@@ -243,6 +243,10 @@ func (p *PolicyService) hasPermission(ctx context.Context, userID, dom, obj, act
 			return false, nil
 		}
 		return false, fmt.Errorf("rbac: read the user %s: %w", userID, err)
+	}
+	// Authn turns a disabled user away before Require decides.
+	if !u.Active {
+		return false, nil
 	}
 	return p.e.decide(userID, u.RoleList(), dom, obj, act)
 }

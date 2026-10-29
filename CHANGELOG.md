@@ -201,11 +201,12 @@ package, configuration key, API, table and metric to its v3 form.
   grants, then what `GrantRole` gave any of the roles; roles within a
   domain stay in casbin, and the InDomain membership methods refuse the
   empty domain. `AddUserToRole`, `RemoveUserFromRole`, `UserRoles` and
-  `BootstrapAdmin` are gone: list the first admin in `auth.admins`. The
-  global role bindings v2 left in `casbin_rule` (`ptype = 'g'`,
-  `v2 = '*'`) no longer count: move them into `users.roles` before v3
-  takes traffic (see the migration guide). A password reset now marks
-  the address verified.
+  `BootstrapAdmin` are gone: list the first admin in `auth.admins`.
+  `HasPermission` decides for an identity user: one that does not exist
+  or is disabled has no permission. The global role bindings v2 left in
+  `casbin_rule` (`ptype = 'g'`, `v2 = '*'`) no longer count: move them
+  into `users.roles` before v3 takes traffic (see the migration guide).
+  A password reset now marks the address verified.
 - **Breaking:** linking a provider needs a verified address:
   `POST {prefix}/identities/link` answers 403 `EMAIL_NOT_VERIFIED` for an
   account whose address nobody has proven, since whoever registered it
