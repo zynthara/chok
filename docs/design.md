@@ -478,9 +478,11 @@ exchange 与 identities 管理；审计开着且 `admin_api` 时挂 `GET /audit/
   （`GrantUser`），或允许 Roles 里任一角色（`GrantRole`）；无 principal 401、
   拒绝 403。`RequireInDomain` 同理：`admin` 跨所有域，后两条在该域判定，域内的
   角色由 `AddUserToRoleInDomain` 管——域不能是 "" 或 `*`（全局角色用
-  `Users().SetRoles`）。`HasPermission(ctx, userID, …)` 按 userID 读 identity 的
-  用户后同规则判定，用户不存在 → false。`New` / `MustNew`、策略服务、Redis
-  watcher 同步多副本。不 import rbac 的应用不链接 casbin，也不建 casbin_rule 表。
+  `Users().SetRoles`）；v2 在 casbin_rule 里留下的全局角色绑定（域 `*`）不算数，
+  升级时要搬进 `users.roles`（迁移文档 §5）。`HasPermission(ctx, userID, …)`
+  按 userID 读 identity 的用户后同规则判定，用户不存在 → false。`New` /
+  `MustNew`、策略服务、Redis watcher 同步多副本。不 import rbac 的应用不链接
+  casbin，也不建 casbin_rule 表。
 
 ### 7.2 `jobs`
 

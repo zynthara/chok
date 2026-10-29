@@ -7,11 +7,15 @@ package rbac
 //	p = sub, dom, obj, act    a policy, of the request's shape
 //	g = _, _, _               a role binding: user, role, domain
 //
-// The matcher admits a request when a policy's subject is the user
-// itself (GrantUser) or a role the user holds in the request's domain or
-// globally; the policy's domain is the request's or "*" (global, valid
-// everywhere); the object matches with keyMatch ("post.*" covers
-// "post.read", "*" everything); and the action is the request's or "*".
+// The matcher admits a request when a policy's subject is the request's
+// — the user (GrantUser) or one of identity's roles, which decide asks
+// about in turn (GrantRole) — or a role the user holds in the request's
+// tenant (AddUserToRoleInDomain); the policy's domain is the request's or
+// "*" (global, valid everywhere); the object matches with keyMatch
+// ("post.*" covers "post.read", "*" everything); and the action is the
+// request's or "*". A role binding in the global scope "*", which v2's
+// AddUserToRole wrote, counts for nothing: the global roles are
+// identity's.
 const rbacWithDomainsModel = `[request_definition]
 r = sub, dom, obj, act
 
@@ -25,5 +29,5 @@ g = _, _, _
 e = some(where (p.eft == allow))
 
 [matchers]
-m = (r.sub == p.sub || g(r.sub, p.sub, r.dom) || g(r.sub, p.sub, "*")) && (r.dom == p.dom || p.dom == "*") && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*")
+m = (r.sub == p.sub || (r.dom != "*" && g(r.sub, p.sub, r.dom))) && (r.dom == p.dom || p.dom == "*") && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*")
 `

@@ -266,6 +266,50 @@ func TestPolicy_NoGlobalRoleAPI(t *testing.T) {
 	}
 }
 
+// TestPolicy_V2GlobalBindingsGrantNothing: a role binding in the global
+// scope, as v2's AddUserToRole left it in casbin_rule, grants the role's
+// permissions nowhere and is no domain of the user's; a binding in a
+// tenant still counts there, and the user's identity roles everywhere.
+func TestPolicy_V2GlobalBindingsGrantNothing(t *testing.T) {
+	ctx := t.Context()
+	idn, rb, d := setup(t, identity.Config{})
+	p := rb.Policy()
+	alice := user(t, idn, "alice@test.com")
+	if err := p.GrantRole(ctx, "editor", "post", "write"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Unsafe(ctx).Exec("INSERT INTO casbin_rule (ptype, v0, v1, v2, v3, v4, v5) VALUES ('g', ?, 'editor', '*', '', '', '')", alice).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ReloadPolicy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := p.HasPermission(ctx, alice, "post", "write"); err != nil || ok {
+		t.Fatalf("the v2 binding granted globally: %v %v", ok, err)
+	}
+	if ok, err := p.HasPermissionInDomain(ctx, alice, "post", "write", "ws_abc"); err != nil || ok {
+		t.Fatalf("the v2 binding granted in a tenant: %v %v", ok, err)
+	}
+	if doms, err := p.DomainsForUser(ctx, alice); err != nil || len(doms) != 0 {
+		t.Fatalf("the v2 binding is a domain: %v %v", doms, err)
+	}
+	if err := p.AddUserToRoleInDomain(ctx, alice, "editor", "ws_abc"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := p.HasPermissionInDomain(ctx, alice, "post", "write", "ws_abc"); !ok {
+		t.Fatal("a tenant binding counts in its tenant")
+	}
+	if ok, _ := p.HasPermission(ctx, alice, "post", "write"); ok {
+		t.Fatal("a tenant binding does not count globally")
+	}
+	if err := idn.Users().SetRoles(ctx, alice, []string{"editor"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := p.HasPermission(ctx, alice, "post", "write"); !ok {
+		t.Fatal("the identity role counts")
+	}
+}
+
 func TestNew_RefusesNil(t *testing.T) {
 	d := dbtest.Open(t)
 	if _, err := rbac.New(nil, d); err == nil {

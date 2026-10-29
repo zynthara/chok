@@ -73,8 +73,8 @@ func (p *PolicyService) UserRolesInDomain(ctx context.Context, userID, domain st
 }
 
 // DomainsForUser lists the domains where userID holds a role bound by
-// AddUserToRoleInDomain; the global roles identity keeps are not here. Casbin does not expose
-// it, so it filters the grouping policies.
+// AddUserToRoleInDomain; the global roles identity keeps are not here.
+// Casbin does not expose it, so it filters the grouping policies.
 func (p *PolicyService) DomainsForUser(ctx context.Context, userID string) ([]string, error) {
 	policies, err := p.e.enforcer.GetGroupingPolicy()
 	if err != nil {
@@ -83,8 +83,9 @@ func (p *PolicyService) DomainsForUser(ctx context.Context, userID string) ([]st
 	seen := map[string]bool{}
 	out := []string{}
 	for _, row := range policies {
-		// row format: [user, role, domain]
-		if len(row) < 3 || row[0] != userID {
+		// row format: [user, role, domain]; a binding in the global
+		// scope, left by v2, is no domain and grants nothing
+		if len(row) < 3 || row[0] != userID || row[2] == globalDomain {
 			continue
 		}
 		if !seen[row[2]] {
@@ -311,6 +312,7 @@ func globalAlternative(methodName string) string {
 }
 
 // globalDomain is the literal Casbin policy value used for
-// global-scope rows. Both g(...) and p(...) tuples store it in their
-// domain column so the matcher's `p.dom == "*"` clause picks it up.
+// global-scope rows: p(...) tuples store it in their domain column so the
+// matcher's `p.dom == "*"` clause picks them up. A g(...) tuple with it,
+// a v2 global role binding, the matcher ignores.
 const globalDomain = "*"
