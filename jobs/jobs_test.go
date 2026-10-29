@@ -535,15 +535,18 @@ func TestCleanup_RunsUnderStart(t *testing.T) {
 	d := dbtest.Open(t)
 	in := &inbox{}
 	cfg := fastConfig()
-	// Contract §5's delivery guarantee assumes every enqueueing transaction
-	// commits within settle_window. 1ms does not hold under -race at high
-	// load: on 2026-10-25 the MySQL lane once saw no delivery within 15s.
 	cfg.SettleWindow, cfg.Retention, cfg.CleanupInterval = 50*time.Millisecond, time.Millisecond, 20*time.Millisecond
 	j := newJobs(t, d, cfg, Worker("clean", in.handle))
-	run(t, j)
+	// The messages commit before Start. Contract §5's delivery guarantee
+	// assumes every enqueueing transaction commits within settle_window,
+	// and a window this short does not hold under -race at high load: a
+	// commit that lands between a sweep's scan and its frontier probe is
+	// passed over, which left a MySQL lane at 1ms (2026-10-25) and CI's
+	// postgres lane at 50ms (2026-10-28) a delivery short for 15s.
 	for i := range 3 {
 		enqueueTx(t, d, j, "clean", i)
 	}
+	run(t, j)
 	eventually(t, "the deliveries", func() bool { return in.count() == 3 })
 	count := func() int64 {
 		var n int64
@@ -598,11 +601,13 @@ func TestObserve_WorkersAndCleanup(t *testing.T) {
 			return nil
 		}),
 		Observe(observe))
-	run(t, j)
+	// The messages commit before Start, as in TestCleanup_RunsUnderStart:
+	// the settle window is too short for an enqueue in flight.
 	for i := range 3 {
 		enqueueTx(t, d, j, "orders", i)
 	}
 	enqueueTx(t, d, j, "flaky", "x")
+	run(t, j)
 	eventually(t, "the sweeps that took the three orders", func() bool { n, _ := sum("orders", "run.finished"); return n == 3 })
 	eventually(t, "a failed sweep of flaky", func() bool { _, seen := sum("flaky", "run.failed"); return seen })
 	healed.Store(true)
