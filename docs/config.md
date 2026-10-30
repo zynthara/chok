@@ -106,8 +106,8 @@ The database handle `db.Open` takes.
 | `db.sqlite.optimize_interval` | duration | `1h` | `gte=0` | OptimizeInterval runs PRAGMA optimize periodically; 0 disables. |
 | `db.sqlite.path` | string | `app.db` |  | Path is the database file, or ":memory:". Driver parameters ride in the query string: app.db?_pragma=busy_timeout(10000). |
 | `db.store.admin_roles` | list of string |  |  | AdminRoles see and write every owner's rows. |
-| `db.store.default_page_size` | int | `20` | `gte=0` |  |
-| `db.store.max_page_size` | int | `100` | `gte=0` |  |
+| `db.store.default_page_size` | int | `20` | `gte=0` | DefaultPageSize pages a list a URL asks for without a size, and a page the code asks for without one; a list the code asks for without pagination is every row. |
+| `db.store.max_page_size` | int | `100` | `gte=0` | MaxPageSize bounds the page a URL asks for; the code's own pages take the size they name. |
 | `db.store.owner_scope` | bool |  |  | OwnerScope fences models that embed an Owned base to the principal's rows; nil means true. |
 | `db.store.require_principal` | bool |  |  | RequirePrincipal makes writing an owner-scoped row without a principal in the context fail instead of writing an unowned row. |
 

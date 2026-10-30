@@ -82,9 +82,14 @@ type StorePolicy struct {
 	AdminRoles []string `yaml:"admin_roles"`
 	// OwnerScope fences models that embed an Owned base to the
 	// principal's rows; nil means true.
-	OwnerScope      *bool `yaml:"owner_scope"`
-	DefaultPageSize int   `yaml:"default_page_size" default:"20" validate:"gte=0"`
-	MaxPageSize     int   `yaml:"max_page_size" default:"100" validate:"gte=0"`
+	OwnerScope *bool `yaml:"owner_scope"`
+	// DefaultPageSize pages a list a URL asks for without a size, and a
+	// page the code asks for without one; a list the code asks for
+	// without pagination is every row.
+	DefaultPageSize int `yaml:"default_page_size" default:"20" validate:"gte=0"`
+	// MaxPageSize bounds the page a URL asks for; the code's own pages
+	// take the size they name.
+	MaxPageSize int `yaml:"max_page_size" default:"100" validate:"gte=0"`
 }
 
 // Validate checks what tags cannot: the fields the chosen driver needs.

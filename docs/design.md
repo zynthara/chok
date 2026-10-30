@@ -347,6 +347,12 @@ SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
   错误，500，日志里有模型名与字段、响应里没有，`errors.Is(err,
   where.ErrUnknownField)` 照样成立。所以把客户端给的字段名交给 `where.*` 之前，
   先用 `QueryFields()` 核对。
+- **页大小也只管客户端**：代码里的 `List` 不带分页选项时返回全部行，带
+  `where.Page` / `Limit` 就按给的大小取（没给大小用缺省页大小）。
+  `db.store.default_page_size` / `max_page_size` 管的是 URL 来的列表：
+  `where.FromQuery` 读到的分页（`ListFromQuery`、`chok.List` 都经它）总是一页，
+  没给 size 用缺省值，给多了截到上限。`ListWithCursor` 同理。单页仍以 where
+  接受的 10,000 行为限，超了报 `where.ErrInvalidParam`，不会悄悄截断。
 - **owner 隔离，失败关闭**：嵌入 Owned 基座就自动启用；principal 从
   `chok.PrincipalFrom(ctx)` 读。没有 principal：读返回空、写返回
   `NoPrincipalError`（401）。admin 角色由 `db.store.admin_roles` /

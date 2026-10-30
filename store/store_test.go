@@ -357,11 +357,11 @@ func TestPolicy_InheritsAndIsCopied(t *testing.T) {
 	for i := range 4 {
 		mustCreate(t, as(ctx, "alice"), inherited, &doc{Title: fmt.Sprintf("d%d", i)})
 	}
-	page, err := inherited.List(as(ctx, "x", "ops"))
-	if err != nil || page.Size != 2 || len(page.Items) != 2 {
+	page, err := inherited.ListFromQuery(as(ctx, "x", "ops"), nil)
+	if err != nil || page.Size != 2 || len(page.Items) != 2 || page.Total != 4 {
 		t.Fatalf("the handle's page size and admin role: %+v %v", page, err)
 	}
-	if page, _ = inherited.List(as(ctx, "x", "ops"), where.Page(1, 50)); page.Size != 3 {
+	if page, _ = inherited.ListFromQuery(as(ctx, "x", "ops"), map[string][]string{"size": {"50"}}); page.Size != 3 {
 		t.Fatalf("the handle's max: %+v", page)
 	}
 	if page, _ = inherited.List(as(ctx, "x", "mallory")); len(page.Items) != 0 {
@@ -377,7 +377,7 @@ func TestPolicy_InheritsAndIsCopied(t *testing.T) {
 	opt := store.Policy(db.StorePolicy{AdminRoles: mine})
 	mine[0] = "mallory"
 	audited := store.New[doc](d, opt)
-	if page, _ = audited.List(as(ctx, "x", "auditor")); len(page.Items) != 4 || page.Size != 20 {
+	if page, _ = audited.ListFromQuery(as(ctx, "x", "auditor"), nil); len(page.Items) != 4 || page.Size != 20 {
 		t.Fatalf("the policy as given, defaults for the sizes: %+v", page)
 	}
 	if page, _ = audited.List(as(ctx, "x", "mallory")); len(page.Items) != 0 {
@@ -388,7 +388,7 @@ func TestPolicy_InheritsAndIsCopied(t *testing.T) {
 	}
 	// No policy pages past the 10,000 rows where accepts.
 	huge := store.New[doc](d, store.Policy(db.StorePolicy{DefaultPageSize: 50_000, MaxPageSize: 50_000}))
-	if page, err = huge.List(as(ctx, "alice")); err != nil || page.Size != 10_000 {
+	if page, err = huge.ListFromQuery(as(ctx, "alice"), nil); err != nil || page.Size != 10_000 {
 		t.Fatalf("the ceiling: %+v %v", page.Size, err)
 	}
 }

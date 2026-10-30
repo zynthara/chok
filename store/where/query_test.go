@@ -28,7 +28,7 @@ func TestFromQuery_Pagination(t *testing.T) {
 		cursorSize          int
 		first, paged        bool
 	}{
-		{query: "", paged: false},
+		{query: "", page: 1, paged: true}, // page 1 at the store's default size
 		{query: "page=3&size=5", page: 3, limit: 5, offset: 10, paged: true},
 		{query: "size=5", page: 1, limit: 5, paged: true},
 		{query: "page=2", page: 2, limit: 0, paged: true}, // the store's default size
@@ -45,7 +45,7 @@ func TestFromQuery_Pagination(t *testing.T) {
 			t.Fatalf("%q: apply: %v", c.query, err)
 		}
 		if cfg.HasPage != c.paged || cfg.PageNumber != c.page || cfg.Limit != c.limit || cfg.Offset != c.offset ||
-			cfg.Cursor != c.cursor || cfg.CursorSize != c.cursorSize || cfg.FirstPage != c.first || cfg.Count {
+			cfg.Cursor != c.cursor || cfg.CursorSize != c.cursorSize || cfg.FirstPage != c.first || cfg.Count || !cfg.FromQuery {
 			t.Errorf("%q: %+v", c.query, cfg)
 		}
 	}

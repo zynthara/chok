@@ -173,12 +173,17 @@ func TestList_PagesOrdersAndCounts(t *testing.T) {
 	for _, title := range []string{"e", "b", "d", "a", "c", "f", "g"} {
 		mustCreate(t, ctx, s, &post{Title: title})
 	}
+	// Without pagination the code gets every row, past the policy's max.
 	page, err := s.List(ctx)
-	if err != nil || page.Page != 1 || page.Size != 3 || len(page.Items) != 3 || !page.HasMore || page.Total != 0 {
-		t.Fatalf("default page: %+v %v", page, err)
+	if err != nil || page.Page != 1 || page.Size != 7 || page.HasMore || page.Total != 0 {
+		t.Fatalf("every row: %+v %v", page, err)
 	}
-	if got := titles(page.Items); !slices.Equal(got, []string{"e", "b", "d"}) {
+	if got := titles(page.Items); !slices.Equal(got, []string{"e", "b", "d", "a", "c", "f", "g"}) {
 		t.Fatalf("no order is insertion order: %v", got)
+	}
+	page, err = s.List(ctx, where.Page(1, 0))
+	if err != nil || page.Page != 1 || page.Size != 3 || len(page.Items) != 3 || !page.HasMore {
+		t.Fatalf("a page with no size has the default size: %+v %v", page, err)
 	}
 	page, err = s.List(ctx, where.Order("title"), where.Page(2, 2), where.Count())
 	if err != nil || page.Page != 2 || page.Size != 2 || page.Total != 7 || !page.HasMore {
@@ -192,11 +197,11 @@ func TestList_PagesOrdersAndCounts(t *testing.T) {
 		t.Fatalf("last page = %v, has more %v", got, page.HasMore)
 	}
 	page, _ = s.List(ctx, where.Page(1, 50))
-	if page.Size != 5 || len(page.Items) != 5 {
-		t.Fatalf("a size over the max is clamped: %+v", page)
+	if page.Size != 50 || len(page.Items) != 7 || page.HasMore {
+		t.Fatalf("the max bounds client pages, not the code's: %+v", page)
 	}
 	page, _ = s.List(ctx, where.Order("title"), where.Offset(5), where.Limit(10))
-	if got := titles(page.Items); !slices.Equal(got, []string{"f", "g"}) || page.Page != 0 || page.Size != 5 {
+	if got := titles(page.Items); !slices.Equal(got, []string{"f", "g"}) || page.Page != 0 || page.Size != 10 {
 		t.Fatalf("offset and a limit over the max: %v %+v", got, page)
 	}
 	page, err = s.List(ctx, where.Eq("title", "zzz"))
@@ -238,7 +243,11 @@ func TestListFromQuery(t *testing.T) {
 	s := posts(t, store.Policy(storePolicy(20, 2)))
 	ctx := t.Context()
 	mustCreate(t, ctx, s, &post{Title: "a", Status: "draft"}, &post{Title: "b", Status: "published"}, &post{Title: "c", Status: "archived"})
-	page, err := s.ListFromQuery(ctx, map[string][]string{"status": {"draft", "published"}, "order": {"title:desc"}, "size": {"1"}})
+	page, err := s.ListFromQuery(ctx, nil)
+	if err != nil || page.Page != 1 || page.Size != 2 || len(page.Items) != 2 || !page.HasMore || page.Total != 3 {
+		t.Fatalf("a request without a size gets the default page: %+v %v", page, err)
+	}
+	page, err = s.ListFromQuery(ctx, map[string][]string{"status": {"draft", "published"}, "order": {"title:desc"}, "size": {"1"}})
 	if err != nil || page.Total != 2 || page.Size != 1 || !page.HasMore || titles(page.Items)[0] != "b" {
 		t.Fatalf("filters, order and size: %+v %v", page, err)
 	}

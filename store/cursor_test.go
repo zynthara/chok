@@ -108,8 +108,12 @@ func TestListWithCursor_PageShape(t *testing.T) {
 		t.Fatalf("size at the cap: %+v", page)
 	}
 	page, _ = s.ListWithCursor(ctx, where.Cursor("", 10), where.Count())
-	if len(page.Items) != 3 || page.Size != 3 || page.Total != 4 {
-		t.Fatalf("clamped, counted: %+v", page)
+	if len(page.Items) != 4 || page.Size != 10 || page.Total != 4 || page.Cursor != "" {
+		t.Fatalf("the code's size, counted: %+v", page)
+	}
+	page, _ = s.ListFromQuery(ctx, map[string][]string{"cursor": {""}, "size": {"10"}})
+	if len(page.Items) != 3 || page.Size != 3 || page.Total != 4 || page.Cursor == "" {
+		t.Fatalf("a client's size within the max: %+v", page)
 	}
 	page, _ = s.ListWithCursor(ctx, where.Cursor("", 3), where.Eq("title", "zzz"))
 	if page.Items == nil || page.Cursor != "" || page.HasMore {

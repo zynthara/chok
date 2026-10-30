@@ -20,12 +20,14 @@ var reserved = []string{"page", "size", "order", "cursor"}
 //	cursor=<token>            Cursor (empty for the first page)
 //	status=draft              Eq; a repeated parameter is In
 //
-// An empty value filters nothing, as an empty form field means: status=
-// is no filter, not a match on the empty string. allowed maps the fields
-// the caller may filter and order on to their columns. With strict, a
-// parameter that is neither reserved nor allowed is an error; without it,
-// such parameters are ignored. Every error wraps ErrInvalidParam or
-// ErrUnknownField.
+// A request is always paged: without page, size or cursor it is page 1 at
+// the store's default size, and the store keeps every size it reads here
+// within its policy's max page size. An empty value filters nothing, as
+// an empty form field means: status= is no filter, not a match on the
+// empty string. allowed maps the fields the caller may filter and order
+// on to their columns. With strict, a parameter that is neither reserved
+// nor allowed is an error; without it, such parameters are ignored. Every
+// error wraps ErrInvalidParam or ErrUnknownField.
 func FromQuery(q url.Values, allowed map[string]string, strict bool) ([]Option, error) {
 	var opts []Option
 	page, size := 0, 0
@@ -54,9 +56,9 @@ func FromQuery(q url.Values, allowed map[string]string, strict bool) ([]Option, 
 		if size == 0 {
 			size = -1 // the store's default
 		}
-		opts = append(opts, cursorOrDefault(c, size))
-	} else if page > 0 || size > 0 {
-		opts = append(opts, Page(max(page, 1), size))
+		opts = append(opts, fromQuery(cursorOrDefault(c, size)))
+	} else {
+		opts = append(opts, fromQuery(Page(max(page, 1), size)))
 	}
 	if v := q.Get("order"); v != "" {
 		for part := range strings.SplitSeq(v, ",") {
@@ -98,6 +100,15 @@ func FromQuery(q url.Values, allowed map[string]string, strict bool) ([]Option, 
 		}
 	}
 	return opts, nil
+}
+
+// fromQuery marks the pagination o declares as read from a URL.
+func fromQuery(o Option) Option {
+	return func(tx *gorm.DB, cfg *Config, fields map[string]string) (*gorm.DB, error) {
+		tx, err := o(tx, cfg, fields)
+		cfg.FromQuery = true
+		return tx, err
+	}
 }
 
 // cursorOrDefault is Cursor with size -1 meaning the store's default.

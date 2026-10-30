@@ -68,7 +68,8 @@ package, configuration key, API, table and metric to its new form.
   pages, aggregates and projections as generic methods, and error types
   that map to 400 / 401 / 404 / 409. `store:"query"` fences what a URL
   may filter and sort on (values read as the field's type); code names
-  any mapped column.
+  any mapped column. Page sizes likewise bound only what a URL asks for:
+  the code's `List` takes the page it names, and every row without one.
 - **`identity`**: accounts, JWT access tokens checked against the user on
   every request, sessions bounded by `refresh_ttl`, login rate limiting,
   OAuth through **`identity/google`**, **`identity/github`**,
@@ -270,6 +271,12 @@ package, configuration key, API, table and metric to its new form.
   columns — is a 500 that keeps the field's name out of the response
   (`errors.Is(err, where.ErrUnknownField)` still holds); an unknown field
   from the URL is still a 400 that lists the allowed ones.
+- **Breaking:** `store`: `List` without pagination options returns every
+  row, as chok v2 did, instead of a page of `db.store.default_page_size`;
+  a size the code names (`where.Page`, `Limit`, `Cursor`) is no longer cut
+  to `db.store.max_page_size`. The page sizes bound what `where.FromQuery`
+  reads from a URL, as `ListFromQuery`, `chok.List` and the identity user
+  list use it, and such a request is always one page.
 
 ### Removed
 

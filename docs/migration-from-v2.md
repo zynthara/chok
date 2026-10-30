@@ -320,6 +320,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | 聚合读数据库 catalog 校验真实列类型 | 按模型的 Go 类型与声明的列类型做静态检查，不读 catalog |
 | 哨兵 `ErrNotFound`、`ErrStaleVersion`、`ErrDuplicate`、`ErrMissingConditions` … | 错误类型 `NotFoundError`（404）、`VersionConflictError`（409）、`DuplicateError`（409）、`EmptyChangesError`（400）、`NoPrincipalError`（401）、`MissingConditionsError`（500）；`errors.As` 取类型，或 `errors.Is(err, chok.ErrNotFound)` 等 |
 | `where.Page[T]`、`CursorPage[T]` | `chok.Page[T]`（游标页同一个类型，`Cursor` 字段） |
+| `List` 不带分页返回全部行；配了 `db.store.max_page_size` 时，代码里的 `WithPage` / `WithLimit` 也被截到它 | 不带分页同样返回全部行；`default_page_size` / `max_page_size` 只管 URL 来的列表（`where.FromQuery`，`ListFromQuery` 与 `chok.List` 都经它，总是一页），代码里给多大取多大（单页不超过 10,000 行，超了报错） |
 | `Upsert` / `BatchUpsert` 必须给冲突列 | 缺省冲突键是 rid；带 owner scope 或自定义 scope 的 store 拒绝 Upsert |
 
 ### 4.4 store/where

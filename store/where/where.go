@@ -67,6 +67,10 @@ type Config struct {
 	// cursor pagination); Offset and Limit are the rows to skip and take
 	// (Limit 0: the store's default). The store renders them.
 	PageNumber, Offset, Limit int
+	// FromQuery marks the pagination of FromQuery, read from a URL: the
+	// store keeps its size within the policy's max page size. The code's
+	// own pagination takes the size it names.
+	FromQuery bool
 }
 
 // orderBy is one order clause: the public field and its column.

@@ -216,13 +216,15 @@ func (s *Store[T]) Count(ctx context.Context, opts ...where.Option) (int64, erro
 	return n, nil
 }
 
-// List returns one page of the rows the filters match: where.Page or
-// Limit and Offset pick it (the policy's default page size otherwise, and
-// never more than its max), where.Order sorts it, and the row ID breaks
-// ties so pages never overlap. Page is the page number — 1 without
-// pagination options, 0 for Offset and Limit, which have none. HasMore
-// says whether rows follow; Total is filled only with where.Count. With
-// where.Cursor, List is ListWithCursor.
+// List returns the rows the filters match, sorted by where.Order with the
+// row ID breaking ties so pages never overlap. Without pagination options
+// it returns every row, as one page. where.Page, or Limit and Offset,
+// pick a page of the size they name, the policy's default page size when
+// they name none; the policy's max bounds only the pagination of
+// where.FromQuery, a client's request (ListFromQuery). Page is the page
+// number — 1 without pagination options, 0 for Offset and Limit, which
+// have none. HasMore says whether rows follow; Total is filled only with
+// where.Count. With where.Cursor, List is ListWithCursor.
 func (s *Store[T]) List(ctx context.Context, opts ...where.Option) (*chok.Page[T], error) {
 	cfg := &where.Config{}
 	tx, err := s.read(ctx, cfg, opts)
@@ -232,22 +234,27 @@ func (s *Store[T]) List(ctx context.Context, opts ...where.Option) (*chok.Page[T
 	if cfg.Cursor != "" || cfg.FirstPage {
 		return s.keyset(ctx, tx, cfg, opts)
 	}
-	def, maxSize := s.pageSizes()
-	size := cfg.Limit
-	if size == 0 {
-		size = def
-	}
-	size = min(size, maxSize)
-	offset := int64(cfg.Offset)
-	if cfg.PageNumber > 0 {
-		offset = int64(cfg.PageNumber-1) * int64(size)
-	}
-	if offset > math.MaxInt32 {
-		return nil, queryError(fmt.Errorf("%w: offset %d is too far", where.ErrInvalidParam, offset))
-	}
-	page := &chok.Page[T]{Page: cfg.PageNumber, Size: size}
+	page := &chok.Page[T]{Page: cfg.PageNumber}
 	if !cfg.HasPage {
 		page.Page = 1 // no pagination asked for: the first page
+	}
+	size, offset := 0, int64(0)
+	if cfg.HasPage {
+		def, maxSize := s.pageSizes()
+		if size = cfg.Limit; size == 0 {
+			size = def
+		}
+		if cfg.FromQuery {
+			size = min(size, maxSize)
+		}
+		offset = int64(cfg.Offset)
+		if cfg.PageNumber > 0 {
+			offset = int64(cfg.PageNumber-1) * int64(size)
+		}
+		if offset > math.MaxInt32 {
+			return nil, queryError(fmt.Errorf("%w: offset %d is too far", where.ErrInvalidParam, offset))
+		}
+		tx = tx.Offset(int(offset)).Limit(size + 1)
 	}
 	if cfg.Count {
 		if page.Total, err = s.Count(ctx, opts...); err != nil {
@@ -259,12 +266,15 @@ func (s *Store[T]) List(ctx context.Context, opts ...where.Option) (*chok.Page[T
 	}
 	tx = tx.Order(s.table() + ".id")
 	var items []T
-	if err := tx.Offset(int(offset)).Limit(size + 1).Find(&items).Error; err != nil {
+	if err := tx.Find(&items).Error; err != nil {
 		return nil, s.mapError(err)
 	}
-	if len(items) > size {
+	if !cfg.HasPage {
+		size = len(items)
+	} else if len(items) > size {
 		items, page.HasMore = items[:size], true
 	}
+	page.Size = size
 	page.Items = nonNil(items)
 	return page, nil
 }
@@ -274,7 +284,9 @@ func (s *Store[T]) List(ctx context.Context, opts ...where.Option) (*chok.Page[T
 // filter (a repeated parameter matches any of its values). A filter on a
 // boolean, numeric or time field is read as that type first: true or
 // false (1 and 0 too), a number, an RFC 3339 time. An unknown parameter,
-// or a value that does not parse, is a 400. The page always carries Total.
+// or a value that does not parse, is a 400. The page is always one page:
+// the policy's default page size when the query names none, and never
+// more than its max. It always carries Total.
 func (s *Store[T]) ListFromQuery(ctx context.Context, q url.Values) (*chok.Page[T], error) {
 	q, typed, err := s.typedFilters(q)
 	if err != nil {
@@ -397,8 +409,10 @@ func parseFilter(t reflect.Type, v string) (any, error) {
 // cursor (none for the first page), ordered by the one where.Order given,
 // or by ID. The page's Cursor continues it and is empty on the last page;
 // clients pass it back untouched. Unlike offset pages, rows added or
-// removed meanwhile never shift a cursor page. The order field must be a
-// NOT NULL scalar; Total is filled only with where.Count.
+// removed meanwhile never shift a cursor page. The page has the size
+// where.Cursor names, the policy's default page size without one, and a
+// cursor from where.FromQuery stays within the policy's max. The order
+// field must be a NOT NULL scalar; Total is filled only with where.Count.
 func (s *Store[T]) ListWithCursor(ctx context.Context, opts ...where.Option) (*chok.Page[T], error) {
 	cfg := &where.Config{}
 	tx, err := s.read(ctx, cfg, opts)
@@ -434,7 +448,9 @@ func (s *Store[T]) keyset(ctx context.Context, tx *gorm.DB, cfg *where.Config, o
 	if size == 0 {
 		size = def
 	}
-	size = min(size, maxSize)
+	if cfg.FromQuery {
+		size = min(size, maxSize)
+	}
 	page := &chok.Page[T]{Size: size}
 	if cfg.Count {
 		var err error
