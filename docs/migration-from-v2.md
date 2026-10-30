@@ -218,6 +218,10 @@ v0.2 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复�
 读入也接受纳秒整数。响应里 nil slice 写成 `[]`。校验错误 400，reason
 `Validation`，`metadata.fields` 以 JSON 名（或 path / query / header 名）为键。
 
+响应里的字符串有非法 UTF-8 时编码失败：整个请求回 500，并记一条
+`chok: response encoding failed` 错误日志（v2 把坏字节换成 U+FFFD）。文本来自
+外部（抓来的网页、上游接口）的应用要在入口转码，或用 `strings.ToValidUTF8` 清洗。
+
 ### 3.3 错误
 
 | v2 | v0.2 |
