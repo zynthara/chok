@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/v2"
 	"errors"
@@ -397,6 +398,61 @@ func TestListIn(t *testing.T) {
 	}
 }
 
+// TestListByIDs: ListIn on the numeric key, which where cannot name.
+func TestListByIDs(t *testing.T) {
+	s := posts(t)
+	ctx := t.Context()
+	var batch []*post
+	for i := range 1200 {
+		batch = append(batch, &post{Title: fmt.Sprintf("t%04d", i)})
+	}
+	if err := s.BatchCreate(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := s.PluckIDs(ctx, where.Order("title", true)) // not key order
+	if err != nil || len(ids) != 1200 {
+		t.Fatalf("ids %d %v", len(ids), err)
+	}
+	keys := append(slices.Clone(ids), ids[:10]...) // duplicates count once
+	got, err := s.ListByIDs(ctx, keys)
+	if err != nil || len(got) != 1200 {
+		t.Fatalf("1,210 keys in 500s: %d rows %v", len(got), err)
+	}
+	if !slices.IsSortedFunc(got, func(a, b post) int { return cmp.Compare(a.ID, b.ID) }) {
+		t.Fatal("rows not in key order")
+	}
+	few, err := s.ListByIDs(ctx, ids, where.Lt("title", "t0100"))
+	if err != nil || len(few) != 100 {
+		t.Fatalf("filtered %d %v", len(few), err)
+	}
+	none, err := s.ListByIDs(ctx, nil)
+	if err != nil || none == nil || len(none) != 0 {
+		t.Fatalf("no keys %#v %v", none, err)
+	}
+	// Soft-deleted rows are out, and missing keys are skipped.
+	if err := s.Delete(ctx, store.ID(got[0].ID)); err != nil {
+		t.Fatal(err)
+	}
+	two, err := s.ListByIDs(ctx, []uint{got[0].ID, got[1].ID, 1 << 30})
+	if err != nil || len(two) != 1 || two[0].ID != got[1].ID {
+		t.Fatalf("one deleted, one missing: %+v %v", two, err)
+	}
+	for name, err := range map[string]error{
+		"order":        errOf(s.ListByIDs(ctx, ids[:1], where.Order("title"))),
+		"page":         errOf(s.ListByIDs(ctx, ids[:1], where.Page(1, 1))),
+		"count":        errOf(s.ListByIDs(ctx, ids[:1], where.Count())),
+		"empty, order": errOf(s.ListByIDs(ctx, nil, where.Order("title"))),
+	} {
+		if !errors.Is(err, chok.ErrBadRequest) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	var coder chok.Coder
+	if err := errOf(s.ListByIDs(ctx, ids[:1], where.Eq("nope", 1))); !errors.Is(err, where.ErrUnknownField) || errors.As(err, &coder) {
+		t.Errorf("unknown extra field: %v", err)
+	}
+}
+
 func TestAggregate_SeesRowsInsideTx(t *testing.T) {
 	s := posts(t)
 	ctx := t.Context()
@@ -631,10 +687,11 @@ func TestAggregate_EveryStatementIsScoped(t *testing.T) {
 		_, _ = s.Pluck[int64](ctx, "amount")
 		_, _ = s.PluckIDs(ctx)
 		_, _ = s.ListIn(ctx, "kind", []string{"k"})
+		_, _ = s.ListByIDs(ctx, []uint{1})
 		if ctx == alice && sum != 3 {
 			t.Fatalf("alice's sum %d", sum)
 		}
-		if len(sqls) < 9 {
+		if len(sqls) < 10 {
 			t.Fatalf("captured %d statements", len(sqls))
 		}
 		for _, q := range sqls {

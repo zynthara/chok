@@ -341,10 +341,10 @@ SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
   `store.Where`、聚合与投影、`ListIn`、Upsert 的冲突字段、`where.Order`、
   `store.Set`——按公开名接受模型的每一列：公开名是 JSON 名，没有 JSON 名、
   `json:"-"` 或字段在具名结构体里时用列名；`id` 永远是 RID，数字主键不能按名字
-  寻址（用 `store.ID` / `PluckIDs`）。托管列（version、时间戳、owner_id、软删
-  两列）可以出现在读条件里，`Set` 与 Patch 仍然不写它们。两个字段同名不同列，
-  New panic。URL 里的未知字段是 400，并列出可用字段；代码里的未知字段是程序
-  错误，500，日志里有模型名与字段、响应里没有，`errors.Is(err,
+  寻址（用 `store.ID` / `PluckIDs` / `ListByIDs`）。托管列（version、时间戳、
+  owner_id、软删两列）可以出现在读条件里，`Set` 与 Patch 仍然不写它们。两个
+  字段同名不同列，New panic。URL 里的未知字段是 400，并列出可用字段；代码里的
+  未知字段是程序错误，500，日志里有模型名与字段、响应里没有，`errors.Is(err,
   where.ErrUnknownField)` 照样成立。所以把客户端给的字段名交给 `where.*` 之前，
   先用 `QueryFields()` 核对。
 - **页大小也只管客户端**：代码里的 `List` 不带分页选项时返回全部行，带
@@ -365,8 +365,9 @@ SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
   / `ListFromQuery`（实现 `chok.Lister`）/ `ListWithCursor`（不透明游标，绑定
   排序字段与方向，并列用 rid 裁决）。聚合与投影是 Go 1.27 的泛型方法：
   `Sum[N]`、`Avg`、`Min[N]`、`Max[N]`、`CountDistinct`、`Pluck[F]`、`PluckIDs`、
-  `ListIn[V]`（每 500 个值一块）、`GroupBy[K]`；结果类型由 Go 类型决定，入口做
-  静态检查，不读数据库 catalog。
+  `ListIn[V]`（每 500 个值一块）、`ListByIDs`（按数字主键的 `ListIn`，结果按主键
+  排序）、`GroupBy[K]`；结果类型由 Go 类型决定，入口做静态检查，不读数据库
+  catalog。
 - **写**：`Create` / `BatchCreate` / `Update` / `Delete`（软删写 token）/
   `Restore` / `Upsert` / `BatchUpsert`（缺省冲突键 rid；带 scope 的 store 拒绝
   Upsert，因为更新半边无法围栏）。`Hooks` 的 BeforeCreate / BeforeUpdate /

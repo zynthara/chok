@@ -272,6 +272,18 @@ func pluck[F any, T db.Modeler](ctx context.Context, s *Store[T], col string, op
 // ListIn returns the rows whose field is one of values, querying 500
 // values at a time so any number fits; options may only filter.
 func (s *Store[T]) ListIn[V comparable](ctx context.Context, field string, values []V, opts ...where.Option) ([]T, error) {
+	return listIn(ctx, s, "ListIn", values, func(vs []any) where.Option { return where.In(field, vs...) }, opts)
+}
+
+// ListByIDs is ListIn on the numeric primary key, which has no field
+// name: the rows whose key is in ids, as PluckIDs or a foreign key column
+// gives them, in key order.
+func (s *Store[T]) ListByIDs(ctx context.Context, ids []uint, opts ...where.Option) ([]T, error) {
+	return listIn(ctx, s, "ListByIDs", slices.Sorted(slices.Values(ids)), s.idIn, opts)
+}
+
+// listIn runs ListIn and ListByIDs: in builds the IN filter of a chunk.
+func listIn[V comparable, T db.Modeler](ctx context.Context, s *Store[T], name string, values []V, in func([]any) where.Option, opts []where.Option) ([]T, error) {
 	unique := make([]any, 0, len(values))
 	seen := make(map[V]bool, len(values))
 	for _, v := range values {
@@ -281,13 +293,13 @@ func (s *Store[T]) ListIn[V comparable](ctx context.Context, field string, value
 		}
 	}
 	if len(unique) == 0 {
-		_, err := s.listChunk(ctx, field, nil, opts) // still reject bad options
+		_, err := s.listChunk(ctx, name, in, nil, opts) // still reject bad options
 		return []T{}, err
 	}
 	out := []T{}
 	ids := map[uint]bool{}
 	for chunk := range slices.Chunk(unique, 500) {
-		items, err := s.listChunk(ctx, field, chunk, opts)
+		items, err := s.listChunk(ctx, name, in, chunk, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -306,14 +318,14 @@ func (s *Store[T]) ListIn[V comparable](ctx context.Context, field string, value
 	return out, nil
 }
 
-func (s *Store[T]) listChunk(ctx context.Context, field string, values []any, opts []where.Option) ([]T, error) {
+func (s *Store[T]) listChunk(ctx context.Context, name string, in func([]any) where.Option, values []any, opts []where.Option) ([]T, error) {
 	cfg := &where.Config{}
-	tx, err := s.read(ctx, cfg, append(slices.Clone(opts), where.In(field, values...)))
+	tx, err := s.read(ctx, cfg, append(slices.Clone(opts), in(values)))
 	if err != nil {
 		return nil, err
 	}
 	if cfg.HasPage || cfg.HasOrder || cfg.Count {
-		return nil, queryError(fmt.Errorf("%w: ListIn takes filters only", where.ErrInvalidParam))
+		return nil, queryError(fmt.Errorf("%w: %s takes filters only", where.ErrInvalidParam, name))
 	}
 	if values == nil {
 		return nil, nil
@@ -323,6 +335,18 @@ func (s *Store[T]) listChunk(ctx context.Context, field string, values []any, op
 		return nil, s.mapError(err)
 	}
 	return items, nil
+}
+
+// idIn is where.In on the numeric key, which where cannot name.
+func (s *Store[T]) idIn(ids []any) where.Option {
+	return func(tx *gorm.DB, cfg *where.Config, _ map[string]string) (*gorm.DB, error) {
+		cfg.HasFilter = true
+		if len(ids) == 0 {
+			cfg.Degenerate = true
+			return tx.Where("1 = 0"), nil
+		}
+		return tx.Where(s.table()+".id IN ?", ids), nil
+	}
 }
 
 // single runs one aggregate function over field.

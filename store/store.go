@@ -12,7 +12,7 @@
 // A field is named by its public name: its JSON name, or its column when
 // the model's JSON has no name for it (json:"-", or a field inside a
 // named struct). id is the RID; the numeric key has no name (store.ID,
-// PluckIDs).
+// PluckIDs, ListByIDs).
 //
 // The store tags say what a client may touch: store:"query" is what a
 // URL filters and orders on (ListFromQuery and chok.List, QueryFields,

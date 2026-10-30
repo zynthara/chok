@@ -277,6 +277,10 @@ package, configuration key, API, table and metric to its new form.
   to `db.store.max_page_size`. The page sizes bound what `where.FromQuery`
   reads from a URL, as `ListFromQuery`, `chok.List` and the identity user
   list use it, and such a request is always one page.
+- `store`: `ListByIDs` keeps chok v2's name and call for the rows whose
+  numeric key is in ids, which `ListIn` cannot name. It now reads like
+  `ListIn`: 500 keys a query, filters as options, and the rows in key
+  order.
 
 ### Removed
 

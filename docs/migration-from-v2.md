@@ -314,7 +314,8 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | `WithBeforeCreate` / `WithBeforeUpdate` / `WithBeforeDelete` | `store.Hooks(store.HookSet[T]{BeforeCreate, BeforeUpdate, BeforeDelete})`；BeforeUpdate 收到 `map[string]any` 变更快照 |
 | `WithBus` / `EntityChanged`、`WithReadOnly`、`WithStrict` | 删除 |
 | `store.Sum[N](ctx, s, field)`、`Avg`、`Min`、`Max`、`CountDistinct`、`Pluck`、`PluckIDs`、`ListIn`、`GroupBy` | 方法：`s.Sum[N](ctx, field)`、`s.Avg(ctx, field)` … `s.GroupBy[K](ctx, field, aggs)` |
-| `store.PluckDistinct`、`ListByIDs`、`BatchUpdate`、`WithRowsAffected`、`Fields(obj, ...)`、`NoLock` | 删除：`Pluck` 后自行去重、`ListIn`、逐条 `Update`、`store.Set(map)` |
+| `ListByIDs(ctx, ids)` | 保留，原来的调用不用改；多了可选的过滤 `s.ListByIDs(ctx, ids, opts...)`，每 500 个主键查一次，结果按主键排序，scope 照常生效 |
+| `store.PluckDistinct`、`BatchUpdate`、`WithRowsAffected`、`Fields(obj, ...)`、`NoLock` | 删除：`Pluck` 后自行去重、逐条 `Update`、`store.Set(map)` |
 | `store.Patch(req)` + `Onto(obj)`、`WithVersion(v)` | `store.Patch(req).Onto(obj)`；版本来自请求的 `version` 字段或 `where.Version(v)`；`Onto(nil)` 是不读行的补丁 |
 | `store.Set(kv)` 返回 `Changes` 接口 | `store.Set(kv)` 返回 `*store.Changes` |
 | 聚合读数据库 catalog 校验真实列类型 | 按模型的 Go 类型与声明的列类型做静态检查，不读 catalog |
@@ -616,7 +617,7 @@ Redis 不可达会让启动相等到 `app.start_timeout` 后失败（v2 只告�
 | 迁移的 dirty / fence / repair 历史 / baseline 收养 / manifest | 单账本 + MySQL 断点续跑 + `mark-applied` |
 | `AppendStore`、`ForeignTable`、`WithRelayFor` | 普通 store；jobs 的消息表只给 worker 用 |
 | `scheduler.Pool`、`RunNow`、`ErrBusy` | 应用自己的 goroutine 池；`Overlap` |
-| store 的事件总线、`BatchUpdate`、`PluckDistinct`、`ListByIDs`、`WithRowsAffected`、聚合 catalog 闸门 | 见 §4.3 |
+| store 的事件总线、`BatchUpdate`、`PluckDistinct`、`WithRowsAffected`、聚合 catalog 闸门 | 见 §4.3 |
 | OAuth 会话的外部存储 | 进程内（多副本粘滞会话）；以后需要时再加选项 |
 | `chok sync`、`chok gen fields`、`chok update`、JSON Schema | 见 §10 |
 
@@ -657,7 +658,7 @@ Redis 不可达会让启动相等到 `app.start_timeout` 后失败（v2 只告�
 | `db/dbtest`、`db/internal/testlane` | `internal/dbtest`、`choktest.DB` | 合并 |
 | `rid/` | `db.NewRID` / `ParseRID` | 合并 |
 | `store/` | `store` | 保留 |
-| `store/`：WithBus、`WithAll*Fields` 与自动发现、`Fields()`、`SetDefaultAdminRoles`、AppendStore、只读 store、BatchUpdate、PluckDistinct、ListByIDs、MapError、聚合 catalog | — | 删除 |
+| `store/`：WithBus、`WithAll*Fields` 与自动发现、`Fields()`、`SetDefaultAdminRoles`、AppendStore、只读 store、BatchUpdate、PluckDistinct、MapError、聚合 catalog | — | 删除 |
 | `store/where` | `store/where` | 保留 |
 | `choktest/` | `choktest.DB` / `Store` / `App` / `Client` / `Principal` | 保留 |
 | `account/` + `account/providers/*` | `identity` + `identity/{apple,facebook,github,google}` | 合并 |
