@@ -29,7 +29,7 @@ func linksCasbin(deps []string) bool {
 // built from identity and its providers — examples/blog among them —
 // links none of it; one that imports identity/rbac does.
 func TestDeps_CasbinOnlyWithRBAC(t *testing.T) {
-	const mod = "github.com/zynthara/chok/v3"
+	const mod = "github.com/zynthara/chok"
 	without := goListDeps(t, mod+"/identity", mod+"/identity/google", mod+"/identity/github", mod+"/identity/apple", mod+"/identity/facebook", mod+"/examples/blog")
 	if linksCasbin(without) {
 		t.Fatal("identity without rbac links casbin")
@@ -48,7 +48,7 @@ func TestDeps_CasbinOnlyWithRBAC(t *testing.T) {
 // go-redis also links internal/redislog, so go-redis's own log lines reach
 // slog in any binary built from them.
 func TestDeps_GoRedisLogsBridgedWhereverLinked(t *testing.T) {
-	const mod = "github.com/zynthara/chok/v3"
+	const mod = "github.com/zynthara/chok"
 	for _, pkg := range []string{mod + "/identity/rbac", mod + "/cache"} {
 		deps := goListDeps(t, pkg)
 		var redis, bridge bool

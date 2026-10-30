@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/choktest"
+	"github.com/zynthara/chok/choktest"
 )
 
 // pwIdentity is an Identity with passwordless sign-in, mailing through a

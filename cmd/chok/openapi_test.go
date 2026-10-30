@@ -13,8 +13,8 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
 )
 
 type exportedThing struct {

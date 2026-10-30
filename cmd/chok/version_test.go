@@ -81,14 +81,14 @@ func TestVersion_FromBuildInfo(t *testing.T) {
 		bi   *debug.BuildInfo
 		want string
 	}{
-		{"go install", &debug.BuildInfo{Main: debug.Module{Path: chokModule, Version: "v3.0.0-alpha.1"}}, "v3.0.0-alpha.1"},
+		{"go install", &debug.BuildInfo{Main: debug.Module{Path: chokModule, Version: "v0.2.0"}}, "v0.2.0"},
 		{"working tree", &debug.BuildInfo{Main: debug.Module{Path: chokModule, Version: "(devel)"}, Settings: vcs}, "(devel)"},
 		{"go tool chok", &debug.BuildInfo{Main: debug.Module{Path: "example.com/app"}, Deps: []*debug.Module{
 			{Path: "github.com/spf13/cobra", Version: "v1.10.2"},
-			{Path: chokModule, Version: "v3.0.0-alpha.1"},
-		}}, "v3.0.0-alpha.1"},
+			{Path: chokModule, Version: "v0.2.0"},
+		}}, "v0.2.0"},
 		{"replaced", &debug.BuildInfo{Main: debug.Module{Path: "example.com/app"}, Deps: []*debug.Module{
-			{Path: chokModule, Version: "v3.0.0-alpha.1", Replace: &debug.Module{Path: "../chok"}},
+			{Path: chokModule, Version: "v0.2.0", Replace: &debug.Module{Path: "../chok"}},
 		}}, "(devel)"},
 		{"not linked", &debug.BuildInfo{Main: debug.Module{Path: "example.com/app"}}, "(devel)"},
 	}
@@ -113,20 +113,20 @@ func TestVersion_FromBuildInfo(t *testing.T) {
 // build stamps replace what Go recorded, a tag without its v gets one, and
 // the release does not report the runner's working tree as modified.
 func TestVersion_ReleaseStampWins(t *testing.T) {
-	setStamp(t, "3.0.0-alpha.1", "fedcba9876543210", "2026-10-26T00:00:00Z")
+	setStamp(t, "0.2.0", "fedcba9876543210", "2026-10-26T00:00:00Z")
 	bi := &debug.BuildInfo{Main: debug.Module{Path: chokModule, Version: "(devel)"}, Settings: []debug.BuildSetting{
 		{Key: "vcs.revision", Value: "0123456789abcdef"},
 		{Key: "vcs.modified", Value: "true"},
 	}}
 	b := buildOf(bi, true)
-	if b.Version != "v3.0.0-alpha.1" || b.Commit != "fedcba9876543210" || b.Date != "2026-10-26T00:00:00Z" || b.Modified {
+	if b.Version != "v0.2.0" || b.Commit != "fedcba9876543210" || b.Date != "2026-10-26T00:00:00Z" || b.Modified {
 		t.Fatalf("release build: %+v", b)
 	}
 	if strings.Contains(b.String(), "modified") {
 		t.Fatalf("a release line never says modified: %s", b.String())
 	}
-	setStamp(t, "v3.0.0", "", "")
-	if got := buildOf(bi, true).Version; got != "v3.0.0" {
+	setStamp(t, "v0.3.0", "", "")
+	if got := buildOf(bi, true).Version; got != "v0.3.0" {
 		t.Fatalf("a tag with its v stays as is: %q", got)
 	}
 }
@@ -137,7 +137,7 @@ func TestVersion_ReleaseStampWins(t *testing.T) {
 func TestVersion_ModifiedMarkedOnce(t *testing.T) {
 	setStamp(t, "", "", "")
 	bi := &debug.BuildInfo{
-		Main: debug.Module{Path: chokModule, Version: "v3.0.0-20261025080000-0123456789ab+dirty"},
+		Main: debug.Module{Path: chokModule, Version: "v0.2.1-0.20261025080000-0123456789ab+dirty"},
 		Settings: []debug.BuildSetting{
 			{Key: "vcs.revision", Value: "0123456789abcdef"},
 			{Key: "vcs.modified", Value: "true"},
@@ -147,7 +147,7 @@ func TestVersion_ModifiedMarkedOnce(t *testing.T) {
 	if strings.Count(line, "dirty") != 1 || strings.Count(line, "modified") != 1 {
 		t.Fatalf("modified marked more than once: %s", line)
 	}
-	if !strings.HasPrefix(line, "chok v3.0.0-20261025080000-0123456789ab+dirty (commit 0123456789ab, modified, go1.") {
+	if !strings.HasPrefix(line, "chok v0.2.1-0.20261025080000-0123456789ab+dirty (commit 0123456789ab, modified, go1.") {
 		t.Fatalf("line %q", line)
 	}
 }

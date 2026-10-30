@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/store/where"
 )
 
 func parse(t *testing.T, raw string, strict bool) ([]where.Option, error) {

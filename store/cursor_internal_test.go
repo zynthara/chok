@@ -13,7 +13,7 @@ import (
 
 	"gorm.io/gorm/schema"
 
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/store/where"
 )
 
 func TestEncodeValue_RoundTripsEveryKind(t *testing.T) {

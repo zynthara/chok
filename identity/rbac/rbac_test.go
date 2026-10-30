@@ -13,12 +13,12 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/rbac"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/rbac"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 const key = "this-is-a-test-signing-key-32bytes!"

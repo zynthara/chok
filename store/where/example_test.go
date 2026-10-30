@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/store/where"
 )
 
 // A list request's query string becomes options; the allowed map is the

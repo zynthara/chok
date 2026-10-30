@@ -8,9 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/telemetry"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/telemetry"
 )
 
 type greeting struct {

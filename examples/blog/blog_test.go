@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
 )
 
 // envelope is the error body every failing request returns.

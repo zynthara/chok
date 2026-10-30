@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"reflect"
 
-	"github.com/zynthara/chok/v3/internal/openapi"
+	"github.com/zynthara/chok/internal/openapi"
 )
 
 // HandlerFunc is a typed handler: chok binds and validates *T from the

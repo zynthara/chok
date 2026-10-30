@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
-	"github.com/zynthara/chok/v3/internal/dbtest"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/identity/internal/oauth"
+	"github.com/zynthara/chok/internal/dbtest"
+	"github.com/zynthara/chok/store"
 )
 
 // fakeProvider is an identity provider in process: BeginAuth points at a

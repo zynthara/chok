@@ -12,7 +12,7 @@ import (
 	"github.com/casbin/casbin/v3/persist"
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/db"
 )
 
 // redisWatcher is the persist.Watcher over the client the Watcher option

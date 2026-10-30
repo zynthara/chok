@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/zynthara/chok/v3/internal/openapi"
-	"github.com/zynthara/chok/v3/internal/reqinfo"
+	"github.com/zynthara/chok/internal/openapi"
+	"github.com/zynthara/chok/internal/reqinfo"
 )
 
 // Middleware wraps an http.Handler.

@@ -6,11 +6,11 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/internal/dbtest"
-	"github.com/zynthara/chok/v3/internal/tracectx"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/internal/dbtest"
+	"github.com/zynthara/chok/internal/tracectx"
 )
 
 // TestAudit_RecordsTheRequestTrace: in a binary that links telemetry an

@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"testing/fstest"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // The smallest application: defaults, chok.yaml and HELLO_* variables,

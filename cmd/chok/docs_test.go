@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 // TestDocsGen_ConfigReferenceIsCurrent keeps docs/config.md from rotting:

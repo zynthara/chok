@@ -11,9 +11,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/store"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/store/where"
 )
 
 // UserService is the administration of accounts — what an operator does

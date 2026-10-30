@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/db"
 )
 
 // repoRoot is the chok checkout the tests run in.

@@ -6,7 +6,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // Open hooks each gorm callback chain once, before and after the callback

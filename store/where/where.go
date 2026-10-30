@@ -18,7 +18,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3/store/internal/q"
+	"github.com/zynthara/chok/store/internal/q"
 )
 
 const (

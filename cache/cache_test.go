@@ -16,9 +16,9 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 func quiet() *slog.Logger { return slog.New(slog.DiscardHandler) }

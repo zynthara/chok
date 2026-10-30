@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/jsonx"
+	"github.com/zynthara/chok/internal/jsonx"
 )
 
 // envelope is the error body.

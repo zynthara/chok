@@ -12,7 +12,7 @@ import (
 	// go-redis's own log lines (a dial that failed, a connection it
 	// dropped) go to slog.Default at warn, process-wide, as everywhere
 	// chok links go-redis.
-	_ "github.com/zynthara/chok/v3/internal/redislog"
+	_ "github.com/zynthara/chok/internal/redislog"
 )
 
 // newClient builds the redis layer's client; it connects on first use.

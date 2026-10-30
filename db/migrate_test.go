@@ -10,8 +10,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 func files(m map[string]string) fstest.MapFS {

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/openapi"
+	"github.com/zynthara/chok/internal/openapi"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")

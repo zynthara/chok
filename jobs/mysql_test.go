@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 // The three MySQL tests of v2's outbox/mysql_test.go, under their v2

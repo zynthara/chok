@@ -17,8 +17,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // dbMetrics are the database client metrics, named after the

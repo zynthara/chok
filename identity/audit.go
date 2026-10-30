@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/tracectx"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/tracectx"
 )
 
 // The results and actor types an Event records. The values are stored and

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to chok v3 (`github.com/zynthara/chok/v3`) are
+All notable changes to chok v3 (`github.com/zynthara/chok`) are
 documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -167,7 +167,7 @@ package, configuration key, API, table and metric to its v3 form.
 
 ### Changed
 
-- Module path `github.com/zynthara/chok/v3`; Go 1.27.
+- Module path `github.com/zynthara/chok`; Go 1.27.
 - Assembly is code: components are values constructed by the application
   and registered with `app.Use`; dependencies are passed to constructors.
 - Configuration is one strict struct; only `log.level` reloads.

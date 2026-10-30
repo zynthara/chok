@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // newUser registers email through the routes and returns the user and a

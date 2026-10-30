@@ -15,9 +15,9 @@ import (
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 
-	"github.com/zynthara/chok/v3/internal/dbx"
-	"github.com/zynthara/chok/v3/store/internal/q"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/internal/dbx"
+	"github.com/zynthara/chok/store/internal/q"
+	"github.com/zynthara/chok/store/where"
 )
 
 const batchSize = 100 // rows per INSERT of BatchCreate and BatchUpsert

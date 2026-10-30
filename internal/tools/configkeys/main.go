@@ -10,15 +10,15 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/cache"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/internal/conf"
-	"github.com/zynthara/chok/v3/jobs"
-	"github.com/zynthara/chok/v3/mail"
-	"github.com/zynthara/chok/v3/realtime"
-	"github.com/zynthara/chok/v3/telemetry"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/cache"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/internal/conf"
+	"github.com/zynthara/chok/jobs"
+	"github.com/zynthara/chok/mail"
+	"github.com/zynthara/chok/realtime"
+	"github.com/zynthara/chok/telemetry"
 )
 
 // sections are the configuration types counted; each battery adds its

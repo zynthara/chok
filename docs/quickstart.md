@@ -14,7 +14,7 @@ resource, a Makefile and migrations (see the [README](../README.md)).
 ```sh
 mkdir hello && cd hello
 go mod init example.com/hello
-go get github.com/zynthara/chok/v3
+go get github.com/zynthara/chok
 ```
 
 `main.go`:
@@ -25,7 +25,7 @@ package main
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // greeting is the request: name comes from the query string and is
@@ -70,9 +70,9 @@ package main
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
 )
 
 // Config is chok.yaml: chok.Base brings the app, http and log sections,
@@ -161,10 +161,10 @@ package main
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/store"
 )
 
 type Config struct {

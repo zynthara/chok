@@ -40,11 +40,11 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/internal/authz"
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/internal/authz"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // watcherChannel is the Redis channel replicas announce policy changes on.

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/identity/internal/oauth"
 )
 
 // assumedFixture is an Identity with two providers in process: fb, which

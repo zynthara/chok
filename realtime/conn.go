@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // The two transports.

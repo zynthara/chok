@@ -1,4 +1,4 @@
-module github.com/zynthara/chok/v3
+module github.com/zynthara/chok
 
 go 1.27
 

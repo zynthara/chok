@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 func planNames(t *testing.T, v any) []string {

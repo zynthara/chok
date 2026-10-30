@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3/choktest"
+	"github.com/zynthara/chok/choktest"
 )
 
 // cookieIdentity is an Identity in cookie mode with passwordless sign-in.

@@ -6,8 +6,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/apptest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/apptest"
 )
 
 // passwordCost is the bcrypt cost of every password hash: about 250ms on

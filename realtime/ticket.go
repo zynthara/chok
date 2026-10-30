@@ -12,7 +12,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // claims is what a ticket binds: the principal it was issued to, none for

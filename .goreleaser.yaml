@@ -36,7 +36,7 @@ builds:
         goarch: arm64
     flags:
       - -trimpath
-    # cmd/chok's own variables (v3 has no version package): `chok version`
+    # cmd/chok's own variables (chok has no version package): `chok version`
     # and `chok init`, which requires the tag in the go.mod it writes,
     # read them. The tag keeps its v; the date is the commit's, so a
     # rebuild of the same tag is the same binary.
@@ -100,7 +100,7 @@ release:
     Install via Go toolchain:
 
     ```
-    go install github.com/zynthara/chok/v3/cmd/chok@{{ .Tag }}
+    go install github.com/zynthara/chok/cmd/chok@{{ .Tag }}
     ```
 
     Or download the binary for your platform below.

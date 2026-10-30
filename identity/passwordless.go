@@ -15,10 +15,10 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/store"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/store/where"
 )
 
 // loginCode is an auth_login_codes row: the code and magic-link token

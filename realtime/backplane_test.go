@@ -11,8 +11,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
 )
 
 // redisClient is a client of mr, closed when the test ends.

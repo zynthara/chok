@@ -1,7 +1,7 @@
 # chok v2 → v3 迁移指南
 
 > 适用：从 `github.com/zynthara/chok/v2`（`v2.0.0-beta.N`）迁到
-> `github.com/zynthara/chok/v3`。v2 在分支 `v2` 上封版、只收安全修复，
+> `github.com/zynthara/chok`。v2 在分支 `v2` 上封版、只收安全修复，
 > 已发布的 beta tag 永久可安装。
 >
 > v3 不是 v2 的增量版本，而是按三条规则（配置严格、错误自描述、装配即代码）
@@ -592,7 +592,7 @@ Redis 不可达会让启动相等到 `app.start_timeout` 后失败（v2 只告�
 | `chok openapi export --addr host:port --out file` | `chok openapi export <url> [--out file]` |
 | `chok docs gen [--check]`（组件表、配置参考、JSON Schema、框架表） | 只在 chok 仓库里用，只生成 `docs/config.md` |
 | `chok version [--json] [--short]` | `chok version [--json]` |
-| `chok update [--ref]` | 删除：`go install github.com/zynthara/chok/v3/cmd/chok@<version>`，或项目里的 `go tool chok` |
+| `chok update [--ref]` | 删除：`go install github.com/zynthara/chok/cmd/chok@<version>`，或项目里的 `go tool chok` |
 
 ## 11. 路由、表与指标的变化（汇总）
 

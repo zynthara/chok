@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zynthara/chok/v3/cache"
+	"github.com/zynthara/chok/cache"
 )
 
 // GetOrLoad in front of a slow source: the first call loads and stores,

@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 // Jobs is the jobs battery: periodic jobs on cron schedules, and workers

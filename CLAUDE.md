@@ -12,7 +12,7 @@ store with owner scoping cover a CRUD resource with four imports. Batteries
 (identity, jobs, telemetry, cache, realtime, mail) are values you construct
 and hand to `app.Use`, never services you look up.
 
-- Module `github.com/zynthara/chok/v3`, Go 1.27 (toolchain go1.27.3), built on
+- Module `github.com/zynthara/chok`, Go 1.27 (toolchain go1.27.3), built on
   `main`. v3 is a rewrite: v2 code is a porting source, not a base.
 - v2 is sealed on branch `v2` at `65651d4` (tags `v2.0.0-beta.N`); its source
   is checked out read-only at `~/go/src/chok-v2` (a git worktree). Port by

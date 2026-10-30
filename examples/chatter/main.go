@@ -16,13 +16,13 @@ import (
 	"embed"
 	"net/http"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/jobs"
-	"github.com/zynthara/chok/v3/mail"
-	"github.com/zynthara/chok/v3/realtime"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/jobs"
+	"github.com/zynthara/chok/mail"
+	"github.com/zynthara/chok/realtime"
+	"github.com/zynthara/chok/store"
 )
 
 // Config is the whole configuration: chok's own sections and one per

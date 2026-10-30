@@ -7,8 +7,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/apptest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/apptest"
 )
 
 func TestPassword_HashAndCompare(t *testing.T) {

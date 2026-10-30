@@ -21,8 +21,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 // The package's tests replace the exporters through these options, which

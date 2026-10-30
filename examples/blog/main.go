@@ -1,4 +1,4 @@
-// Command blog is the chok v3 quickstart: a JWT-guarded blog API where
+// Command blog is the chok quickstart: a JWT-guarded blog API where
 // every post belongs to the user who wrote it.
 //
 //	cd examples/blog
@@ -8,11 +8,11 @@
 package main
 
 import (
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/store"
-	"github.com/zynthara/chok/v3/telemetry"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/telemetry"
 )
 
 // Config is the whole configuration: the standard app / http / log

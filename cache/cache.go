@@ -10,7 +10,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 // Cache is the cache battery: the layers Config enables, memory first,

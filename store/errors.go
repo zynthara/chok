@@ -11,8 +11,8 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/store/where"
 )
 
 // NotFoundError is a locator that matched no row the caller may see.

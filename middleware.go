@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/clientip"
-	"github.com/zynthara/chok/v3/internal/openapi"
-	"github.com/zynthara/chok/v3/internal/reqinfo"
+	"github.com/zynthara/chok/internal/clientip"
+	"github.com/zynthara/chok/internal/openapi"
+	"github.com/zynthara/chok/internal/reqinfo"
 )
 
 // Instrumenter is a component that contributes middleware to the default

@@ -15,7 +15,7 @@ import (
 
 	// go-redis reports its own trouble through a process-wide logger;
 	// internal/redislog routes it to slog.
-	_ "github.com/zynthara/chok/v3/internal/redislog"
+	_ "github.com/zynthara/chok/internal/redislog"
 )
 
 // The states of the backplane.

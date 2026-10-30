@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// The scheduler tests are v2's scheduler/scheduler_test.go on the v3
+// The scheduler tests are v2's scheduler/scheduler_test.go on this
 // scheduler, in a synctest bubble: the clock is fake, so a run that
 // "takes 2.5s" takes no time and every count is exact. v2 needed RunNow
 // to run a job by hand and sleeps of real seconds; here the schedule

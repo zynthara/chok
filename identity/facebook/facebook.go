@@ -36,8 +36,8 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/internal/oauth"
 )
 
 // graphVersion is the version segment an endpoint on graph.facebook.com

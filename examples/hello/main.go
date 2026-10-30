@@ -9,7 +9,7 @@ package main
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 type greeting struct {

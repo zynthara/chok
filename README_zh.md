@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.27+" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
-  <a href="https://pkg.go.dev/github.com/zynthara/chok/v3"><img src="https://pkg.go.dev/badge/github.com/zynthara/chok/v3.svg" alt="Go Reference" /></a>
+  <a href="https://pkg.go.dev/github.com/zynthara/chok"><img src="https://pkg.go.dev/badge/github.com/zynthara/chok.svg" alt="Go Reference" /></a>
   <a href="https://github.com/zynthara/chok/actions/workflows/ci.yml"><img src="https://github.com/zynthara/chok/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
 </p>
 
@@ -15,7 +15,7 @@
 ---
 
 > [!NOTE]
-> 这里是 **chok v3**（`github.com/zynthara/chok/v3`），以 `v3.0.0-alpha.N`
+> 这里是 **chok v3**（`github.com/zynthara/chok`），以 `v3.0.0-alpha.N`
 > 发布：v3.0.0 之前 API 仍可能变化。v2 封版于
 > [`v2` 分支](https://github.com/zynthara/chok/tree/v2)（只收安全修复；
 > `go get github.com/zynthara/chok/v2@v2.0.0-beta.6` 永久可用）。从 v2 迁移请看
@@ -34,10 +34,10 @@ package main
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/store"
 )
 
 type Config struct {
@@ -93,7 +93,7 @@ auth:
 ## 30 秒 hello
 
 ```sh
-go run github.com/zynthara/chok/v3/cmd/chok@latest init hello
+go run github.com/zynthara/chok/cmd/chok@latest init hello
 cd hello && go mod tidy && go run .
 ```
 
@@ -153,8 +153,8 @@ package main
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/realtime"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/realtime"
 )
 
 type Config struct {
@@ -212,10 +212,10 @@ package main
 import (
 	"os"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/mail"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/mail"
 )
 
 type Config struct {
@@ -263,19 +263,19 @@ mail:
 
 | 包 | 是什么 |
 |---|---|
-| [`chok`](https://pkg.go.dev/github.com/zynthara/chok/v3) | 配置装载、App 与生命周期、类型化 handler 与路由、绑定与校验、错误信封、默认中间件、OpenAPI、健康探针、slog、与 API 同域服务的单页应用（`SPA`） |
-| [`db`](https://pkg.go.dev/github.com/zynthara/chok/v3/db) | SQLite / MySQL / Postgres 句柄、事务、模型基座、RID、软唯一索引、单账本上的 auto / versioned / off 迁移 |
-| [`store`](https://pkg.go.dev/github.com/zynthara/chok/v3/store) | 泛型 `Store[T]`：CRUD、失败关闭的 owner 隔离、带乐观锁的 Patch、游标、聚合 |
-| [`store/where`](https://pkg.go.dev/github.com/zynthara/chok/v3/store/where) | 查询 DSL：`Eq`、`In`、`Like`、`Order`、`Page`、`Cursor`、`FromQuery` … |
-| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | 账户、JWT、登录限速、OAuth、邮件验证码的无密码登录、cookie 会话、审计日志、`auth.admins` 指定的首个管理员、`Authn()` |
-| [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/rbac) | 基于 identity 角色的 casbin 权限，`admin` 全通：`Require`、策略、租户域、Redis watcher |
-| [`identity/google`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/google)、[`github`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/github)、[`apple`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/apple)、[`facebook`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/facebook) | OAuth provider |
-| [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | cron 调度的周期任务与事务性 outbox worker：至少一次、类型化 payload、退避重试、死信 |
-| [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/v3/telemetry) | Prometheus 指标、OpenTelemetry 链路、slog 到 OpenTelemetry Logs、SQL 埋点 |
-| [`cache`](https://pkg.go.dev/github.com/zynthara/chok/v3/cache) | 一个 `Config` 后面的内存层与 Redis 层，带熔断器 |
-| [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/v3/realtime) | 经 WebSocket 与 server-sent events 推给浏览器的事件：一次性 ticket、授权的主题、断线续传、Redis backplane |
-| [`mail`](https://pkg.go.dev/github.com/zynthara/chok/v3/mail) | 经 SMTP 中继、`.eml` 文件或日志发出的事务邮件：模板、附件、内嵌图片；identity 的登录验证码 |
-| [`choktest`](https://pkg.go.dev/github.com/zynthara/chok/v3/choktest) | 测试辅助：按 lane 的方言给每个测试一个一次性数据库、进程内的 App 客户端 |
+| [`chok`](https://pkg.go.dev/github.com/zynthara/chok) | 配置装载、App 与生命周期、类型化 handler 与路由、绑定与校验、错误信封、默认中间件、OpenAPI、健康探针、slog、与 API 同域服务的单页应用（`SPA`） |
+| [`db`](https://pkg.go.dev/github.com/zynthara/chok/db) | SQLite / MySQL / Postgres 句柄、事务、模型基座、RID、软唯一索引、单账本上的 auto / versioned / off 迁移 |
+| [`store`](https://pkg.go.dev/github.com/zynthara/chok/store) | 泛型 `Store[T]`：CRUD、失败关闭的 owner 隔离、带乐观锁的 Patch、游标、聚合 |
+| [`store/where`](https://pkg.go.dev/github.com/zynthara/chok/store/where) | 查询 DSL：`Eq`、`In`、`Like`、`Order`、`Page`、`Cursor`、`FromQuery` … |
+| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/identity) | 账户、JWT、登录限速、OAuth、邮件验证码的无密码登录、cookie 会话、审计日志、`auth.admins` 指定的首个管理员、`Authn()` |
+| [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/identity/rbac) | 基于 identity 角色的 casbin 权限，`admin` 全通：`Require`、策略、租户域、Redis watcher |
+| [`identity/google`](https://pkg.go.dev/github.com/zynthara/chok/identity/google)、[`github`](https://pkg.go.dev/github.com/zynthara/chok/identity/github)、[`apple`](https://pkg.go.dev/github.com/zynthara/chok/identity/apple)、[`facebook`](https://pkg.go.dev/github.com/zynthara/chok/identity/facebook) | OAuth provider |
+| [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/jobs) | cron 调度的周期任务与事务性 outbox worker：至少一次、类型化 payload、退避重试、死信 |
+| [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/telemetry) | Prometheus 指标、OpenTelemetry 链路、slog 到 OpenTelemetry Logs、SQL 埋点 |
+| [`cache`](https://pkg.go.dev/github.com/zynthara/chok/cache) | 一个 `Config` 后面的内存层与 Redis 层，带熔断器 |
+| [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/realtime) | 经 WebSocket 与 server-sent events 推给浏览器的事件：一次性 ticket、授权的主题、断线续传、Redis backplane |
+| [`mail`](https://pkg.go.dev/github.com/zynthara/chok/mail) | 经 SMTP 中继、`.eml` 文件或日志发出的事务邮件：模板、附件、内嵌图片；identity 的登录验证码 |
+| [`choktest`](https://pkg.go.dev/github.com/zynthara/chok/choktest) | 测试辅助：按 lane 的方言给每个测试一个一次性数据库、进程内的 App 客户端 |
 
 每个导出符号一行：[docs/api.md](docs/api.md)。
 
@@ -289,7 +289,7 @@ secret 打码；`--check-config` 校验配置并打印、不启动任何东西�
 ## 命令行
 
 ```sh
-go install github.com/zynthara/chok/v3/cmd/chok@latest   # 或在项目里 go tool chok
+go install github.com/zynthara/chok/cmd/chok@latest   # 或在项目里 go tool chok
 ```
 
 | 命令 | 做什么 |
@@ -320,7 +320,7 @@ go install github.com/zynthara/chok/v3/cmd/chok@latest   # 或在项目里 go to
 | 设计文档 | [docs/design.md](docs/design.md) |
 | 从 v2 迁移 | [docs/migration-v2-to-v3.md](docs/migration-v2-to-v3.md) |
 | 各版本的变更 | [CHANGELOG.md](CHANGELOG.md) |
-| GoDoc | <https://pkg.go.dev/github.com/zynthara/chok/v3> |
+| GoDoc | <https://pkg.go.dev/github.com/zynthara/chok> |
 | 给编码代理的约定 | [CLAUDE.md](CLAUDE.md)、[AGENTS.md](AGENTS.md) |
 
 ## 参与开发

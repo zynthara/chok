@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/db"
 )
 
 // watermark is the in-process shape of a worker's persisted position.

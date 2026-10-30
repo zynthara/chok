@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 // The relay tests are v2's outbox/relay_test.go, the five review rounds
-// included, under their v2 names. The adaptations: a v3 worker is keyed
+// included, under their v2 names. The adaptations: a worker here is keyed
 // by its topic, so each relay's name in v2 is the topic its messages are
 // enqueued under here; the WithRelayFor escape hatch over user-owned
 // tables is gone (contract §5), with its two tests; every test runs on
@@ -394,7 +394,7 @@ func TestRelay_ConcurrentEnqueue_NoLoss(t *testing.T) {
 	ctx := t.Context()
 
 	// v2 ran this with settle 0, on SQLite only, over an unfiltered relay.
-	// A v3 worker is the topic-filtered shape: a drained sweep probes the
+	// A worker here is the topic-filtered shape: a drained sweep probes the
 	// settled frontier, so with settle 0 a message whose transaction
 	// commits between the scan and the probe is jumped — and on Postgres
 	// and MySQL a writer can also commit behind the cursor. Covering
@@ -503,7 +503,7 @@ func TestRelay_TopicFilterAndIndependentWatermarks(t *testing.T) {
 }
 
 // TestRelay_OverlappingSweepIsRefused is v2's
-// TestRelay_RunNowOverlapReturnsBusy: v3 has no RunNow, and a worker's
+// TestRelay_RunNowOverlapReturnsBusy: there is no RunNow, and a worker's
 // sweeps never overlap under the scheduler, but the guard on mem stays.
 func TestRelay_OverlappingSweepIsRefused(t *testing.T) {
 	c := openCore(t)

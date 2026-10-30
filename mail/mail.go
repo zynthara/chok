@@ -12,8 +12,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 // Mailer sends mail: m.Send(ctx, mail.Message{To: …, Template: …, Data: …}).

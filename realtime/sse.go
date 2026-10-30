@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // serveSSE serves GET {Path}/sse?ticket=…&topics=a,b: the topics are

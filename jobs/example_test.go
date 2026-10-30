@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/jobs"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/jobs"
 )
 
 type orderPlaced struct {

@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/google"
-	"github.com/zynthara/chok/v3/identity/internal/idptest"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/google"
+	"github.com/zynthara/chok/identity/internal/idptest"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 // TestGoogle_SignInEndToEnd runs a real provider package through

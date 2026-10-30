@@ -18,11 +18,11 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/apple"
-	"github.com/zynthara/chok/v3/identity/internal/idptest"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/apple"
+	"github.com/zynthara/chok/identity/internal/idptest"
+	"github.com/zynthara/chok/identity/internal/oauth"
 )
 
 func p8(t *testing.T, key any) string {

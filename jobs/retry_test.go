@@ -12,8 +12,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 // The failure handling of the workers: retries after a growing wait, the

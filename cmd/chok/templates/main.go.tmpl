@@ -1,4 +1,4 @@
-// Command {{.Name}} is a chok v3 application: one strict configuration in
+// Command {{.Name}} is a chok application: one strict configuration in
 // chok.yaml, a database, and a JSON API over one resource.
 //
 //	go run .                    # serves :8080
@@ -13,9 +13,9 @@ import (
 	"embed"
 	"io/fs"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/store"
 )
 
 // Config is chok.yaml: chok.Base brings the app, http and log sections.

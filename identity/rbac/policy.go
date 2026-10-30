@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/identity"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/identity"
 )
 
 // PolicyService manages the policies: which permissions — an object and

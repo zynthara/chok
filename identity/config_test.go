@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 func TestConfig_Validate(t *testing.T) {

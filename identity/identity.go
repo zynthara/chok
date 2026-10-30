@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity/internal/authz"
-	"github.com/zynthara/chok/v3/internal/conf"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity/internal/authz"
+	"github.com/zynthara/chok/internal/conf"
+	"github.com/zynthara/chok/store"
 )
 
 // Identity is the identity battery: accounts with passwords and OAuth

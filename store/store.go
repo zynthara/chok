@@ -55,10 +55,10 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbx"
-	"github.com/zynthara/chok/v3/store/internal/q"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbx"
+	"github.com/zynthara/chok/store/internal/q"
 )
 
 // Store is the data access of model T on a database handle.

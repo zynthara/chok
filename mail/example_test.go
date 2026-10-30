@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing/fstest"
 
-	"github.com/zynthara/chok/v3/mail"
+	"github.com/zynthara/chok/mail"
 )
 
 // A mailer with templates; here a Sender stands in for the relay and

@@ -11,7 +11,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/db"
 )
 
 // newWatcherClient spins up an in-process miniredis and returns a

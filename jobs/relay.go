@@ -13,13 +13,13 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/db"
 )
 
 // relay is the delivery engine of one worker: scan the committed messages
 // of its topic past the persisted watermark in (created_at, id) order,
 // hand each to the handler, advance the watermark over the settled prefix.
-// It is v2's outbox relay with its algorithm unchanged; a v3 worker is
+// It is v2's outbox relay with its algorithm unchanged; a worker here is
 // always the topic-filtered shape.
 //
 // Scanning is the overlapping-watermark idiom: created_at >= W plus
@@ -29,7 +29,7 @@ import (
 // could still reorder ties), and mem remembers rows delivered in earlier
 // sweeps that are not yet settled enough to advance the watermark over.
 //
-// v3 adds the failure handling around the handler call (attempt): a
+// What v2 lacked is the failure handling around the handler call (attempt): a
 // failure is counted on the message row and retried after a backoff,
 // the last allowed failure parks the message in chok_jobs_dead and the
 // sweep goes on; and mem outlives a graceful restart through

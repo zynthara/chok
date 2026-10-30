@@ -17,8 +17,8 @@ import (
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/store/where"
 )
 
 // read applies opts to a scoped query of T. Without a principal, an

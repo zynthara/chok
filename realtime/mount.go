@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // Mount registers the three endpoints under Config.Path:

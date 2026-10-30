@@ -12,7 +12,7 @@ import (
 )
 
 // chokModule is the module this command belongs to.
-const chokModule = "github.com/zynthara/chok/v3"
+const chokModule = "github.com/zynthara/chok"
 
 // The release build sets these with -ldflags "-X main.version=...", as
 // .goreleaser.yaml does; a binary built any other way reads its version
@@ -75,7 +75,7 @@ func buildOf(bi *debug.BuildInfo, ok bool) build {
 
 // moduleVersion is the version of the chok module the binary was built
 // from: the main module's when chok is the main module (go install
-// .../cmd/chok@v3.x.y, go build in a checkout), the dependency's when the
+// .../cmd/chok@v0.x.y, go build in a checkout), the dependency's when the
 // command is built inside an application (go tool chok).
 func moduleVersion(bi *debug.BuildInfo) string {
 	if bi.Main.Path == chokModule {
@@ -112,7 +112,7 @@ func withV(v string) string {
 }
 
 // String is the one line chok version prints, such as
-// "chok v3.0.0-alpha.1 (commit 1a2b3c4d5e6f, 2026-10-25T08:00:00Z, go1.27.3 darwin/arm64)".
+// "chok v0.2.0 (commit 1a2b3c4d5e6f, 2026-10-25T08:00:00Z, go1.27.3 darwin/arm64)".
 func (b build) String() string {
 	var parts []string
 	if b.Commit != "" {

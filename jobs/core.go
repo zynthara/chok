@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
 )
 
 // ErrOutsideTx is what Enqueue returns when its context does not carry a

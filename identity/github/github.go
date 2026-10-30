@@ -28,8 +28,8 @@ import (
 	"golang.org/x/oauth2"
 	githubendpoint "golang.org/x/oauth2/github"
 
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/internal/oauth"
 )
 
 const publicAPI = "https://api.github.com"

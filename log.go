@@ -9,7 +9,7 @@ import (
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
-	"github.com/zynthara/chok/v3/internal/logtap"
+	"github.com/zynthara/chok/internal/logtap"
 )
 
 // loggers is what New builds from LogConfig.

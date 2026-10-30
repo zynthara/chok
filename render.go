@@ -4,7 +4,7 @@ import (
 	"encoding/json/v2"
 	"net/http"
 
-	"github.com/zynthara/chok/v3/internal/jsonx"
+	"github.com/zynthara/chok/internal/jsonx"
 )
 
 // writeJSON writes v as the response body with code; an encoding

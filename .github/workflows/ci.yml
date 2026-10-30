@@ -2,7 +2,7 @@
 # gofmt / vet / golangci-lint / go fix, the SQLite suite, the Postgres and
 # MySQL lanes, the API budget and the examples/blog smoke test. Every gate
 # in it blocks. The apidiff job reports incompatible public API changes
-# since the last v3 release and is advisory while v3 is in alpha.
+# since the last release and is advisory while chok is at v0.
 
 name: ci
 
@@ -75,10 +75,11 @@ jobs:
           CHOK_TEST_MYSQL_DSN: root:root@tcp(localhost:3306)/?parseTime=true
         run: make verify
 
-  # Incompatible changes to the public API since the last v3 release
+  # Incompatible changes to the public API since the last release
   # (hack/apidiff.sh; it passes when CHANGELOG.md changed alongside them).
-  # Advisory during the alpha: continue-on-error keeps a red apidiff from
-  # failing the run. Drop continue-on-error before tagging v3.0.0.
+  # Advisory while chok is at v0, where a minor release may break the API:
+  # continue-on-error keeps a red apidiff from failing the run. Drop
+  # continue-on-error before tagging v1.0.0.
   apidiff:
     runs-on: ubuntu-latest
     continue-on-error: true

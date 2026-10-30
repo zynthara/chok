@@ -14,7 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 //go:embed templates
@@ -24,7 +24,7 @@ var templates embed.FS
 // writes it into go.mod when the running binary is not a release itself
 // (a build of a working tree reports no usable version); bump it with
 // every release.
-const releaseVersion = "v3.0.0-alpha.1"
+const releaseVersion = "v0.2.0"
 
 // scaffold is what the templates see.
 type scaffold struct {
@@ -79,7 +79,7 @@ differs from the name, such as github.com/acme/<name>.`,
 // running command's own, when it is a release or a pseudo-version a
 // proxy can serve, else releaseVersion (fallback true).
 func scaffoldVersion(b build) (v string, fallback bool) {
-	if strings.HasPrefix(b.Version, "v3.") && !strings.Contains(b.Version, "+") {
+	if strings.HasPrefix(b.Version, "v0.") && !strings.Contains(b.Version, "+") {
 		return b.Version, false
 	}
 	return releaseVersion, true

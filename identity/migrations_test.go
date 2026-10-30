@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 var identityTables = []string{"users", "identities", "audit_logs", "auth_login_codes"}

@@ -9,8 +9,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/store"
 )
 
 // A signed-in user confirms the address with a code mailed to it: a proof

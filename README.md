@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.27+" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
-  <a href="https://pkg.go.dev/github.com/zynthara/chok/v3"><img src="https://pkg.go.dev/badge/github.com/zynthara/chok/v3.svg" alt="Go Reference" /></a>
+  <a href="https://pkg.go.dev/github.com/zynthara/chok"><img src="https://pkg.go.dev/badge/github.com/zynthara/chok.svg" alt="Go Reference" /></a>
   <a href="https://github.com/zynthara/chok/actions/workflows/ci.yml"><img src="https://github.com/zynthara/chok/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
 </p>
 
@@ -15,7 +15,7 @@
 ---
 
 > [!NOTE]
-> This is **chok v3** (`github.com/zynthara/chok/v3`), released as
+> This is **chok v3** (`github.com/zynthara/chok`), released as
 > `v3.0.0-alpha.N`: the API may still change before v3.0.0. v2 is sealed
 > on the [`v2` branch](https://github.com/zynthara/chok/tree/v2) (security
 > fixes only; `go get github.com/zynthara/chok/v2@v2.0.0-beta.6` keeps
@@ -37,10 +37,10 @@ package main
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/store"
 )
 
 type Config struct {
@@ -98,7 +98,7 @@ versioned SQL migrations.
 ## 30-second hello
 
 ```sh
-go run github.com/zynthara/chok/v3/cmd/chok@latest init hello
+go run github.com/zynthara/chok/cmd/chok@latest init hello
 cd hello && go mod tidy && go run .
 ```
 
@@ -162,8 +162,8 @@ package main
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/realtime"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/realtime"
 )
 
 type Config struct {
@@ -225,10 +225,10 @@ package main
 import (
 	"os"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/mail"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/mail"
 )
 
 type Config struct {
@@ -278,19 +278,19 @@ in this way.
 
 | Package | What it is |
 |---|---|
-| [`chok`](https://pkg.go.dev/github.com/zynthara/chok/v3) | Configuration loading, the App and its lifecycle, typed handlers and routing, binding and validation, error envelopes, default middleware, OpenAPI, health probes, slog, a single-page app served beside the API (`SPA`) |
-| [`db`](https://pkg.go.dev/github.com/zynthara/chok/v3/db) | SQLite, MySQL and Postgres handles, transactions, model bases, RIDs, soft-unique indexes, auto / versioned / off migrations on one ledger |
-| [`store`](https://pkg.go.dev/github.com/zynthara/chok/v3/store) | Generic `Store[T]`: CRUD, owner scoping that fails closed, patches with optimistic locking, cursors, aggregates |
-| [`store/where`](https://pkg.go.dev/github.com/zynthara/chok/v3/store/where) | The query DSL: `Eq`, `In`, `Like`, `Order`, `Page`, `Cursor`, `FromQuery`, … |
-| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity) | Accounts, JWTs, login rate limiting, OAuth, passwordless sign-in by mailed code, cookie sessions, the audit log, the first admin from `auth.admins`, `Authn()` |
-| [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/rbac) | casbin permissions over identity's roles, `admin` passing every check: `Require`, policies, tenant domains, a Redis watcher |
-| [`identity/google`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/google), [`github`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/github), [`apple`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/apple), [`facebook`](https://pkg.go.dev/github.com/zynthara/chok/v3/identity/facebook) | The OAuth providers |
-| [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/v3/jobs) | Cron-scheduled periodic jobs and transactional-outbox workers: at least once, typed payloads, retries with backoff, dead letters |
-| [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/v3/telemetry) | Prometheus metrics, OpenTelemetry traces, slog to OpenTelemetry logs, SQL instrumentation |
-| [`cache`](https://pkg.go.dev/github.com/zynthara/chok/v3/cache) | An in-memory and a Redis layer behind one `Config`, with a circuit breaker |
-| [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/v3/realtime) | Events pushed to browsers over WebSocket and server-sent events: one-time tickets, authorized topics, resuming after a reconnect, a Redis backplane |
-| [`mail`](https://pkg.go.dev/github.com/zynthara/chok/v3/mail) | Transactional mail through an SMTP relay, `.eml` files or the log: templates, attachments, inline images; identity's sign-in codes |
-| [`choktest`](https://pkg.go.dev/github.com/zynthara/chok/v3/choktest) | Test helpers: a throwaway database per test on the lane's dialect, an in-process App client |
+| [`chok`](https://pkg.go.dev/github.com/zynthara/chok) | Configuration loading, the App and its lifecycle, typed handlers and routing, binding and validation, error envelopes, default middleware, OpenAPI, health probes, slog, a single-page app served beside the API (`SPA`) |
+| [`db`](https://pkg.go.dev/github.com/zynthara/chok/db) | SQLite, MySQL and Postgres handles, transactions, model bases, RIDs, soft-unique indexes, auto / versioned / off migrations on one ledger |
+| [`store`](https://pkg.go.dev/github.com/zynthara/chok/store) | Generic `Store[T]`: CRUD, owner scoping that fails closed, patches with optimistic locking, cursors, aggregates |
+| [`store/where`](https://pkg.go.dev/github.com/zynthara/chok/store/where) | The query DSL: `Eq`, `In`, `Like`, `Order`, `Page`, `Cursor`, `FromQuery`, … |
+| [`identity`](https://pkg.go.dev/github.com/zynthara/chok/identity) | Accounts, JWTs, login rate limiting, OAuth, passwordless sign-in by mailed code, cookie sessions, the audit log, the first admin from `auth.admins`, `Authn()` |
+| [`identity/rbac`](https://pkg.go.dev/github.com/zynthara/chok/identity/rbac) | casbin permissions over identity's roles, `admin` passing every check: `Require`, policies, tenant domains, a Redis watcher |
+| [`identity/google`](https://pkg.go.dev/github.com/zynthara/chok/identity/google), [`github`](https://pkg.go.dev/github.com/zynthara/chok/identity/github), [`apple`](https://pkg.go.dev/github.com/zynthara/chok/identity/apple), [`facebook`](https://pkg.go.dev/github.com/zynthara/chok/identity/facebook) | The OAuth providers |
+| [`jobs`](https://pkg.go.dev/github.com/zynthara/chok/jobs) | Cron-scheduled periodic jobs and transactional-outbox workers: at least once, typed payloads, retries with backoff, dead letters |
+| [`telemetry`](https://pkg.go.dev/github.com/zynthara/chok/telemetry) | Prometheus metrics, OpenTelemetry traces, slog to OpenTelemetry logs, SQL instrumentation |
+| [`cache`](https://pkg.go.dev/github.com/zynthara/chok/cache) | An in-memory and a Redis layer behind one `Config`, with a circuit breaker |
+| [`realtime`](https://pkg.go.dev/github.com/zynthara/chok/realtime) | Events pushed to browsers over WebSocket and server-sent events: one-time tickets, authorized topics, resuming after a reconnect, a Redis backplane |
+| [`mail`](https://pkg.go.dev/github.com/zynthara/chok/mail) | Transactional mail through an SMTP relay, `.eml` files or the log: templates, attachments, inline images; identity's sign-in codes |
+| [`choktest`](https://pkg.go.dev/github.com/zynthara/chok/choktest) | Test helpers: a throwaway database per test on the lane's dialect, an in-process App client |
 
 Every exported symbol, one line each: [docs/api.md](docs/api.md).
 
@@ -306,7 +306,7 @@ type, default and rules: [docs/config.md](docs/config.md).
 ## Command line
 
 ```sh
-go install github.com/zynthara/chok/v3/cmd/chok@latest   # or go tool chok in a project
+go install github.com/zynthara/chok/cmd/chok@latest   # or go tool chok in a project
 ```
 
 | Command | What it does |
@@ -339,7 +339,7 @@ More in [docs/design.md](docs/design.md) (Chinese).
 | Design (Chinese) | [docs/design.md](docs/design.md) |
 | Migrating from v2 (Chinese) | [docs/migration-v2-to-v3.md](docs/migration-v2-to-v3.md) |
 | Changes by release | [CHANGELOG.md](CHANGELOG.md) |
-| GoDoc | <https://pkg.go.dev/github.com/zynthara/chok/v3> |
+| GoDoc | <https://pkg.go.dev/github.com/zynthara/chok> |
 | Guidance for coding agents | [CLAUDE.md](CLAUDE.md), [AGENTS.md](AGENTS.md) |
 
 ## Contributing

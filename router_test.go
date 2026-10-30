@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zynthara/chok/v3/internal/openapi"
+	"github.com/zynthara/chok/internal/openapi"
 )
 
 func tag(name string, log *[]string, mu *sync.Mutex) Middleware {

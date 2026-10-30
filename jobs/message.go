@@ -8,8 +8,8 @@ import (
 	"io/fs"
 	"time"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // Message is an enqueued message as a worker receives it, its payload

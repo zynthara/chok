@@ -16,15 +16,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 // The battery's tests through its public face: New, the options, Enqueue,
 // Start / Close and Stats, on the lane's database. v2's scheduler and
-// outbox module tests land here under v3 names; the report maps them.
+// outbox module tests land here under new names; the report maps them.
 
 // fastConfig sweeps every 10ms, so a test sees a delivery quickly, and
 // tries a failed message again 10ms later, without ever parking it: the

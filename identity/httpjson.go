@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // maxJSONBody caps the bodies of the raw OAuth routes, which take a code

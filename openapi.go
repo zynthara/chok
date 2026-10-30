@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 
-	"github.com/zynthara/chok/v3/internal/openapi"
+	"github.com/zynthara/chok/internal/openapi"
 )
 
 // openAPIDocument renders the OpenAPI 3.1 document of the typed routes.

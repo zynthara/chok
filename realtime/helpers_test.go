@@ -18,9 +18,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/conf"
-	"github.com/zynthara/chok/v3/internal/openapi"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/conf"
+	"github.com/zynthara/chok/internal/openapi"
 )
 
 // The helpers serve a hub through a chok App — its default middleware,

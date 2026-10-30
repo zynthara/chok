@@ -3,7 +3,7 @@ package identity
 import (
 	"embed"
 
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // migrationFiles are identity's SQL migrations for migrate: versioned,

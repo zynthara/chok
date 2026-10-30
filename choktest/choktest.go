@@ -35,13 +35,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/apptest"
-	"github.com/zynthara/chok/v3/internal/conf"
-	"github.com/zynthara/chok/v3/internal/dbtest"
-	"github.com/zynthara/chok/v3/internal/jsonx"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/apptest"
+	"github.com/zynthara/chok/internal/conf"
+	"github.com/zynthara/chok/internal/dbtest"
+	"github.com/zynthara/chok/internal/jsonx"
+	"github.com/zynthara/chok/store"
 )
 
 // testPasswordCost is bcrypt.MinCost.

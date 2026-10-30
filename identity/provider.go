@@ -3,7 +3,7 @@ package identity
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
+	"github.com/zynthara/chok/identity/internal/oauth"
 )
 
 // Provider is an OAuth identity provider: what identity/google,

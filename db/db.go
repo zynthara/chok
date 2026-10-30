@@ -16,8 +16,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3/internal/conf"
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/internal/conf"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // DB is an open database: a gorm handle behind a narrow API, the schemas

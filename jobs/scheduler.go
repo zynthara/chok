@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zynthara/chok/v3/jobs/internal/cron"
+	"github.com/zynthara/chok/jobs/internal/cron"
 )
 
 // specParser reads a Periodic spec: five fields, or six with leading

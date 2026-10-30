@@ -13,9 +13,9 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbtest"
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbtest"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // project is a temporary application directory holding a chok.yaml whose

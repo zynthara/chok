@@ -17,7 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 // testBase is a defaulted Base that does not listen.

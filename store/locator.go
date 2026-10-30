@@ -6,7 +6,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/store/where"
 )
 
 // Locator picks the row, or rows, an operation targets.

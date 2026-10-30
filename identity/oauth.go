@@ -15,10 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
-	"github.com/zynthara/chok/v3/store"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/identity/internal/oauth"
+	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/store/where"
 )
 
 // oauthFlow is OAuth sign-in: the providers, the cookie that carries a

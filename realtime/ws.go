@@ -12,7 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // serveWS serves GET {Path}/ws?ticket=…[&topics=a,b]. Before the upgrade

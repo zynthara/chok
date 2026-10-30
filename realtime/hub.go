@@ -18,8 +18,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/jsonx"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/jsonx"
 )
 
 // Hub is the realtime battery: the topics, the connections subscribed to

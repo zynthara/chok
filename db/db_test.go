@@ -11,9 +11,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbtest"
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbtest"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 type note struct {

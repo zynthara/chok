@@ -15,7 +15,7 @@ import (
 
 	"gorm.io/gorm/schema"
 
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/store/where"
 )
 
 // A cursor is base64url(JSON(cursorToken)): the keyset position — the

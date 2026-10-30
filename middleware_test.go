@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/openapi"
-	"github.com/zynthara/chok/v3/internal/reqinfo"
+	"github.com/zynthara/chok/internal/openapi"
+	"github.com/zynthara/chok/internal/reqinfo"
 )
 
 func TestRecover_PanicBecomes500Envelope(t *testing.T) {

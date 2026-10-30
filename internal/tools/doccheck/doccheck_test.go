@@ -101,7 +101,7 @@ func TestDocs_GoProgramsBuild(t *testing.T) {
 	if len(programs) < 11 {
 		t.Fatalf("found %d programs; the quickstart has three, each README three, docs/realtime.md and docs/mail.md one each", len(programs))
 	}
-	gomod := "module example.com/docs\n\ngo 1.27\n\nrequire github.com/zynthara/chok/v3 v3.0.0\n\nreplace github.com/zynthara/chok/v3 => " + root + "\n"
+	gomod := "module example.com/docs\n\ngo 1.27\n\nrequire github.com/zynthara/chok v0.2.0\n\nreplace github.com/zynthara/chok => " + root + "\n"
 	if err := os.WriteFile(filepath.Join(mod, "go.mod"), []byte(gomod), 0o644); err != nil {
 		t.Fatal(err)
 	}

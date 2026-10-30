@@ -16,7 +16,7 @@ import (
 
 	"github.com/go-playground/validator/v10"
 
-	"github.com/zynthara/chok/v3/internal/jsonx"
+	"github.com/zynthara/chok/internal/jsonx"
 )
 
 // source is where a request field's value comes from.

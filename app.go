@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/apptest"
-	"github.com/zynthara/chok/v3/internal/openapi"
+	"github.com/zynthara/chok/internal/apptest"
+	"github.com/zynthara/chok/internal/openapi"
 )
 
 // App is one application: its configuration, the components registered

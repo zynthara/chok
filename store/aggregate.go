@@ -15,9 +15,9 @@ import (
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/store/internal/q"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/store/internal/q"
+	"github.com/zynthara/chok/store/where"
 )
 
 // Aggregates and projections read like Count: any column of the model,

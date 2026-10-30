@@ -14,8 +14,8 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/zynthara/chok/v3/internal/clientip"
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok/internal/clientip"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 // Base is the standard configuration every application embeds: the app,

@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/facebook"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/facebook"
+	"github.com/zynthara/chok/identity/internal/oauth"
 )
 
 // mockGraph is the Graph API in process, under any version prefix.

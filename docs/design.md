@@ -9,7 +9,7 @@
 
 ## 1. 定位与三条规则
 
-chok 是一套有主见的 Go 应用工具包，模块路径 `github.com/zynthara/chok/v3`，
+chok 是一套有主见的 Go 应用工具包，模块路径 `github.com/zynthara/chok`，
 要求 Go 1.27。应用 `import` 它、用普通 Go 代码装配：没有内核、没有注册表、
 没有生成文件。一份严格的类型化配置、带运行时 OpenAPI 的类型化 handler、
 带 owner 隔离的 gorm 存储，用四个 import 就能写出一个 CRUD 资源；身份、
@@ -702,7 +702,7 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
 
 ## 9. 命令行
 
-`cmd/chok`（`go install github.com/zynthara/chok/v3/cmd/chok@<version>`，或在
+`cmd/chok`（`go install github.com/zynthara/chok/cmd/chok@<version>`，或在
 `chok init` 生成的项目里 `go tool chok`——go.mod 的 tool 指令让它与项目用的 chok
 同一版本）：
 

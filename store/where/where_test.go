@@ -9,9 +9,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbtest"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbtest"
+	"github.com/zynthara/chok/store/where"
 )
 
 // item is the table the options run against on every lane.

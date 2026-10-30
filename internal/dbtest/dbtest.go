@@ -26,7 +26,7 @@ import (
 	gomysql "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib" // the pgx database/sql driver for the admin connection
 
-	"github.com/zynthara/chok/v3/db"
+	"github.com/zynthara/chok/db"
 )
 
 // The environment of the database lanes.

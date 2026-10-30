@@ -38,9 +38,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
 
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
-	"github.com/zynthara/chok/v3/identity/internal/oidc"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/internal/oauth"
+	"github.com/zynthara/chok/identity/internal/oidc"
 )
 
 const (

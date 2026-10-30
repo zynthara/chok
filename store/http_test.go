@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/store"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/store"
 )
 
 type postID struct {

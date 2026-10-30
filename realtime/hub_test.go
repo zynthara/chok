@@ -14,8 +14,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/internal/conf"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/conf"
 )
 
 // TestConfig_Validate: the path's shape, the origin patterns and every

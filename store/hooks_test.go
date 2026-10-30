@@ -7,8 +7,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/zynthara/chok/v3/store"
-	"github.com/zynthara/chok/v3/store/where"
+	"github.com/zynthara/chok/store"
+	"github.com/zynthara/chok/store/where"
 )
 
 func TestHooks_RunBeforeWritesAndCanAbort(t *testing.T) {

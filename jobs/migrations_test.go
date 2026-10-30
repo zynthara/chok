@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 var jobsTables = []string{"chok_jobs_messages", "chok_jobs_watermarks", "chok_jobs_dead", "chok_jobs_delivered"}

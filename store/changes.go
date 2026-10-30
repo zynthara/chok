@@ -11,8 +11,8 @@ import (
 
 	"gorm.io/gorm/schema"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/store/internal/q"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/store/internal/q"
 )
 
 // Changes is the set of columns an Update writes: from Patch(...).Onto, or

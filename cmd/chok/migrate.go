@@ -18,15 +18,15 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/conf"
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/conf"
+	"github.com/zynthara/chok/internal/dbx"
 
 	// The batteries with a schema of their own register their migrations
 	// in dbx when they initialize.
-	_ "github.com/zynthara/chok/v3/identity"
-	_ "github.com/zynthara/chok/v3/identity/rbac"
-	_ "github.com/zynthara/chok/v3/jobs"
+	_ "github.com/zynthara/chok/identity"
+	_ "github.com/zynthara/chok/identity/rbac"
+	_ "github.com/zynthara/chok/jobs"
 )
 
 // The dialects a migration directory can split into.

@@ -1,4 +1,4 @@
-# chok v3 — the gates every change must pass. CI runs `make verify` and
+# chok — the gates every change must pass. CI runs `make verify` and
 # nothing else, so a green local `make verify` predicts a green CI run.
 #
 # The database lanes read their DSNs from the environment; this Makefile
@@ -95,7 +95,7 @@ smoke: ## Boot examples/blog on a random port, probe /healthz, SIGINT it, expect
 ##@ Helpers
 
 .PHONY: apidiff
-apidiff: ## Incompatible public API changes since the last v3 release (advisory in CI until v3.0.0)
+apidiff: ## Incompatible public API changes since the last release (advisory in CI while chok is at v0)
 	@bash hack/apidiff.sh
 
 .PHONY: tidy

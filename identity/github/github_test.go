@@ -11,9 +11,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/github"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/github"
+	"github.com/zynthara/chok/identity/internal/oauth"
 )
 
 // mockGitHub is a GitHub Enterprise server in process: the OAuth pair

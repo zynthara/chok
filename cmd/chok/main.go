@@ -1,4 +1,4 @@
-// Command chok is the chok v3 command line. It scaffolds a project, runs
+// Command chok is the chok command line. It scaffolds a project, runs
 // the versioned migrations of an application's database, saves a running
 // application's OpenAPI document and reports its own build:
 //
@@ -26,7 +26,7 @@ func main() {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "chok",
-		Short:         "The chok v3 command line",
+		Short:         "The chok command line",
 		Version:       currentBuild().String(),
 		SilenceUsage:  true,
 		SilenceErrors: false,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# apibudget.sh — the chok v3 API surface budget (plan §6); `make budget`.
+# apibudget.sh — the chok API surface budget (plan §6); `make budget`.
 #
 # For every public package (neither internal nor main) it counts
 #   exports       `go doc -short` lines, indentation stripped, that start
@@ -68,7 +68,7 @@ done
 
 exports_of() { printf '%s' "$counts" | awk -v p="$1" '$1 == p { print $2; found = 1 } END { if (!found) print "-" }'; }
 
-printf 'chok v3 API budget (limits in %s)\n\n' "$budget"
+printf 'chok API budget (limits in %s)\n\n' "$budget"
 printf '%-36s %7s %7s  %s\n' ITEM ACTUAL LIMIT STATUS
 row "public packages (providers excluded)" "$public" "$(limit_of public_packages)"
 while read -r kind path cap; do

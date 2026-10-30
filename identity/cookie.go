@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // sessionResponse is what a route that issues a token answers with

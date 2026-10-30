@@ -26,15 +26,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/db"
-	"github.com/zynthara/chok/v3/internal/conf"
-	"github.com/zynthara/chok/v3/internal/logtap"
-	"github.com/zynthara/chok/v3/internal/tracectx"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/conf"
+	"github.com/zynthara/chok/internal/logtap"
+	"github.com/zynthara/chok/internal/tracectx"
 )
 
 // scope names the instrumentation in spans and log records.
-const scope = "github.com/zynthara/chok/v3/telemetry"
+const scope = "github.com/zynthara/chok/telemetry"
 
 // identity's audit events take the trace id of their context through
 // internal/tracectx, without importing OpenTelemetry.

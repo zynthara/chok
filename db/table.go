@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
-	"github.com/zynthara/chok/v3/internal/dbx"
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // TableSpec declares a model's table for auto migration.

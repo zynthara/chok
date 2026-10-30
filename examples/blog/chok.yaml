@@ -1,4 +1,4 @@
-# blog — the chok v3 quickstart.
+# blog — the chok quickstart.
 #
 # Every key is checked: a misspelled one fails startup with a suggestion.
 # Every key can also be set from the environment, named after its path:

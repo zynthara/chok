@@ -10,8 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/realtime"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/realtime"
 )
 
 // A hub whose topic news anyone may follow, a stream reading it the way a

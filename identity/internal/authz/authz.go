@@ -6,7 +6,7 @@ package authz
 import (
 	"context"
 
-	"github.com/zynthara/chok/v3"
+	"github.com/zynthara/chok"
 )
 
 // Func decides whether the principal may perform action on object.

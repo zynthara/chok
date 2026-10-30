@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 // TestInit_GeneratedProjectBoots is the scaffold's self-check: chok init
@@ -45,7 +45,7 @@ func TestInit_GeneratedProjectBoots(t *testing.T) {
 		t.Fatalf("main.go is not gofmt-clean: %v", err)
 	}
 	gomod, _ := os.ReadFile(filepath.Join(proj, "go.mod"))
-	for _, want := range []string{"module initapp\n", "\ngo 1.27\n", "\nrequire github.com/zynthara/chok/v3 v3.", "\ntool github.com/zynthara/chok/v3/cmd/chok\n"} {
+	for _, want := range []string{"module initapp\n", "\ngo 1.27\n", "\nrequire github.com/zynthara/chok v0.", "\ntool github.com/zynthara/chok/cmd/chok\n"} {
 		if !strings.Contains(string(gomod), want) {
 			t.Fatalf("go.mod lacks %q:\n%s", want, gomod)
 		}
@@ -59,7 +59,7 @@ func TestInit_GeneratedProjectBoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.WriteString(f, "\nreplace github.com/zynthara/chok/v3 => "+root+"\n")
+	_, _ = io.WriteString(f, "\nreplace github.com/zynthara/chok => "+root+"\n")
 	_ = f.Close()
 	goTool(t, proj, "mod", "tidy")
 	goTool(t, proj, "vet", "./...")
@@ -162,10 +162,10 @@ func TestInit_RequiresItsOwnRelease(t *testing.T) {
 		want     string
 		fallback bool
 	}{
-		{"v3.0.0-alpha.1", "v3.0.0-alpha.1", false},
-		{"v3.1.2", "v3.1.2", false},
-		{"v3.0.0-20261025080000-0123456789ab", "v3.0.0-20261025080000-0123456789ab", false},
-		{"v3.0.0-20261025080000-0123456789ab+dirty", releaseVersion, true},
+		{"v0.2.0", "v0.2.0", false},
+		{"v0.3.1", "v0.3.1", false},
+		{"v0.2.1-0.20261025080000-0123456789ab", "v0.2.1-0.20261025080000-0123456789ab", false},
+		{"v0.2.1-0.20261025080000-0123456789ab+dirty", releaseVersion, true},
 		{"(devel)", releaseVersion, true},
 	} {
 		v, fallback := scaffoldVersion(build{Version: c.version})

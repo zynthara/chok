@@ -25,9 +25,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/choktest"
-	"github.com/zynthara/chok/v3/realtime"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/realtime"
 )
 
 // TestChatter_FullPath runs the app the way main does — chok.yaml, a real
@@ -238,7 +238,7 @@ func TestChatter_StaysSmall(t *testing.T) {
 		}
 		for _, imp := range f.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if path == "github.com/zynthara/chok/v3" || strings.HasPrefix(path, "github.com/zynthara/chok/v3/") {
+			if path == "github.com/zynthara/chok" || strings.HasPrefix(path, "github.com/zynthara/chok/") {
 				pkgs[path] = true
 			}
 		}

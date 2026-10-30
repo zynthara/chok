@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zynthara/chok/v3"
-	"github.com/zynthara/chok/v3/identity"
-	"github.com/zynthara/chok/v3/identity/google"
-	"github.com/zynthara/chok/v3/identity/internal/idptest"
-	"github.com/zynthara/chok/v3/identity/internal/oauth"
+	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/identity"
+	"github.com/zynthara/chok/identity/google"
+	"github.com/zynthara/chok/identity/internal/idptest"
+	"github.com/zynthara/chok/identity/internal/oauth"
 )
 
 func config(idp *idptest.IdP) identity.ProviderConfig {

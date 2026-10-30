@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zynthara/chok/v3/internal/dbtest"
+	"github.com/zynthara/chok/internal/dbtest"
 )
 
 // adminsConfig lists root@test.com among the administrators, in another
