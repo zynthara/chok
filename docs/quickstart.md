@@ -1,6 +1,6 @@
 # Quickstart
 
-chok v3 is a Go toolkit you import and wire with plain code: no generated
+chok is a Go toolkit you import and wire with plain code: no generated
 files, no registry. This page goes from an empty directory to an
 authenticated, owner-scoped CRUD resource in three steps. Requires Go
 1.27. Every Go program below is complete — paste it over `main.go` — and
@@ -240,7 +240,7 @@ metrics — is [`examples/blog`](../examples/blog).
   with tickets, topics and resuming: [docs/realtime.md](realtime.md).
 - Mail — sign-in codes, password resets, receipts — and sessions in a
   cookie: [docs/mail.md](mail.md).
-- Coming from chok v2: [docs/migration-v2-to-v3.md](migration-v2-to-v3.md)
+- Coming from chok v2: [docs/migration-from-v2.md](migration-from-v2.md)
   (in Chinese). Request bodies are decoded with `encoding/json/v2`: field
   names match case-sensitively, unknown and duplicate fields are a 400,
   and a nil slice is written as `[]`.

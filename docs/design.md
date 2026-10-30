@@ -1,9 +1,9 @@
-# chok v3 设计文档
+# chok 设计文档
 
-> 本文是 chok v3 架构的中文正文（团队惯例：设计文档中文、代码注释英文）。
+> 本文是 chok（v0.2 起）架构的中文正文（团队惯例：设计文档中文、代码注释英文）。
 > 源代码是真相的最终来源；本文讲清「为什么」与契约的边界。逐键的配置参考
 > 是生成的 [config.md](config.md)，逐符号的公开面是生成的 [api.md](api.md)，
-> 从 v2 升级看 [migration-v2-to-v3.md](migration-v2-to-v3.md)。
+> 从 v2 升级看 [migration-from-v2.md](migration-from-v2.md)。
 
 ---
 
@@ -18,7 +18,7 @@ chok 是一套有主见的 Go 应用工具包，模块路径 `github.com/zynthar
 
 v2 是「有内核、由 yaml 段驱动模块装配的框架」：段在场即装配、`chok sync`
 生成装配代码、组件声明 `Descriptor`、依赖经 `k.Get` 查找、配置是可热换的
-RCU 快照。v3 把这些全部拿掉，只留三条规则：
+RCU 快照。v0.2 把这些全部拿掉，只留三条规则：
 
 1. **配置是严格的。** 一个类型化 struct 由 `chok.Load[T]` 装入：默认值 <
    `chok.yaml` < 环境变量 < flag。未知键让启动失败并给出候选；只有
@@ -465,7 +465,7 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
 - **绑定要先验证邮箱**：注册邮箱的人不一定是邮箱的主人。未验证邮箱的账户不能
   绑定新的登录方式（`POST {prefix}/identities/link` 与回调都答 403
   `EMAIL_NOT_VERIFIED`）；邮箱第一次被证明时（reset-password、passwordless
-  的码、`Users().MarkEmailVerified`），同一事务里解绑此前的所有绑定——v3 不会
+  的码、`Users().MarkEmailVerified`），同一事务里解绑此前的所有绑定——v0.2 不会
   产生这种绑定，v2 的数据里可能有。否则抢注者绑定的登录方式，会在主人接管账户
   之后留下来。Facebook 建的账户（邮箱推定）可以绑定，因为从外面第一次证明邮箱时
   这些绑定一并解除。
@@ -746,11 +746,14 @@ tag）与 `update`（用 `go install …@version`）。
 
 ## 11. 版本与发布
 
-- v1 封版于 `v0.1.4`；v2 封版于分支 `v2`（`v2.0.0-beta.N` 永久可装，只收安全
-  修复）；v3 在 `main` 上开发，模块路径带 `/v3`。
-- v3 以 `v3.0.0-alpha.N` 开始：手动裁切——`CHANGELOG.md` 条目 → `make verify`
-  全绿 → 打带注释的 tag → push tag，goreleaser workflow 构建 `chok` 命令的
-  各平台产物并发布 GitHub Release（`chok version` 显示 tag）。tag 一经推送
-  不可重打（module proxy 永久缓存）。
-- `hack/apidiff.sh` 以上一个 v3 release 为基线报告不兼容的 API 变更；alpha 期间
-  它在 CI 里只报告不阻断，GA 前改为阻断。
+- v0.1.x 封版于 `v0.1.4`；v2 封版于分支 `v2`（模块路径带 `/v2`，`v2.0.0-beta.N`
+  永久可装，只收安全修复）；这一版在 `main` 上开发，模块路径
+  `github.com/zynthara/chok`，不带主版本后缀。
+- 不带后缀的路径只能用 v0、v1 的版本号，而这个路径已有 v0.1.0 到 v0.1.4，所以
+  这一版从 `v0.2.0` 开始，不带 `-alpha`：预发布版在 `@latest` 里会输给 v0.1.4。
+  v0 期间不兼容的改动升中间那位（v0.3.0…），CHANGELOG 写明怎么改。
+- 手动裁切：`CHANGELOG.md` 条目 → `make verify` 全绿 → 打带注释的 tag → push
+  tag，goreleaser workflow 构建 `chok` 命令的各平台产物并发布 GitHub Release
+  （`chok version` 显示 tag）。tag 一经推送不可重打（module proxy 永久缓存）。
+- `hack/apidiff.sh` 以上一个 release 为基线报告不兼容的 API 变更；v0 期间它在
+  CI 里只报告不阻断，v1.0.0 之前改为阻断。

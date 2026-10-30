@@ -4,9 +4,9 @@
 
 | Line | Module path | Status |
 |---|---|---|
-| v3 (`main`, `v3.0.0-alpha.N` pre-releases) | `github.com/zynthara/chok` | Supported — fixes ship in the next pre-release |
+| v0.2 and later (`main`) | `github.com/zynthara/chok` | Supported — fixes ship in the next release |
 | v2 (branch `v2`, `v2.0.0-beta.N` series) | `github.com/zynthara/chok/v2` | **Security fixes only** |
-| v1 (sealed at `v0.1.4`) | `github.com/zynthara/chok` | **Security fixes only** |
+| v0.1.x (the line before v2, sealed at `v0.1.4`) | `github.com/zynthara/chok` | **Security fixes only** |
 | Anything older | — | Not supported |
 
 ## Reporting a vulnerability

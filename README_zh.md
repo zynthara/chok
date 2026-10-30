@@ -15,11 +15,12 @@
 ---
 
 > [!NOTE]
-> 这里是 **chok v3**（`github.com/zynthara/chok`），以 `v3.0.0-alpha.N`
-> 发布：v3.0.0 之前 API 仍可能变化。v2 封版于
+> 这里是 chok（`github.com/zynthara/chok`，不带主版本后缀），从 v0.2.0
+> 开始发布：v0 期间，中间那位升级（v0.3.0…）时 API 可能变化，
+> [CHANGELOG](CHANGELOG.md) 会写明怎么改。v2 封版于
 > [`v2` 分支](https://github.com/zynthara/chok/tree/v2)（只收安全修复；
 > `go get github.com/zynthara/chok/v2@v2.0.0-beta.6` 永久可用）。从 v2 迁移请看
-> [迁移指南](docs/migration-v2-to-v3.md)。
+> [迁移指南](docs/migration-from-v2.md)。
 
 ---
 
@@ -318,7 +319,7 @@ go install github.com/zynthara/chok/cmd/chok@latest   # 或在项目里 go tool 
 | 配置参考（生成） | [docs/config.md](docs/config.md) |
 | API 地图（生成） | [docs/api.md](docs/api.md) |
 | 设计文档 | [docs/design.md](docs/design.md) |
-| 从 v2 迁移 | [docs/migration-v2-to-v3.md](docs/migration-v2-to-v3.md) |
+| 从 v2 迁移 | [docs/migration-from-v2.md](docs/migration-from-v2.md) |
 | 各版本的变更 | [CHANGELOG.md](CHANGELOG.md) |
 | GoDoc | <https://pkg.go.dev/github.com/zynthara/chok> |
 | 给编码代理的约定 | [CLAUDE.md](CLAUDE.md)、[AGENTS.md](AGENTS.md) |

@@ -1,4 +1,4 @@
-# blog — the chok v3 quickstart
+# blog — the chok quickstart
 
 A JWT-guarded blog API — register, log in, own your posts — in under a
 hundred lines of application code. `main.go` assembles it with plain Go:

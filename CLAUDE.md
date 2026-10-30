@@ -1,9 +1,9 @@
-# CLAUDE.md — working on chok v3
+# CLAUDE.md — working on chok
 
 > Loaded by Claude Code on every session in this repo; AGENTS.md points here.
 > Keep it under 120 lines.
 
-## What chok v3 is
+## What chok is
 
 chok is an opinionated Go application toolkit that an app imports and wires
 with plain Go code — no kernel, no registry, no generated files. One strict
@@ -12,8 +12,8 @@ store with owner scoping cover a CRUD resource with four imports. Batteries
 (identity, jobs, telemetry, cache, realtime, mail) are values you construct
 and hand to `app.Use`, never services you look up.
 
-- Module `github.com/zynthara/chok`, Go 1.27 (toolchain go1.27.3), built on
-  `main`. v3 is a rewrite: v2 code is a porting source, not a base.
+- Module `github.com/zynthara/chok` from v0.2.0, Go 1.27 (toolchain go1.27.3),
+  on `main`. A rewrite of v2: v2 code is a porting source, not a base.
 - v2 is sealed on branch `v2` at `65651d4` (tags `v2.0.0-beta.N`); its source
   is checked out read-only at `~/go/src/chok-v2` (a git worktree). Port by
   copy + rewrite, never `git mv` across trees; never commit to `v2` or move a tag.
@@ -42,7 +42,7 @@ root no battery and no gorm. A new public package is an orchestrator decision.
 It runs tidy-check, fmt-check (gofmt -s), vet, golangci-lint (blocking),
 fix-check (`go fix -diff` empty), test (SQLite, `-race -count=1`), test-pg,
 test-mysql, budget and smoke in that order: CI's verify job (its apidiff
-job only reports until v3.0.0). All dialect lanes must be green, MySQL too.
+job only reports while chok is at v0). All dialect lanes must be green, MySQL too.
 
 ### Database lanes
 

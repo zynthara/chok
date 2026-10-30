@@ -1,26 +1,33 @@
 # Changelog
 
-All notable changes to chok v3 (`github.com/zynthara/chok`) are
+All notable changes to chok (`github.com/zynthara/chok`) are
 documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Releases are cut by hand: a maintainer writes the entry here, runs
 `make verify`, tags and pushes the tag; goreleaser publishes the `chok`
-command for each platform. While v3 is in alpha, `hack/apidiff.sh` reports
-incompatible API changes against the previous v3 release without blocking.
-The v1 and v2 histories are in the `CHANGELOG.md` of the
+command for each platform. While chok is at v0, a minor release (v0.3.0,
+...) may change the API incompatibly and its entry here says how;
+`hack/apidiff.sh` reports such changes against the previous release
+without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of the
 [`v2` branch](https://github.com/zynthara/chok/blob/v2/CHANGELOG.md).
 
 <!-- When tagging: replace 未发布 (unreleased) with the release date, YYYY-MM-DD. -->
 
-## [v3.0.0-alpha.1] - 未发布
+## [v0.2.0] - 未发布
 
-The first release of v3, a rewrite: chok becomes a toolkit an application
+The module path is `github.com/zynthara/chok` again, with no major-version
+suffix: this line continues on the path v0.1.x used, from v0.2.0 (a path
+without a suffix only takes v0 and v1 versions). v2 stays on
+`github.com/zynthara/chok/v2` and the `v2` branch, security fixes only;
+`go get github.com/zynthara/chok/v2@v2.0.0-beta.6` keeps working.
+
+A rewrite of v2: chok becomes a toolkit an application
 imports and assembles with plain Go code. There is no kernel, no registry
 and no generated file. Upgrading from v2 is a port, not a dependency bump:
-[docs/migration-v2-to-v3.md](docs/migration-v2-to-v3.md) maps every v2
-package, configuration key, API, table and metric to its v3 form.
+[docs/migration-from-v2.md](docs/migration-from-v2.md) maps every v2
+package, configuration key, API, table and metric to its new form.
 
 ### Added
 
@@ -154,7 +161,7 @@ package, configuration key, API, table and metric to its v3 form.
   the realtime battery; [mail](docs/mail.md), from a first mail to a
   passwordless sign-in with a cookie session; a generated [configuration reference](docs/config.md)
   and [API map](docs/api.md), both kept current by tests;
-  [design](docs/design.md) and the [v2 migration guide](docs/migration-v2-to-v3.md),
+  [design](docs/design.md) and the [v2 migration guide](docs/migration-from-v2.md),
   in Chinese; English and Chinese READMEs.
 - **`examples/chatter`**: chat rooms over a WebSocket, a bot answering
   from a jobs worker, and a jobs panel over server-sent events, behind a
@@ -189,7 +196,7 @@ package, configuration key, API, table and metric to its v3 form.
   an `identity.Mail` — the `Token`, the `Code`, a `Link` and `ExpiresAt` —
   as the data. It replaces v2's `account.Sender`
   (`Send(ctx, to, code string)`) and the `MailSender` interface of earlier
-  v3 snapshots, whose senders no longer compile. identity sends in
+  snapshots of this line, whose senders no longer compile. identity sends in
   tracked goroutines, `Close` waits for the mails in flight within its
   context, and a failed send is logged as a warning.
 - **Breaking:** `chok.Public()` and `http.openapi.bearer_auth` are gone.
@@ -215,7 +222,7 @@ package, configuration key, API, table and metric to its v3 form.
   `HasPermission` decides for an identity user: one that does not exist
   or is disabled has no permission. The global role bindings v2 left in
   `casbin_rule` (`ptype = 'g'`, `v2 = '*'`) no longer count: move them
-  into `users.roles` before v3 takes traffic (see the migration guide).
+  into `users.roles` before the new version takes traffic (see the migration guide).
   A password reset now marks the address verified.
 - **Breaking:** linking a provider needs a verified address:
   `POST {prefix}/identities/link` answers 403 `EMAIL_NOT_VERIFIED` for an
@@ -276,4 +283,4 @@ package, configuration key, API, table and metric to its v3 form.
   manifests, repair history, fences and baseline adoption.
 - The error mapper registry; viper; fsnotify; the robfig/cron dependency.
 
-[v3.0.0-alpha.1]: https://github.com/zynthara/chok/releases/tag/v3.0.0-alpha.1
+[v0.2.0]: https://github.com/zynthara/chok/releases/tag/v0.2.0

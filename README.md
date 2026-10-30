@@ -15,12 +15,13 @@
 ---
 
 > [!NOTE]
-> This is **chok v3** (`github.com/zynthara/chok`), released as
-> `v3.0.0-alpha.N`: the API may still change before v3.0.0. v2 is sealed
-> on the [`v2` branch](https://github.com/zynthara/chok/tree/v2) (security
-> fixes only; `go get github.com/zynthara/chok/v2@v2.0.0-beta.6` keeps
-> working). Moving from v2? Read the
-> [migration guide](docs/migration-v2-to-v3.md).
+> This is chok (`github.com/zynthara/chok`, no major-version suffix),
+> released from v0.2.0 on: while it is at v0, a minor release (v0.3.0, ...)
+> may change the API, and the [CHANGELOG](CHANGELOG.md) says how. v2 is
+> sealed on the [`v2` branch](https://github.com/zynthara/chok/tree/v2)
+> (security fixes only; `go get github.com/zynthara/chok/v2@v2.0.0-beta.6`
+> keeps working). Moving from v2? Read the
+> [migration guide](docs/migration-from-v2.md).
 
 ---
 
@@ -337,7 +338,7 @@ More in [docs/design.md](docs/design.md) (Chinese).
 | Configuration reference (generated) | [docs/config.md](docs/config.md) |
 | API map (generated) | [docs/api.md](docs/api.md) |
 | Design (Chinese) | [docs/design.md](docs/design.md) |
-| Migrating from v2 (Chinese) | [docs/migration-v2-to-v3.md](docs/migration-v2-to-v3.md) |
+| Migrating from v2 (Chinese) | [docs/migration-from-v2.md](docs/migration-from-v2.md) |
 | Changes by release | [CHANGELOG.md](CHANGELOG.md) |
 | GoDoc | <https://pkg.go.dev/github.com/zynthara/chok> |
 | Guidance for coding agents | [CLAUDE.md](CLAUDE.md), [AGENTS.md](AGENTS.md) |

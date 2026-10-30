@@ -1,12 +1,12 @@
-# chok v2 → v3 迁移指南
+# chok v2 → v0.2 迁移指南
 
 > 适用：从 `github.com/zynthara/chok/v2`（`v2.0.0-beta.N`）迁到
 > `github.com/zynthara/chok`。v2 在分支 `v2` 上封版、只收安全修复，
 > 已发布的 beta tag 永久可安装。
 >
-> v3 不是 v2 的增量版本，而是按三条规则（配置严格、错误自描述、装配即代码）
+> v0.2 不是 v2 的增量版本，而是按三条规则（配置严格、错误自描述、装配即代码）
 > 重写的工具包：内核、`Descriptor`、`k.Get` 查找、`chok sync` 生成物、RCU 配置
-> 与热重载都不再存在。本文按主题逐条列出「v2 写法 → v3 写法」，结尾的附录 A 是
+> 与热重载都不再存在。本文按主题逐条列出「v2 写法 → v0.2 写法」，结尾的附录 A 是
 > v2 每个包的去向总表。逐键的新配置见 [config.md](config.md)，逐符号的新公开面见
 > [api.md](api.md)，设计见 [design.md](design.md)。
 
@@ -14,7 +14,7 @@
 
 ## 0. 总路线
 
-1. **Go 1.27，import 换 `/v3`。** v3 用到泛型方法、`encoding/json/v2` 与
+1. **Go 1.27，import 去掉 `/v2`。** v0.2 用到泛型方法、`encoding/json/v2` 与
    `testing/synctest`。
 2. **删掉生成的装配。** `chok_modules_gen.go` 与 `chok sync` 都没有了：写一个
    嵌入 `chok.Base` 的 `Config` struct，`main` 里依次 `Load` → `New` → 打开数据库
@@ -35,7 +35,7 @@
    `choktest.DB`（§9）。
 
 `examples/blog` 是迁移后的样板：同一个博客应用在 v2 里是 yaml + 生成的装配 +
-路由回调，在 v3 里是 98 行普通 Go 代码。
+路由回调，在 v0.2 里是 98 行普通 Go 代码。
 
 ## 1. 装配与生命周期
 
@@ -55,7 +55,7 @@ func main() {
 	).Execute()
 }
 
-// v3
+// v0.2
 type Config struct {
 	chok.Base                    // app / http / log 三段，内联在顶层
 	DB   db.Config       `yaml:"db"`
@@ -75,7 +75,7 @@ func main() {
 }
 ```
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `chok.New(name, opts...)` | `cfg := chok.MustLoad[Config](name)`，`app := chok.New(cfg.Base, opts...)` |
 | `chok.Use(mod.Module(), …)`、`chokModules()`、`chok sync` | 构造值、`app.Use(值…)`；没有生成文件 |
@@ -106,7 +106,7 @@ func main() {
 
 ### 2.1 规则的变化
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | viper + mapstructure，`mapstructure:"key"` tag | 自写的严格装载，`yaml:"key"` tag |
 | 段在场即装配（`chok sync`），`enabled` 是运行期开关 | 段只是配置；装不装由代码决定；`enabled` 只在电池选层的地方保留 |
@@ -123,11 +123,11 @@ func main() {
 
 ### 2.2 键的映射
 
-v3 的段名由应用的 Config struct 决定；下表右列用 `examples/blog` 与
+v0.2 的段名由应用的 Config struct 决定；下表右列用 `examples/blog` 与
 `chok init` 的约定（`db`、`auth`、`jobs`、`telemetry`、`cache`）。未列出的键
 同名同位置。
 
-| v2 键 | v3 键 | 说明 |
+| v2 键 | v0.2 键 | 说明 |
 |---|---|---|
 | `log.level` / `format` / `output` / `files[]` / `access_files[]` | `log.*` | 同名 |
 | `log.access_enabled` | `log.access` | |
@@ -186,7 +186,7 @@ v3 的段名由应用的 Config struct 决定；下表右列用 `examples/blog` 
 
 ### 3.1 路由与 handler
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `web.GET/POST/PUT/PATCH[T, R](r, pattern, fn, opts...)` | `chok.GET/POST/PUT/PATCH[T, R](r, pattern, fn, opts...)` |
 | `web.DELETE[T](r, pattern, fn handler.ActionFunc[T])`、`handler.HandleAction` | `chok.DELETE[T, chok.None](…)`：`R = chok.None` 即 204 无体 |
@@ -203,7 +203,7 @@ v3 的段名由应用的 Config struct 决定；下表右列用 `examples/blog` 
 
 ### 3.2 绑定
 
-| v2 tag | v3 tag |
+| v2 tag | v0.2 tag |
 |---|---|
 | `uri:"rid"` | `path:"id"`（名字跟着路由模板） |
 | `form:"q"` | `query:"q"` |
@@ -211,7 +211,7 @@ v3 的段名由应用的 Config struct 决定；下表右列用 `examples/blog` 
 | `json:"title"` | `json:"title"` |
 | `binding:"required,max=200"` | `validate:"required,max=200"` |
 
-v3 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复键与未知字段都是
+v0.2 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复键与未知字段都是
 400（`metadata.field` 指出哪个）；非 JSON 的 Content-Type 是 415（v2 是 400），
 超过上限 413。JSON 体先解码，再由 query、header、path 覆盖，带这三种 tag 的
 字段不从 JSON 体取值。`time.Duration` 在请求与响应里是字符串（`"1h30m0s"`），
@@ -220,7 +220,7 @@ v3 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复键
 
 ### 3.3 错误
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `apierr.Error`、`apierr.New(code, reason, msg)` | `chok.Error`、`chok.NewError(code, reason, msg)` |
 | `apierr.ErrNotFound` … | `chok.ErrNotFound` …（`With`、`Msgf`、`Wrap` 派生副本，`errors.Is` 按 code + reason 匹配） |
@@ -250,7 +250,7 @@ v3 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复键
 
 ### 4.1 db
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `db.Module(db.WithTables(...), db.WithMigrations(fs))`、`db.From(k)` | `d := db.MustOpen(cfg.DB, db.Tables(...), db.Migrations(fs))` |
 | `db.Open(db.Options)` | `db.Open(db.Config, opts...)` |
@@ -267,20 +267,20 @@ v3 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复键
 | 模型基座 `db.Model` / `SoftDeleteModel` / `OwnedModel` / `OwnedSoftDeleteModel` | 同名，字段相同 |
 | `db.Table(model, db.SoftUnique(...))` | 同名；三方言统一为 `UNIQUE(cols..., delete_token)`（v2 在 Postgres 上是部分索引） |
 
-时间：v3 以 UTC 写入所有时间（MySQL 会话 `+00:00`、Postgres 会话 UTC、SQLite 存
+时间：v0.2 以 UTC 写入所有时间（MySQL 会话 `+00:00`、Postgres 会话 UTC、SQLite 存
 `+00:00` 结尾的文本）。两种 v2 库要换算已有数据：
 
 - **SQLite，机器时区不是 UTC**：v2 按进程的本地时区写时间（带偏移的文本），而
   SQLite 按文本比较时间，新旧行在排序、范围查询与游标里的次序会错（聚合按瞬时
   比较，不受影响）。迁移时把各表的时间列改写成 UTC。
 - **MySQL，`mysql.time_zone` 不是缺省的 `utc`**：DATETIME 列存的是那个时区的
-  墙钟，v3 按 UTC 读写，迁移时按原时区换算成 UTC。
+  墙钟，v0.2 按 UTC 读写，迁移时按原时区换算成 UTC。
 
 Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 
 ### 4.2 版本化迁移
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | 文件 `NNNN_name.sql`（递增序号） | `<14 位版本>_<name>.sql`，版本是 UTC 时间戳，如 `20261025080000_create_notes.sql` |
 | 应用账本 `schema_migrations`；电池各自的 `schema_migrations_chok_<kind>`；`schema_migrations_chok_manifest` / `_repairs` | 单表 `chok_migrations(owner, version, name, checksum, applied_at, statement_index)`，应用的 owner 是 `app`，电池用 `identity` / `rbac` / `jobs` |
@@ -292,7 +292,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 1. 把每个已应用的 `NNNN_name.sql` 改名为 14 位版本（保持顺序，例如
    `0001_init.sql` → `20260101000001_init.sql`），内容不动；需要按方言区分的放进
    `sqlite/` `mysql/` `postgres/` 子目录。
-2. 用 v3 的配置（`db.migrate: off` 或 `versioned`）对这个库逐个登记：
+2. 用 v0.2 的配置（`db.migrate: off` 或 `versioned`）对这个库逐个登记：
    `chok migrate mark-applied 20260101000001` …（它只写账本，不执行 SQL）。
 3. `chok migrate status` 应全部是 applied；之后的新迁移用 `chok migrate create`。
 4. 确认无误后可以删除 v2 的 `schema_migrations*` 表。
@@ -303,7 +303,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 
 ### 4.3 store
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `store.New[T](h, logger, opts...)` | `store.New[T](d, opts...)` |
 | `store.WithQueryFields(...)` / `WithUpdateFields(...)` / `WithAllQueryFields` / `WithAllUpdateFields`、按 JSON tag 自动发现 | 模型字段上的 `store:"query"`（URL 的过滤与排序）/ `store:"update"`（Patch）/ `store:"query,update"`；没有任何 tag 的模型在 New 时 panic。代码里的 where 选项、聚合、`Pluck`、`ListIn`、Upsert 冲突字段与 `store.Set` 不受 tag 限制，接受模型的每一列；代码里的未知字段是 500（同 v2），URL 里的是 400 |
@@ -324,7 +324,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 
 ### 4.4 store/where
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `where.WithFilter(f, v)` | `where.Eq(f, v)` |
 | `WithFilterOp(f, op, v)` | `where.Ne` / `Gt` / `Gte` / `Lt` / `Lte` |
@@ -341,7 +341,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 
 ## 5. identity（account + auth + authz + audit）
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `account.Module(account.WithOptions(...), account.WithProviders(...))` | `auth := identity.MustNew(cfg.Auth, d, identity.Providers(google.New(cfg.Auth.Providers["google"])), identity.Sender(mail))`，`app.Use(auth)` |
 | `account.Authn(k)` | `auth.Authn()` |
@@ -353,7 +353,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 | `auth/jwt` 的可插拔 `TokenParser` / `PrincipalResolver` | 删除：`Authn` 只认本 Identity 签发的 HS256 token，每个请求按主键读一次用户 |
 | `account/providers/{google,github,apple,facebook}` | `identity/{google,github,apple,facebook}`，各只导出 `New(identity.ProviderConfig)` |
 | `authz.Module()`、`authz/casbin` | `rb, err := rbac.New(auth, d, opts...)`（或 `rbac.MustNew`），`app.Use(rb)`；`rb.Require(obj, act)` / `rb.RequireInDomain(obj, act, param)` 中间件；`rb.Policy()` 策略服务 |
-| casbin 的全局角色成员：`AddUserToRole` / `RemoveUserFromRole` / `UserRoles` | 删除：全局角色只在 identity，`auth.Users().SetRoles(ctx, id, roles)` 设置、`auth.Users().Get(ctx, id)` 的 `Roles` 读取；rbac 判定读 `Principal.Roles`。域内的 `AddUserToRoleInDomain` 等保留，但域不能是 "" 或 `*`。v2 已经写下的全局绑定 v3 不再认，要搬，见下面的 `casbin_rule` |
+| casbin 的全局角色成员：`AddUserToRole` / `RemoveUserFromRole` / `UserRoles` | 删除：全局角色只在 identity，`auth.Users().SetRoles(ctx, id, roles)` 设置、`auth.Users().Get(ctx, id)` 的 `Roles` 读取；rbac 判定读 `Principal.Roles`。域内的 `AddUserToRoleInDomain` 等保留，但域不能是 "" 或 `*`。v2 已经写下的全局绑定 v0.2 不再认，要搬，见下面的 `casbin_rule` |
 | `casbin.Bootstrap(ctx, svc, casbin.BootstrapConfig{AdminUserID, …})`（种一个 admin 用户与它的全权限） | 删除：`admin` 是内置角色，在 rbac 里不用授权就全通；首个管理员写进 `auth.admins` |
 | `audit.Module()` 与它的 `audit.Logger`：`Log(ctx, audit.Entry)` / `LogSync` / `Query` | `auth.Audit().Log(ctx, identity.Event)`（异步）/ `LogSync`（随 ctx 的事务）/ `ListFromQuery`（`/audit/logs` 用）；常量 `audit.ResultSuccess`、`ActorTypeUser` → `identity.ResultSuccess`、`ActorUser` |
 
@@ -368,9 +368,9 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
   login 200，体都是 `{token, expires_at}`；forgot-password 一律 204）。
 - **登录限速**默认开（15m / 10，按 email 与客户端 IP），429 带 `Retry-After`。
 - **角色只有一套**：v2 的 `users.roles`（进 token 的角色）与 casbin 的全局角色
-  成员是两套、互不相通；v3 只留 `users.roles`，rbac 判定时读它：`admin` 全通，
+  成员是两套、互不相通；v0.2 只留 `users.roles`，rbac 判定时读它：`admin` 全通，
   其余按用户自己的授权（`GrantUser`）与它的角色的授权（`GrantRole`）。casbin
-  里留下的全局角色成员 v3 不再认，升级时要搬进 `users.roles`（见下）。
+  里留下的全局角色成员 v0.2 不再认，升级时要搬进 `users.roles`（见下）。
 - **首个管理员**：`auth.admins: [ops@example.com]`。列出的邮箱一旦证明过（无密码
   登录、OAuth 的已验证邮箱但不含 Facebook 的、reset-password、或在会话里用
   confirm-email 确认），下次签发 token 或请求经过 `Authn` 时就加上 `admin` 并落库，
@@ -381,7 +381,7 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
   `EMAIL_NOT_VERIFIED`（v2 允许）。v2 库里已有的这类绑定，在邮箱第一次被证明时
   （reset-password、passwordless 的码、`Users().MarkEmailVerified`）自动解绑。
 - **Facebook 的邮箱不再并入已有账户**：Meta 不说 Graph API 返回的邮箱是否已确认，
-  v3 只把它当推定已验证。首次用 Facebook 登录不再按 `link_by_email` 并入同邮箱的
+  v0.2 只把它当推定已验证。首次用 Facebook 登录不再按 `link_by_email` 并入同邮箱的
   已有账户（v2 会并入），用户先用别的方式登录，再在账户设置里绑定 Facebook；它也
   不能新建 `auth.admins` 列出的邮箱的账户。别的新账户照常创建，但记为推定
   （`users.email_assumed`）：`auth.admins` 不授予；之后有人从外面证明这个邮箱
@@ -395,18 +395,18 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
   其余用户由 rbac 判 `audit/read`。
 - **决策审计**跟随 `auth.audit.enabled`；watcher 频道固定 `chok:authz:policy`。
 
-表的变化（v3 的表名沿用 v2，不加前缀）：
+表的变化（v0.2 的表名沿用 v2，不加前缀）：
 
 | 表 | 变化 | v2 库怎么升 |
 |---|---|---|
 | `users` | 加一列 `email_assumed`（邮箱是否只是 Facebook 推定的） | 跑版本化迁移 `20261029000001`；v2 用 Facebook 建的账户可以回填，见下 |
-| `identities` | `ix_identity_user_provider` 改为真正的 `(user_id, provider)` 复合索引；单列 `idx_identities_user_id` 去掉 | 按 v3 的 SQL（`identity/migrations/<方言>/`）重建这两个索引 |
+| `identities` | `ix_identity_user_provider` 改为真正的 `(user_id, provider)` 复合索引；单列 `idx_identities_user_id` 去掉 | 按 v0.2 的 SQL（`identity/migrations/<方言>/`）重建这两个索引 |
 | `audit_logs` | `before` / `after` 改名 `before_data` / `after_data`（MySQL 保留字）；`actor_id` / `resource_id` / `request_id` 加宽到 128；`action` / `result` NOT NULL；三个 `*_time` 索引真正包含 `occurred_at` | 改名并加宽列、重建索引 |
-| `casbin_rule` | 表形不变；全局的角色绑定（`ptype = 'g'`、`v2 = '*'`）v3 不再认 | v3 接流量之前，把这些行的角色合并进对应用户的 `users.roles`（`Users().SetRoles`），再删掉这些行，见下 |
-| `auth_login_codes` | v3 新增（无密码登录的验证码，只存 HMAC） | 跑版本化迁移 `20261025000002` 建表，见下 |
+| `casbin_rule` | 表形不变；全局的角色绑定（`ptype = 'g'`、`v2 = '*'`）v0.2 不再认 | v0.2 接流量之前，把这些行的角色合并进对应用户的 `users.roles`（`Users().SetRoles`），再删掉这些行，见下 |
+| `auth_login_codes` | v0.2 新增（无密码登录的验证码，只存 HMAC） | 跑版本化迁移 `20261025000002` 建表，见下 |
 | `schema_migrations_chok_account` / `_audit` / `_authz` | 不再使用 | 见下 |
 
-用版本化迁移（`db.migrate: versioned` 或 `off`）的 v2 库：先按 v3 的 SQL
+用版本化迁移（`db.migrate: versioned` 或 `off`）的 v2 库：先按 v0.2 的 SQL
 （`identity/migrations/<方言>/`、`identity/rbac/migrations/<方言>/`）把
 identities 的索引与 audit_logs 的列改到一致，再登记电池的版本（只写账本，不执行
 SQL）：
@@ -415,7 +415,7 @@ SQL）：
 chok migrate mark-applied 20261024000001   # identity：users、identities
 chok migrate mark-applied 20261024000002   # identity：audit_logs
 chok migrate mark-applied 20261024000003   # rbac：casbin_rule
-chok migrate up --battery identity         # 真正执行 v3 新增的 20261025000002 与 20261029000001
+chok migrate up --battery identity         # 真正执行 v0.2 新增的 20261025000002 与 20261029000001
 chok migrate status --battery identity --battery rbac   # 全部 applied
 ```
 
@@ -425,16 +425,16 @@ chok migrate status --battery identity --battery rbac   # 全部 applied
 与索引，但不会改名列——`before` / `after` 两列仍要手工改名。
 
 v2 的全局角色绑定（`casbin_rule` 里 `ptype = 'g'` 且 `v2 = '*'` 的行，由
-`AddUserToRole` 与 `Bootstrap` 写入）v3 不再认：匹配器跳过它们，`DomainsForUser`
-也不列。不搬的话，这些用户一换上 v3 就没了这些角色——`Bootstrap` 种的管理员也是
-这样一行，会丢掉 `admin`。所以先搬，再让 v3 接流量：
+`AddUserToRole` 与 `Bootstrap` 写入）v0.2 不再认：匹配器跳过它们，`DomainsForUser`
+也不列。不搬的话，这些用户一换上 v0.2 就没了这些角色——`Bootstrap` 种的管理员也是
+这样一行，会丢掉 `admin`。所以先搬，再让 v0.2 接流量：
 
 ```sql
 SELECT v0 AS user_id, v1 AS role FROM casbin_rule WHERE ptype = 'g' AND v2 = '*';
 ```
 
 把每个用户的这些角色并进它现有的角色，用 `auth.Users().SetRoles(ctx, userID,
-roles)` 写回（会吊销该用户的 token，下次登录就是新角色），然后删掉这些行——v3
+roles)` 写回（会吊销该用户的 token，下次登录就是新角色），然后删掉这些行——v0.2
 已经不看它们，删掉是免得和 `users.roles` 两处对不上：
 
 ```sql
@@ -445,9 +445,9 @@ DELETE FROM casbin_rule WHERE ptype = 'g' AND v2 = '*';
 内置全通——也可以一起删。
 
 v2 用 Facebook 建的账户 `email_verified` 为真（v2 信了 Facebook 的邮箱），升级后
-v3 会把它们当作已证明：邮箱列进 `auth.admins` 就拿 `admin`，主人之后走
-reset-password 也赶不走用 Facebook 抢注的人。要让它们按 v3 的规则来，在跑完
-`20261029000001`（auto 模式是 AutoMigrate 补上列）之后、v3 接流量之前，把它们标成
+v0.2 会把它们当作已证明：邮箱列进 `auth.admins` 就拿 `admin`，主人之后走
+reset-password 也赶不走用 Facebook 抢注的人。要让它们按 v0.2 的规则来，在跑完
+`20261029000001`（auto 模式是 AutoMigrate 补上列）之后、v0.2 接流量之前，把它们标成
 推定：
 
 ```sql
@@ -470,7 +470,7 @@ WHERE email_verified = TRUE
   );
 ```
 
-条件是绑着 Facebook，且没有别的 provider 的绑定报过同一个邮箱（v3 里，绑定一个明说
+条件是绑着 Facebook，且没有别的 provider 的绑定报过同一个邮箱（v0.2 里，绑定一个明说
 已验证、邮箱相同的 provider 就算确认）。三种数据库都能直接跑，重复跑无害。v2 的数据
 分不清邮箱后来有没有被证明过，所以在 v2 里走过 reset-password 的、或应用调过
 `MarkEmailVerified` 之后才绑 Facebook 的账户也会被标上：这些用户要拿 `admin`，得在
@@ -478,7 +478,7 @@ WHERE email_verified = TRUE
 解除、token 吊销，Facebook 要重新绑。宁可多标：漏掉一个抢注者，它就一直留在主人的
 账户里。
 
-标完看一眼已经有 `admin` 的推定账户：v2 给的角色原样保留，v3 只是不再自动授予。
+标完看一眼已经有 `admin` 的推定账户：v2 给的角色原样保留，v0.2 只是不再自动授予。
 
 ```sql
 SELECT rid, email, roles FROM users WHERE email_assumed = TRUE AND roles LIKE '%admin%';
@@ -486,7 +486,7 @@ SELECT rid, email, roles FROM users WHERE email_assumed = TRUE AND roles LIKE '%
 
 ## 6. jobs（scheduler + outbox）
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `scheduler.Module()` + 同伴组件 `Register(job)` | `jobs.Periodic(name, spec, fn, overlap)` 选项 |
 | `scheduler.Policy`：`PolicyDelayIfRunning` / `PolicySkipIfRunning` | `jobs.Overlap`：`OverlapQueue`（至多排一次）/ `OverlapSkip`；新增 `OverlapAllow`（并发运行） |
@@ -522,13 +522,13 @@ err := d.RunInTx(ctx, func(txCtx context.Context) error {
 周期任务跑在一个 `jobs.enabled: true` 的进程里，其余进程 `enabled: false` 只
 Enqueue；多进程分 topic 时 `retention` 必须为 0。
 
-表：v2 的 `outbox_messages` / `outbox_relay_state` 不复用，v3 是新表
+表：v2 的 `outbox_messages` / `outbox_relay_state` 不复用，v0.2 是新表
 `chok_jobs_messages` / `chok_jobs_watermarks`（owner `jobs`），**没有数据迁移**——
 升级前先让 v2 的 relay 把积压投递完。
 
 ## 7. telemetry（metrics + tracing）
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `metrics.Module()`、`chok.Get[*metrics.Component](k, "metrics").Registry()` | `tel := telemetry.MustNew(cfg.Telemetry)`，`tel.Registry()` |
 | `tracing.Module()`、`TracerProvider()` | `tel.TracerProvider()` |
@@ -538,7 +538,7 @@ Enqueue；多进程分 topic 时 `retention` 必须为 0。
 
 指标名按 OTel 语义约定改名，看板与告警要跟着改：
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `http_requests_total` | 删除：用 `http_server_request_duration_seconds_count` |
 | `http_request_duration_seconds{method,path}` | `http_server_request_duration_seconds{http_request_method,http_route,http_response_status_code}` |
@@ -555,7 +555,7 @@ stdout exporter 改为一行一个 JSON（v2 是多行 pretty print）。
 
 ## 8. cache（cache + redis）
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `cache.Module()`、`Component.Cache()` | `c := cache.MustNew(cfg.Cache)`，`app.Use(c)` |
 | `cache.Cache` 接口、`Build(BuildOptions)`、`Chain(...)`、`WithBreaker(...)`、`NewMemory`、`NewRedis(WithTTL)` | 删除：层次只由 Config 决定（内存层在前、Redis 层在后、熔断器在 Redis 前） |
@@ -570,7 +570,7 @@ Redis 不可达会让启动相等到 `app.start_timeout` 后失败（v2 只告�
 
 ## 9. 测试（choktest）
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `choktest.NewTestDB(t, models...)`、`db/dbtest.Open` | `choktest.DB(t, db.Table(&M{}), …)`：按 `CHOK_TEST_DRIVER` 给每个测试一个一次性数据库 |
 | `choktest.NewTestStore[T](t, opts...)` | `choktest.Store[T](t, opts...)` |
@@ -583,7 +583,7 @@ Redis 不可达会让启动相等到 `app.start_timeout` 后失败（v2 只告�
 
 ## 10. 命令行
 
-| v2 | v3 |
+| v2 | v0.2 |
 |---|---|
 | `chok init <name>`（生成 yaml + 装配） | `chok init <name>`：普通 Go 的 main.go、chok.yaml、Makefile、migrations/、带 `tool` 指令的 go.mod |
 | `chok sync [--check]` | 删除：装配是代码 |
@@ -619,12 +619,12 @@ Redis 不可达会让启动相等到 `app.start_timeout` 后失败（v2 只告�
 | OAuth 会话的外部存储 | 进程内（多副本粘滞会话）；以后需要时再加选项 |
 | `chok sync`、`chok gen fields`、`chok update`、JSON Schema | 见 §10 |
 
-## 附录 A：v2 包 → v3 去向总表
+## 附录 A：v2 包 → v0.2 去向总表
 
-处置：**保留**（同一能力在 v3 有对应物，可能改名）、**合并**（并入另一个 v3 包或
+处置：**保留**（同一能力在 v0.2 有对应物，可能改名）、**合并**（并入另一个 v0.2 包或
 电池）、**删除**（能力不再提供）。
 
-| v2 包 / 功能 | v3 去向 | 处置 |
+| v2 包 / 功能 | v0.2 去向 | 处置 |
 |---|---|---|
 | 根 `chok.go` / `options.go`：App、Use、Run、Execute、6 个超时选项 | `chok.New` / `Use` / `Run` / `Execute`；超时进 `chok.Base`（`app.*`、`http.*`） | 保留 |
 | 根：Section 句柄、`Override`、RCU 配置与 diff、reload tag、三阶段 reload、命名实例 | — | 删除 |
