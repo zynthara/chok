@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -9,8 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/telemetry"
 )
 
 // envelope is the error body every failing request returns.
@@ -26,7 +28,7 @@ type envelope struct {
 // from chok.yaml: health, register and log in, the post CRUD as alice
 // with the optimistic lock and the error envelopes, the owner fence
 // against bob, the anonymous caller turned away, the OpenAPI document,
-// and finally the metrics.
+// and finally the metrics, which the App's port does not serve.
 func TestBlog_QuickstartPath(t *testing.T) {
 	t.Setenv("BLOG_DB_SQLITE_PATH", filepath.Join(t.TempDir(), "blog.db"))
 	t.Setenv("BLOG_AUTH_SIGNING_KEY", strings.Repeat("k", 32))
@@ -34,7 +36,8 @@ func TestBlog_QuickstartPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := choktest.App(t, cfg.Base, func(app *chok.App) { setup(app, cfg) })
+	var tel *telemetry.Telemetry
+	c := choktest.App(t, cfg.Base, func(app *chok.App) { tel = setup(app, cfg) })
 
 	// 1. Health: every component reports in.
 	var health struct {
@@ -209,17 +212,24 @@ func TestBlog_QuickstartPath(t *testing.T) {
 	}
 
 	// 9. The metrics: every request above is in the histogram under its
-	// route, every statement under its operation and table.
-	resp := c.Do(httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	body, _ := io.ReadAll(resp.Body)
+	// route, every statement under its operation and table. The App's
+	// port does not serve them; a running App serves them on
+	// 127.0.0.1:9464, which choktest does not open, so the test reads
+	// the same registry in process.
+	if resp := c.Do(httptest.NewRequest(http.MethodGet, "/metrics", nil)); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("the App's port serves /metrics: %d", resp.StatusCode)
+	}
+	rec := httptest.NewRecorder()
+	promhttp.HandlerFor(tel.Registry(), promhttp.HandlerOpts{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
 	for _, want := range []string{
 		"# TYPE http_server_request_duration_seconds histogram",
 		`http_server_request_duration_seconds_count{http_request_method="GET",http_response_status_code="404",http_route="/api/v1/posts/{id}"}`,
 		`http_server_request_duration_seconds_count{http_request_method="POST",http_response_status_code="201",http_route="/api/v1/posts"}`,
 		`db_client_operation_duration_seconds_count{db_collection_name="posts",db_operation_name="INSERT",db_system_name="sqlite",error_type=""}`,
 	} {
-		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), want) {
-			t.Fatalf("/metrics = %d, lacking %q:\n%s", resp.StatusCode, want, body)
+		if rec.Code != http.StatusOK || !strings.Contains(body, want) {
+			t.Fatalf("metrics = %d, lacking %q:\n%s", rec.Code, want, body)
 		}
 	}
 }

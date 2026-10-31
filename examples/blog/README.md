@@ -68,8 +68,10 @@ curl -s localhost:8080/api/v1/posts/$RID -H "Authorization: Bearer $TOKEN"
 curl -s localhost:8080/openapi.json
 
 # 9. Prometheus metrics: every request above by method, route and status,
-#    every SQL statement by operation and table:
-curl -s localhost:8080/metrics | grep -E '^(http_server_request|db_client_operation)_duration_seconds_count'
+#    every SQL statement by operation and table. They have a port of
+#    their own that only this host reaches (telemetry.metrics.addr);
+#    localhost:8080/metrics is a 404:
+curl -s localhost:9464/metrics | grep -E '^(http_server_request|db_client_operation)_duration_seconds_count'
 ```
 
 Stop the server with Ctrl-C. Since `/healthz` has been requested, it
@@ -93,6 +95,7 @@ Without writing them you get: owner isolation (`Post` embeds
 `db.OwnedSoftDeleteModel`, and the owner is the token's user id), 404 /
 409 / 401 error envelopes (store and identity errors describe
 themselves), request IDs on every log line, `/readyz` and `/livez`,
-login rate limiting, the OpenAPI document and `/metrics`. Set
+login rate limiting, the OpenAPI document and the metrics on
+`127.0.0.1:9464/metrics`. Set
 `telemetry.tracing.enabled: true` (with `exporter: stdout` to watch in
 the terminal) for a span per request and per SQL statement.

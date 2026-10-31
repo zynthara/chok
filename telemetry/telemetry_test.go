@@ -2,7 +2,9 @@ package telemetry
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
@@ -22,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/internal/apptest"
 	"github.com/zynthara/chok/internal/conf"
 )
 
@@ -120,7 +124,7 @@ func metric(t *testing.T, reg *prometheus.Registry, name string, want map[string
 	return 0, false
 }
 
-// scrape serves the registry the way /metrics does and returns the text.
+// scrape serves a GET of path through h and returns the text.
 func scrape(t *testing.T, h http.Handler, path string) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -156,6 +160,7 @@ func TestConfig_Validate(t *testing.T) {
 		}, "endpoint"},
 		"endpoint with a signal": {func(c *Config) { c.Logs.OTel, c.Tracing.Endpoint = true, "http://collector:4318/v1/traces" }, "base URL"},
 		"metrics path":           {func(c *Config) { c.Metrics.Enabled, c.Metrics.Path = true, "metrics" }, "metrics.path"},
+		"metrics addr":           {func(c *Config) { c.Metrics.Enabled, c.Metrics.Addr = true, "9464" }, "metrics.addr"},
 	} {
 		c := metricsOn().withDefaults()
 		tc.edit(&c)
@@ -201,7 +206,7 @@ func TestConfig_LoadsWithDefaults(t *testing.T) {
 func TestNew_DefaultsZeroFields(t *testing.T) {
 	tel := newTel(t, Config{})
 	c := tel.cfg
-	if c.Metrics.Enabled || c.Metrics.Path != "/metrics" || c.Tracing.Exporter != "stdout" ||
+	if c.Metrics.Enabled || c.Metrics.Addr != "127.0.0.1:9464" || c.Metrics.Path != "/metrics" || c.Tracing.Exporter != "stdout" ||
 		c.Tracing.Endpoint != "http://localhost:4318" || c.Tracing.SampleRatio != 1 {
 		t.Fatalf("defaults in code: %+v", c)
 	}
@@ -215,7 +220,7 @@ func TestNew_DefaultsZeroFields(t *testing.T) {
 
 func TestMetrics_ExposesRuntimeAndProcess(t *testing.T) {
 	tel := newTel(t, metricsOn())
-	body := scrape(t, mounted(t, tel), "/metrics")
+	body := scrape(t, tel.metricsHandler(), "/metrics")
 	for _, want := range []string{"go_goroutines ", "go_memstats_alloc_bytes ", "process_start_time_seconds "} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/metrics lacks %q:\n%s", want, body)
@@ -223,18 +228,10 @@ func TestMetrics_ExposesRuntimeAndProcess(t *testing.T) {
 	}
 }
 
-// mounted is the handler of an App with tel mounted.
-func mounted(t *testing.T, tel *Telemetry) http.Handler {
-	t.Helper()
-	app := chok.New(testBase(t), chok.Logger(quiet()))
-	app.Use(tel)
-	return app.Handler()
-}
-
-func TestMount_ServesTheConfiguredPath(t *testing.T) {
+func TestMetricsHandler_ServesTheConfiguredPath(t *testing.T) {
 	cfg := metricsOn()
 	cfg.Metrics.Path = "/internal/metrics"
-	h := mounted(t, newTel(t, cfg))
+	h := newTel(t, cfg).metricsHandler()
 	if body := scrape(t, h, "/internal/metrics"); !strings.Contains(body, "go_goroutines") {
 		t.Fatalf("the configured path serves the registry:\n%s", body)
 	}
@@ -243,11 +240,103 @@ func TestMount_ServesTheConfiguredPath(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("/metrics is not served when the path is elsewhere: %d", rec.Code)
 	}
-	// Metrics off: nothing is mounted.
-	rec = httptest.NewRecorder()
-	mounted(t, newTel(t, Config{})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("metrics off: /metrics = %d", rec.Code)
+}
+
+// running runs an App with tel until the test ends and returns it once
+// its start phase is over.
+func running(t *testing.T, base chok.Base, tel *Telemetry) *chok.App {
+	t.Helper()
+	app := chok.New(base, chok.Logger(quiet()))
+	app.Use(tel)
+	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("stop: %v", err)
+		}
+	})
+	for deadline := time.Now().Add(10 * time.Second); !apptest.Ready(app); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the App did not start")
+		}
+	}
+	return app
+}
+
+// get fetches url and returns the status and the body.
+func get(t *testing.T, url string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, string(body)
+}
+
+// TestStart_ServesOnItsOwnListener: with the App serving HTTP, the
+// metrics answer on their own address and path only; the App's port does
+// not serve them.
+func TestStart_ServesOnItsOwnListener(t *testing.T) {
+	base := testBase(t)
+	base.HTTP.Enabled, base.HTTP.Addr = true, "127.0.0.1:0"
+	cfg := metricsOn()
+	cfg.Metrics.Addr = "127.0.0.1:0"
+	tel := newTel(t, cfg)
+	app := running(t, base, tel)
+
+	addr := tel.addr.Load()
+	if addr == nil {
+		t.Fatal("no metrics listener")
+	}
+	if code, body := get(t, "http://"+*addr+"/metrics"); code != http.StatusOK || !strings.Contains(body, "go_goroutines ") {
+		t.Fatalf("metrics listener: GET /metrics = %d:\n%s", code, body)
+	}
+	if code, _ := get(t, "http://"+*addr+"/healthz"); code != http.StatusNotFound {
+		t.Fatalf("metrics listener: GET /healthz = %d, want 404", code)
+	}
+	if code, _ := get(t, "http://"+app.Addr()+"/metrics"); code != http.StatusNotFound {
+		t.Fatalf("the App's port: GET /metrics = %d, want 404", code)
+	}
+}
+
+// TestStart_NoListenerWithoutHTTP: a worker process, or an App under
+// choktest, opens no port for the metrics; they are still recorded.
+func TestStart_NoListenerWithoutHTTP(t *testing.T) {
+	cfg := metricsOn()
+	cfg.Metrics.Addr = "127.0.0.1:0"
+	tel := newTel(t, cfg)
+	running(t, testBase(t), tel)
+	if addr := tel.addr.Load(); addr != nil {
+		t.Fatalf("http.enabled false, yet the metrics listen on %s", *addr)
+	}
+	if fams, err := tel.Registry().Gather(); err != nil || len(fams) == 0 {
+		t.Fatalf("the metrics are still recorded: %d families, %v", len(fams), err)
+	}
+}
+
+// TestStart_AddressInUse fails and names the key that picks another.
+func TestStart_AddressInUse(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = taken.Close() }()
+	cfg := metricsOn()
+	cfg.Metrics.Addr = taken.Addr().String()
+	err = newTel(t, cfg).Start(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "telemetry.metrics.addr") {
+		t.Fatalf("Start on a taken address: %v", err)
 	}
 }
 
@@ -256,7 +345,7 @@ func TestRegistry_TakesCustomCollectors(t *testing.T) {
 	orders := prometheus.NewCounter(prometheus.CounterOpts{Name: "shop_orders_total", Help: "Orders placed."})
 	tel.Registry().MustRegister(orders)
 	orders.Add(3)
-	if body := scrape(t, mounted(t, tel), "/metrics"); !strings.Contains(body, "shop_orders_total 3") {
+	if body := scrape(t, tel.metricsHandler(), "/metrics"); !strings.Contains(body, "shop_orders_total 3") {
 		t.Fatalf("the application's collector is served:\n%s", body)
 	}
 }

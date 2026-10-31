@@ -3,6 +3,7 @@ package telemetry
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -10,8 +11,9 @@ import (
 // Config is the telemetry section of an application's configuration:
 //
 //	telemetry:
-//	  metrics:
-//	    path: /metrics           # served by default
+//	  metrics:                   # on by default
+//	    addr: 127.0.0.1:9464     # the default: this host only
+//	    path: /metrics
 //	  tracing:
 //	    enabled: true
 //	    exporter: otlp
@@ -22,16 +24,23 @@ import (
 //	    otel: true
 //
 // New gives the zero fields of a Config built in code the defaults
-// below: Metrics.Path, Tracing.Exporter, Tracing.Endpoint and
-// Tracing.SampleRatio. The switches have no zero-value default: a Config
-// built in code sets Metrics.Enabled to serve /metrics.
+// below: Metrics.Addr, Metrics.Path, Tracing.Exporter, Tracing.Endpoint
+// and Tracing.SampleRatio. The switches have no zero-value default: a
+// Config built in code sets Metrics.Enabled to record and serve the
+// metrics.
 type Config struct {
 	Metrics struct {
 		// Enabled records the HTTP and database metrics, with the Go
-		// runtime and process collectors, and serves them on Path in the
-		// Prometheus text format. Off, the registry stays empty.
+		// runtime and process collectors, and serves them on Addr and
+		// Path in the Prometheus text format. Off, the registry stays
+		// empty.
 		Enabled bool `yaml:"enabled" default:"true"`
-		// Path is where the App serves the metrics.
+		// Addr is the metrics' own listener, apart from http.addr: the
+		// loopback default keeps them off the network, and an address
+		// such as :9464 lets a scraper on another host reach them. It
+		// listens while the App's HTTP server does.
+		Addr string `yaml:"addr" default:"127.0.0.1:9464"`
+		// Path is where the metrics listener serves the metrics.
 		Path string `yaml:"path" default:"/metrics"`
 	} `yaml:"metrics"`
 	Tracing struct {
@@ -67,6 +76,7 @@ type Config struct {
 
 // The defaults New gives the zero fields of a Config built in code.
 const (
+	defaultMetricsAddr = "127.0.0.1:9464"
 	defaultMetricsPath = "/metrics"
 	defaultExporter    = "stdout"
 	defaultEndpoint    = "http://localhost:4318"
@@ -74,6 +84,9 @@ const (
 )
 
 func (c Config) withDefaults() Config {
+	if c.Metrics.Addr == "" {
+		c.Metrics.Addr = defaultMetricsAddr
+	}
 	if c.Metrics.Path == "" {
 		c.Metrics.Path = defaultMetricsPath
 	}
@@ -94,8 +107,13 @@ func (c Config) withDefaults() Config {
 // chok.Load reads the configuration and again in New.
 func (c *Config) Validate() error {
 	var errs []error
-	if c.Metrics.Enabled && !strings.HasPrefix(c.Metrics.Path, "/") {
-		errs = append(errs, fmt.Errorf("metrics.path must start with /, got %q", c.Metrics.Path))
+	if c.Metrics.Enabled {
+		if _, _, err := net.SplitHostPort(c.Metrics.Addr); err != nil {
+			errs = append(errs, fmt.Errorf("metrics.addr must be host:port, such as 127.0.0.1:9464 or :9464, got %q", c.Metrics.Addr))
+		}
+		if !strings.HasPrefix(c.Metrics.Path, "/") {
+			errs = append(errs, fmt.Errorf("metrics.path must start with /, got %q", c.Metrics.Path))
+		}
 	}
 	if c.Tracing.Enabled {
 		if r := c.Tracing.SampleRatio; r <= 0 || r > 1 {

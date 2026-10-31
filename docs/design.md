@@ -567,7 +567,11 @@ recover 并记 Warn，不影响运行与统计。典型用法是交给 realtime 
 
 `telemetry.New(cfg)` 一个值管三件事，`app.Use(tel, …)` 放第一个：
 
-- **指标**（client_golang，`telemetry.metrics.path` 默认 `/metrics`）：
+- **指标**（client_golang）：不挂在 App 的端口上，由 telemetry 自己的监听提供，
+  `telemetry.metrics.addr` 默认 `127.0.0.1:9464`（只有本机访问得到），
+  `telemetry.metrics.path` 默认 `/metrics`；要让别的主机（另一个容器或 pod 里的
+  Prometheus）来抓，就把 addr 设成 `:9464`。这个监听跟着 App 的 HTTP 服务开：
+  `http.enabled` 为 false 的 worker 进程和 choktest 里都不开端口。指标包括
   `http_server_request_duration_seconds{http_request_method, http_route,
   http_response_status_code}`（直方图，`_count` 就是请求数）、
   `http_server_active_requests`；`tel.Instrument(d)` 之后还有
@@ -700,7 +704,7 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
 - **验收即文档**：`examples/blog` 的验收测试走一遍 README 的路径；
   `examples/chatter` 的验收测试在真实服务器上走它的 README 路径（三方言）：经
   mail 的 dir 传输取验证码与链接登录、cookie 会话、HTTP、WebSocket 与 SSE；`make smoke`
-  起真实二进制、探 `/healthz` 与 `/metrics`、SIGINT 后 3 秒内退出；`chok init`
+  起真实二进制、探 `/healthz` 与指标端口的 `/metrics`（App 端口上答 404）、SIGINT 后 3 秒内退出；`chok init`
   的自检测试在三方言上生成、构建、启动脚手架；`internal/tools/doccheck` 编译
   quickstart、两份 README、`docs/realtime.md` 与 `docs/mail.md` 里的每个程序；
   `docs/config.md` 与 `docs/api.md` 由测试守着不腐烂。

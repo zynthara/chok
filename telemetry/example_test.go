@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/db"
 	"github.com/zynthara/chok/telemetry"
@@ -18,8 +20,11 @@ type greeting struct {
 }
 
 // Telemetry next to the App: Use puts its middleware in the default
-// stack and mounts /metrics; Instrument adds the database. A Config from
-// chok.Load has the metrics on; this one is built in code.
+// stack, and the running App serves the metrics at
+// http://127.0.0.1:9464/metrics, a port of their own that only this host
+// reaches; Instrument adds the database. A Config from chok.Load has the
+// metrics on; this one is built in code. The App here is not run: the
+// registry is read in process.
 func Example() {
 	var cfg telemetry.Config
 	cfg.Metrics.Enabled = true
@@ -41,7 +46,7 @@ func Example() {
 	app.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/hello/ann", nil))
 
 	rec := httptest.NewRecorder()
-	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	promhttp.HandlerFor(tel.Registry(), promhttp.HandlerOpts{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	for line := range strings.Lines(rec.Body.String()) {
 		if strings.HasPrefix(line, "http_server_request_duration_seconds_count") ||
 			strings.HasPrefix(line, "db_client_operation_duration_seconds_count") {

@@ -29,7 +29,9 @@ auth:
   login_rate_limit: 10
 
 telemetry:
-  # Request and SQL metrics, served on GET /metrics for Prometheus.
+  # Request and SQL metrics for Prometheus, on a port of their own that
+  # only this host reaches: GET http://127.0.0.1:9464/metrics. Set addr
+  # to :9464 for a Prometheus on another host or in another container.
   metrics:
     enabled: true
   # Spans for every request and statement: turn them on with a collector

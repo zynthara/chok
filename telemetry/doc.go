@@ -9,10 +9,14 @@
 //
 // Registered with app.Use, a Telemetry instruments every request (it is a
 // chok.Instrumenter: its middleware runs between ClientIP and AccessLog)
-// and serves its registry on telemetry.metrics.path (GET /metrics by
-// default). Use it before the components whose shutdown it should still
-// see: Close runs in reverse order, and telemetry's Close flushes the
-// spans and log records the others' Close produced.
+// and serves its registry on a listener of its own, not the App's port:
+// GET http://127.0.0.1:9464/metrics by default, reachable from the same
+// host only. Set telemetry.metrics.addr to :9464 for a scraper on another
+// host (a Prometheus in another container or pod), keeping that port
+// away from the public internet. Use it before the components whose
+// shutdown it should still see: Close runs in reverse order, and
+// telemetry's Close flushes the spans and log records the others' Close
+// produced.
 //
 // # Names
 //

@@ -123,7 +123,11 @@ package, configuration key, API, table and metric to its new form.
   semantic conventions (`http_server_request_duration_seconds`,
   `db_client_operation_duration_seconds`, …) on `/metrics`, OpenTelemetry
   traces for requests and SQL statements, and a slog bridge to
-  OpenTelemetry logs.
+  OpenTelemetry logs. The metrics have a listener of their own, not the
+  App's port: `telemetry.metrics.addr`, by default `127.0.0.1:9464`, which
+  only the same host reaches; set it to `:9464` for a scraper on another
+  host. It listens while the App's HTTP server does, so a worker process
+  and an App under `choktest` open no port.
 - **`cache`**: an in-memory and a Redis layer behind one `Config`, with a
   circuit breaker and coalesced loads.
 - **`realtime`**, a battery that pushes events to browsers as they happen:

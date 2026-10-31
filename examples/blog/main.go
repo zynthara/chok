@@ -45,9 +45,11 @@ func main() {
 	app.Execute()
 }
 
-// setup wires the batteries and the routes; blog_test.go reuses it.
-func setup(app *chok.App, cfg Config) {
-	// Request and SQL metrics on /metrics; spans once tracing is on.
+// setup wires the batteries and the routes; blog_test.go reuses it and
+// reads the metrics from the telemetry it returns.
+func setup(app *chok.App, cfg Config) *telemetry.Telemetry {
+	// Request and SQL metrics on 127.0.0.1:9464/metrics; spans once
+	// tracing is on.
 	tel := telemetry.MustNew(cfg.Telemetry)
 	// Titles are unique per author among live posts; deleting a post
 	// frees its title.
@@ -66,4 +68,5 @@ func setup(app *chok.App, cfg Config) {
 	chok.GET(api, "/posts/{id}", getPost(posts))
 	chok.PATCH(api, "/posts/{id}", updatePost(posts))
 	chok.DELETE(api, "/posts/{id}", deletePost(posts))
+	return tel
 }

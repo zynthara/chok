@@ -183,8 +183,9 @@ Prometheus metrics, OpenTelemetry traces and the slog bridge to OpenTelemetry lo
 | Key | Type | Default | Rules | Description |
 |---|---|---|---|---|
 | `telemetry.logs.otel` | bool |  |  | OTel copies every record the App's loggers write (those New builds from the log section, the access log included) to OpenTelemetry Logs, exported over OTLP to Tracing.Endpoint with the trace and span id of the request; the log output itself is unchanged. |
-| `telemetry.metrics.enabled` | bool | `true` |  | Enabled records the HTTP and database metrics, with the Go runtime and process collectors, and serves them on Path in the Prometheus text format. Off, the registry stays empty. |
-| `telemetry.metrics.path` | string | `/metrics` |  | Path is where the App serves the metrics. |
+| `telemetry.metrics.addr` | string | `127.0.0.1:9464` |  | Addr is the metrics' own listener, apart from http.addr: the loopback default keeps them off the network, and an address such as :9464 lets a scraper on another host reach them. It listens while the App's HTTP server does. |
+| `telemetry.metrics.enabled` | bool | `true` |  | Enabled records the HTTP and database metrics, with the Go runtime and process collectors, and serves them on Addr and Path in the Prometheus text format. Off, the registry stays empty. |
+| `telemetry.metrics.path` | string | `/metrics` |  | Path is where the metrics listener serves the metrics. |
 | `telemetry.tracing.enabled` | bool |  |  | Enabled records a span for every request and, through Instrument, every SQL statement, and exports them. |
 | `telemetry.tracing.endpoint` | string | `http://localhost:4318` |  | Endpoint is the OpenTelemetry collector's base URL, as in OTEL_EXPORTER_OTLP_ENDPOINT: spans are posted to &lt;endpoint&gt;/v1/traces and, with Logs.OTel, log records to &lt;endpoint&gt;/v1/logs. https uses TLS with the system roots. The other OTEL_EXPORTER_OTLP_\* variables (headers, certificates, timeout) still apply. |
 | `telemetry.tracing.exporter` | string | `stdout` | `oneof=stdout otlp` | Exporter is where spans go: stdout (one JSON object per span, for development) or otlp (OTLP over HTTP to Endpoint). |

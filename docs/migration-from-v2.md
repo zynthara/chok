@@ -603,8 +603,11 @@ Redis 不可达会让启动相等到 `app.start_timeout` 后失败（v2 只告�
 ## 11. 路由、表与指标的变化（汇总）
 
 - **路由**：`/swagger`、`/swagger/doc.json` → `/docs`、`/openapi.json`；
-  `/componentz` 删除；新增 `GET /auth/me`；`/healthz` `/livez` `/readyz`
-  `/metrics` `/auth/*` `/audit/logs` 不变。
+  `/componentz` 删除；新增 `GET /auth/me`；`/metrics` 搬出 App 的端口，改由
+  telemetry 自己的监听提供，默认 `127.0.0.1:9464`（`telemetry.metrics.addr`，
+  只有本机访问得到）：原来从别的主机抓主端口 `/metrics` 的 Prometheus 要改抓
+  这个端口，并把 addr 设成 `:9464`；`/healthz` `/livez` `/readyz` `/auth/*`
+  `/audit/logs` 不变。
 - **表**：`schema_migrations*`（应用、电池、manifest、repairs）→
   `chok_migrations`；`outbox_messages` / `outbox_relay_state` →
   `chok_jobs_messages` / `chok_jobs_watermarks`；`audit_logs` 两列改名、三列加宽、

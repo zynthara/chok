@@ -16,6 +16,7 @@ import (
 
 	"github.com/zynthara/chok/internal/apptest"
 	"github.com/zynthara/chok/internal/openapi"
+	"github.com/zynthara/chok/internal/serving"
 )
 
 // App is one application: its configuration, the components registered
@@ -268,7 +269,9 @@ func (a *App) run(ctx context.Context, comps []*component) error {
 	a.Handler() // the middleware stack is fixed: every route's schemes are known
 	a.warnCookieWithoutCSRF()
 
-	runCtx, cancelRun := context.WithCancel(context.WithoutCancel(ctx))
+	// The Starters learn whether the App serves HTTP: a battery's own
+	// listener (telemetry's metrics) stays closed when it does not.
+	runCtx, cancelRun := context.WithCancel(serving.With(context.WithoutCancel(ctx), a.base.HTTP.Enabled))
 	defer cancelRun()
 	failed := make(chan error, len(comps)+1)
 	var starters sync.WaitGroup

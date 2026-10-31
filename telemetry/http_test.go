@@ -237,9 +237,8 @@ func TestMetricsEndpoint_ServesTheHistogram(t *testing.T) {
 	tel := newTel(t, metricsOn())
 	app := chok.New(testBase(t), chok.Logger(quiet()))
 	app.Use(tel)
-	h := app.Handler()
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	body := scrape(t, h, "/metrics")
+	app.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	body := scrape(t, tel.metricsHandler(), "/metrics")
 	for _, want := range []string{
 		"# TYPE http_server_request_duration_seconds histogram",
 		`http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="200",http_route="/healthz",le="0.005"}`,

@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -26,10 +28,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/db"
 	"github.com/zynthara/chok/internal/conf"
 	"github.com/zynthara/chok/internal/logtap"
+	"github.com/zynthara/chok/internal/serving"
 	"github.com/zynthara/chok/internal/tracectx"
 )
 
@@ -52,8 +54,9 @@ func traceID(ctx context.Context) string {
 // Telemetry is the observability battery: a Prometheus registry, an
 // OpenTelemetry tracer provider and, with logs.otel, a bridge from the
 // App's logs to OpenTelemetry Logs. Register it with app.Use: its
-// middleware records every request (chok.Instrumenter), its Mount serves
-// the metrics, its Close flushes what is buffered.
+// middleware records every request (chok.Instrumenter), its Start serves
+// the metrics on a listener of their own, its Close flushes what is
+// buffered.
 type Telemetry struct {
 	cfg    Config
 	logger *slog.Logger
@@ -66,8 +69,9 @@ type Telemetry struct {
 	logs   *sdklog.LoggerProvider // nil when logs.otel is off
 	untap  func()
 
-	http    *httpMetrics // nil when metrics are off
-	db      *dbMetrics   // nil when metrics are off
+	http    *httpMetrics           // nil when metrics are off
+	db      *dbMetrics             // nil when metrics are off
+	addr    atomic.Pointer[string] // the metrics listener's address, once it listens
 	mu      sync.Mutex
 	dbs     map[*db.DB]bool // instrumented handles
 	poolIDs map[string]bool // db_name labels of the pool collectors
@@ -258,10 +262,13 @@ func (t *Telemetry) registerMetrics() error {
 	return nil
 }
 
-// Registry returns the Prometheus registry served on metrics.path: the
-// HTTP, database, Go runtime and process metrics, and whatever the
+// Registry returns the Prometheus registry the metrics listener serves:
+// the HTTP, database, Go runtime and process metrics, and whatever the
 // application registers next to them. With metrics off it stays empty
-// and is not served.
+// and is not served. To serve it on the App's own port as well, behind
+// the application's own guard:
+//
+//	app.Router().Handle(http.MethodGet, "/metrics", promhttp.HandlerFor(tel.Registry(), promhttp.HandlerOpts{}))
 func (t *Telemetry) Registry() *prometheus.Registry { return t.reg }
 
 // TracerProvider returns the tracer provider, for spans of the
@@ -269,13 +276,54 @@ func (t *Telemetry) Registry() *prometheus.Registry { return t.reg }
 // instrumenting code needs no switch.
 func (t *Telemetry) TracerProvider() trace.TracerProvider { return t.tp }
 
-// Mount serves the registry on metrics.path (GET), when metrics are on.
-func (t *Telemetry) Mount(r chok.Router) {
-	if !t.cfg.Metrics.Enabled {
-		return
+// Start serves the registry on GET metrics.path at metrics.addr, a
+// listener of its own, apart from the App's port: the loopback default
+// keeps the metrics off the network. It listens only while the App
+// serves HTTP — a worker process (http.enabled false) and an App under
+// choktest open no port — and with metrics on; otherwise it just waits
+// for ctx. An address already in use fails the App's start.
+func (t *Telemetry) Start(ctx context.Context) error {
+	if !t.cfg.Metrics.Enabled || serving.Off(ctx) {
+		<-ctx.Done()
+		return nil
 	}
-	h := promhttp.HandlerFor(t.reg, promhttp.HandlerOpts{ErrorLog: promLogger{t.logger}})
-	r.Handle(http.MethodGet, t.cfg.Metrics.Path, h)
+	ln, err := net.Listen("tcp", t.cfg.Metrics.Addr)
+	if err != nil {
+		return fmt.Errorf("telemetry: metrics: %w (telemetry.metrics.addr picks another address)", err)
+	}
+	addr := ln.Addr().String()
+	t.addr.Store(&addr)
+	srv := &http.Server{
+		Handler:           t.metricsHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		ErrorLog:          slog.NewLogLogger(t.logger.Handler(), slog.LevelWarn),
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ln) }()
+	t.logger.Info("telemetry: metrics listening", "addr", addr, "path", t.cfg.Metrics.Path)
+	select {
+	case <-ctx.Done():
+		// A scrape cut short is retried by the scraper; the App is
+		// stopping, so there is nothing to drain.
+		_ = srv.Close()
+		if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+			t.logger.Warn("telemetry: metrics listener stopped", "error", err)
+		}
+		return nil
+	case err := <-served:
+		return fmt.Errorf("telemetry: metrics: %w", err)
+	}
+}
+
+// metricsHandler serves the registry on GET metrics.path and nothing
+// else.
+func (t *Telemetry) metricsHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle(http.MethodGet+" "+t.cfg.Metrics.Path, promhttp.HandlerFor(t.reg, promhttp.HandlerOpts{ErrorLog: promLogger{t.logger}}))
+	return mux
 }
 
 // promLogger reports promhttp's collection and encoding errors.
