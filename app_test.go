@@ -271,9 +271,10 @@ func (s stuckCloser) Close(context.Context) error {
 }
 
 // TestStop_CloseIgnoringCtxIsAbandoned: a Close that ignores its ctx holds
-// the stop no longer than app.shutdown_timeout. Run returns when the budget
-// is spent, with an error and an Error log naming the component, and the
-// component registered before it is still closed.
+// the stop no longer than app.shutdown_timeout plus closeGrace. Run then
+// returns, with an error and an Error log naming the component; the
+// component registered before it, closed only after the budget is spent,
+// still gets its grace and finishes before Run returns.
 func TestStop_CloseIgnoringCtxIsAbandoned(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		base := testBase(t)
@@ -290,18 +291,21 @@ func TestStop_CloseIgnoringCtxIsAbandoned(t *testing.T) {
 		cancel()
 		begin := time.Now()
 		err := <-done
-		if d := time.Since(begin); d != 3*time.Second {
-			t.Fatalf("the stop takes its budget and no more, took %s", d)
+		closed := events.all() // what was closed by the time Run returned
+		if d := time.Since(begin); d != 3*time.Second+closeGrace {
+			t.Fatalf("the stop takes its budget and the grace of the abandoned Close, no more: took %s", d)
 		}
 		if err == nil || !strings.Contains(err.Error(), "chok: close engine did not return within the stop budget; abandoned: app.shutdown_timeout (3s)") {
 			t.Fatalf("got %v", err)
 		}
+		if strings.Contains(err.Error(), "close first") {
+			t.Fatalf("a Close that returns within its grace is not abandoned: %v", err)
+		}
 		if out := logs.String(); !strings.Contains(out, `level=ERROR msg="chok: close did not return within the stop budget; abandoned" component=engine`) {
 			t.Fatalf("the abandoned Close is logged at error level, naming the component:\n%s", out)
 		}
-		synctest.Wait() // the next Close, called once the budget was spent, runs in the background
-		if !slices.Contains(events.all(), "close first") {
-			t.Fatalf("the component after the abandoned one is still closed: %v", events.all())
+		if !slices.Contains(closed, "close first") {
+			t.Fatalf("the component after the abandoned one is closed before Run returns: %v", closed)
 		}
 	})
 }
@@ -312,10 +316,11 @@ type bomb struct{}
 func (bomb) Close(context.Context) error { panic("boom") }
 
 // TestClose_BeforeRunAbandonsACloseIgnoringCtx: App.Close waits for each
-// Close until its ctx is done. A Close that panics, in the goroutine it
-// now runs in, is reported; one that ignores ctx is abandoned when ctx
-// expires, with an error naming it, and the component registered before
-// it is still closed.
+// Close while its ctx lasts and closeGrace longer. A Close that panics, in
+// the goroutine it now runs in, is reported; one that ignores ctx is
+// abandoned at the end of its grace, with an error naming it; the
+// component registered before it gets its own grace and is closed before
+// App.Close returns.
 func TestClose_BeforeRunAbandonsACloseIgnoringCtx(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		app := New(testBase(t), Logger(quiet()))
@@ -327,20 +332,23 @@ func TestClose_BeforeRunAbandonsACloseIgnoringCtx(t *testing.T) {
 		defer cancel()
 		begin := time.Now()
 		err := app.Close(ctx)
-		if d := time.Since(begin); d != 2*time.Second {
-			t.Fatalf("Close takes what its ctx allows and no more, took %s", d)
+		closed := events.all()
+		if d := time.Since(begin); d != 2*time.Second+closeGrace {
+			t.Fatalf("Close takes what its ctx allows and the abandoned Close's grace, no more: took %s", d)
 		}
 		for _, want := range []string{"chok: close bomb: close panicked: boom", "chok: close engine did not return within the stop budget; abandoned"} {
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("want %q in %v", want, err)
 			}
 		}
+		if strings.Contains(err.Error(), "close first") {
+			t.Fatalf("a Close that returns within its grace is not abandoned: %v", err)
+		}
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("the abandoned Close's error wraps why ctx ended: %v", err)
 		}
-		synctest.Wait()
-		if !slices.Contains(events.all(), "close first") {
-			t.Fatalf("the component after the abandoned one is still closed: %v", events.all())
+		if !slices.Contains(closed, "close first") {
+			t.Fatalf("the component after the abandoned one is closed before App.Close returns: %v", closed)
 		}
 	})
 }

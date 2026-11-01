@@ -94,8 +94,8 @@ func Wrap(mw ...Middleware) Option {
 func Version(v string) Option { return func(a *App) { a.version = v } }
 
 // Closer is a component that releases resources when the App stops.
-// Close should return once ctx is done: the App waits for it only while
-// the stop budget lasts.
+// Close should return once ctx is done: the App waits for it while the
+// stop budget lasts and one second more, then abandons it.
 type Closer interface {
 	Close(ctx context.Context) error
 }
@@ -230,6 +230,14 @@ var errFastStop = errors.New("chok: fast stop")
 // App stops.
 const fastStopBudget = 5 * time.Second
 
+// closeGrace is how long a Close may still run once its ctx is done (the
+// stop's budget is spent, or App.Close's ctx ended) before it is
+// abandoned. A Close that honours ctx finishes within it — a pool
+// closed, a goodbye sent, a flush cut short — so only one that ignores
+// ctx is left behind, and a stop takes at most its budget plus closeGrace
+// for each Close still running after the budget.
+const closeGrace = time.Second
+
 // stopFast turns a stop under way, or the one to come, fast: the drain
 // ends and what is left of the stop budget is capped at fastStopBudget.
 // It reports whether this call made the change.
@@ -261,9 +269,10 @@ func init() {
 // them has been requested since the start, so a stop nobody's probes
 // watch does not wait — the HTTP server shuts down within
 // http.shutdown_timeout, the Starters' context is canceled and Run waits
-// for them, then every Closer is closed in reverse Use order. A Close
-// still running when the budget is spent is abandoned and reported, and
-// the next Closer is closed.
+// for them, then every Closer is closed in reverse Use order. Once the
+// budget is spent, each Close still running, or called after that, gets
+// one second more; one that has not returned by then is abandoned and
+// reported, and the next Closer is closed.
 //
 // Run returns nil when ctx is canceled, ctx.Err() when its deadline
 // expires, and the failure otherwise. It can be called once.
@@ -487,32 +496,43 @@ func (a *App) stop(ctx context.Context, srv *http.Server, cancelRun context.Canc
 	return errors.Join(errs...)
 }
 
-// closeAll closes the Closers in reverse Use order, waiting for each until
-// ctx is done. A Close still running then is abandoned: it is logged and
-// reported, its goroutine is left behind (the process is on its way out)
-// and the next Closer is closed. Once ctx is done, the remaining Closers
-// are still called but no longer waited for.
+// closeAll closes the Closers in reverse Use order, each as closeOne
+// does.
 func (a *App) closeAll(ctx context.Context, comps []*component) []error {
 	var errs []error
 	for _, comp := range slices.Backward(comps) {
-		c, ok := comp.value.(Closer)
-		if !ok {
-			continue
-		}
-		done := make(chan error, 1) // buffered: an abandoned Close never blocks on it
-		go func() { done <- callClose(ctx, c) }()
-		select {
-		case err := <-done:
-			if err != nil {
-				errs = append(errs, fmt.Errorf("chok: close %s: %w", comp.name, err))
+		if c, ok := comp.value.(Closer); ok {
+			if err := a.closeOne(ctx, comp.name, c); err != nil {
+				errs = append(errs, err)
 			}
-		case <-ctx.Done():
-			cause := context.Cause(ctx)
-			a.logger.Error("chok: close did not return within the stop budget; abandoned", "component", comp.name, "cause", cause)
-			errs = append(errs, fmt.Errorf("chok: close %s did not return within the stop budget; abandoned: %w", comp.name, cause))
 		}
 	}
 	return errs
+}
+
+// closeOne calls c.Close and waits for it while ctx lasts and closeGrace
+// longer; a Close called once ctx is done gets closeGrace too. One still
+// running then is abandoned: it is logged and reported, and its goroutine
+// is left behind, as the process is on its way out.
+func (a *App) closeOne(ctx context.Context, name string, c Closer) error {
+	done := make(chan error, 1) // buffered: an abandoned Close never blocks on it
+	go func() { done <- callClose(ctx, c) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		select {
+		case err = <-done:
+		case <-time.After(closeGrace):
+			cause := context.Cause(ctx)
+			a.logger.Error("chok: close did not return within the stop budget; abandoned", "component", name, "grace", closeGrace, "cause", cause)
+			return fmt.Errorf("chok: close %s did not return within the stop budget; abandoned: %w", name, cause)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("chok: close %s: %w", name, err)
+	}
+	return nil
 }
 
 func callClose(ctx context.Context, c Closer) (err error) {
@@ -532,11 +552,11 @@ func (a *App) closeLogs() {
 
 // Close releases registered components if Run has not begun, in reverse
 // Use order, then closes owned log files. A component's Close still
-// running when ctx is done is abandoned and reported, and the next one is
-// closed. This supports deferred cleanup during construction. After Run
-// begins, Close waits for Run to finish; cancel Run's context to stop it.
-// A closed App cannot be run or extended. Components constructed before
-// Use remain the caller's responsibility.
+// running one second after ctx is done is abandoned and reported, and the
+// next one is closed. This supports deferred cleanup during construction.
+// After Run begins, Close waits for Run to finish; cancel Run's context to
+// stop it. A closed App cannot be run or extended. Components constructed
+// before Use remain the caller's responsibility.
 func (a *App) Close(ctx context.Context) error {
 	a.mu.Lock()
 	if a.started {
