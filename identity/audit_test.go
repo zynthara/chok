@@ -8,11 +8,15 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/db"
 	"github.com/zynthara/chok/internal/dbtest"
 	"github.com/zynthara/chok/internal/tracectx"
 )
@@ -25,7 +29,8 @@ func auditOn(t testing.TB, c AuditConfig) *Identity {
 }
 
 // detachedAudit is an Audit on idn's database whose writer is not
-// running yet: start it with a.start, or never, to hold the queue full.
+// running yet: start it with a.startWriter, or never, to hold the queue
+// full.
 func detachedAudit(idn *Identity, buffer int, dropOnFull bool) *Audit {
 	a := &Audit{
 		enabled: true, d: idn.d, logger: slog.New(slog.DiscardHandler), dropOnFull: dropOnFull,
@@ -37,11 +42,10 @@ func detachedAudit(idn *Identity, buffer int, dropOnFull bool) *Audit {
 	return a
 }
 
-// startWriter starts a detached audit's writer.
+// startWriter starts a detached audit's writer and, with a retention,
+// its sweeper, as start does; the test's end closes it.
 func (a *Audit) startWriter(t testing.TB) {
-	ctx, cancel := context.WithCancel(context.Background())
-	a.cancel = cancel
-	go a.run(ctx)
+	a.launch()
 	t.Cleanup(func() { _ = a.close(context.Background()) })
 }
 
@@ -359,7 +363,7 @@ func TestAudit_RetentionPurges(t *testing.T) {
 	if err != nil || n != 5 || count(t, idn, "") != 1 || count(t, idn, "action = ?", "fresh") != 1 {
 		t.Fatalf("purged %d (%v); left %d", n, err, count(t, idn, ""))
 	}
-	// The writer sweeps on its own: a short purge period and retention.
+	// The sweeper runs on its own: a short purge period and retention.
 	b := detachedAudit(idn, 8, false)
 	b.retention, b.purgeEvery = time.Minute, 20*time.Millisecond
 	if err := b.LogSync(t.Context(), Event{Action: "stale", OccurredAt: now.Add(-time.Hour)}); err != nil {
@@ -371,7 +375,7 @@ func TestAudit_RetentionPurges(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if count(t, idn, "action = ?", "stale") != 0 || count(t, idn, "action = ?", "fresh") != 0 {
-		t.Fatal("the writer's sweep removes records past the retention (fresh is an hour old too)")
+		t.Fatal("the sweeper removes records past the retention (fresh is an hour old too)")
 	}
 }
 
@@ -474,6 +478,74 @@ func TestAudit_HealthClearsWhenAWriteGoesThrough(t *testing.T) {
 	}
 	if kept, lost := count(t, idn, "action = ?", "kept"), count(t, idn, "action = ?", "lost"); kept != 2 || lost != 0 {
 		t.Fatalf("kept=%d lost=%d", kept, lost)
+	}
+}
+
+// TestAudit_SweepRunsBesideTheWriter: the retention sweep has a goroutine
+// of its own. While a sweep is under way, Log still gets through a queue
+// of one and the events reach the table; Close cancels the sweep and
+// waits for it to return.
+func TestAudit_SweepRunsBesideTheWriter(t *testing.T) {
+	idn := auditOn(t, AuditConfig{})
+	gdb := idn.d.Unsafe(t.Context())
+	old := time.Now().Add(-48 * time.Hour).UTC()
+	expired := make([]auditRow, 100) // past the retention, for the sweep to find
+	for i := range expired {
+		expired[i] = auditRow{ID: db.NewRID("aud"), OccurredAt: old, Action: "expired", Result: ResultSuccess}
+	}
+	if err := gdb.CreateInBatches(expired, len(expired)).Error; err != nil {
+		t.Fatal(err)
+	}
+	// The sweep stops before its first DELETE begins a transaction, so it
+	// holds no connection, and stays until its context ends; then it takes
+	// a moment longer, which Close must wait out.
+	held, release := make(chan struct{}), make(chan struct{})
+	var hold sync.Once
+	var sweepReturned atomic.Bool
+	err := gdb.Callback().Delete().Before("gorm:begin_transaction").Register("test:hold_sweep", func(tx *gorm.DB) {
+		if tx.Statement.Table != "audit_logs" {
+			return
+		}
+		hold.Do(func() {
+			close(held)
+			select {
+			case <-tx.Statement.Context.Done():
+				time.Sleep(50 * time.Millisecond)
+				sweepReturned.Store(true)
+			case <-release: // the test failed before Close
+			}
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := detachedAudit(idn, 1, false) // a queue of one: Log waits for the writer
+	a.retention, a.purgeEvery, a.flushEvery = time.Hour, 10*time.Millisecond, 10*time.Millisecond
+	a.startWriter(t)
+	t.Cleanup(func() { close(release) })
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no sweep started")
+	}
+	const n = 10
+	go func() {
+		for range n {
+			a.Log(context.Background(), Event{Action: "fresh"})
+		}
+	}()
+	eventually(t, "the events written while a sweep is under way", func() bool {
+		return count(t, idn, "action = ?", "fresh") == n
+	})
+	if err := a.close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !sweepReturned.Load() {
+		t.Fatal("Close returned before the sweep it canceled")
+	}
+	if a.written.Load() != n || a.dropped.Load() != 0 {
+		t.Fatalf("written=%d dropped=%d", a.written.Load(), a.dropped.Load())
 	}
 }
 

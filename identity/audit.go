@@ -84,7 +84,8 @@ type Audit struct {
 	in        chan Event
 	stopping  chan struct{}
 	cancel    context.CancelFunc
-	done      chan struct{}
+	done      chan struct{}  // closed when the writer returns
+	sweeper   sync.WaitGroup // the retention sweep, when records expire
 	closeOnce sync.Once
 
 	pending atomic.Int64
@@ -121,15 +122,25 @@ func newAudit(d *db.DB, c AuditConfig, logger *slog.Logger) *Audit {
 	return a
 }
 
-// start runs the writer. Its context is the background's: the writer
-// outlives the call that built the Identity, and Close ends it.
+// start runs the writer and, when records expire, the sweeper.
 func (a *Audit) start(buffer int) {
 	a.in = make(chan Event, buffer)
 	a.stopping = make(chan struct{})
 	a.done = make(chan struct{})
+	a.launch()
+}
+
+// launch starts the writer and, with a retention, the sweeper in a
+// goroutine of its own, so that a long sweep never holds up the queue.
+// Their context is the background's: they outlive the call that built
+// the Identity, and close ends them.
+func (a *Audit) launch() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	go a.run(ctx)
+	if a.retention > 0 {
+		a.sweeper.Go(func() { a.sweep(ctx) })
+	}
 }
 
 // Enabled reports whether the log records anything.
@@ -267,8 +278,7 @@ func marshalJSON(v any) (jsonData, error) {
 }
 
 // run is the writer: it batches queued events, writes a batch when it is
-// full or a second old, sweeps expired records every hour, and on close
-// writes what is left.
+// full or a second old, and on close writes what is left.
 func (a *Audit) run(ctx context.Context) {
 	defer close(a.done)
 	batch := make([]auditRow, 0, a.batchSize)
@@ -288,12 +298,6 @@ func (a *Audit) run(ctx context.Context) {
 	}
 	timer := time.NewTimer(a.flushEvery)
 	defer timer.Stop()
-	var purge <-chan time.Time
-	if a.retention > 0 {
-		t := time.NewTicker(a.purgeEvery)
-		defer t.Stop()
-		purge = t.C
-	}
 	for {
 		select {
 		case e, ok := <-a.in:
@@ -317,8 +321,22 @@ func (a *Audit) run(ctx context.Context) {
 		case <-timer.C:
 			flush()
 			timer.Reset(a.flushEvery)
-		case <-purge:
-			if n, err := a.purge(ctx, a.now().Add(-a.retention)); err != nil {
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// sweep deletes the records past the retention every purgeEvery until
+// ctx ends; a sweep that close cuts short is no failure to report.
+func (a *Audit) sweep(ctx context.Context) {
+	tick := time.NewTicker(a.purgeEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			n, err := a.purge(ctx, a.now().Add(-a.retention))
+			if err != nil && ctx.Err() == nil {
 				a.logger.Warn("identity: audit retention sweep failed", "error", err)
 			} else if n > 0 {
 				a.logger.Info("identity: audit retention swept expired records", "deleted", n, "retention", a.retention)
@@ -386,7 +404,8 @@ func (a *Audit) health() error {
 }
 
 // close stops the writer once the queued events are written, or when ctx
-// ends; the events still queued then are lost and reported.
+// ends — the events still queued then are lost and reported — and then
+// cancels the sweep and waits for it.
 func (a *Audit) close(ctx context.Context) error {
 	if !a.enabled {
 		return nil
@@ -409,6 +428,7 @@ func (a *Audit) close(ctx context.Context) error {
 			err = fmt.Errorf("identity: audit closed before %d queued event(s) were written: %w", a.pending.Load(), ctx.Err())
 		}
 		a.cancel()
+		a.sweeper.Wait()
 	})
 	return err
 }
