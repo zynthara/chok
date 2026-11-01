@@ -44,13 +44,25 @@ package, configuration key, API, table and metric to its new form.
   once `/readyz` or `/healthz` has been probed, and both answer 503
   while it lasts; a second SIGINT or SIGTERM during the stop stops fast.
   `Load`'s warnings reach the App's logger, as JSON under
-  `log.format: json`.
+  `log.format: json`. `app.Close(ctx)` releases what `Use` registered
+  when the application fails before `Run`, in reverse order — the
+  scaffold and the examples `defer` it right after `New`. During the
+  stop a component's `Close` still running a second after
+  `app.shutdown_timeout` is spent is abandoned, logged and reported, and
+  the next one is closed; a `Health` that panics fails its probe, and the
+  start phase's budget bounds the probes. A registered value with a
+  `BindLogger(*slog.Logger)` method is handed the root logger as it is
+  registered; `Use` panics for an `Instrumenter` registered after
+  `Handler`, which the fixed middleware stack would leave out.
 - **`chok`**: typed handlers `GET` / `POST` / `PUT` / `PATCH` / `DELETE`
   and `List`, binding `path` / `query` / `header` / `json` tags with
   `encoding/json/v2` and `validate` rules; errors that describe their HTTP
   envelope through `chok.Coder`; the default middleware stack (recover,
   request id, client ip, access log, timeout, CORS, and CSRF protection,
-  on by default); an OpenAPI 3.1 document at `/openapi.json` with its UI
+  on by default — a forwarding header from a peer outside
+  `http.trusted_proxies` is ignored, and the first one warns once, since
+  behind a reverse proxy an empty list makes every client the proxy's
+  address, for the rate limits too); an OpenAPI 3.1 document at `/openapi.json` with its UI
   at `/docs`, each route's security taken from its authentication
   middleware; `/healthz`, `/readyz`, `/livez` and optional pprof.
 - **`chok`**: `SPA(r, prefix, fsys)` serves a single-page application
@@ -63,6 +75,11 @@ package, configuration key, API, table and metric to its new form.
   public ids; soft-unique indexes; `migrate: auto | versioned | off` with
   one `chok_migrations` ledger shared by the application and the
   batteries, statement-level resume on MySQL, and `MarkApplied`.
+  `db.migration_timeout` (30s) bounds one owner's schema work, lock and
+  pool wait included; Postgres and MySQL hold the migration lock and run
+  the SQL on one connection. A transaction of another handle is not
+  reused: `RunInTx` on a second `*DB` inside it is an error. telemetry
+  sees `RunInTx` as BEGIN, COMMIT and ROLLBACK phases.
 - **`store`** and **`store/where`**: a generic `Store[T]` with owner
   scoping that fails closed, patches with optimistic locking, cursor
   pages, aggregates and projections as generic methods, and error types
@@ -70,6 +87,8 @@ package, configuration key, API, table and metric to its new form.
   may filter and sort on (values read as the field's type); code names
   any mapped column. Page sizes likewise bound only what a URL asks for:
   the code's `List` takes the page it names, and every row without one.
+  `BeforeUpdate` and `BeforeDelete` hooks run once the fields, the scope
+  and the locator passed, not before.
 - **`identity`**: accounts, JWT access tokens checked against the user on
   every request, sessions bounded by `refresh_ttl`, login rate limiting,
   OAuth through **`identity/google`**, **`identity/github`**,
@@ -80,7 +99,16 @@ package, configuration key, API, table and metric to its new form.
   they are proven, which Facebook's word alone does not do; `Users()`
   finds a user by email and lists every user for an admin page — to the
   `admin` role and those `identity/rbac` grants `user/read` only,
-  wherever the list is mounted.
+  wherever the list is mounted; `/audit/logs` likewise answers 401 / 403
+  to anyone else. forgot-password, passwordless/start and
+  confirm-email/start count against the login rate limit, by address
+  and by client, every call, and a mail send is bounded to a minute.
+  identity's `Health` reports the audit log: a write that failed within
+  the last minute, judged by its own error rather than by a caller that
+  gave up, cleared by the next write that goes through; the retention
+  sweep runs beside the writer. `identity/rbac`'s watcher reloads the
+  policy every 30 seconds and when its Redis subscription returns, so a
+  lost notification still converges.
 - **`identity`**: passwordless sign-in (`auth.passwordless`):
   `POST /auth/passwordless/start` answers 202 whatever the address and
   mails a code and a magic-link token in the background;
@@ -114,8 +142,13 @@ package, configuration key, API, table and metric to its new form.
   outbox workers that deliver at least once in order, the payload decoded
   into the worker's type. A failing message is retried with a growing
   wait and, after `max_attempts`, parked in the dead letters
-  (`Dead`, `Requeue`, `Discard`) while its topic moves on; a graceful
-  restart does not deliver again what was delivered. `jobs.Observe`
+  (`Dead`, `Requeue`, `Discard`) while its topic moves on. The message
+  row's `completed_at` is the one record of what was delivered: a
+  restart, graceful or not, delivers again only what no handler
+  finished, a success that a stop interrupted is acknowledged within a
+  budget of its own, a worker is handed no further message once the stop
+  began, a message committed late behind the watermark is still found,
+  and retention removes only what its topic's worker completed. `jobs.Observe`
   streams every run — started, finished, failed, skipped — and every
   parked message as a `jobs.Event`, for a live jobs panel through
   `realtime`.
@@ -127,7 +160,11 @@ package, configuration key, API, table and metric to its new form.
   App's port: `telemetry.metrics.addr`, by default `127.0.0.1:9464`, which
   only the same host reaches; set it to `:9464` for a scraper on another
   host. It listens while the App's HTTP server does, so a worker process
-  and an App under `choktest` open no port.
+  and an App under `choktest` open no port. The providers belong to the
+  `Telemetry`; `telemetry.Globals()` makes one instance's tracer provider
+  and propagator the process defaults for third-party clients.
+  `BindLogger` attaches the `logs.otel` bridge to an App-owned logger,
+  which `Use` does.
 - **`cache`**: an in-memory and a Redis layer behind one `Config`, with a
   circuit breaker and coalesced loads.
 - **`realtime`**, a battery that pushes events to browsers as they happen:
@@ -141,7 +178,10 @@ package, configuration key, API, table and metric to its new form.
   (`hub.Send`). `hub.Publish` never waits on a slow connection — one that
   falls `send_buffer` events behind is dropped — and the last `replay`
   events stay in memory, so a reconnecting page resumes after the last
-  event it saw (`after`, `Last-Event-ID`) or gets a `reset`. With
+  event it saw (`after`, `Last-Event-ID`) or gets a `reset`. A
+  connection carries its ticket's principal for `connection_ttl` (5m),
+  then closes for the page to obtain a fresh ticket; `hub.Disconnect`
+  ends a user's connections on this replica after a revocation. With
   `realtime.Redis`, tickets and events span every replica. See
   [docs/realtime.md](docs/realtime.md).
 - **`mail`**, a battery for transactional mail with the standard library
@@ -264,9 +304,10 @@ package, configuration key, API, table and metric to its new form.
   (`Worker[jsontext.Value]` for the JSON as stored); a payload that does
   not decode is parked. A failing message is no longer retried on every
   sweep forever: see `max_attempts`, `retry_backoff` and `max_backoff`.
-  The jobs migration `20261025000001` gained the failure columns and two
-  tables in place: drop and recreate a development database made by an
-  earlier snapshot.
+  The jobs migration `20261025000001` gained the failure columns,
+  `completed_at` and the dead-letter table in place: drop and recreate a
+  development database made by an earlier snapshot. The
+  `chok_jobs_delivered` table of earlier snapshots is gone.
 - **Breaking:** `jobs.retention` defaults to `168h` when the
   configuration does not set it; a `jobs.Config` built in code still
   keeps messages forever with a zero `Retention`.
