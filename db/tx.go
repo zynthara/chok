@@ -111,7 +111,9 @@ func (d *DB) AfterCommit(ctx context.Context, fn func(ctx context.Context)) bool
 
 // Unsafe returns the *gorm.DB for ctx: the transaction RunInTx started, or
 // the handle. It is the one way to gorm and raw SQL; nothing outside db
-// and store hands *gorm.DB around.
+// and store hands *gorm.DB around. It carries none of a store's fences,
+// neither the owner scope nor the custom scopes: for a query fenced like
+// the store's, use (*store.Store[T]).Unsafe.
 func (d *DB) Unsafe(ctx context.Context) *gorm.DB {
 	if e := txOf(ctx, d); e != nil {
 		return e.tx.WithContext(ctx)

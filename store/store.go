@@ -410,7 +410,8 @@ func (s *Store[T]) Tx(ctx context.Context, fn func(txCtx context.Context) error)
 // Unsafe returns the *gorm.DB of the store's model with the owner scope
 // and the custom scopes applied, joined to the transaction in ctx. A scope
 // that fails leaves the error on the returned *gorm.DB, so whatever runs
-// on it fails: the escape hatch is fenced like the rest.
+// on it fails: the escape hatch is fenced like the rest. To get past the
+// fences, use (*db.DB).Unsafe on the handle the store was built on.
 func (s *Store[T]) Unsafe(ctx context.Context) *gorm.DB {
 	tx, err := s.scoped(ctx, s.d.Unsafe(ctx).Model(new(T)))
 	if err != nil {
