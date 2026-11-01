@@ -205,3 +205,51 @@ func TestRelay_FailedAcknowledgementRedeliversSameID(t *testing.T) {
 		t.Fatalf("durable ack repeated: %v", ids)
 	}
 }
+
+// TestRelay_StopDuringASuccessfulHandlerStillAcknowledges: a graceful stop
+// that begins while the handler runs cancels the sweep's context. The
+// handler, which does not watch it, finishes the work and returns nil: its
+// acknowledgement is written all the same, on a budget of its own, so a
+// restart does not deliver the message again.
+func TestRelay_StopDuringASuccessfulHandlerStillAcknowledges(t *testing.T) {
+	c := openCore(t)
+	enqueue(t, c, "stop", "1")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var ids []uint64
+	r, err := newRelay("stop", func(_ context.Context, m rawMessage) error {
+		ids = append(ids, m.ID)
+		close(entered)
+		<-release
+		return nil // the work is done; the handler did not watch ctx
+	}, c, time.Hour, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.run(ctx) }()
+	<-entered
+	cancel()       // the stop begins while the handler runs
+	close(release) // the handler returns nil
+	if err := <-done; err != nil {
+		t.Fatalf("the sweep the stop interrupted: %v", err)
+	}
+	var row message
+	if err := c.d.Unsafe(t.Context()).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.CompletedAt == nil {
+		t.Fatal("completed_at is NULL: the acknowledgement went down with the sweep's context")
+	}
+	restarted, err := newRelay("stop", func(_ context.Context, m rawMessage) error { ids = append(ids, m.ID); return nil }, c, time.Hour, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("deliveries %v: the restart delivered a message the handler had taken", ids)
+	}
+}

@@ -407,23 +407,25 @@ func (r *relay) attempt(ctx context.Context, row *message, head *headState) erro
 		return errRetryLater
 	}
 	err := r.call(ctx, row.toMessage())
+	if err != nil && ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return err // actual cancellation is not a message failure
+	}
+	// The outcome is written on a budget of its own: a stop that cancels
+	// ctx while the handler runs must not lose the acknowledgement of work
+	// it finished, nor the count of a real failure.
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	if err == nil {
-		if err := r.complete(ctx, row.ID); err != nil {
+		if err := r.complete(persistCtx, row.ID); err != nil {
 			return err
 		}
 		r.delivered.Add(1)
 		return nil
 	}
-	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-		return err // actual cancellation is not a message failure
-	}
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
 	n := row.Attempts + 1
 	if _, undecodable := errors.AsType[decodeError](err); undecodable || n >= r.retry.maxAttempts {
 		return r.park(persistCtx, row, n, err)
 	}
-	// Persist a real handler failure even if shutdown cancelled its context.
 	return r.fail(persistCtx, row, n, err, head)
 }
 
@@ -504,6 +506,8 @@ func (r *relay) isParked(ctx context.Context, id uint64) (bool, error) {
 	return false, nil
 }
 
+// complete writes the acknowledgement of the message id: its
+// completed_at, unless it has one already.
 func (r *relay) complete(ctx context.Context, id uint64) error {
 	if err := r.d.Unsafe(ctx).Model(&message{}).Where("id = ? AND completed_at IS NULL", id).Update("completed_at", r.now().UTC()).Error; err != nil {
 		return fmt.Errorf("jobs: acknowledge message %d: %w", id, err)
