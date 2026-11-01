@@ -60,7 +60,13 @@ func TestLogs_BridgesAreScopedToApp(t *testing.T) {
 	base := testBase(t)
 	base.Log.Output = nil
 	a, b := chok.New(base), chok.New(base)
-	t.Cleanup(func() { _ = a.Close(t.Context()); _ = b.Close(t.Context()) })
+	t.Cleanup(func() {
+		// t.Context() is canceled before cleanups run: close with a live one.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+		defer cancel()
+		_ = a.Close(ctx)
+		_ = b.Close(ctx)
+	})
 	cfg := Config{}
 	cfg.Logs.OTel = true
 	la, lb := &memLogs{}, &memLogs{}
