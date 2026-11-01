@@ -576,7 +576,8 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   `encoding/json/v2` 解码（要原始 JSON 用 `Worker[jsontext.Value]`），以
   `(created_at, id)` 顺序**至少一次**投递，每个 topic 一个水位，失败只阻塞自己的
   topic。handler 必须幂等（按 `Message.ID` 或业务键去重）。成功后持久写入原消息的
-  `completed_at`；水位仅加速扫描，每轮补扫水位之前未确认的消息，迟提交不再受
+  `completed_at`，它是消息已完成的唯一记录：进程内不另记已投递的消息，停机也不写
+  任何东西。水位仅加速扫描，每轮补扫水位之前未确认的消息，迟提交不再受
   `settle_window` 时长限制。扫描按 `(created_at,id)`，迟提交可能晚于新消息送达，
   不保证全局入队顺序或提交顺序。
 - 失败与死信：handler 返回错误或 panic，这条消息的失败次数 +1 并写在消息行上
@@ -593,11 +594,6 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   结果（成功确认或普通错误）即便与停机同时发生，也用独立的 5s context 写入，所以在
   handler 运行中开始的优雅停机不会让它已完成的消息重投。数据库故障或崩溃仍会丢失尚未
   保存的确认或计数。
-
-升级 jobs 必须先停止旧消费者，执行新增的 `20261101000001_confirm_jobs_messages.sql`
-迁移，升级后再启动；不要混跑旧/新消费者。旧死信和 delivered 集合可回填完成证据，
-水位不能证明旧消息已完成，因此其余仍保留的旧消息可能补投一次。升级前先确保 handler
-幂等。旧版本已经物理删除的消息不能靠迁移恢复。
 
 部署假设：所有 worker 与周期任务跑在**一个** `jobs.enabled: true` 的进程里，
 其余进程 `enabled: false` 只 Enqueue。`Stats()` 给出每个作业的运行统计；

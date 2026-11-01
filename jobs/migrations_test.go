@@ -83,6 +83,7 @@ func TestMigrations_VersionedMatchesAuto(t *testing.T) {
 	for _, index := range []string{
 		"idx_chok_jobs_messages_scan [created_at id] unique=false",
 		"idx_chok_jobs_messages_topic [created_at id topic] unique=false",
+		"idx_chok_jobs_messages_pending [completed_at created_at id topic] unique=false",
 		"idx_chok_jobs_dead_parked [id parked_at] unique=false",
 		"idx_chok_jobs_dead_topic [id parked_at topic] unique=false",
 	} {

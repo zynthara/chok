@@ -144,7 +144,7 @@ func tables() []db.TableSpec {
 }
 
 // migrationFiles are the jobs' SQL migrations for migrate: versioned,
-// under migrations/{sqlite,mysql,postgres}: the four tables as migrate:
+// under migrations/{sqlite,mysql,postgres}: the three tables as migrate:
 // auto creates them.
 //
 //go:embed migrations

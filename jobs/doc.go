@@ -66,12 +66,6 @@
 // messages of registered topics below the watermark floor; unknown topics
 // stay. Dead letters remain until Requeue or Discard.
 //
-// Upgrading an existing database adds completed_at. Old dead letters and
-// saved delivered sets provide completion evidence; watermarks do not.
-// Other retained old rows may be replayed once. Deploy idempotent handlers
-// before upgrading. Already deleted rows cannot be recovered by migration.
-// Stop old consumers before migration; mixed old/new consumers are unsafe.
-//
 // Attempts count persisted handler failures, not effects or deliveries.
 // Actual cancellation errors do not consume an attempt. A success or a
 // real error racing shutdown is still recorded, with a separate bounded

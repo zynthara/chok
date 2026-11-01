@@ -859,7 +859,7 @@ func TestMigrations_VersionedUsesTheLedger(t *testing.T) {
 	for _, st := range sts {
 		got = append(got, st.Owner+" "+st.Version+"_"+st.Name+" "+st.State)
 	}
-	if !slices.Equal(got, []string{"jobs 20261025000001_create_jobs_tables applied", "jobs 20261101000001_confirm_jobs_messages applied"}) {
+	if !slices.Equal(got, []string{"jobs 20261025000001_create_jobs_tables applied"}) {
 		t.Fatalf("ledger:\n%s", strings.Join(got, "\n"))
 	}
 	// The tables work.
@@ -904,11 +904,13 @@ func TestMigrations_AutoCreatesTheTables(t *testing.T) {
 			t.Errorf("no table %s", table)
 		}
 	}
-	if !m.HasIndex("chok_jobs_messages", "idx_chok_jobs_messages_scan") || !m.HasIndex("chok_jobs_messages", "idx_chok_jobs_messages_topic") {
-		t.Fatal("the scan indexes")
+	for _, index := range []string{"idx_chok_jobs_messages_scan", "idx_chok_jobs_messages_topic", "idx_chok_jobs_messages_pending"} {
+		if !m.HasIndex("chok_jobs_messages", index) {
+			t.Fatalf("no index %s", index)
+		}
 	}
 	// auto mode records nothing in the ledger: the tables follow the rows.
-	if sts, err := d.MigrationStatus(t.Context()); err != nil || len(sts) != 2 || sts[0].State != "pending" || sts[1].State != "pending" {
+	if sts, err := d.MigrationStatus(t.Context()); err != nil || len(sts) != 1 || sts[0].State != "pending" {
 		t.Fatalf("status in auto mode: %+v %v", sts, err)
 	}
 	// One Jobs per database handle.

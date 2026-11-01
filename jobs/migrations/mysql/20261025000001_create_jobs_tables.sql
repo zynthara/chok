@@ -1,5 +1,5 @@
--- jobs: the messages Enqueue writes, each worker's watermark, the dead
--- letters, and the delivered sets a graceful stop keeps.
+-- jobs: the messages Enqueue writes, each worker's watermark and the dead
+-- letters.
 CREATE TABLE `chok_jobs_messages` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `created_at` datetime(3) NOT NULL,
@@ -8,9 +8,11 @@ CREATE TABLE `chok_jobs_messages` (
   `attempts` bigint NOT NULL DEFAULT '0',
   `retry_at` datetime(3) DEFAULT NULL,
   `last_error` longtext,
+  `completed_at` datetime(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_chok_jobs_messages_scan` (`created_at`,`id`),
-  KEY `idx_chok_jobs_messages_topic` (`topic`,`created_at`,`id`)
+  KEY `idx_chok_jobs_messages_topic` (`topic`,`created_at`,`id`),
+  KEY `idx_chok_jobs_messages_pending` (`topic`,`completed_at`,`created_at`,`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE `chok_jobs_watermarks` (
   `topic` varchar(200) NOT NULL,
@@ -30,10 +32,4 @@ CREATE TABLE `chok_jobs_dead` (
   PRIMARY KEY (`id`),
   KEY `idx_chok_jobs_dead_parked` (`parked_at`,`id`),
   KEY `idx_chok_jobs_dead_topic` (`topic`,`parked_at`,`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE TABLE `chok_jobs_delivered` (
-  `topic` varchar(200) NOT NULL,
-  `message_id` bigint unsigned NOT NULL,
-  `created_at` datetime(3) NOT NULL,
-  PRIMARY KEY (`topic`,`message_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
