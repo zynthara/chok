@@ -436,8 +436,10 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   值；mail 电池的 `SendTemplate` 正是这个形状，装配一行
   `identity.Sender(mailer.SendTemplate)`。发信在后台
   goroutine 里做，响应不等它（是否有这个账户也就从时长上看不出来），失败只记
-  Warn；`Close` 在 ctx 内等在途的发送，超时则取消它们。`reset_url` /
-  `passwordless.magic_link_url` 配了，`Mail.Link` 就是带 `?token=` 的页面地址。
+  Warn；每次发送的 ctx 一分钟后取消，兜住自己不设超时的 `Sender`（`SendTemplate`
+  本身守着 `mail.timeout`）；`Close` 在 ctx 内等在途的发送，超时则取消它们。
+  `reset_url` / `passwordless.magic_link_url` 配了，`Mail.Link` 就是带 `?token=`
+  的页面地址。
 - **无密码登录**（`auth.passwordless`，需要 `Sender`）：start 一律 202、无体，
   按邮箱 upsert 一行 `auth_login_codes`（码与 magic-link token 都只存
   HMAC-SHA256(signing_key, ·) 的 hex），码未用时在 `resend_after` 内再 start 不换码、

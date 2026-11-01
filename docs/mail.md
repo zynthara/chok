@@ -89,7 +89,8 @@ data: `{{.Code}}`, `{{.Token}}`, `{{.Link}}` (set when `magic_link_url` or
 code, which the user types in where they are signed in. identity
 calls it in the background — a response never waits on a mail, so it
 takes as long whether or not the address has an account — logs a
-failure as a warning, and waits for the mails in flight when it closes.
+failure as a warning, cancels the context of a send still going after a
+minute, and waits for the mails in flight when it closes.
 
 ## Templates
 

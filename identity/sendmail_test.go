@@ -183,3 +183,50 @@ func TestClose_WaitsForTheMailsInFlight(t *testing.T) {
 		}
 	})
 }
+
+// TestMail_SendEndsAtTheCap: a Sender that hangs until its context ends
+// is canceled once the send has run mailTimeout: the send ends with the
+// deadline, the end is a warning, and Close, which waits for the sends in
+// flight, returns on its own, well within its context.
+func TestMail_SendEndsAtTheCap(t *testing.T) {
+	old := mailTimeout
+	mailTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { mailTimeout = old })
+	sender := newBlockingSender()
+	idn := newIdentity(t, Config{}, Sender(sender.send))
+	// A send left hanging by a failure below would hold the cleanup's Close.
+	t.Cleanup(func() { close(sender.release) })
+	h, logs := loggedApp(t, idn)
+	if _, err := idn.Users().Create(t.Context(), "alice@test.com", "password123", "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	if rec := serveJSON(t, h, http.MethodPost, "/auth/forgot-password", map[string]string{"email": "alice@test.com"}, "X-Request-Id", "req-capped"); rec.Code != http.StatusNoContent {
+		t.Fatalf("forgot = %d", rec.Code)
+	}
+	select {
+	case <-sender.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the send did not start")
+	}
+	// Close while the send hangs: the cap ends the send, and Close returns
+	// before its context ends.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := idn.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-sender.ended:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the send ended with %v", err)
+		}
+	default:
+		t.Fatal("Close returned while the send was in flight")
+	}
+	line := logs.String()
+	for _, want := range []string{"level=WARN", "identity: mail not sent", "kind=password-reset", `error="context deadline exceeded"`, "request_id=req-capped"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("the warning lacks %s:\n%s", want, line)
+		}
+	}
+}

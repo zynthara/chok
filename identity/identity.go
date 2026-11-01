@@ -90,7 +90,10 @@ func Providers(p ...Provider) Option {
 //
 // identity calls fn in the background, so a response never waits on it;
 // an error is logged as a warning, and Close waits for the sends in
-// flight. ctx carries the request's values, not its cancellation.
+// flight. ctx carries the request's values, not its cancellation, and
+// ends a minute into the send, or sooner when Close stops waiting: fn
+// should return when ctx is done. The minute is a backstop for a Sender
+// without a timeout of its own; SendTemplate keeps to mail.timeout.
 func Sender(fn func(ctx context.Context, to, template string, data any) error) Option {
 	return func(o *options) { o.sender = fn }
 }
@@ -261,10 +264,19 @@ func (idn *Identity) Close(ctx context.Context) error {
 	return idn.closeErr
 }
 
+// mailTimeout bounds a send: identity cancels the Sender's context once
+// the send has run this long, so a Sender that hangs holds its goroutine,
+// and any connection it has open, no longer. It is wider than the mail
+// battery's mail.timeout (15s by default), which SendTemplate keeps by
+// itself: it is for a Sender of the application's that has no timeout.
+// A variable so that tests can shorten it.
+var mailTimeout = time.Minute
+
 // sendMail hands m to the Sender in the background, so that a response
 // takes as long whether or not a mail goes out. The send keeps ctx's
-// values — the request's logger and id — but not its cancellation; Close
-// waits for it. A failure is a warning in the log.
+// values — the request's logger and id — but not its cancellation; it is
+// canceled after mailTimeout, and Close waits for it. A failure is a
+// warning in the log.
 func (idn *Identity) sendMail(ctx context.Context, m Mail) {
 	logger := chok.LoggerFrom(ctx)
 	idn.mailMu.Lock()
@@ -275,7 +287,7 @@ func (idn *Identity) sendMail(ctx context.Context, m Mail) {
 	}
 	idn.mailing.Add(1)
 	idn.mailMu.Unlock()
-	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mailTimeout)
 	stop := context.AfterFunc(idn.mailCtx, cancel)
 	go func() {
 		defer idn.mailing.Done()
