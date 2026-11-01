@@ -148,7 +148,8 @@ package, configuration key, API, table and metric to its new form.
   finished, a success that a stop interrupted is acknowledged within a
   budget of its own, a worker is handed no further message once the stop
   began, a message committed late behind the watermark is still found,
-  and retention removes only what its topic's worker completed. `jobs.Observe`
+  and retention removes only what its topic's worker completed; `Stats`
+  shows each worker's backlog as `pending` and `oldest_pending`. `jobs.Observe`
   streams every run — started, finished, failed, skipped — and every
   parked message as a `jobs.Event`, for a live jobs panel through
   `realtime`.
