@@ -143,7 +143,10 @@ func New(base Base, opts ...Option) *App {
 // implements: Starter, Closer, Healther, Mounter, Namer and Instrumenter.
 // Use mounts in registration order; Start calls run concurrently and do not
 // establish readiness dependencies. Close runs in reverse. A value that
-// implements none of them is ignored with a warning.
+// implements none of them is ignored with a warning. A registered value
+// with a BindLogger(*slog.Logger) method is handed the App's root logger
+// as it is registered: that is how telemetry's logs.otel bridge attaches
+// to the logger New built.
 func (a *App) Use(components ...any) {
 	var mount []Mounter
 	a.mu.Lock()

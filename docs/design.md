@@ -87,6 +87,8 @@ app.Execute()                              // Run + 信号
 返回）、`Closer`、`Healther`、`Mounter`（电池挂自己的路由，在用户路由之前）、
 `Namer`（健康报告里的名字）、`Instrumenter`（插进中间件栈的遥测槽位）；
 什么都没实现的值被忽略并告警。Mount 按登记顺序执行，Close 逆序；Start 并发执行，登记顺序不建立组件就绪依赖。
+登记的值若还有 `BindLogger(*slog.Logger)` 方法，Use 当场把 App 的根 logger 交给它，
+telemetry 的 logs.otel 桥接就是这样接上的（§7.3）。
 
 **启动相**：把 Start 分别放进 goroutine 并发调用，然后轮询所有
 `Healther` 直到全部健康（受 `app.start_timeout` 约束）；期间任何 `Start`
