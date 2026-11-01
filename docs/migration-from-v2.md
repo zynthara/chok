@@ -371,8 +371,10 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
   token 一致），禁用、改密、改角色、`RevokeTokens` 立即生效。
 - **新路由** `GET {prefix}/me`：`{id, email, name, email_verified, email_assumed,
   roles, created_at}`。其余路由与请求 / 响应体逐字沿用 v2（register 201、
-  login 200，体都是 `{token, expires_at}`；forgot-password 一律 204）。
+  login 200，体都是 `{token, expires_at}`；forgot-password 204，超过限速 429）。
 - **登录限速**默认开（15m / 10，按 email 与客户端 IP），429 带 `Retry-After`。
+  同一组阈值也限发码：forgot-password（按 email 与客户端 IP）、passwordless/start
+  （按客户端 IP）、confirm-email/start（按用户），这三条每次调用都计，不只失败。
 - **角色只有一套**：v2 的 `users.roles`（进 token 的角色）与 casbin 的全局角色
   成员是两套、互不相通；v0.2 只留 `users.roles`，rbac 判定时读它：`admin` 全通，
   其余按用户自己的授权（`GrantUser`）与它的角色的授权（`GrantRole`）。casbin
