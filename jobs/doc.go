@@ -79,7 +79,9 @@
 //
 // # Watching the runs
 //
-// Stats is a snapshot; Observe is the stream. Its function receives an
+// Stats is a snapshot, a worker's backlog included: how many messages of
+// its topic were unacknowledged when its last sweep ended, and since
+// when. Observe is the stream. Its function receives an
 // Event as each run starts, finishes or fails, as a trigger is skipped
 // and as a worker parks a message, so a dashboard can show the background
 // work live — hand the

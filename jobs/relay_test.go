@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/zynthara/chok/internal/dbtest"
 )
 
@@ -1182,4 +1184,69 @@ func TestRelay_ClockZoneDoesNotMatter(t *testing.T) {
 		t.Fatalf("watermark = %+v, %v after the window", w, err)
 	}
 	wantPayloads(t, cp.payloads(), []string{"m1", "m2"})
+}
+
+// TestRelay_CountsTheBacklogAfterEachSweep: after every sweep the relay
+// counts its topic's messages without an acknowledgement and reads when
+// the oldest was enqueued, for Stats: all three while the first fails
+// and holds the others back, none once the topic flows again. Another
+// topic's messages are not counted. A count that fails leaves the one
+// before and does not fail the sweep.
+func TestRelay_CountsTheBacklogAfterEachSweep(t *testing.T) {
+	c := openCore(t)
+	ctx := t.Context()
+	for i := 1; i <= 3; i++ {
+		enqueue(t, c, "backlog", fmt.Sprintf("m%d", i))
+	}
+	enqueue(t, c, "elsewhere", "x")
+	boom := errors.New("downstream down")
+	cp := &capture{fail: func(m rawMessage) error {
+		if string(m.Payload) == "m1" {
+			return boom
+		}
+		return nil
+	}}
+	r := mkRelay(t, c, "backlog", cp, 0, 10) // no backoff: the next sweep tries m1 again
+	if head, backlog := r.headStats(); head != (headState{}) || backlog != (backlogState{}) {
+		t.Fatalf("before the first sweep: head %+v, backlog %+v", head, backlog)
+	}
+
+	if err := r.run(ctx); !errors.Is(err, boom) {
+		t.Fatalf("sweep err = %v, want the handler error", err)
+	}
+	// m1 as the database keeps it: milliseconds on MySQL, microseconds on
+	// Postgres.
+	oldest := topicRows(t, c, "backlog")[0].CreatedAt
+	head, backlog := r.headStats()
+	if backlog.pending != 3 || !backlog.oldest.Equal(oldest) || backlog.oldest.Location() != time.UTC || head.attempts != 1 {
+		t.Fatalf("after the failing sweep: backlog %+v, head %+v; want 3 pending since %v, in UTC", backlog, head, oldest)
+	}
+
+	// The count of the next sweep fails, against a table that does not
+	// exist; the sweep delivers the three all the same.
+	rowCallbacks := c.d.Unsafe(ctx).Callback().Row()
+	if err := rowCallbacks.Before("gorm:row").Register("test:count_failure", func(tx *gorm.DB) {
+		tx.Statement.Table = "chok_jobs_missing"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cp.mu.Lock()
+	cp.fail = nil
+	cp.mu.Unlock()
+	err := r.run(ctx)
+	_ = rowCallbacks.Remove("test:count_failure")
+	if err != nil {
+		t.Fatalf("a sweep whose count failed: %v", err)
+	}
+	wantPayloads(t, cp.payloads(), []string{"m1", "m2", "m3"})
+	if head, kept := r.headStats(); kept != backlog || head != (headState{}) {
+		t.Fatalf("after a failed count: backlog %+v, head %+v; want the backlog before, %+v", kept, head, backlog)
+	}
+
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, backlog := r.headStats(); backlog != (backlogState{}) {
+		t.Fatalf("once the topic flows: backlog %+v, want none", backlog)
+	}
 }

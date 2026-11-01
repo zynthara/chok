@@ -262,6 +262,17 @@ type JobStats struct {
 	// NextRetry is when that message is tried next; zero while the
 	// topic flows.
 	NextRetry time.Time `json:"next_retry,omitzero"`
+	// Pending is, for a worker, how many messages of its topic were
+	// waiting for an acknowledgement (completed_at) when its last sweep
+	// ended: a snapshot taken after each sweep, not a live count. It
+	// grows while a failing message holds the topic or the worker falls
+	// behind. Zero for the periodic jobs and the cleanup, and before a
+	// worker's first sweep, so always in a process with Enabled false; a
+	// count that fails leaves the snapshot before it.
+	Pending int64 `json:"pending,omitzero"`
+	// OldestPending is when the oldest of those messages was enqueued, in
+	// UTC: how long the backlog has waited. Zero when none was pending.
+	OldestPending time.Time `json:"oldest_pending,omitzero"`
 }
 
 // New builds the jobs battery on d: it checks cfg and every option, then
@@ -400,8 +411,9 @@ func (j *Jobs) Stats() Stats {
 		r := j.relays[i]
 		ws := e.snapshot()
 		ws.Messages, ws.Parked = r.delivered.Load(), r.parked.Load()
-		head := r.headStats()
+		head, backlog := r.headStats()
 		ws.HeadAttempts, ws.NextRetry = head.attempts, head.next
+		ws.Pending, ws.OldestPending = backlog.pending, backlog.oldest
 		st.Workers = append(st.Workers, ws)
 	}
 	if j.cleanup != nil {

@@ -844,6 +844,45 @@ func TestStats_ListsEveryEntry(t *testing.T) {
 	}
 }
 
+// TestStats_ShowAWorkersBacklog: a worker's Stats carry how many messages
+// of its topic waited for an acknowledgement when its last sweep ended,
+// and when the oldest of them was enqueued: both while a failing message
+// holds the topic, and zero once it flows. The periodic jobs and the
+// cleanup have no backlog.
+func TestStats_ShowAWorkersBacklog(t *testing.T) {
+	d := dbtest.Open(t)
+	var healed atomic.Bool
+	in := &inbox{}
+	cfg := fastConfig()
+	cfg.Retention = 24 * time.Hour // a cleanup entry; it does not run during the test
+	j := newJobs(t, d, cfg,
+		Periodic("report", "@hourly", noop, OverlapSkip),
+		Worker("orders", func(ctx context.Context, m Message[jsontext.Value]) error {
+			if !healed.Load() {
+				return errors.New("downstream down")
+			}
+			return in.handle(ctx, m)
+		}))
+	run(t, j)
+	enqueueTx(t, d, j, "orders", "o1")
+	enqueueTx(t, d, j, "orders", "o2")
+	oldest := topicRows(t, j.core, "orders")[0].CreatedAt
+	eventually(t, "a backlog of two", func() bool {
+		st := j.Stats().Workers[0]
+		return st.Pending == 2 && st.OldestPending.Equal(oldest)
+	})
+	st := j.Stats()
+	if p, c := st.Periodic[0], st.Cleanup; p.Pending != 0 || !p.OldestPending.IsZero() || c.Pending != 0 || !c.OldestPending.IsZero() {
+		t.Fatalf("the periodic job's or the cleanup's stats carry a backlog: %+v, %+v", p, c)
+	}
+
+	healed.Store(true)
+	eventually(t, "both delivered and no backlog left", func() bool {
+		st := j.Stats().Workers[0]
+		return in.count() == 2 && st.Pending == 0 && st.OldestPending.IsZero()
+	})
+}
+
 // TestMigrations_VersionedUsesTheLedger is v2's
 // TestModule_VersionedUsesOwnedLedger: in migrate: versioned, New applies
 // the jobs' SQL under the owner "jobs" in the one ledger.

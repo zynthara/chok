@@ -43,8 +43,9 @@ type relay struct {
 	// sweeps handing the same message to the handler at once.
 	mu sync.Mutex
 
-	headMu sync.Mutex
-	head   headState // where the last sweep stopped on a failing message, for Stats
+	headMu  sync.Mutex   // guards head and backlog
+	head    headState    // where the last sweep stopped on a failing message, for Stats
+	backlog backlogState // the topic's unacknowledged messages after the last sweep, for Stats
 }
 
 // retryPolicy is what a worker does with a message its function fails
@@ -73,6 +74,14 @@ func (p retryPolicy) delay(n int) time.Duration {
 type headState struct {
 	attempts int
 	next     time.Time
+}
+
+// backlogState is what a worker's topic held without an acknowledgement
+// when its last sweep ended: how many messages, and when the oldest was
+// enqueued, in UTC. Zero when none was pending.
+type backlogState struct {
+	pending int64
+	oldest  time.Time
 }
 
 // scanPos is the in-sweep cursor: the created_at boundary plus how many
@@ -156,7 +165,8 @@ const maxSweepPages = 100
 
 // run is one sweep. An error aborted it with the watermark parked before
 // the failed row; errRetryLater ends it there quietly, at a message whose
-// next try is not due.
+// next try is not due. However the sweep ended, run then counts the
+// topic's backlog for Stats, unless a stop has begun.
 func (r *relay) run(ctx context.Context) error {
 	if !r.mu.TryLock() {
 		return errSweepRunning
@@ -165,17 +175,74 @@ func (r *relay) run(ctx context.Context) error {
 
 	var head headState
 	err := r.sweep(ctx, &head)
+	backlog, counted := r.countBacklog(ctx, err)
 	r.headMu.Lock()
 	r.head = head
+	if counted {
+		r.backlog = backlog
+	}
 	r.headMu.Unlock()
 	return err
 }
 
-// headStats returns where the last sweep stopped on a failing message.
-func (r *relay) headStats() headState {
+// headStats returns what the last sweep left for Stats: where it stopped
+// on a failing message, and the topic's backlog after it.
+func (r *relay) headStats() (headState, backlogState) {
 	r.headMu.Lock()
 	defer r.headMu.Unlock()
-	return r.head
+	return r.head, r.backlog
+}
+
+// countBacklog counts the topic's messages without an acknowledgement and
+// finds when the oldest was enqueued, in one query on the pending index.
+// ok is false when a stop has begun or the query failed: Stats keep the
+// count before, and the sweep's outcome stands. A failed count is logged
+// at Warn, or at Debug after a sweep that failed, whose failure is in the
+// log already.
+func (r *relay) countBacklog(ctx context.Context, sweepErr error) (b backlogState, ok bool) {
+	if ctx.Err() != nil {
+		return backlogState{}, false
+	}
+	var oldest any // nil when no message is pending
+	err := r.scope(ctx).Where("completed_at IS NULL").Select("COUNT(*), MIN(created_at)").Row().Scan(&b.pending, &oldest)
+	if err == nil {
+		b.oldest, err = minCreatedAt(oldest)
+	}
+	if err != nil {
+		if ctx.Err() == nil { // a stop that began during the query is no failure
+			level := slog.LevelWarn
+			if sweepErr != nil && !errors.Is(sweepErr, errRetryLater) {
+				level = slog.LevelDebug
+			}
+			r.logger.Log(ctx, level, "jobs: counting the pending messages failed; Stats keep the previous count", "error", err)
+		}
+		return backlogState{}, false
+	}
+	return b, true
+}
+
+// sqliteTimeLayout is the layout the SQLite driver writes times in. SQLite
+// returns MIN over a time column as that text: an aggregate has no
+// declared type for the driver to convert it by.
+const sqliteTimeLayout = "2006-01-02 15:04:05.999999999-07:00"
+
+// minCreatedAt is MIN(created_at) as the driver returned it, in UTC: nil
+// when no message matched, a time.Time on MySQL and Postgres, the stored
+// text on SQLite.
+func minCreatedAt(v any) (time.Time, error) {
+	switch v := v.(type) {
+	case nil:
+		return time.Time{}, nil
+	case time.Time:
+		return v.UTC(), nil
+	case string:
+		t, err := time.Parse(sqliteTimeLayout, v)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("read MIN(created_at): %w", err)
+		}
+		return t.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("read MIN(created_at): the driver returned a %T", v)
 }
 
 // sweep scans and delivers; it sets *head when it stops on a failing
