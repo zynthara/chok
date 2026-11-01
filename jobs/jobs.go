@@ -188,8 +188,8 @@ type Event struct {
 	// for the workers and the cleanup.
 	Next time.Time `json:"next,omitzero"`
 	// Messages counts, when a run ends, the messages a worker's sweep
-	// handed to its function and the function took, or the rows the
-	// cleanup deleted.
+	// handed to its function that it returned nil for and whose
+	// acknowledgement was written, or the rows the cleanup deleted.
 	Messages int `json:"messages,omitzero"`
 }
 
@@ -248,9 +248,9 @@ type JobStats struct {
 	// nanoseconds, and encoding/json/v2 refuses it unless told how, having
 	// no default representation for a Duration.
 	AvgDuration time.Duration `json:"avg_duration"`
-	// Messages counts, for a worker, the messages its function took
-	// (returned nil for) since New; for the cleanup, the messages it
-	// deleted.
+	// Messages counts, for a worker, the messages its function returned
+	// nil for and whose acknowledgement was written, since New; for the
+	// cleanup, the messages it deleted.
 	Messages int64 `json:"messages"`
 	// Parked counts, for a worker, the messages it parked in the dead
 	// letters since New.

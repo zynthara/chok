@@ -70,7 +70,8 @@
 // Actual cancellation errors do not consume an attempt. A success or a
 // real error racing shutdown is still recorded, with a separate bounded
 // context, when the DB permits: a stop that begins while the function
-// runs does not repeat a message it finished.
+// runs does not repeat a message it finished, and the function gets no
+// further message until the next start.
 //
 // Workers and periodic jobs run in the processes where Config.Enabled is
 // true; run them in one process of a deployment and set enabled: false in

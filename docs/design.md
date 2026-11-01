@@ -592,8 +592,8 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   未确认消息或未知 topic。配置文件不写 retention 默认 168h，代码 Config 为 0（永久）。
   Attempt 计算已持久记录的 handler 失败，不是投递次数；取消错误不扣次数。handler 的
   结果（成功确认或普通错误）即便与停机同时发生，也用独立的 5s context 写入，所以在
-  handler 运行中开始的优雅停机不会让它已完成的消息重投。数据库故障或崩溃仍会丢失尚未
-  保存的确认或计数。
+  handler 运行中开始的优雅停机不会让它已完成的消息重投；停机开始后，这一轮剩下的消息
+  不再交给 handler，等下次启动。数据库故障或崩溃仍会丢失尚未保存的确认或计数。
 
 部署假设：所有 worker 与周期任务跑在**一个** `jobs.enabled: true` 的进程里，
 其余进程 `enabled: false` 只 Enqueue。`Stats()` 给出每个作业的运行统计；

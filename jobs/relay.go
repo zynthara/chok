@@ -372,15 +372,21 @@ func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint
 }
 
 // attempt delivers row, a row without a completed_at, unless its next try
-// is not due (errRetryLater). nil means the topic moves past row: the
-// handler took it, or it is parked. A failure below MaxAttempts is
-// counted on the row and stops the sweep there; the last one parks it.
-// Parking writes completed_at with the dead letter, so a parked row is
-// never attempted again.
+// is not due (errRetryLater) or a stop has cancelled ctx (ctx's error).
+// nil means the topic moves past row: the handler took it, or it is
+// parked. A failure below MaxAttempts is counted on the row and stops the
+// sweep there; the last one parks it. Parking writes completed_at with
+// the dead letter, so a parked row is never attempted again.
 func (r *relay) attempt(ctx context.Context, row *message, head *headState) error {
 	if row.RetryAt != nil && row.RetryAt.After(r.now()) {
 		*head = headState{attempts: row.Attempts, next: row.RetryAt.UTC()}
 		return errRetryLater
+	}
+	// Once a stop has begun, the rest of the page waits for the next
+	// start: the handler gets no message it could only receive with a
+	// cancelled context.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	err := r.call(ctx, row.toMessage())
 	if err != nil && ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {

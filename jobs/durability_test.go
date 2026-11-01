@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -251,5 +252,55 @@ func TestRelay_StopDuringASuccessfulHandlerStillAcknowledges(t *testing.T) {
 	}
 	if len(ids) != 1 {
 		t.Fatalf("deliveries %v: the restart delivered a message the handler had taken", ids)
+	}
+}
+
+// TestRelay_StopHandsOutNoFurtherMessage: once a stop has cancelled the
+// sweep's context, the relay acknowledges the message the handler was
+// running and hands it nothing more, even a handler that does not watch
+// its context; the rest of the page waits for the next start.
+func TestRelay_StopHandsOutNoFurtherMessage(t *testing.T) {
+	c := openCore(t)
+	enqueue(t, c, "stop", "1")
+	enqueue(t, c, "stop", "2")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var got []string
+	r, err := newRelay("stop", func(_ context.Context, m rawMessage) error {
+		got = append(got, string(m.Payload))
+		if len(got) == 1 {
+			close(entered)
+			<-release
+		}
+		return nil // the handler does not watch ctx
+	}, c, time.Hour, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.run(ctx) }()
+	<-entered
+	cancel()       // the stop begins while the handler runs the first
+	close(release) // the handler returns nil
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the sweep the stop interrupted: %v, want context.Canceled", err)
+	}
+	if !slices.Equal(got, []string{"1"}) {
+		t.Fatalf("the handler got %v, want only the message it was running when the stop began", got)
+	}
+	rows := topicRows(t, c, "stop")
+	if rows[0].CompletedAt == nil || rows[1].CompletedAt != nil {
+		t.Fatalf("completed_at %v and %v: want the first acknowledged, the second pending", rows[0].CompletedAt, rows[1].CompletedAt)
+	}
+	restarted, err := newRelay("stop", func(_ context.Context, m rawMessage) error { got = append(got, string(m.Payload)); return nil }, c, time.Hour, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"1", "2"}) {
+		t.Fatalf("deliveries %v after the restart, want 1 once and then 2", got)
 	}
 }
