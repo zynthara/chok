@@ -104,7 +104,7 @@ const (
 	auditFlushEvery = time.Second // a partial batch waits at most this long
 	auditPurgeEvery = time.Hour   // retention sweeps
 	auditPurgeBatch = 1000        // rows per DELETE, so a sweep never holds long locks
-	auditFailWindow = time.Minute // Health reports a write failure this recent
+	auditFailWindow = time.Minute // Health reports an unrecovered write failure this recent
 	auditPageSize   = 50          // ListFromQuery's default page
 	auditMaxPage    = 500         // and its largest
 	auditReasonMax  = 512         // the reason column's size
@@ -191,6 +191,7 @@ func (a *Audit) LogSync(ctx context.Context, e Event) error {
 		return fmt.Errorf("identity: audit: %w", err)
 	}
 	a.written.Add(1)
+	a.succeed()
 	return nil
 }
 
@@ -281,6 +282,7 @@ func (a *Audit) run(ctx context.Context) {
 			a.logger.Error("identity: audit batch not written; dropped", "size", len(batch), "error", err)
 		} else {
 			a.written.Add(uint64(len(batch)))
+			a.succeed()
 		}
 		batch = batch[:0]
 	}
@@ -364,8 +366,18 @@ func (a *Audit) fail(err error) {
 	a.lastErr.Store(&failure{at: a.now(), err: err})
 }
 
-// health fails when a write failed within the last minute; a write its
-// context cut short does not count.
+// succeed clears the recorded failure, now that a write went through. A
+// failure recorded in the meantime stands; with nothing to clear, as on
+// nearly every write, it only reads.
+func (a *Audit) succeed() {
+	if f := a.lastErr.Load(); f != nil {
+		a.lastErr.CompareAndSwap(f, nil)
+	}
+}
+
+// health fails while the latest recorded failure is under a minute old
+// and no write has gone through since; fail does not record a write its
+// context cut short.
 func (a *Audit) health() error {
 	if f := a.lastErr.Load(); f != nil && a.now().Sub(f.at) < auditFailWindow {
 		return fmt.Errorf("audit: a write failed %s ago: %w", a.now().Sub(f.at).Round(time.Second), f.err)

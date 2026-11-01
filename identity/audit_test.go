@@ -430,6 +430,53 @@ func TestAudit_HealthIgnoresAnEndedContext(t *testing.T) {
 	}
 }
 
+// TestAudit_HealthClearsWhenAWriteGoesThrough: a failed write makes
+// Health fail until a later write goes through, a batch of the writer's
+// or a LogSync, so one bad moment does not keep /healthz down a minute.
+func TestAudit_HealthClearsWhenAWriteGoesThrough(t *testing.T) {
+	idn := auditOn(t, AuditConfig{})
+	m := idn.d.Unsafe(t.Context()).Migrator()
+	rename := func(from, to string) {
+		t.Helper()
+		if err := m.RenameTable(from, to); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := detachedAudit(idn, 8, false)
+	a.flushEvery = 10 * time.Millisecond
+	a.startWriter(t)
+
+	// The table is away: the writer's batch fails.
+	rename("audit_logs", "audit_logs_away")
+	a.Log(t.Context(), Event{Action: "lost"})
+	eventually(t, "the failed batch shows in Health", func() bool { return a.health() != nil })
+	rename("audit_logs_away", "audit_logs")
+	if err := a.health(); err == nil {
+		t.Fatal("the failure stands until a write goes through")
+	}
+	a.Log(t.Context(), Event{Action: "kept"})
+	eventually(t, "a written batch clears Health", func() bool { return a.health() == nil })
+
+	// The same through LogSync.
+	rename("audit_logs", "audit_logs_away")
+	if err := a.LogSync(t.Context(), Event{Action: "lost"}); err == nil {
+		t.Fatal("LogSync wrote with the table away")
+	}
+	rename("audit_logs_away", "audit_logs")
+	if err := a.health(); err == nil {
+		t.Fatal("a failed LogSync shows in Health")
+	}
+	if err := a.LogSync(t.Context(), Event{Action: "kept"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.health(); err != nil {
+		t.Fatalf("after a LogSync that went through: %v", err)
+	}
+	if kept, lost := count(t, idn, "action = ?", "kept"), count(t, idn, "action = ?", "lost"); kept != 2 || lost != 0 {
+		t.Fatalf("kept=%d lost=%d", kept, lost)
+	}
+}
+
 func TestAudit_AdminAPI(t *testing.T) {
 	idn := auditOn(t, AuditConfig{AdminAPI: true})
 	c := serve(t, idn)
