@@ -478,7 +478,9 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   绑定、清掉密码、吊销 token，用 Facebook 注册的人（不一定是邮箱的主人）被踢出去。
   用户在自己的会话里确认邮箱则一切保留，见下面「在会话里确认邮箱」。
 - **审计**：`Audit().Log`（异步入队，不进调用方事务）/ `LogSync`（同步，随 ctx
-  事务）；trace id 由 telemetry 经内部钩子补上。
+  事务）；trace id 由 telemetry 经内部钩子补上。`Health` 只在最近一次审计写入失败、
+  此后还没有写成功过、且失败不到一分钟时报错；调用方的 ctx 到期或取消造成的失败
+  不算（`LogSync` 照样把错误返回给调用方）。
 - **角色只有一套**：全局角色只存在 identity——`users.roles` → `Principal.Roles`，
   用 `Users().SetRoles` 管（会吊销该用户的 token，下个请求就是新角色）。内置的
   `admin` 在 rbac 里无所不能，在 identity 里可读审计；store 的
