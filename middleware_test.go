@@ -3,6 +3,7 @@ package chok
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -309,6 +310,66 @@ func TestInstrumenter_SitsInsideRequestIDAndClientIP(t *testing.T) {
 	do(t, app.Handler(), call{method: http.MethodGet, path: "/x"})
 	if len(seen) != 1 || seen[0] != "true" {
 		t.Fatalf("instrumenters see the request id and client ip: %v", seen)
+	}
+}
+
+// TestClientIP_UntrustedForwardingWarnsOnce: a forwarding header from a
+// peer that http.trusted_proxies does not list is ignored, and the App
+// says so once, naming the peer, without its port, and the header; a
+// listed peer's header, or a request without one, says nothing.
+func TestClientIP_UntrustedForwardingWarnsOnce(t *testing.T) {
+	forwarded := map[string]string{"X-Forwarded-For": "203.0.113.7"}
+	for name, c := range map[string]struct {
+		trusted []string
+		header  map[string]string
+		wantIP  string
+		warns   int
+	}{
+		"untrusted peer":       {nil, forwarded, "192.0.2.1", 1},
+		"trusted peer":         {[]string{"192.0.2.0/24"}, forwarded, "203.0.113.7", 0},
+		"no forwarding header": {nil, nil, "192.0.2.1", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := testBase(t)
+			base.HTTP.TrustedProxies = c.trusted
+			var logs bytes.Buffer
+			app := New(base, Logger(slog.New(slog.NewJSONHandler(&logs, nil))))
+			var got string
+			GET(app.Router(), "/ip", func(ctx context.Context, _ *None) (None, error) { got = ClientIP(ctx); return None{}, nil })
+			for range 2 { // httptest's peer is 192.0.2.1:1234
+				do(t, app.Handler(), call{method: http.MethodGet, path: "/ip", header: c.header})
+				if got != c.wantIP {
+					t.Fatalf("ClientIP %q, want %q", got, c.wantIP)
+				}
+			}
+			type line struct {
+				Level     string `json:"level"`
+				Msg       string `json:"msg"`
+				RequestID string `json:"request_id"`
+				Peer      string `json:"peer"`
+				Header    string `json:"header"`
+			}
+			var warns []line
+			for raw := range strings.Lines(logs.String()) {
+				var l line
+				if err := json.Unmarshal([]byte(raw), &l); err != nil {
+					t.Fatalf("log line %q: %v", raw, err)
+				}
+				if l.Level == "WARN" {
+					warns = append(warns, l)
+				}
+			}
+			if len(warns) != c.warns {
+				t.Fatalf("%d warnings, want %d:\n%s", len(warns), c.warns, logs.String())
+			}
+			if c.warns == 0 {
+				return
+			}
+			if w := warns[0]; !strings.Contains(w.Msg, "untrusted peer is ignored; set http.trusted_proxies") ||
+				w.Peer != "192.0.2.1" || w.Header != "X-Forwarded-For" || w.RequestID == "" {
+				t.Fatalf("the warning names the peer and the header, with the request id: %+v", w)
+			}
+		})
 	}
 }
 

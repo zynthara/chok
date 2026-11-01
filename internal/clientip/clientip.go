@@ -18,8 +18,9 @@ import (
 )
 
 // headers consulted, in order, when the direct peer is trusted. Same
-// set and order as gin's default RemoteIPHeaders.
-var headers = []string{"X-Forwarded-For", "X-Real-IP"}
+// set and order as gin's default RemoteIPHeaders, in canonical form so
+// that looking one up allocates nothing.
+var headers = []string{"X-Forwarded-For", "X-Real-Ip"}
 
 // Resolver derives the client IP from RemoteAddr plus forwarding
 // headers, honouring headers only when the direct peer is a trusted
@@ -85,6 +86,26 @@ func (r *Resolver) ClientIP(req *http.Request) string {
 		}
 	}
 	return peerStr
+}
+
+// Ignored reports the forwarding header ClientIP disregards on req
+// because the direct peer is not a trusted proxy: the first of the
+// headers req carries, and the peer's address without its port. Both
+// are empty when req carries none, when the peer is trusted, and when
+// RemoteAddr holds no IP address, which no trusted_proxies entry could
+// match.
+func (r *Resolver) Ignored(req *http.Request) (header, peer string) {
+	for _, h := range headers {
+		if req.Header.Get(h) == "" {
+			continue
+		}
+		addr, ok := parseAddr(req.RemoteAddr)
+		if !ok || r.isTrusted(addr) {
+			return "", ""
+		}
+		return h, addr.String()
+	}
+	return "", ""
 }
 
 // fromHeader walks a comma-separated forwarding chain from the

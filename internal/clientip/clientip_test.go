@@ -171,3 +171,42 @@ func TestClientIP_WhitespaceInChain(t *testing.T) {
 		t.Fatalf("whitespace-padded hops must parse, got %q", got)
 	}
 }
+
+func TestIgnored_NamesTheHeaderAndTheUntrustedPeer(t *testing.T) {
+	r := mustResolver(t, "10.0.0.0/8")
+	xff := map[string]string{"X-Forwarded-For": "198.51.100.1"}
+	for _, c := range []struct {
+		name, remote         string
+		sent                 map[string]string
+		wantHeader, wantPeer string
+	}{
+		{"X-Forwarded-For", "203.0.113.7:41234", xff, "X-Forwarded-For", "203.0.113.7"},
+		{"X-Real-IP", "203.0.113.7:41234", map[string]string{"X-Real-IP": "198.51.100.1"}, "X-Real-Ip", "203.0.113.7"},
+		{"both: the first consulted", "203.0.113.7:41234", map[string]string{"X-Forwarded-For": "198.51.100.1", "X-Real-IP": "198.51.100.2"}, "X-Forwarded-For", "203.0.113.7"},
+		{"IPv4-mapped peer", "[::ffff:203.0.113.7]:41234", xff, "X-Forwarded-For", "203.0.113.7"},
+		{"IPv6 peer", "[2001:db8::7]:41234", xff, "X-Forwarded-For", "2001:db8::7"},
+		{"bare peer", "203.0.113.7", xff, "X-Forwarded-For", "203.0.113.7"},
+		{"trusted peer", "10.0.0.5:9000", xff, "", ""},
+		{"no forwarding header", "203.0.113.7:41234", nil, "", ""},
+		{"empty header", "203.0.113.7:41234", map[string]string{"X-Forwarded-For": ""}, "", ""},
+		// No trusted_proxies entry could match a peer that is no IP.
+		{"unparseable peer", "@", xff, "", ""},
+	} {
+		rq := httptest.NewRequest("GET", "/", nil)
+		rq.RemoteAddr = c.remote
+		for k, v := range c.sent {
+			rq.Header.Set(k, v)
+		}
+		if h, p := r.Ignored(rq); h != c.wantHeader || p != c.wantPeer {
+			t.Errorf("%s: Ignored = %q, %q; want %q, %q", c.name, h, p, c.wantHeader, c.wantPeer)
+		}
+	}
+
+	// The default trusts nobody: every peer's header is ignored.
+	rq := httptest.NewRequest("GET", "/", nil)
+	rq.RemoteAddr = "10.0.0.5:9000"
+	rq.Header.Set("X-Forwarded-For", "198.51.100.1")
+	if h, p := mustResolver(t).Ignored(rq); h != "X-Forwarded-For" || p != "10.0.0.5" {
+		t.Fatalf("without trusted proxies: Ignored = %q, %q", h, p)
+	}
+}

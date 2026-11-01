@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/zynthara/chok/internal/clientip"
@@ -207,8 +208,20 @@ func (a *App) clientIP(next http.Handler) http.Handler {
 		a.logger.Error("chok: http.trusted_proxies is invalid; trusting no proxy", "error", err)
 		resolver, _ = clientip.NewResolver(nil)
 	}
+	// Behind a proxy missing from http.trusted_proxies every client has the
+	// proxy's address; nothing else would show that the forwarding headers
+	// are ignored. warned keeps the warning to one per App, whose stack is
+	// built once, and spares later requests the check.
+	var warned atomic.Bool
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), clientIPKey, resolver.ClientIP(r))
+		ctx := r.Context()
+		if !warned.Load() {
+			if header, peer := resolver.Ignored(r); header != "" && warned.CompareAndSwap(false, true) {
+				LoggerFrom(ctx).WarnContext(ctx, "chok: X-Forwarded-For or X-Real-Ip from an untrusted peer is ignored; set http.trusted_proxies if a proxy sits in front",
+					"peer", peer, "header", header)
+			}
+		}
+		ctx = context.WithValue(ctx, clientIPKey, resolver.ClientIP(r))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
