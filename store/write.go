@@ -95,14 +95,15 @@ func (s *Store[T]) Update(ctx context.Context, loc Locator, ch *Changes, opts ..
 	if err != nil {
 		return err
 	}
+
+	tx, cfg, err := s.write(ctx, loc, opts)
+	if err != nil {
+		return err
+	}
 	if h := s.hooks.BeforeUpdate; h != nil {
 		if err := h(ctx, loc, maps.Clone(b.fields)); err != nil {
 			return err
 		}
-	}
-	tx, cfg, err := s.write(ctx, loc, opts)
-	if err != nil {
-		return err
 	}
 	lock := b.lock
 	if cfg.Version > 0 {
@@ -155,14 +156,15 @@ func (s *Store[T]) missed(ctx context.Context, loc Locator, lock int) error {
 // not an error, except under where.Version: then a moved row is a
 // VersionConflictError and a missing one a NotFoundError.
 func (s *Store[T]) Delete(ctx context.Context, loc Locator, opts ...where.Option) error {
+
+	tx, cfg, err := s.write(ctx, loc, opts)
+	if err != nil {
+		return err
+	}
 	if h := s.hooks.BeforeDelete; h != nil {
 		if err := h(ctx, loc); err != nil {
 			return err
 		}
-	}
-	tx, cfg, err := s.write(ctx, loc, opts)
-	if err != nil {
-		return err
 	}
 	if cfg.Version > 0 {
 		tx = tx.Where(s.table()+".version = ?", cfg.Version)
@@ -306,7 +308,7 @@ func (s *Store[T]) conflictTarget(fields []string) ([]string, error) {
 		cols = append(cols, col)
 	}
 	if s.soft {
-		for _, idx := range dbx.Indexes(s.schema.ModelType) {
+		for _, idx := range dbx.Indexes(s.d, s.schema.ModelType) {
 			if len(idx.Columns) == len(cols) && sameSet(idx.Columns, cols) {
 				return append(slices.Clone(idx.Columns), "delete_token"), nil
 			}

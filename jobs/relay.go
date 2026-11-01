@@ -16,24 +16,10 @@ import (
 	"github.com/zynthara/chok/db"
 )
 
-// relay is the delivery engine of one worker: scan the committed messages
-// of its topic past the persisted watermark in (created_at, id) order,
-// hand each to the handler, advance the watermark over the settled prefix.
-// It is v2's outbox relay with its algorithm unchanged; a worker here is
-// always the topic-filtered shape.
-//
-// Scanning is the overlapping-watermark idiom: created_at >= W plus
-// dedup. Dedup has two layers: positions at or before the persisted
-// watermark are settled-delivered (exact keyset skip — sound because the
-// watermark never advances into the unsettled window where late commits
-// could still reorder ties), and mem remembers rows delivered in earlier
-// sweeps that are not yet settled enough to advance the watermark over.
-//
-// What v2 lacked is the failure handling around the handler call (attempt): a
-// failure is counted on the message row and retried after a backoff,
-// the last allowed failure parks the message in chok_jobs_dead and the
-// sweep goes on; and mem outlives a graceful restart through
-// chok_jobs_delivered (restore, saveDelivered).
+// relay scans in (created_at, id) order. Watermarks only accelerate scans;
+// CompletedAt is the durable acknowledgement. Every sweep also checks pending
+// rows behind the watermark, including transactions committed arbitrarily late.
+// External effects and acknowledgement are not atomic: handlers must dedupe by ID.
 type relay struct {
 	topic   string
 	handler func(ctx context.Context, m rawMessage) error
@@ -213,40 +199,34 @@ func (r *relay) sweep(ctx context.Context, head *headState) error {
 	r.prune(w)
 	cand := w
 
-	// Rows younger than the cutoff are unsettled: a still-open
-	// transaction may yet commit a row with an earlier created_at, so the
-	// persisted watermark must not advance past them. Delivery is NOT
-	// delayed — unsettled rows are handed out immediately and remembered
-	// in mem; settle only gates watermark advancement.
-	//
-	// The cutoff is taken ONCE, before the scan (round-3 review —
-	// restoring this closed a Critical): covering a position is safe only
-	// when its created_at predates the moment the CURSOR PASSED that
-	// position by settle — an invisible row there can otherwise still
-	// commit (within its own settle budget) after the pass, and the cursor
-	// never returns within this sweep. Sweep start lower-bounds every pass
-	// time, so the pre-scan cutoff is sound; the round-2 per-batch refresh
-	// was not ("cutoff predates persist" ignores pass times) — it could
-	// settle positions passed while a perfectly legal transaction was
-	// still invisible, skipping its row forever. The endless-sweep memory
-	// concern that refresh addressed is handled by maxSweepPages instead:
-	// the next tick takes a fresh cutoff and rescans the overlap from the
-	// persisted watermark, so entries settle and prune across sweeps.
 	cutoff := r.now().Add(-r.settle).UTC()
 	pages := 0
 	drained := false
+	// A timestamp is not a commit position. Revisit unacknowledged rows
+	// behind the scan cursor before advancing it; never infer completion
+	// from a watermark, even after the settle window has elapsed.
+	if w.ok {
+		for pages < r.maxPages {
+			var rows []message
+			if err := r.scope(ctx).Where("completed_at IS NULL").
+				Where("created_at < ? OR (created_at = ? AND id <= ?)", w.At, w.At, w.ID).
+				Order("created_at").Order("id").Limit(r.batch).Find(&rows).Error; err != nil {
+				return err
+			}
+			if len(rows) == 0 {
+				break
+			}
+			pages++
+			for i := range rows {
+				if err := r.attempt(ctx, &rows[i], head); err != nil {
+					return err
+				}
+			}
+		}
+	}
 
-	// Stage 1 — the watermark-boundary tie remainder, resumed by COMPOSITE
-	// position (round-4 review): rows AT w.At with id > w.ID, advanced by
-	// id keyset. Restarting every sweep at created_at >= w.At OFFSET 0
-	// refetched the covered prefix just to skip it in Go; each refetch
-	// burned page budget, so a settled tie group wider than one sweep's
-	// budget ate every sweep before reaching its own tail — the tail rows
-	// starved forever (and the strict < cleanup never removes the
-	// same-timestamp prefix, so it never recovered). Excluding the prefix
-	// in SQL by exact keyset at the persisted watermark is safe for the
-	// same reason the Go-side covers() skip was: the watermark is a
-	// settled position, nothing can still commit at or before it.
+	// Resume the watermark timestamp by ID keyset. The pending lookbehind
+	// above owns late commits in the already scanned prefix.
 	if w.ok {
 		bAt, lastID := w.At, w.ID // fixed boundary; w advances as batches persist
 		for pages < r.maxPages {
@@ -321,16 +301,8 @@ func (r *relay) sweep(ctx context.Context, head *headState) error {
 			break
 		}
 	}
-	// A worker's scan only sees its topic, so a quiet topic would never
-	// advance its watermark — leaving no state row (or a stale one) that
-	// blocks the retention cleanup forever (round-2 review). Once the scan
-	// is DRAINED, every message of the topic up to the settled frontier is
-	// delivered, so the watermark may jump over the other topics' rows to
-	// that frontier. Drained clean exits only: handler failures returned
-	// above (head-of-line intact) and a budget-stopped sweep prove nothing
-	// about rows they never reached. The probe reuses the pre-scan cutoff
-	// for the same pass-time reason as the loop: a probe-time cutoff could
-	// settle a match that committed after the cursor passed its position.
+	// Quiet topics may advance to the global settled frontier. This only
+	// moves a scan cursor: completion and cleanup require per-row evidence.
 	if drained {
 		f, err := r.frontier(ctx, cutoff)
 		if err != nil {
@@ -393,13 +365,13 @@ func (r *relay) scanForward(ctx context.Context, pos scanPos, batch int, strict 
 	return items, nil
 }
 
-// deliver handles one scanned row: dedup (persisted-watermark keyset,
-// then process memory), the attempt, and the settled-candidate advance.
+// deliver handles one scanned row: durable completion dedup, a local
+// memory shortcut, the attempt, and the settled-candidate advance.
 // Everything up to and including this row is delivered (or parked) when
 // it returns nil (head-of-line: an error aborts the sweep above, so the
 // prefix stays contiguous).
 func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint64, w watermark, cand *watermark, cutoff time.Time, head *headState) error {
-	delivered := w.covers(at, id)
+	delivered := row.CompletedAt != nil
 	if !delivered {
 		if _, seen := r.mem[id]; seen {
 			delivered = true
@@ -436,17 +408,23 @@ func (r *relay) attempt(ctx context.Context, row *message, head *headState) erro
 	}
 	err := r.call(ctx, row.toMessage())
 	if err == nil {
+		if err := r.complete(ctx, row.ID); err != nil {
+			return err
+		}
 		r.delivered.Add(1)
 		return nil
 	}
-	if ctx.Err() != nil {
-		return err // stopped by shutdown: not a failure of the message
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return err // actual cancellation is not a message failure
 	}
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	n := row.Attempts + 1
 	if _, undecodable := errors.AsType[decodeError](err); undecodable || n >= r.retry.maxAttempts {
-		return r.park(ctx, row, n, err)
+		return r.park(persistCtx, row, n, err)
 	}
-	return r.fail(ctx, row, n, err, head)
+	// Persist a real handler failure even if shutdown cancelled its context.
+	return r.fail(persistCtx, row, n, err, head)
 }
 
 // call runs the handler on m. A panic is a failed delivery: its stack
@@ -500,7 +478,7 @@ func (r *relay) park(ctx context.Context, row *message, n int, cause error) erro
 			return err
 		}
 		return tx.Model(&message{}).Where("id = ?", row.ID).
-			Updates(map[string]any{"attempts": n, "retry_at": nil, "last_error": text}).Error
+			Updates(map[string]any{"attempts": n, "retry_at": nil, "last_error": text, "completed_at": parkedAt}).Error
 	})
 	if err != nil {
 		return fmt.Errorf("jobs: worker %q: park message %d: %w (the failure: %v)", r.topic, row.ID, err, cause)
@@ -520,7 +498,17 @@ func (r *relay) isParked(ctx context.Context, id uint64) (bool, error) {
 	if err := r.d.Unsafe(ctx).Model(&deadRow{}).Where("id = ?", id).Count(&n).Error; err != nil {
 		return false, fmt.Errorf("jobs: worker %q: look for message %d in the dead letters: %w", r.topic, id, err)
 	}
-	return n > 0, nil
+	if n > 0 {
+		return true, r.complete(ctx, id)
+	}
+	return false, nil
+}
+
+func (r *relay) complete(ctx context.Context, id uint64) error {
+	if err := r.d.Unsafe(ctx).Model(&message{}).Where("id = ? AND completed_at IS NULL", id).Update("completed_at", r.now().UTC()).Error; err != nil {
+		return fmt.Errorf("jobs: acknowledge message %d: %w", id, err)
+	}
+	return nil
 }
 
 // restore reads back the delivered set the worker saved when the jobs
@@ -535,11 +523,19 @@ func (r *relay) restore(ctx context.Context) error {
 	if len(rows) == 0 {
 		return nil
 	}
+	if err := r.d.RunInTx(ctx, func(txCtx context.Context) error {
+		for _, row := range rows {
+			if err := r.complete(txCtx, row.MessageID); err != nil {
+				return err
+			}
+		}
+		return r.d.Unsafe(txCtx).Where("topic = ?", r.topic).Delete(&deliveredRow{}).Error
+	}); err != nil {
+		return err
+	}
+	// Only expose the restored shortcut after its acknowledgement commits.
 	for _, row := range rows {
 		r.mem[row.MessageID] = row.CreatedAt
-	}
-	if err := r.d.Unsafe(ctx).Where("topic = ?", r.topic).Delete(&deliveredRow{}).Error; err != nil {
-		r.logger.WarnContext(ctx, "jobs: deleting the delivered set failed; the next start reads it again", "error", err)
 	}
 	return nil
 }
@@ -580,14 +576,14 @@ const deliveredBatch = 500
 // handler error returned early, and grew without bound while a sweep
 // never caught up).
 //
-// Save errors are logged, not returned: a failed save costs redelivery
-// (the next sweep rescans from the older watermark), never loss.
+// Save errors are logged, not returned: acknowledgements still dedupe
+// the rescan from the older cursor.
 func (r *relay) persist(ctx context.Context, w *watermark, cand watermark) {
 	if !cand.ok || !w.after(cand.At, cand.ID) {
 		return
 	}
 	if err := r.states.save(ctx, r.topic, cand); err != nil {
-		r.logger.WarnContext(ctx, "jobs: saving the watermark failed; the next sweep redelivers the settled window", "error", err)
+		r.logger.WarnContext(ctx, "jobs: saving the watermark failed; the next sweep rescans the settled window", "error", err)
 		return
 	}
 	*w = cand

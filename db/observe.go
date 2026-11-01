@@ -25,6 +25,10 @@ func init() {
 		} else {
 			h.obs.Store(&observer{o: o})
 		}
+		return dbx.Describe(d)
+	}
+	dbx.Describe = func(d any) dbx.Observed {
+		h := d.(*DB)
 		primary, _ := h.gdb.DB()
 		return dbx.Observed{Driver: h.cfg.Driver, SlowThreshold: h.cfg.SlowThreshold, Primary: primary, Readers: h.readers}
 	}
@@ -35,13 +39,16 @@ func (d *DB) installObserver(gdb *gorm.DB) error {
 	before := func(op string) func(*gorm.DB) {
 		return func(tx *gorm.DB) {
 			if ob := d.obs.Load(); ob != nil {
+				tx.InstanceSet("chok:observer:"+op, ob)
 				ob.o.Before(tx, op)
 			}
 		}
 	}
 	after := func(op string) func(*gorm.DB) {
 		return func(tx *gorm.DB) {
-			if ob := d.obs.Load(); ob != nil {
+			if v, ok := tx.InstanceGet("chok:observer:" + op); ok {
+				ob := v.(*observer)
+				tx.Statement.Settings.Delete(fmt.Sprintf("%p", tx.Statement) + "chok:observer:" + op)
 				ob.o.After(tx, op)
 			}
 		}

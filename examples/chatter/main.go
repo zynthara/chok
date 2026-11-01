@@ -13,8 +13,10 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"net/http"
+	"time"
 
 	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/db"
@@ -40,6 +42,11 @@ type Config struct {
 func main() {
 	cfg := chok.MustLoad[Config]("chatter")
 	app := chok.New(cfg.Base)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = app.Close(ctx)
+	}()
 	setup(app, cfg, db.MustOpen(cfg.DB, db.Tables(tables()...)))
 	app.Execute()
 }
@@ -60,12 +67,11 @@ var templates embed.FS
 func setup(app *chok.App, cfg Config, d *db.DB) {
 	// Sign-in by a mailed code, the session in a cookie (chok.yaml); the
 	// mails go out through the mail battery, as .eml files here.
+	app.Use(d)
 	mailer := mail.MustNew(cfg.Mail, mail.Templates(templates))
 	auth := identity.MustNew(cfg.Auth, d, identity.Sender(mailer.SendTemplate)) // /auth/passwordless/start, .../verify, /auth/logout, ...
+	app.Use(auth)
 	c := &chat{d: d, rooms: store.New[Room](d), members: store.New[Member](d), messages: store.New[Message](d)}
-	// The hub: a ticket from /realtime/ticket carries the signed-in user,
-	// and mayWatch decides which topics that user may follow.
-	c.hub = realtime.MustNew(cfg.Realtime, realtime.Authn(auth.Authn()), realtime.Authorize(c.mayWatch))
 	// The jobs: the bot's worker, a periodic job, and every run of both
 	// handed to the hub for the jobs panel. The batteries do not know each
 	// other; this closure is where they meet.
@@ -73,8 +79,12 @@ func setup(app *chok.App, cfg Config, d *db.DB) {
 		jobs.Worker("bot.reply", c.botReply),
 		jobs.Periodic("stats", "@every 30s", c.stats, jobs.OverlapSkip),
 		jobs.Observe(c.observe))
+	app.Use(c.jobs)
+	// The hub: a ticket from /realtime/ticket carries the signed-in user,
+	// and mayWatch decides which topics that user may follow.
+	c.hub = realtime.MustNew(cfg.Realtime, realtime.Authn(auth.Authn()), realtime.Authorize(c.mayWatch))
 	// Close runs in reverse: the hub says goodbye to the browsers first.
-	app.Use(d, auth, c.jobs, c.hub)
+	app.Use(c.hub)
 
 	api := app.Group("/api", auth.Authn())
 	chok.POST(api, "/rooms", c.createRoom, chok.Created(), chok.Summary("Create a room"))

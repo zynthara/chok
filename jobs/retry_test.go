@@ -197,8 +197,8 @@ func TestRelay_ParkedMessageIsNotRetriedAfterACrash(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if calls["m1"] != 1 || calls["m2"] != 2 {
-		t.Fatalf("deliveries %v: the parked m1 once, the delivered m2 again after the crash", calls)
+	if calls["m1"] != 1 || calls["m2"] != 1 {
+		t.Fatalf("deliveries %v: the parked m1 once, the delivered m2 once across crashes", calls)
 	}
 	var n int64
 	if err := c.d.Unsafe(ctx).Model(&deadRow{}).Count(&n).Error; err != nil || n != 1 {

@@ -617,7 +617,7 @@ func TestAudit_RecordsPolicyChangesAndDenials(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			page, err := idn.Audit().ListFromQuery(ctx, q)
+			page, err := idn.Audit().ListFromQuery(chok.WithPrincipal(ctx, chok.Principal{UserID: "usr_admin", Roles: []string{"admin"}}), q)
 			if err != nil {
 				t.Fatal(err)
 			}

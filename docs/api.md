@@ -18,7 +18,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity`](#identity) | 19 |
 | [`identity/rbac`](#identityrbac) | 8 |
 | [`jobs`](#jobs) | 17 |
-| [`telemetry`](#telemetry) | 6 |
+| [`telemetry`](#telemetry) | 7 |
 | [`cache`](#cache) | 6 |
 | [`choktest`](#choktest) | 5 |
 | [`realtime`](#realtime) | 11 |
@@ -27,7 +27,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 233 |
+| total | 234 |
 
 ## chok
 
@@ -116,7 +116,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `type Modeler interface{ ... }` | Modeler is satisfied only by the four model bases, through an unexported method: embed one of them to make a struct a model. |
 | `type MySQLConfig struct{ ... }` | MySQLConfig is db.mysql. |
 | `type Option func(*openConfig)` | Option configures Open. |
-| ↳ `func Logger(l *slog.Logger) Option` | Logger is where the handle and gorm log; the default follows slog.Default. |
+| ↳ `func Logger(l *slog.Logger) Option` | Logger is where the handle and gorm log; Open captures slog.Default when no logger is supplied. |
 | ↳ `func Migrations(fsys fs.FS) Option` | Migrations gives the application's SQL files for migrate: versioned, named &lt;14-digit version&gt;_&lt;name&gt;.sql; a sqlite/, mysql/ or postgres/ subdirectory is used for its dialect when present. |
 | ↳ `func Owner(name string) Option` | Owner names the application's rows in the migration ledger; the default is "app". |
 | ↳ `func Tables(specs ...TableSpec) Option` | Tables declares the application's tables for migrate: auto. |
@@ -246,7 +246,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 
 ## jobs
 
-`import "github.com/zynthara/chok/jobs"` — Package jobs is chok's battery for background work: periodic jobs on cron schedules, and workers that deliver, at least once and in order, the messages the application enqueues in its own transactions.
+`import "github.com/zynthara/chok/jobs"` — Package jobs is chok's battery for background work: periodic jobs on cron schedules, and workers that deliver, at least once, the messages the application enqueues in its own transactions.
 
 | Declaration | |
 |---|---|
@@ -276,6 +276,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 |---|---|
 | `type Config struct{ ... }` | Config is the telemetry section of an application's configuration: |
 | `type Option func(*options)` | Option configures New. |
+| ↳ `func Globals() Option` | Globals installs this Telemetry's provider and propagator as process defaults for third-party clients. |
 | ↳ `func Logger(l *slog.Logger) Option` | Logger is where telemetry reports its own trouble, such as an export that failed; the default is slog.Default(). |
 | `type Telemetry struct{ ... }` | Telemetry is the observability battery: a Prometheus registry, an OpenTelemetry tracer provider and, with logs.otel, a bridge from the App's logs to OpenTelemetry Logs. |
 | ↳ `func MustNew(cfg Config, opts ...Option) *Telemetry` | MustNew is New that panics on error. |

@@ -130,7 +130,7 @@ func (c *core) cleanupOnce(ctx context.Context, topics []string, retention time.
 		}
 		var ids []uint64
 		if err := gdb.Model(&message{}).
-			Where("created_at < ?", cutoff).
+			Where("created_at < ? AND completed_at IS NOT NULL AND topic IN ?", cutoff, topics).
 			Order("created_at").
 			Limit(batchSize).
 			Pluck("id", &ids).Error; err != nil {

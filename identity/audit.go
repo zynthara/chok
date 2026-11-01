@@ -68,6 +68,7 @@ type Event struct {
 // than auth.audit.retention are purged every hour. With auth.audit off,
 // Log and LogSync do nothing.
 type Audit struct {
+	admit      func(context.Context) error
 	enabled    bool
 	d          *db.DB
 	logger     *slog.Logger
@@ -81,6 +82,7 @@ type Audit struct {
 	mu        sync.RWMutex // Log holds it to send; close takes it to stop sends
 	closed    bool
 	in        chan Event
+	stopping  chan struct{}
 	cancel    context.CancelFunc
 	done      chan struct{}
 	closeOnce sync.Once
@@ -123,6 +125,7 @@ func newAudit(d *db.DB, c AuditConfig, logger *slog.Logger) *Audit {
 // outlives the call that built the Identity, and Close ends it.
 func (a *Audit) start(buffer int) {
 	a.in = make(chan Event, buffer)
+	a.stopping = make(chan struct{})
 	a.done = make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
@@ -160,6 +163,8 @@ func (a *Audit) Log(ctx context.Context, e Event) {
 	select {
 	case a.in <- e:
 		a.pending.Add(1)
+	case <-a.stopping:
+		a.drop(ctx, e, "the audit log is closing")
 	case <-ctx.Done():
 		a.drop(ctx, e, "the queue is full and the caller's context ended")
 	}
@@ -367,6 +372,10 @@ func (a *Audit) close(ctx context.Context) error {
 	}
 	var err error
 	a.closeOnce.Do(func() {
+		// Unblock queue senders before waiting for their read locks.
+		if a.stopping != nil {
+			close(a.stopping)
+		}
 		a.mu.Lock()
 		a.closed = true
 		close(a.in)
@@ -404,8 +413,13 @@ func (a *Audit) QueryFields() []string {
 // size (default 50, at most 500), order=field:asc|desc, from and to
 // (RFC 3339, inclusive bounds on occurred_at) and equality filters on
 // the fields QueryFields lists. An unknown or malformed parameter is a
-// 400. It lets an *Audit serve a chok.List route.
+// 400. The caller must hold admin or audit/read. It can serve a chok.List route.
 func (a *Audit) ListFromQuery(ctx context.Context, q url.Values) (*chok.Page[Event], error) {
+	if a.admit != nil {
+		if err := a.admit(ctx); err != nil {
+			return nil, err
+		}
+	}
 	page, size := 1, auditPageSize
 	order, desc := "occurred_at", true
 	tx := a.d.Unsafe(ctx).Model(&auditRow{})

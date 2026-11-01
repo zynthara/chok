@@ -42,6 +42,8 @@ type App struct {
 	components    []*component
 	instrumenters []Instrumenter
 	started       bool
+	finished      chan struct{}
+	closeErr      error
 
 	ready    atomic.Bool
 	draining atomic.Bool
@@ -116,7 +118,7 @@ type Namer interface{ Name() string }
 // base normally comes from Load or MustLoad. Unless Logger is given, New
 // builds the root logger from base.Log and installs it as slog.Default.
 func New(base Base, opts ...Option) *App {
-	a := &App{base: base, mux: http.NewServeMux(), reload: lastLoad.Load(), hurry: make(chan struct{})}
+	a := &App{base: base, mux: http.NewServeMux(), reload: base.reload, hurry: make(chan struct{}), finished: make(chan struct{})}
 	for _, o := range opts {
 		o(a)
 	}
@@ -137,7 +139,8 @@ func New(base Base, opts ...Option) *App {
 
 // Use registers components. Each is handled by the interfaces it
 // implements: Starter, Closer, Healther, Mounter, Namer and Instrumenter.
-// Use order is Start and Mount order; Close runs in reverse. A value that
+// Use mounts in registration order; Start calls run concurrently and do not
+// establish readiness dependencies. Close runs in reverse. A value that
 // implements none of them is ignored with a warning.
 func (a *App) Use(components ...any) {
 	var mount []Mounter
@@ -160,6 +163,9 @@ func (a *App) Use(components ...any) {
 			a.logger.Warn("chok: Use: value implements none of Start, Close, Health, Mount or Middleware; ignored",
 				"type", fmt.Sprintf("%T", c))
 			continue
+		}
+		if b, ok := c.(interface{ BindLogger(*slog.Logger) }); ok {
+			b.BindLogger(a.logger)
 		}
 		a.components = append(a.components, &component{value: c, name: nameOf(c)})
 		if instrumenter {
@@ -250,6 +256,7 @@ func (a *App) Run(ctx context.Context) error {
 	a.started = true
 	comps := slices.Clone(a.components)
 	a.mu.Unlock()
+	defer close(a.finished)
 	defer a.closeLogs()
 
 	err := a.run(ctx, comps)
@@ -350,8 +357,8 @@ func (a *App) awaitHealthy(ctx context.Context, comps []*component, failed <-cha
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for wait := 10 * time.Millisecond; ; wait = min(2*wait, 500*time.Millisecond) {
 		select {
 		case err := <-failed:
@@ -366,9 +373,7 @@ func (a *App) awaitHealthy(ctx context.Context, comps []*component, failed <-cha
 		case err := <-failed:
 			return err
 		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("not healthy after app.start_timeout (%s): %s", timeout, report.failures())
+			return fmt.Errorf("not healthy after app.start_timeout (%s): %s: %w", timeout, report.failures(), ctx.Err())
 		case <-time.After(wait):
 		}
 	}
@@ -483,4 +488,37 @@ func (a *App) closeLogs() {
 	for _, c := range a.closers {
 		_ = c.Close()
 	}
+}
+
+// Close releases registered components if Run has not begun, in reverse
+// Use order, then closes owned log files. This supports deferred cleanup
+// during construction. After Run begins, Close waits for Run to finish;
+// cancel Run's context to stop it. A closed App cannot be run or extended.
+// Components constructed before Use remain the caller's responsibility.
+func (a *App) Close(ctx context.Context) error {
+	a.mu.Lock()
+	if a.started {
+		a.mu.Unlock()
+		select {
+		case <-a.finished:
+			return a.closeErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	a.started = true
+	comps := slices.Clone(a.components)
+	a.mu.Unlock()
+	defer close(a.finished)
+	defer a.closeLogs()
+	var errs []error
+	for _, c := range slices.Backward(comps) {
+		if closer, ok := c.value.(Closer); ok {
+			if err := callClose(ctx, closer); err != nil {
+				errs = append(errs, fmt.Errorf("chok: close %s: %w", c.name, err))
+			}
+		}
+	}
+	a.closeErr = errors.Join(errs...)
+	return a.closeErr
 }

@@ -8,11 +8,13 @@
 package main
 
 import (
+	"context"
 	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/db"
 	"github.com/zynthara/chok/identity"
 	"github.com/zynthara/chok/store"
 	"github.com/zynthara/chok/telemetry"
+	"time"
 )
 
 // Config is the whole configuration: the standard app / http / log
@@ -41,6 +43,11 @@ func (Post) RIDPrefix() string { return "pst" }
 func main() {
 	cfg := chok.MustLoad[Config]("blog")
 	app := chok.New(cfg.Base)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = app.Close(ctx)
+	}()
 	setup(app, cfg)
 	app.Execute()
 }
@@ -50,16 +57,18 @@ func main() {
 func setup(app *chok.App, cfg Config) *telemetry.Telemetry {
 	// Request and SQL metrics on 127.0.0.1:9464/metrics; spans once
 	// tracing is on.
-	tel := telemetry.MustNew(cfg.Telemetry)
+	tel := telemetry.MustNew(cfg.Telemetry, telemetry.Logger(app.Logger()))
+	app.Use(tel)
 	// Titles are unique per author among live posts; deleting a post
 	// frees its title.
 	d := db.MustOpen(cfg.DB, db.Tables(
 		db.Table(&Post{}, db.SoftUnique("uk_post_title_owner", "title", "owner_id")),
 	))
+	app.Use(d)
 	tel.Instrument(d)
 	auth := identity.MustNew(cfg.Auth, d)
 	// Close runs in reverse: telemetry, first in, flushes last.
-	app.Use(tel, d, auth)
+	app.Use(auth)
 
 	posts := store.New[Post](d)
 	api := app.Group("/api/v1", auth.Authn())

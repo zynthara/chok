@@ -63,11 +63,13 @@ type Telemetry struct {
 	reg    *prometheus.Registry
 	prop   propagation.TextMapPropagator
 
-	tp     trace.TracerProvider     // the SDK's, or a no-op one when tracing is off
-	sdk    *sdktrace.TracerProvider // nil when tracing is off
-	tracer trace.Tracer
-	logs   *sdklog.LoggerProvider // nil when logs.otel is off
-	untap  func()
+	tp      trace.TracerProvider     // the SDK's, or a no-op one when tracing is off
+	sdk     *sdktrace.TracerProvider // nil when tracing is off
+	tracer  trace.Tracer
+	logs    *sdklog.LoggerProvider // nil when logs.otel is off
+	untaps  []func()
+	bridge  slog.Handler
+	globals bool
 
 	http    *httpMetrics           // nil when metrics are off
 	db      *dbMetrics             // nil when metrics are off
@@ -82,7 +84,8 @@ type Telemetry struct {
 type Option func(*options)
 
 type options struct {
-	logger *slog.Logger
+	logger  *slog.Logger
+	globals bool
 	// spans and logs replace the exporters the Config names, and export
 	// synchronously; the package's tests set them.
 	spans sdktrace.SpanExporter
@@ -93,11 +96,14 @@ type options struct {
 // that failed; the default is slog.Default().
 func Logger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
 
-// New builds the battery from cfg. With tracing on it installs its
-// tracer provider and the W3C trace-context propagator as the
-// OpenTelemetry globals, so instrumented clients join the same traces;
-// with tracing or logs.otel on, OpenTelemetry's own errors (a failed
-// export) are logged through the Logger option's logger. Spans and log
+// Globals installs this Telemetry's provider and propagator as process
+// defaults for third-party clients. Use at most one per process; the
+// default keeps providers local to the Telemetry instance.
+func Globals() Option { return func(o *options) { o.globals = true } }
+
+// New builds the battery from cfg. Providers remain instance-local unless
+// Globals is given. With Globals, OpenTelemetry's own errors are routed
+// through Logger. App.Use binds the Logs bridge only to that App. Spans and log
 // records are exported in the background, in batches; Close flushes what
 // is buffered and stops the exporters.
 func New(cfg Config, opts ...Option) (*Telemetry, error) {
@@ -113,7 +119,7 @@ func New(cfg Config, opts ...Option) (*Telemetry, error) {
 		o.logger = slog.Default()
 	}
 	t := &Telemetry{
-		cfg: cfg, logger: o.logger, reg: prometheus.NewRegistry(),
+		cfg: cfg, logger: o.logger, globals: o.globals, reg: prometheus.NewRegistry(),
 		prop:    propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}),
 		tp:      noop.NewTracerProvider(),
 		dbs:     map[*db.DB]bool{},
@@ -124,6 +130,20 @@ func New(cfg Config, opts ...Option) (*Telemetry, error) {
 	var spans sdktrace.SpanExporter
 	var logs sdklog.Exporter
 	var err error
+	constructed := false
+	defer func() {
+		if constructed {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if spans != nil {
+			_ = spans.Shutdown(ctx)
+		}
+		if logs != nil {
+			_ = logs.Shutdown(ctx)
+		}
+	}()
 	if cfg.Tracing.Enabled {
 		if spans, err = spanExporter(cfg, o.spans); err != nil {
 			return nil, err
@@ -143,7 +163,7 @@ func New(cfg Config, opts ...Option) (*Telemetry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("telemetry: resource: %w", err)
 	}
-	if spans != nil || logs != nil {
+	if o.globals && (spans != nil || logs != nil) {
 		reportOTelErrors(t.logger)
 	}
 	if spans != nil {
@@ -154,8 +174,10 @@ func New(cfg Config, opts ...Option) (*Telemetry, error) {
 		t.sdk = sdktrace.NewTracerProvider(process, sdktrace.WithResource(res),
 			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.Tracing.SampleRatio))))
 		t.tp = t.sdk
-		otel.SetTracerProvider(t.sdk)
-		otel.SetTextMapPropagator(t.prop)
+		if o.globals {
+			otel.SetTracerProvider(t.sdk)
+			otel.SetTextMapPropagator(t.prop)
+		}
 	}
 	t.tracer = t.tp.Tracer(scope)
 	if logs != nil {
@@ -164,8 +186,9 @@ func New(cfg Config, opts ...Option) (*Telemetry, error) {
 			processor = sdklog.NewSimpleProcessor(logs)
 		}
 		t.logs = sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(processor))
-		t.untap = logtap.Install(otelslog.NewHandler(scope, otelslog.WithLoggerProvider(t.logs)))
+		t.bridge = otelslog.NewHandler(scope, otelslog.WithLoggerProvider(t.logs))
 	}
+	constructed = true
 	return t, nil
 }
 
@@ -352,9 +375,11 @@ func (t *Telemetry) Close(ctx context.Context) error {
 	t.closed = true
 	t.mu.Unlock()
 	var errs []error
-	errLogger.CompareAndSwap(t.logger, nil)
-	if t.untap != nil {
-		t.untap()
+	if t.globals {
+		errLogger.CompareAndSwap(t.logger, nil)
+	}
+	for _, undo := range t.untaps {
+		undo()
 	}
 	if t.logs != nil {
 		if err := t.logs.Shutdown(ctx); err != nil {
@@ -362,7 +387,7 @@ func (t *Telemetry) Close(ctx context.Context) error {
 		}
 	}
 	if t.sdk != nil {
-		if otel.GetTracerProvider() == trace.TracerProvider(t.sdk) {
+		if t.globals && otel.GetTracerProvider() == trace.TracerProvider(t.sdk) {
 			otel.SetTracerProvider(noop.NewTracerProvider())
 		}
 		if err := t.sdk.Shutdown(ctx); err != nil {
@@ -370,4 +395,15 @@ func (t *Telemetry) Close(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// BindLogger attaches the log bridge to an App-owned logger. App.Use calls
+// it automatically. Injected, unwrapped loggers remain application-owned.
+func (t *Telemetry) BindLogger(l *slog.Logger) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed || t.bridge == nil || l == nil {
+		return
+	}
+	t.untaps = append(t.untaps, logtap.Install(l.Handler(), t.bridge))
 }

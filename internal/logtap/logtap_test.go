@@ -28,7 +28,7 @@ func TestInstall_CopiesRecordsWithAttrsAndGroups(t *testing.T) {
 	l := slog.New(Wrap(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: level})))
 	child := l.With("request_id", "r1").WithGroup("req")
 
-	uninstall := Install(slog.NewTextHandler(&tapped, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	uninstall := Install(l.Handler(), slog.NewTextHandler(&tapped, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	child.Info("served", "status", 200)
 	l.Debug("below the wrapped handler's level")
 	level.Set(slog.LevelDebug)
@@ -53,9 +53,9 @@ func TestInstall_CopiesRecordsWithAttrsAndGroups(t *testing.T) {
 func TestInstall_LaterInstallWins(t *testing.T) {
 	var first, second bytes.Buffer
 	l := slog.New(Wrap(slog.NewTextHandler(io.Discard, nil))).With("k", "v")
-	undoFirst := Install(slog.NewTextHandler(&first, nil))
+	undoFirst := Install(l.Handler(), slog.NewTextHandler(&first, nil))
 	l.Info("one")
-	undoSecond := Install(slog.NewTextHandler(&second, nil))
+	undoSecond := Install(l.Handler(), slog.NewTextHandler(&second, nil))
 	l.Info("two")
 	undoFirst() // replaced already: removes nothing
 	l.Info("three")
@@ -78,7 +78,7 @@ func TestHandle_ConcurrentWithInstall(t *testing.T) {
 		})
 	}
 	for range 50 {
-		Install(slog.NewTextHandler(io.Discard, nil))()
+		Install(l.Handler(), slog.NewTextHandler(io.Discard, nil))()
 	}
 	wg.Wait()
 }

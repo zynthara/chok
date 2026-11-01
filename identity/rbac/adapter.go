@@ -1,9 +1,11 @@
 package rbac
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/casbin/casbin/v3/model"
 	"github.com/casbin/casbin/v3/persist"
@@ -83,8 +85,10 @@ func newGormAdapter(db func() *gorm.DB) (persist.Adapter, error) {
 // without it, Casbin's first-match matcher iteration becomes
 // driver-dependent.
 func (a *gormAdapter) LoadPolicy(m model.Model) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var rules []casbinRule
-	if err := a.db().Order("id").Find(&rules).Error; err != nil {
+	if err := a.db().WithContext(ctx).Order("id").Find(&rules).Error; err != nil {
 		return fmt.Errorf("rbac LoadPolicy: %w", err)
 	}
 	for _, r := range rules {

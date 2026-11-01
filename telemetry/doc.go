@@ -48,8 +48,8 @@
 // Tracing is off by default. On, every request continues the trace of an
 // incoming W3C traceparent header, or starts one for sample_ratio of
 // them, and the spans go to stdout or, over OTLP/HTTP, to the collector
-// at tracing.endpoint. The tracer provider and the propagator become the
-// OpenTelemetry globals, so a client instrumented with otel's defaults
-// joins the request's trace. A binary that links telemetry records the
+// at tracing.endpoint. Providers remain local by default. Give Globals()
+// to the single process-wide Telemetry when third-party clients use otel's
+// global defaults, or pass TracerProvider() to those clients explicitly. A binary that links telemetry records the
 // trace id in identity's audit events.
 package telemetry

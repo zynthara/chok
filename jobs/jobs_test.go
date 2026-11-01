@@ -438,9 +438,8 @@ func TestWorker_FailureBlocksOnlyItsTopic(t *testing.T) {
 // TestWorker_DeliversAtLeastOnce_HandlersDedupeByID documents why a
 // worker function must be idempotent. A message is delivered again (1)
 // after the function fails on it, even if it had done its work before
-// failing, and (2) after a crash, when it is younger than the settle
-// window. A graceful restart does not deliver it again: the stop saved
-// what was delivered. The redeliveries carry the same Message.ID, which
+// failing, and (2) after a crash between the effect and the durable acknowledgement.
+// A successful acknowledgement survives both graceful restarts and crashes. The redeliveries carry the same Message.ID, which
 // is what an idempotent function dedupes on; Message.Attempt counts the
 // failed deliveries before.
 func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
@@ -481,7 +480,7 @@ func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 	enqueueTx(t, d1, j1, "orders", "m2")
 	eventually(t, "m1 twice and m2 once", func() bool {
 		c, _ := snapshot()
-		return len(c) == 2 && c[1] == 2 && c[2] == 1
+		return len(c) == 2 && c[1] == 2 && c[2] == 1 && j1.Stats().Workers[0].Messages == 2
 	})
 	if err := stop1(); err != nil {
 		t.Fatal(err)
@@ -494,7 +493,7 @@ func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 	j2 := newJobs(t, d2, cfg1, Worker("orders", worker))
 	stop2 := run(t, j2)
 	enqueueTx(t, d2, j2, "orders", "m3")
-	eventually(t, "m3 after the graceful restart", func() bool { c, _ := snapshot(); return c[3] == 1 })
+	eventually(t, "m3 after the graceful restart", func() bool { c, _ := snapshot(); return c[3] == 1 && j2.Stats().Workers[0].Messages == 1 })
 	if err := stop2(); err != nil {
 		t.Fatal(err)
 	}
@@ -503,28 +502,27 @@ func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 	}
 
 	// A crash: the process dies without stopping, so it saves nothing —
-	// here the saved set is dropped. Within the settle window all three
-	// come again.
+	// here the saved set is dropped. Acknowledgements survive independently of the saved set.
 	if err := d2.Unsafe(t.Context()).Where("1 = 1").Delete(&deliveredRow{}).Error; err != nil {
 		t.Fatal(err)
 	}
 	d3 := dbtest.OpenConfig(t, cfg)
 	j3 := newJobs(t, d3, cfg1, Worker("orders", worker))
 	run(t, j3)
-	eventually(t, "the replay after the crash", func() bool {
-		c, _ := snapshot()
-		return c[1] == 3 && c[2] == 2 && c[3] == 2
-	})
+	enqueueTx(t, d3, j3, "orders", "m4")
+	eventually(t, "a new delivery after the crash", func() bool { c, _ := snapshot(); return c[4] == 1 && j3.Stats().Workers[0].Messages == 1 })
+	if c, _ := snapshot(); c[1] != 2 || c[2] != 1 || c[3] != 1 {
+		t.Fatalf("acknowledged messages replayed: %v", c)
+	}
 	c, effects := snapshot()
-	if effects[1] != 1 || effects[2] != 1 || effects[3] != 1 || len(effects) != 3 {
+	if effects[1] != 1 || effects[2] != 1 || effects[3] != 1 || len(effects) != 4 {
 		t.Fatalf("deliveries %v, effects %v: the dedupe on Message.ID keeps one effect per message", c, effects)
 	}
-	// m1 failed once, so its retry was attempt 2; the replay repeats the
-	// delivery it repeats, and its number.
+	// m1 failed once, so its retry was attempt 2.
 	mu.Lock()
 	defer mu.Unlock()
-	if !slices.Equal(attempts, []int{1, 2, 2}) {
-		t.Fatalf("m1's attempts %v, want [1 2 2]", attempts)
+	if !slices.Equal(attempts, []int{1, 2}) {
+		t.Fatalf("m1's attempts %v, want [1 2]", attempts)
 	}
 }
 
@@ -857,7 +855,7 @@ func TestMigrations_VersionedUsesTheLedger(t *testing.T) {
 	for _, st := range sts {
 		got = append(got, st.Owner+" "+st.Version+"_"+st.Name+" "+st.State)
 	}
-	if !slices.Equal(got, []string{"jobs 20261025000001_create_jobs_tables applied"}) {
+	if !slices.Equal(got, []string{"jobs 20261025000001_create_jobs_tables applied", "jobs 20261101000001_confirm_jobs_messages applied"}) {
 		t.Fatalf("ledger:\n%s", strings.Join(got, "\n"))
 	}
 	// The tables work.
@@ -906,7 +904,7 @@ func TestMigrations_AutoCreatesTheTables(t *testing.T) {
 		t.Fatal("the scan indexes")
 	}
 	// auto mode records nothing in the ledger: the tables follow the rows.
-	if sts, err := d.MigrationStatus(t.Context()); err != nil || len(sts) != 1 || sts[0].State != "pending" {
+	if sts, err := d.MigrationStatus(t.Context()); err != nil || len(sts) != 2 || sts[0].State != "pending" || sts[1].State != "pending" {
 		t.Fatalf("status in auto mode: %+v %v", sts, err)
 	}
 	// One Jobs per database handle.

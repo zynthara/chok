@@ -201,6 +201,7 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 		idn.limiter = newLoginLimiter(cfg.LoginRateWindow, cfg.LoginRateLimit)
 	}
 	idn.audit = newAudit(d, cfg.Audit, o.logger)
+	idn.audit.admit = func(ctx context.Context) error { return idn.admit(ctx, "audit", "read") }
 	if cfg.Passwordless.Enabled || idn.confirms() {
 		idn.startSweep()
 	}

@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -37,6 +36,7 @@ type Base struct {
 	// warnings are what Load found worth a warning; New logs them through
 	// the App's logger, in the configured format.
 	warnings []string
+	reload   *loaded
 }
 
 // AppConfig is the app section.
@@ -243,8 +243,9 @@ func Load[T any](name string, opts ...LoadOption) (T, error) {
 	if err != nil {
 		return cfg, err
 	}
-	remember(name, o, cfg)
+	reload := remember(name, o, cfg)
 	if base != nil {
+		base.reload = reload
 		base.warnings = res.Warnings
 	}
 	return cfg, nil
@@ -341,21 +342,18 @@ func checkConfig(name, file string, cfg any, err error) {
 	exit(0)
 }
 
-// loaded is the most recent successful Load, kept so SIGHUP can re-read
-// the same sources and apply log.level.
+// loaded belongs to the Base produced by Load, so SIGHUP reads that
+// instance's sources even when other configurations were loaded later.
 type loaded struct {
 	reread func() (level string, othersChanged bool, err error)
 }
 
-var lastLoad atomic.Pointer[loaded]
-
-func remember[T any](name string, o conf.Options, cfg T) {
+func remember[T any](name string, o conf.Options, cfg T) *loaded {
 	level, ok := logLevel(&cfg)
 	if !ok {
-		lastLoad.Store(nil)
-		return
+		return nil
 	}
-	lastLoad.Store(&loaded{reread: func() (string, bool, error) {
+	return &loaded{reread: func() (string, bool, error) {
 		var fresh T
 		if _, err := conf.Load(&fresh, o); err != nil {
 			return "", false, err
@@ -363,8 +361,7 @@ func remember[T any](name string, o conf.Options, cfg T) {
 		newLevel, _ := logLevel(&fresh)
 		setLogLevel(&fresh, level)
 		return newLevel, !reflect.DeepEqual(cfg, fresh), nil
-	}})
-	_ = name
+	}}
 }
 
 func logLevel(cfg any) (string, bool) {

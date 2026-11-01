@@ -86,9 +86,9 @@ app.Execute()                              // Run + 信号
 `app.Use(components...)` 按值实现的接口分别处理：`Starter`（长驻，ctx 取消后
 返回）、`Closer`、`Healther`、`Mounter`（电池挂自己的路由，在用户路由之前）、
 `Namer`（健康报告里的名字）、`Instrumenter`（插进中间件栈的遥测槽位）；
-什么都没实现的值被忽略并告警。Use 顺序 = Start 顺序 = Mount 顺序，Close 逆序。
+什么都没实现的值被忽略并告警。Mount 按登记顺序执行，Close 逆序；Start 并发执行，登记顺序不建立组件就绪依赖。
 
-**启动相**：按 Use 顺序在各自的 goroutine 里调用 `Start`，然后轮询所有
+**启动相**：把 Start 分别放进 goroutine 并发调用，然后轮询所有
 `Healther` 直到全部健康（受 `app.start_timeout` 约束）；期间任何 `Start`
 返回错误即中止。全部健康后才开始监听 HTTP。没有长驻工作的 Starter 可以立即
 返回 nil（如 `jobs.enabled: false`）；App 只把 ctx 未取消时返回的错误当失败。
@@ -108,6 +108,15 @@ Ctrl-C 立即停。开发时手动 curl 过 `/healthz` 也会等，再按一次 
 （见下面的信号）。`/livez` 不算：存活探针不决定流量往哪去。
 所有停机路径从 `context.WithoutCancel(ctx)` 派生，trace id 与 request id 保持
 关联。
+
+**装配失败**：构造成功后立即 Use，再构造后续组件。`App.Close(ctx)` 在 Run 前按
+逆序释放已登记组件，也关闭 App 自建日志文件；可在 main 中 defer，并给独立的
+超时 context。它不会取消已经运行的 Run，而是等 Run 完成（或 ctx 到期）；运行时
+停止仍取消 Run 的 context。未交给 Use 的外部/共享资源仍由调用方关闭。
+`Open` / `RegisterSchema` 在 Run 之前做 schema 工作，另受
+`db.migration_timeout`（默认 30s）约束。PostgreSQL/MySQL 持迁移锁和执行 SQL
+共用一个固定连接，单连接池也可工作。
+
 
 **信号**（`Execute`）：SIGINT / SIGTERM 优雅停；停机过程中再来一个 SIGINT /
 SIGTERM，或任何时候的 SIGQUIT，快停（剩下的 drain 立即结束，剩余预算封顶 5 秒，
@@ -294,9 +303,11 @@ schema；`*db.DB` 实现 Closer / Healther / Namer，交给 `app.Use`。
 - **三方言同等地位**：SQLite 用纯 Go 的 glebarez 驱动，文件库是 WAL、一个写
   连接加一个读池（读路由：不在事务里、没有 `FOR` 锁子句的 SELECT 走读池）；
   MySQL 强制 `parseTime=true&loc=UTC`、会话 `time_zone='+00:00'`；Postgres
-  会话固定 UTC。时间一律以 UTC 写入。
+  未显式指定 DSN timezone 时设置 UTC；显式 DSN 可覆盖。框架写入的时间以 UTC 生成。
 - **事务**：`d.RunInTx(ctx, fn)` 把事务放进 ctx，`store` 与 `d.Unsafe(ctx)`
-  自动加入；`d.InTx(ctx)` 判断，`d.AfterCommit(ctx, fn)` 登记提交后的动作。
+  自动加入；同一 handle 嵌套复用外层事务，跨 handle 嵌套直接拒绝，避免覆盖外层 ctx。
+  `d.InTx(ctx)` 判断，`d.AfterCommit(ctx, fn)` 登记提交后的动作；这些回调同步执行、
+  保留调用方取消状态、崩溃可丢失，不能替代 outbox。
 - **gorm 的唯一出口**：`d.Unsafe(ctx)`（事务感知）。`grep '\.Unsafe('` 就是
   全部越权点。
 - **模型基座**：`db.Model`（`ID uint`、`RID string`、`Version int`、
@@ -326,7 +337,9 @@ SQLite 写连接的 `BEGIN IMMEDIATE`。
 MySQL 的 DDL 隐式提交，所以 MySQL 上一条语句一条语句地执行并逐条记断点：
 半途失败的文件留下 `applied_at` 为空的行，`checksum` 是已执行前缀的指纹；
 下次从断点续跑，前缀被改过则拒绝。SQLite 与 Postgres 整个文件一个事务。
-`MarkApplied(version)` 是唯一的人工干预（手工修好 schema 之后）。`chok migrate`
+MySQL 的 DDL 提交与账本更新不是一个原子动作：DDL 已执行而账本尚未写入时崩溃，
+下一次可能重放同一条 DDL 并失败。此时检查真实 schema，补齐剩余 SQL 并核对结果后，
+用 `MarkApplied(version)` 标记完成；不能未经核对就跳过文件。它是唯一的人工干预入口。`chok migrate`
 （§9）是这些能力的命令行门面。
 
 ### 6.3 `store`：安全栏
@@ -371,7 +384,9 @@ SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
 - **写**：`Create` / `BatchCreate` / `Update` / `Delete`（软删写 token）/
   `Restore` / `Upsert` / `BatchUpsert`（缺省冲突键 rid；带 scope 的 store 拒绝
   Upsert，因为更新半边无法围栏）。`Hooks` 的 BeforeCreate / BeforeUpdate /
-  BeforeDelete 在全部校验之后、任何 SQL 之前调用。
+  BeforeDelete 在变更字段、scope 与 locator 校验之后、写 SQL 之前调用；
+  这不证明 locator 命中的行存在或属于当前用户，也不替代权限判断。外部副作用放在
+  提交后的可靠任务中，不能靠 Before hook 保证最终写入成功。
 - **错误是类型**：`NotFoundError`（404）、`VersionConflictError` 与
   `DuplicateError`（409，`metadata.field` 由约束推出字段名）、
   `EmptyChangesError`（400）、`NoPrincipalError`（401）、`MissingConditionsError`
@@ -519,7 +534,9 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   升级时要搬进 `users.roles`（迁移文档 §5）。`HasPermission(ctx, userID, …)`
   按 userID 读 identity 的用户后同规则判定，用户不存在或已停用（`SetActive`）
   → false。`New` /
-  `MustNew`、策略服务、Redis watcher 同步多副本。不 import rbac 的应用不链接
+  `MustNew`、策略服务、Redis watcher 同步多副本。Watcher 每 30s 从数据库完整复核，
+  补偿丢失通知，Redis 重新订阅成功也立即触发复核；失败记录计数并在下一轮重试。数据库可用且查询能在
+  5s 内完成时，撤权在下一次复核收敛；数据库持续不可用时这个时限不成立。不 import rbac 的应用不链接
   casbin，也不建 casbin_rule 表。
 
 ### 7.2 `jobs`
@@ -535,18 +552,27 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   `ErrOutsideTx`），消息与业务写入同生共死；worker 把 payload 按 `T` 用
   `encoding/json/v2` 解码（要原始 JSON 用 `Worker[jsontext.Value]`），以
   `(created_at, id)` 顺序**至少一次**投递，每个 topic 一个水位，失败只阻塞自己的
-  topic。handler 必须幂等（按 `Message.ID` 去重）。保证的前提：enqueue 事务在
-  `settle_window` 内提交，各进程时钟同步。
+  topic。handler 必须幂等（按 `Message.ID` 或业务键去重）。成功后持久写入原消息的
+  `completed_at`；水位仅加速扫描，每轮补扫水位之前未确认的消息，迟提交不再受
+  `settle_window` 时长限制。扫描按 `(created_at,id)`，迟提交可能晚于新消息送达，
+  不保证全局入队顺序或提交顺序。
 - 失败与死信：handler 返回错误或 panic，这条消息的失败次数 +1 并写在消息行上
   （重启不清零），`retry_backoff` 后重试、每次翻倍、不超过 `max_backoff`，等待期间
   不再每轮重试；第 `max_attempts` 次（默认 10）仍失败就**停放**进死信表
   `chok_jobs_dead`，算作已投递，topic 继续往下走；payload 解码失败直接停放。
   `j.Dead(ctx, topic, limit)` 列出、`j.Requeue(ctx, ids...)` 重新入队成新消息、
   `j.Discard(ctx, ids...)` 删除，只用数据库，`enabled: false` 的进程也能调。
-  优雅停止时，各 worker 已投递、水位还没越过的消息写进 `chok_jobs_delivered`，
-  重启后的第一轮读回、不再投递；崩溃没有这一步，仍可能重投。retention 清理只删
-  消息表，不碰死信；配置文件不写 `retention` 时默认 168h，代码里构造的 Config
-  不写就是 0（永久）。
+  成功确认和停放终态都持久保存在原消息上；Discard/Requeue 删除死信时不抹掉终态。
+  外部副作用到确认写入之间崩溃，仍可能重复执行；确认失败不能推进为成功。
+  retention 只删本进程已登记 topic 中已确认、低于保守水位且过期的消息，不碰死信、
+  未确认消息或未知 topic。配置文件不写 retention 默认 168h，代码 Config 为 0（永久）。
+  Attempt 计算已持久记录的 handler 失败，不是投递次数；取消错误不扣次数，普通错误
+  即便与停机同时发生也会尝试用独立 5s context 保存。数据库故障或崩溃仍会丢失尚未保存的计数。
+
+升级 jobs 必须先停止旧消费者，执行新增的 `20261101000001_confirm_jobs_messages.sql`
+迁移，升级后再启动；不要混跑旧/新消费者。旧死信和 delivered 集合可回填完成证据，
+水位不能证明旧消息已完成，因此其余仍保留的旧消息可能补投一次。升级前先确保 handler
+幂等。旧版本已经物理删除的消息不能靠迁移恢复。
 
 部署假设：所有 worker 与周期任务跑在**一个** `jobs.enabled: true` 的进程里，
 其余进程 `enabled: false` 只 Enqueue。`Stats()` 给出每个作业的运行统计；
@@ -587,8 +613,17 @@ recover 并记 Warn，不影响运行与统计。典型用法是交给 realtime 
   `chok.LoggerFrom`）复制到 OTel Logs，带 trace / span id；用 `chok.Logger`
   注入的 logger 不桥接。
 
-埋点不注册 gorm 回调：db 在 `Open` 时已给六条回调链挂好前后钩子，telemetry 经
-`internal/dbx` 原子地挂观察者，所以句柄使用中也能 `Instrument`。
+db 在 Open 时给六条 GORM 回调链挂好前后钩子；Instrument 先完整初始化观察者再
+原子发布，同一条语句的前后使用同一观察者。RunInTx 另计 BEGIN/COMMIT/ROLLBACK，
+BEGIN 包含连接池等待。普通 GORM Query 包含结果扫描；Raw().Row()/Rows() 的回调
+只到取得 cursor，不含之后 Scan/Next/Close，应用对这段读取自行建 span。
+
+provider 默认按 Telemetry 实例隔离；第三方客户端可显式接收 TracerProvider()，
+或只在单个进程级 Telemetry 上使用 `telemetry.Globals()` 恢复 OTel 全局集成。
+App.Use 将日志桥绑定到当前 App，自建访问日志与根日志共享这个桥，不串到其他 App。
+root 的默认 New 仍安装 slog.Default（兼容单 App 常见用法）；多 App 用 chok.Logger
+显式传入各自 logger。数据库在 Open 时固定捕获 logger，后续 New 不再重定向它。
+Base 自带 Load 来源，SIGHUP 不读取其他配置的来源；SoftUnique 元数据归 DB 句柄所有。
 
 ### 7.4 `cache`
 
@@ -621,6 +656,11 @@ Redis 前；三层全关是错误。`Get` 读穿并以内存层回填，`Set` / 
   error：EventSource 自己的连接错误用这个名字，页面惯用 onerror 重连）；SSE 的主题全部
   被拒时回 403。refused、reset 与 error 三个类型 `Publish` 一律拒绝（backplane 收到的
   也丢弃）：error 若能发布，页面的 onerror 会把它当成断线。
+- **会话失效**：连接的 principal 是 ticket 签发时的快照。`connection_ttl` 默认 5m，
+  WS/SSE 到期关闭，客户端需重新认证取 ticket；撤权的默认最长残留时间约为
+  ticket_ttl + connection_ttl。可在撤销会话或修改权限后调用 `hub.Disconnect(userID)`
+  立即关闭该副本现有连接。多副本需应用把撤销传给各副本；它不作跨副本广播，也不
+  作废尚未兑换的 ticket，ticket_ttl 内仍可兑换。需要更短窗口时缩短两个 TTL。
 - **投递**：`Publish(ctx, topic, typ, data)` 在锁内给事件编号
   `<origin>-<seq>`（origin 是 Hub 在 New 时抽的随机标识）、写进续传缓冲、放进每个
   订阅者的发送队列，从不等慢连接：队列里已有 `send_buffer` 条实时事件的连接被当作

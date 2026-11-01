@@ -41,7 +41,7 @@ func TestAudit_RecordsTheRequestTrace(t *testing.T) {
 	if resp := c.Do(req); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("POST /publish = %d", resp.StatusCode)
 	}
-	page, err := idn.Audit().ListFromQuery(t.Context(), url.Values{"action": {"post.publish"}})
+	page, err := idn.Audit().ListFromQuery(chok.WithPrincipal(t.Context(), chok.Principal{UserID: "usr_admin", Roles: []string{"admin"}}), url.Values{"action": {"post.publish"}})
 	if err != nil || len(page.Items) != 1 {
 		t.Fatalf("%+v %v", page, err)
 	}

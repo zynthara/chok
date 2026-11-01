@@ -447,7 +447,7 @@ func TestClose_FlushesAndRestoresTheGlobalProvider(t *testing.T) {
 	spans := tracetest.NewInMemoryExporter()
 	var cfg Config
 	cfg.Tracing.Enabled = true
-	tel, err := New(cfg, Logger(quiet()), spanExporterOption(spans))
+	tel, err := New(cfg, Globals(), Logger(quiet()), spanExporterOption(spans))
 	if err != nil {
 		t.Fatal(err)
 	}

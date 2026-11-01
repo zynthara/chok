@@ -79,7 +79,7 @@ func TestBuildLoggers_TappedForTelemetry(t *testing.T) {
 		}
 	})
 	var tapped bytes.Buffer
-	uninstall := logtap.Install(slog.NewJSONHandler(&tapped, nil))
+	uninstall := logtap.Install(l.root.Handler(), slog.NewJSONHandler(&tapped, nil))
 	defer uninstall()
 	l.root.With("request_id", "r-1").Info("handled")
 	l.root.Debug("below log.level")

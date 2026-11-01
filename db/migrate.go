@@ -306,6 +306,7 @@ func (d *DB) applyByStatement(ctx context.Context, gdb *gorm.DB, f migration, ro
 
 // markApplied records f as applied without running it.
 func markApplied(ctx context.Context, gdb *gorm.DB, f migration) error {
+	gdb = gdb.WithContext(ctx)
 	release, err := lockMigrations(ctx, gdb)
 	if err != nil {
 		return err
@@ -370,7 +371,12 @@ func lockMigrations(ctx context.Context, gdb *gorm.DB) (release func(), err erro
 		_ = conn.Close()
 		return nil, fmt.Errorf("db: migration lock: %w", err)
 	}
+	// Execute migrations on the lock-owning session. A second checkout
+	// would deadlock a one-connection pool and could outlive a lost lock.
+	original := gdb.Statement.ConnPool
+	gdb.Statement.ConnPool = conn
 	return func() {
+		gdb.Statement.ConnPool = original
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if unlock(cctx) != nil {

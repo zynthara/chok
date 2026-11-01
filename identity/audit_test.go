@@ -30,6 +30,7 @@ func detachedAudit(idn *Identity, buffer int, dropOnFull bool) *Audit {
 		batchSize: auditBatchSize, flushEvery: auditFlushEvery, purgeEvery: auditPurgeEvery, now: time.Now,
 	}
 	a.in = make(chan Event, buffer)
+	a.stopping = make(chan struct{})
 	a.done = make(chan struct{})
 	return a
 }
@@ -119,7 +120,7 @@ func TestAudit_LogSyncRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := idn.Audit().ListFromQuery(t.Context(), url.Values{"action": {"post.publish"}})
+	page, err := idn.Audit().ListFromQuery(auditReader(t.Context()), url.Values{"action": {"post.publish"}})
 	if err != nil || page.Total != 1 || len(page.Items) != 1 {
 		t.Fatalf("list = %+v %v", page, err)
 	}
@@ -164,7 +165,7 @@ func TestAudit_LogFillsTheActorFromTheRequest(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("publish = %d", resp.StatusCode)
 	}
-	page, err := idn.Audit().ListFromQuery(t.Context(), url.Values{})
+	page, err := idn.Audit().ListFromQuery(auditReader(t.Context()), url.Values{})
 	if err != nil || len(page.Items) != 1 {
 		t.Fatalf("%+v %v", page, err)
 	}
@@ -304,19 +305,19 @@ func TestAudit_ListFromQuery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	page, err := a.ListFromQuery(t.Context(), url.Values{"actor_id": {"usr_alice"}, "page": {"1"}, "size": {"5"}})
+	page, err := a.ListFromQuery(auditReader(t.Context()), url.Values{"actor_id": {"usr_alice"}, "page": {"1"}, "size": {"5"}})
 	if err != nil || page.Total != 8 || len(page.Items) != 5 || !page.HasMore || page.Page != 1 || page.Size != 5 {
 		t.Fatalf("page 1: %+v %v", page, err)
 	}
 	if !page.Items[0].OccurredAt.After(page.Items[4].OccurredAt) {
 		t.Fatal("newest first")
 	}
-	page, _ = a.ListFromQuery(t.Context(), url.Values{"actor_id": {"usr_alice"}, "page": {"2"}, "size": {"5"}})
+	page, _ = a.ListFromQuery(auditReader(t.Context()), url.Values{"actor_id": {"usr_alice"}, "page": {"2"}, "size": {"5"}})
 	if len(page.Items) != 3 || page.HasMore {
 		t.Fatalf("page 2: %+v", page)
 	}
 	// from and to bound occurred_at, inclusive; order flips the time.
-	page, _ = a.ListFromQuery(t.Context(), url.Values{
+	page, _ = a.ListFromQuery(auditReader(t.Context()), url.Values{
 		"from": {base.Add(2 * time.Hour).Format(time.RFC3339)}, "to": {base.Add(4 * time.Hour).Format(time.RFC3339)}, "order": {"occurred_at:asc"},
 	})
 	if page.Total != 3 || !page.Items[0].OccurredAt.Equal(base.Add(2*time.Hour)) {
@@ -332,7 +333,7 @@ func TestAudit_ListFromQuery(t *testing.T) {
 		"bad dir":      {"order": {"occurred_at:up"}},
 		"not a number": {"page": {"one"}},
 	} {
-		if _, err := a.ListFromQuery(t.Context(), q); err == nil {
+		if _, err := a.ListFromQuery(auditReader(t.Context()), q); err == nil {
 			t.Errorf("%s: %v passed", name, q)
 		} else if e, ok := err.(*chok.Error); !ok || e.Code != http.StatusBadRequest {
 			t.Errorf("%s: want a 400, got %v", name, err)
@@ -445,7 +446,7 @@ func TestAudit_FillsTheTraceIDFromTheContext(t *testing.T) {
 	}
 	idn.Audit().Log(ctx, Event{Action: "post.archive"})
 	waitRows(t, idn, 2, 5*time.Second)
-	page, err := idn.Audit().ListFromQuery(t.Context(), url.Values{})
+	page, err := idn.Audit().ListFromQuery(auditReader(t.Context()), url.Values{})
 	if err != nil || len(page.Items) != 2 {
 		t.Fatalf("%+v %v", page, err)
 	}
@@ -454,4 +455,8 @@ func TestAudit_FillsTheTraceIDFromTheContext(t *testing.T) {
 			t.Fatalf("%s: trace id %q", e.Action, e.TraceID)
 		}
 	}
+}
+
+func auditReader(ctx context.Context) context.Context {
+	return chok.WithPrincipal(ctx, chok.Principal{UserID: "usr_admin", Roles: []string{"admin"}})
 }

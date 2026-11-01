@@ -1,5 +1,5 @@
 // Package jobs is chok's battery for background work: periodic jobs on
-// cron schedules, and workers that deliver, at least once and in order,
+// cron schedules, and workers that deliver, at least once,
 // the messages the application enqueues in its own transactions.
 //
 //	j := jobs.MustNew(cfg.Jobs, d,
@@ -39,13 +39,14 @@
 //
 // # Delivery
 //
-// A worker sweeps its topic every PollInterval and hands each committed
-// message to its function in (created_at, id) order, the payload decoded
-// into the worker's type. Delivery is at least once: a message the
-// function failed on comes again, and after a crash the messages younger
-// than the settle window come again. So the function must be idempotent
-// — dedupe on Message.ID, or on a business key in the payload. A graceful
-// stop saves what was delivered, so a restart does not repeat it.
+// A worker sweeps its topic every PollInterval and hands committed messages
+// to its function in (created_at, id) scan order, decoded into the worker's
+// type. Late commits can arrive after newer messages: there is no total
+// enqueue or commit order. Delivery is at least once. The durable
+// acknowledgement is written AFTER the handler succeeds; a crash or write
+// failure between an external effect and acknowledgement can repeat the
+// effect. Handlers must dedupe by Message.ID or a business idempotency key.
+// Successful acknowledgements survive crashes and graceful restarts.
 //
 // A failing message blocks the messages behind it in its topic (they keep
 // their order); the other topics' workers keep their own pace. The worker
@@ -57,14 +58,23 @@
 // Requeue enqueues them again once the cause is fixed, Discard drops
 // them — from any process, the jobs enabled or not.
 //
-// Each worker keeps its position, a watermark, in chok_jobs_watermarks.
-// The watermark never passes messages younger than SettleWindow: a
-// transaction that enqueued earlier but commits later is still found. The
-// guarantee holds while every enqueuing transaction commits within
-// SettleWindow of its Enqueue and the processes that enqueue keep their
-// clocks in sync. Retention (a week, from a configuration file) deletes
-// the messages every worker has passed once they are older than it; the
-// dead letters stay until Requeue or Discard.
+// Each worker keeps a watermark in chok_jobs_watermarks to accelerate
+// scanning. Pending rows behind it are always revisited, so arbitrarily
+// late commits are found without a settle deadline or synchronized clocks.
+// CompletedAt on the original message is the correctness boundary, also
+// for parking, Requeue and Discard. Retention only deletes acknowledged
+// messages of registered topics below the watermark floor; unknown topics
+// stay. Dead letters remain until Requeue or Discard.
+//
+// Upgrading an existing database adds completed_at. Old dead letters and
+// saved delivered sets provide completion evidence; watermarks do not.
+// Other retained old rows may be replayed once. Deploy idempotent handlers
+// before upgrading. Already deleted rows cannot be recovered by migration.
+// Stop old consumers before migration; mixed old/new consumers are unsafe.
+//
+// Attempts count persisted handler failures, not effects or deliveries.
+// Actual cancellation errors do not consume an attempt. Real errors racing
+// shutdown are recorded with a separate bounded context when the DB permits.
 //
 // Workers and periodic jobs run in the processes where Config.Enabled is
 // true; run them in one process of a deployment and set enabled: false in

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zynthara/chok"
 )
@@ -49,6 +50,7 @@ type conn struct {
 	ended  bool
 	code   int
 	reason string
+	timer  *time.Timer
 	abort  func() // SSE: unblocks a write stuck on a peer that stopped reading
 }
 
@@ -157,11 +159,15 @@ func (h *Hub) register(c *conn) bool {
 		h.users[c.userID]++
 	}
 	h.sessions.Add(1)
+	c.timer = time.AfterFunc(h.cfg.ConnectionTTL, func() { c.end(closePolicy, "session expired; obtain a fresh ticket") })
 	return true
 }
 
 // unregister removes c and its subscriptions once its transport is done.
 func (h *Hub) unregister(c *conn) {
+	if c.timer != nil {
+		c.timer.Stop()
+	}
 	h.mu.Lock()
 	h.detachLocked(c, nil)
 	delete(h.conns, c)
@@ -365,5 +371,23 @@ func (h *Hub) logDropped(slow []*conn, topic string) {
 	for _, c := range slow {
 		c.log.Info("realtime: dropped a slow consumer", "transport", c.kind, "user_id", c.userID,
 			"topic", topic, "send_buffer", c.limit)
+	}
+}
+
+// Disconnect ends the current connections of userID on this replica.
+// Call after revoking sessions or changing authorization. With several
+// replicas, deliver the revocation to every replica; ConnectionTTL is
+// the fallback bound. Outstanding tickets still live until TicketTTL.
+func (h *Hub) Disconnect(userID string) {
+	if userID == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.conns {
+		if c.userID == userID {
+			h.detachLocked(c, nil)
+			c.end(closePolicy, "session revoked")
+		}
 	}
 }

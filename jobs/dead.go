@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/zynthara/chok"
 )
@@ -111,6 +112,11 @@ func (j *Jobs) takeDead(ctx context.Context, op string, ids []uint64, then func(
 		}
 		var deleted int64
 		for chunk := range slices.Chunk(ids, deadChunk) {
+			// Preserve terminal state even for dead letters created before
+			// durable acknowledgements were introduced.
+			if err := tx.Model(&message{}).Where("id IN ? AND completed_at IS NULL", chunk).Update("completed_at", time.Now().UTC()).Error; err != nil {
+				return err
+			}
 			res := tx.Where("id IN ?", chunk).Delete(&deadRow{})
 			if res.Error != nil {
 				return fmt.Errorf("jobs: %s: delete from the dead letters: %w", op, res.Error)

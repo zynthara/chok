@@ -141,3 +141,26 @@ func TestHooks_ValidationFirst(t *testing.T) {
 		t.Fatalf("valid change: %v, hook ran %v", err, ran)
 	}
 }
+
+func TestHooks_RejectInvalidWriteContextAndLocatorBeforeCallingHooks(t *testing.T) {
+	calls := 0
+	s := store.New[doc](openDB(t), store.Hooks(store.HookSet[doc]{
+		BeforeUpdate: func(context.Context, store.Locator, map[string]any) error { calls++; return nil },
+		BeforeDelete: func(context.Context, store.Locator) error { calls++; return nil },
+	}))
+	if err := s.Update(t.Context(), store.ID(1), store.Set(map[string]any{"title": "x"})); err == nil {
+		t.Fatal("missing principal admitted")
+	}
+	if err := s.Delete(t.Context(), store.ID(1)); err == nil {
+		t.Fatal("missing principal admitted")
+	}
+	if err := s.Update(as(t.Context(), "alice"), nil, store.Set(map[string]any{"title": "x"})); err == nil {
+		t.Fatal("nil locator admitted")
+	}
+	if err := s.Delete(as(t.Context(), "alice"), nil); err == nil {
+		t.Fatal("nil locator admitted")
+	}
+	if calls != 0 {
+		t.Fatalf("hooks ran for refused writes: %d", calls)
+	}
+}

@@ -14,6 +14,9 @@ type Config struct {
 	// the SQL files given to Migrations) or off (touch nothing, but fail
 	// if versioned files are pending).
 	Migrate string `yaml:"migrate" default:"auto" validate:"oneof=auto versioned off"`
+	// MigrationTimeout bounds one owner's schema work, including lock and pool wait.
+	// Open and RegisterSchema run before App.Run and use this separate budget.
+	MigrationTimeout time.Duration `yaml:"migration_timeout" default:"30s" validate:"gte=0"`
 	// SlowThreshold logs queries slower than it at warn; 0 disables.
 	SlowThreshold time.Duration  `yaml:"slow_threshold" default:"200ms" validate:"gte=0"`
 	SQLite        SQLiteConfig   `yaml:"sqlite"`

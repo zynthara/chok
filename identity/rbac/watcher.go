@@ -72,13 +72,9 @@ import (
 //     — peer pods would silently diverge. Best-effort is the only
 //     correct stance for at-most-once pub/sub semantics.
 //
-//   - Reload failures (peer-triggered LoadPolicy returning error) are
-//     logged at Error and counted in watcherStats.ReloadFailures. The
-//     subscriber stays alive; the next peer publish will re-attempt.
-//     Operators running across slow links should configure a periodic
-//     SyncedEnforcer.LoadPolicy as backstop — Redis pub/sub is
-//     at-most-once, so a watcher alone cannot guarantee convergence
-//     under sustained Redis loss.
+//   - Reload failures are logged and counted. A periodic full reload every
+//     30 seconds repairs missed notifications and Redis reconnect gaps.
+//     Database failures can extend this bound; successful reload is required.
 //
 //   - Callback panics are NOT recovered. In Go an unrecovered panic
 //     in a goroutine kills the entire process, which is the correct
@@ -106,6 +102,7 @@ type redisWatcher struct {
 	reload chan struct{}
 
 	publishTimeout time.Duration
+	reloadInterval time.Duration
 
 	mu       sync.RWMutex
 	callback func(string)
@@ -224,6 +221,7 @@ func newRedisWatcher(ctx context.Context, client *goredis.Client, channel string
 		reloadDone:     make(chan struct{}),
 		reload:         make(chan struct{}, 1),
 		publishTimeout: watcherPublishTimeout,
+		reloadInterval: 30 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -240,7 +238,7 @@ func newRedisWatcher(ctx context.Context, client *goredis.Client, channel string
 // produces at most one queued reload.
 func (w *redisWatcher) receiveLoop(ctx context.Context) {
 	defer close(w.recvDone)
-	ch := w.pubsub.Channel(
+	ch := w.pubsub.ChannelWithSubscriptions(
 		goredis.WithChannelSize(watcherChannelBufferSize),
 		goredis.WithChannelSendTimeout(watcherChannelSendTimeout),
 	)
@@ -248,9 +246,17 @@ func (w *redisWatcher) receiveLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case msg, ok := <-ch:
+		case value, ok := <-ch:
 			if !ok {
 				return
+			}
+			if _, ok := value.(*goredis.Subscription); ok {
+				w.signalReload() // reconnect may have missed any number of changes
+				continue
+			}
+			msg, ok := value.(*goredis.Message)
+			if !ok {
+				continue
 			}
 			if msg.Payload == w.instanceID {
 				continue
@@ -276,11 +282,23 @@ func (w *redisWatcher) signalReload() {
 // pubsub draining.
 func (w *redisWatcher) reloadLoop(ctx context.Context) {
 	defer close(w.reloadDone)
+	interval := w.reloadInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-w.reload:
+		case <-ticker.C:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		{
 			w.mu.RLock()
 			cb := w.callback
 			w.mu.RUnlock()
@@ -332,7 +350,7 @@ func (w *redisWatcher) Update() error {
 	defer cancel()
 	if err := w.client.Publish(ctx, w.channel, w.instanceID).Err(); err != nil {
 		w.publishFailures.Add(1)
-		w.logger.Warn("rbac watcher: publish failed (best-effort, peers may stay stale until next mutation)",
+		w.logger.Warn("rbac watcher: publish failed (best-effort, peers refresh within 30s while the database is available)",
 			"channel", w.channel,
 			"error", err.Error(),
 		)

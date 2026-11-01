@@ -217,7 +217,7 @@ func New[T db.Modeler](d *db.DB, opts ...Option) *Store[T] {
 			s.constraints["uni_"+stmt.Schema.Table+"_"+f.DBName] = s.fieldOfColumns([]string{f.DBName})
 		}
 	}
-	for _, idx := range dbx.Indexes(t) {
+	for _, idx := range dbx.Indexes(d, t) {
 		if f := s.fieldOfColumns(idx.Columns); f != "" {
 			s.constraints[idx.Name] = f
 		}

@@ -25,19 +25,20 @@ type loggers struct {
 // they write.
 func buildLoggers(c LogConfig) loggers {
 	var l loggers
+	group := new(logtap.Group)
 	l.level = new(slog.LevelVar)
 	if lv, ok := parseLevel(c.Level); ok {
 		l.level.Set(lv)
 	}
 	w, closers := logWriter(c.Output, c.Files)
 	l.closers = closers
-	l.root = slog.New(logtap.Wrap(logHandler(c.Format, w, l.level)))
+	l.root = slog.New(group.Wrap(logHandler(c.Format, w, l.level)))
 	if c.Access {
 		l.access = l.root
 		if hasPath(c.AccessFiles) {
 			aw, ac := logWriter(nil, c.AccessFiles)
 			l.closers = append(l.closers, ac...)
-			l.access = slog.New(logtap.Wrap(logHandler(c.Format, aw, slog.LevelInfo)))
+			l.access = slog.New(group.Wrap(logHandler(c.Format, aw, slog.LevelInfo)))
 		}
 	}
 	return l

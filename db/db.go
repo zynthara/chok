@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -33,6 +34,7 @@ type DB struct {
 
 	mu      sync.Mutex
 	schemas []*ownerSchema
+	indexes sync.Map // reflect.Type -> []dbx.Index
 }
 
 // ownerSchema is one owner's tables and migrations: the application's, given
@@ -63,7 +65,8 @@ func Tables(specs ...TableSpec) Option {
 // subdirectory is used for its dialect when present.
 func Migrations(fsys fs.FS) Option { return func(c *openConfig) { c.migrations = fsys } }
 
-// Logger is where the handle and gorm log; the default follows slog.Default.
+// Logger is where the handle and gorm log; Open captures slog.Default
+// when no logger is supplied. Later Apps cannot redirect an existing handle.
 func Logger(l *slog.Logger) Option { return func(c *openConfig) { c.logger = l } }
 
 // Owner names the application's rows in the migration ledger; the
@@ -92,6 +95,9 @@ func Open(cfg Config, opts ...Option) (*DB, error) {
 	// The caller keeps its slices: the handle's policy must not change
 	// when they do.
 	cfg.Store = cfg.Store.clone()
+	if oc.logger == nil {
+		oc.logger = slog.Default()
+	}
 	d := &DB{cfg: cfg, logger: oc.logger}
 	gcfg := &gorm.Config{
 		Logger: &gormLogger{d: d, slow: cfg.SlowThreshold},
@@ -175,13 +181,19 @@ func (d *DB) Migrate(ctx context.Context) error {
 }
 
 func (d *DB) migrate(ctx context.Context, s *ownerSchema) error {
+	timeout := d.cfg.MigrationTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for _, t := range s.tables {
 		if len(t.indexes) > 0 {
 			var idx []dbx.Index
 			for _, i := range t.indexes {
 				idx = append(idx, dbx.Index{Name: i.name, Columns: i.columns})
 			}
-			dbx.SetIndexes(t.typ, idx)
+			d.indexes.Store(t.typ, idx)
 		}
 	}
 	switch d.cfg.Migrate {
@@ -329,4 +341,12 @@ func (d *DB) closePools() error {
 		errs = append(errs, d.readers.Close())
 	}
 	return errors.Join(errs...)
+}
+
+func init() {
+	dbx.Indexes = func(d any, t reflect.Type) []dbx.Index {
+		v, _ := d.(*DB).indexes.Load(t)
+		idx, _ := v.([]dbx.Index)
+		return idx
+	}
 }

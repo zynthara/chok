@@ -78,13 +78,17 @@ func (a *App) checkHealth(ctx context.Context, comps []*component) healthReport 
 }
 
 func callHealth(ctx context.Context, h Healther) (err error) {
-	defer func() {
-		if p := recover(); p != nil {
-			err = fmt.Errorf("health check panicked: %v", p)
-		}
-	}()
 	done := make(chan error, 1)
-	go func() { done <- h.Health(ctx) }()
+	go func() {
+		var err error
+		defer func() {
+			if p := recover(); p != nil {
+				err = fmt.Errorf("health check panicked: %v", p)
+			}
+			done <- err
+		}()
+		err = h.Health(ctx)
+	}()
 	select {
 	case err := <-done:
 		return err

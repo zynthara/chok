@@ -32,14 +32,13 @@ type Config struct {
 	// many the cleanup deletes per statement; a sweep reads at most 100
 	// batches, the rest wait for the next one. At most 10000.
 	BatchSize int `yaml:"batch_size" default:"100"`
-	// SettleWindow bounds how long a transaction that calls Enqueue may
-	// take to commit: a worker's watermark never passes messages younger
-	// than this, so a late commit is still delivered. Raise it if
-	// enqueueing transactions run longer, and keep the clocks of the
-	// processes that enqueue in sync.
+	// SettleWindow delays advancement of the scan watermark; it is an
+	// optimization, not a transaction deadline. Pending messages behind
+	// the watermark are rescanned until durably acknowledged.
 	SettleWindow time.Duration `yaml:"settle_window" default:"30s"`
-	// MaxAttempts is how many times a worker delivers a message, the
-	// first time included: a message its function still fails on then is
+	// MaxAttempts bounds durably recorded handler failures. A crash or
+	// failed acknowledgement can repeat an Attempt; it is not a delivery
+	// count. A message its function still fails on at the limit is
 	// parked in the dead letters (Jobs.Dead) and the topic moves on.
 	MaxAttempts int `yaml:"max_attempts" default:"10"`
 	// RetryBackoff is how long a worker waits after a message's first
@@ -51,8 +50,9 @@ type Config struct {
 	// Retention deletes, every CleanupInterval, the messages older than
 	// Retention that every worker has delivered; 0 keeps them forever,
 	// and is what a Config built in code without it gets. The cleanup
-	// goes by the watermarks of the workers of its own process: one
-	// without workers deletes nothing. It never deletes the dead letters.
+	// only deletes acknowledged messages of registered topics below
+	// the conservative watermark floor. Unknown topics and pending rows
+	// are retained; a process without workers deletes nothing. It never deletes the dead letters.
 	Retention time.Duration `yaml:"retention" default:"168h"`
 	// CleanupInterval is how often the retention cleanup runs.
 	CleanupInterval time.Duration `yaml:"cleanup_interval" default:"1h"`

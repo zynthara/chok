@@ -10,7 +10,6 @@ import (
 	"database/sql"
 	"io/fs"
 	"reflect"
-	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -30,17 +29,9 @@ type Index struct {
 	Columns []string
 }
 
-var indexes sync.Map // reflect.Type → []Index
-
-// SetIndexes records the SoftUnique indexes of model type t.
-func SetIndexes(t reflect.Type, idx []Index) { indexes.Store(t, idx) }
-
-// Indexes returns the SoftUnique indexes recorded for model type t.
-func Indexes(t reflect.Type) []Index {
-	v, _ := indexes.Load(t)
-	idx, _ := v.([]Index)
-	return idx
-}
+// Indexes returns the SoftUnique metadata belonging to a database handle.
+// Set by db at initialization; no model metadata is shared across handles.
+var Indexes func(d any, t reflect.Type) []Index
 
 // PlainTable, set by package db when it initializes, declares the table
 // of a model that embeds no db model base — an append-only log, or a
@@ -74,3 +65,6 @@ type Observed struct {
 // observer attached before (nil detaches it). It returns what o needs to
 // know about d.
 var Observe func(d any, o Observer) Observed
+
+// Describe reads immutable metadata without publishing an observer.
+var Describe func(d any) Observed

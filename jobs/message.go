@@ -73,19 +73,22 @@ func checkTopic(topic string) error {
 // cleanup. (created_at, id) is the delivery order. One index serves a
 // worker's scan of its topic, the other the scans across topics: the
 // settled-frontier probe and the cleanup. The worker writes the last
-// three columns, and only when a delivery fails: head-of-line delivery
+// failure columns when delivery fails, and CompletedAt when it finishes.
+// Head-of-line delivery
 // means only the head of a topic can be failing, and the count travels
 // with the message, so a restart picks it up.
 type message struct {
-	ID        uint64    `gorm:"primaryKey;index:idx_chok_jobs_messages_scan,priority:2;index:idx_chok_jobs_messages_topic,priority:3"`
-	CreatedAt time.Time `gorm:"not null;index:idx_chok_jobs_messages_scan,priority:1;index:idx_chok_jobs_messages_topic,priority:2"`
-	Topic     string    `gorm:"size:200;not null;index:idx_chok_jobs_messages_topic,priority:1"`
+	ID        uint64    `gorm:"primaryKey;index:idx_chok_jobs_messages_scan,priority:2;index:idx_chok_jobs_messages_topic,priority:3;index:idx_chok_jobs_messages_pending,priority:4"`
+	CreatedAt time.Time `gorm:"not null;index:idx_chok_jobs_messages_scan,priority:1;index:idx_chok_jobs_messages_topic,priority:2;index:idx_chok_jobs_messages_pending,priority:3"`
+	Topic     string    `gorm:"size:200;not null;index:idx_chok_jobs_messages_topic,priority:1;index:idx_chok_jobs_messages_pending,priority:1"`
 	Payload   []byte
 	// Attempts counts the failed deliveries; RetryAt is when the next
 	// may start (NULL: at once); LastError is the last failure's error.
 	Attempts  int `gorm:"not null;default:0"`
 	RetryAt   *time.Time
 	LastError string
+	// CompletedAt is the durable acknowledgement, independent of scan watermarks.
+	CompletedAt *time.Time `gorm:"index:idx_chok_jobs_messages_pending,priority:2"`
 }
 
 func (message) TableName() string { return "chok_jobs_messages" }
@@ -97,11 +100,8 @@ func (m *message) toMessage() rawMessage {
 	}
 }
 
-// watermarkRow is a worker's persisted position in chok_jobs_watermarks,
-// keyed by its topic: (watermark_at, watermark_id) is the (created_at, id)
-// of the last settled message whose whole prefix, in delivery order, is
-// delivered. A row appears with the first advance, so watermark_at is
-// never the zero time, which MySQL would refuse.
+// watermarkRow is a scan position, not proof that every earlier message
+// completed. Late commits behind it remain eligible through CompletedAt.
 type watermarkRow struct {
 	Topic       string    `gorm:"primaryKey;size:200"`
 	WatermarkAt time.Time `gorm:"not null"`

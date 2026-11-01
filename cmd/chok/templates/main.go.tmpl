@@ -12,6 +12,7 @@ import (
 	"context"
 	"embed"
 	"io/fs"
+	"time"
 
 	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/db"
@@ -54,11 +55,14 @@ var migrations embed.FS
 func main() {
 	cfg := chok.MustLoad[Config]("{{.Name}}")
 	app := chok.New(cfg.Base)
-
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = app.Close(ctx)
+	}()
 	files, _ := fs.Sub(migrations, "migrations")
 	d := db.MustOpen(cfg.DB, db.Tables(db.Table(&Note{})), db.Migrations(files))
 	app.Use(d) // health on /healthz, closed when the app stops
-
 	notes := store.New[Note](d)
 	api := app.Group("/api/v1")
 	chok.POST(api, "/notes", func(ctx context.Context, req *createNote) (*Note, error) {

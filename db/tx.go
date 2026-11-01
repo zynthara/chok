@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/zynthara/chok/internal/dbx"
 )
 
 // txKey carries the transaction of one handle in a context: a transaction
@@ -30,15 +33,24 @@ func txOf(ctx context.Context, d *DB) *txEntry {
 // RunInTx runs fn in a transaction whose context is txCtx: every store and
 // Unsafe call made with txCtx joins it. fn's error rolls it back, so does a
 // panic, which is re-raised. A RunInTx inside another joins the outer
-// transaction; the outermost commit is the only one.
+// transaction of the same handle; the outermost commit is the only one.
+// Nesting a different handle is rejected because its context would hide
+// the outer transaction. There is no cross-database atomicity.
 func (d *DB) RunInTx(ctx context.Context, fn func(txCtx context.Context) error) error {
 	if txOf(ctx, d) != nil {
 		return fn(ctx)
 	}
+	if e, _ := ctx.Value(txKey{}).(*txEntry); e != nil && e.owner != d {
+		return fmt.Errorf("db: nesting transactions from different handles is not supported; use the outer transaction context for its handle")
+	}
 	p := &pending{}
+	var ob dbx.Observer
+	if o := d.obs.Load(); o != nil {
+		ob = o.o
+	}
 	err := runTransaction(ctx, d.gdb, func(tx *gorm.DB) error {
 		return fn(context.WithValue(ctx, txKey{}, &txEntry{owner: d, tx: tx, pending: p}))
-	})
+	}, ob)
 	if err != nil {
 		return err
 	}
@@ -46,24 +58,37 @@ func (d *DB) RunInTx(ctx context.Context, fn func(txCtx context.Context) error) 
 	return nil
 }
 
-func runTransaction(ctx context.Context, gdb *gorm.DB, fn func(tx *gorm.DB) error) (err error) {
-	tx := gdb.WithContext(ctx).Begin(&sql.TxOptions{})
+func runTransaction(ctx context.Context, gdb *gorm.DB, fn func(tx *gorm.DB) error, observers ...dbx.Observer) (err error) {
+	phase := func(op string, fn func() error) error {
+		begin := time.Now()
+		err := fn()
+		if len(observers) > 0 {
+			if o, ok := observers[0].(interface {
+				Phase(context.Context, string, time.Time, error)
+			}); ok {
+				o.Phase(ctx, op, begin, err)
+			}
+		}
+		return err
+	}
+	var tx *gorm.DB
+	_ = phase("BEGIN", func() error { tx = gdb.WithContext(ctx).Begin(&sql.TxOptions{}); return tx.Error })
 	if tx.Error != nil {
 		return tx.Error
 	}
 	defer func() {
 		if p := recover(); p != nil {
-			_ = tx.Rollback()
+			_ = phase("ROLLBACK", func() error { return tx.Rollback().Error })
 			panic(p)
 		}
 	}()
 	if err := fn(tx); err != nil {
-		if rb := tx.Rollback().Error; rb != nil {
+		if rb := phase("ROLLBACK", func() error { return tx.Rollback().Error }); rb != nil {
 			return fmt.Errorf("%w (rollback also failed: %v)", err, rb)
 		}
 		return err
 	}
-	return tx.Commit().Error
+	return phase("COMMIT", func() error { return tx.Commit().Error })
 }
 
 // InTx reports whether ctx carries a transaction of this handle.
@@ -72,7 +97,9 @@ func (d *DB) InTx(ctx context.Context) bool { return txOf(ctx, d) != nil }
 // AfterCommit stages fn to run after the transaction in ctx commits, in
 // staging order, with a context that is no longer transactional; a
 // rollback drops it. Outside a transaction it does nothing and returns
-// false.
+// false. Callbacks are synchronous and best effort, retain the caller's
+// cancellation, and are lost on a crash; use a transactional outbox when
+// execution must be durable.
 func (d *DB) AfterCommit(ctx context.Context, fn func(ctx context.Context)) bool {
 	e := txOf(ctx, d)
 	if e == nil {

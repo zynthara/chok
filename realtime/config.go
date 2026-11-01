@@ -45,6 +45,9 @@ type Config struct {
 	PingInterval time.Duration `yaml:"ping_interval" default:"25s"`
 	// TicketTTL is how long a ticket from {Path}/ticket can be redeemed.
 	TicketTTL time.Duration `yaml:"ticket_ttl" default:"60s"`
+	// ConnectionTTL bounds the lifetime of the ticket's principal snapshot.
+	// Reconnect obtains a fresh ticket through Authn.
+	ConnectionTTL time.Duration `yaml:"connection_ttl" default:"5m"`
 	// Replay is how many recent events the hub keeps, across all topics,
 	// for clients that resume after an event they saw; 0 turns resuming
 	// off, so every resume gets a reset event.
@@ -74,6 +77,9 @@ func (c Config) withDefaults() Config {
 	if c.PingInterval == 0 {
 		c.PingInterval = defaultPingInterval
 	}
+	if c.ConnectionTTL == 0 {
+		c.ConnectionTTL = 5 * time.Minute
+	}
 	if c.TicketTTL == 0 {
 		c.TicketTTL = defaultTicketTTL
 	}
@@ -102,7 +108,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Sprintf("%s must be at least 1, got %d", name, n))
 		}
 	}
-	for name, d := range map[string]time.Duration{"ping_interval": c.PingInterval, "ticket_ttl": c.TicketTTL} {
+	for name, d := range map[string]time.Duration{"ping_interval": c.PingInterval, "ticket_ttl": c.TicketTTL, "connection_ttl": c.ConnectionTTL} {
 		if d <= 0 {
 			errs = append(errs, fmt.Sprintf("%s must be positive, got %s", name, d))
 		}

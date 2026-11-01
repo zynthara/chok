@@ -48,7 +48,11 @@ func (m *dbMetrics) collectors() []prometheus.Collector {
 	return []prometheus.Collector{m.duration, m.slow}
 }
 
-// Instrument observes every SQL statement d runs: a client span named
+// Instrument observes GORM statement execution and RunInTx transaction phases.
+// Query callbacks include result scanning; Raw().Row()/Rows() callbacks end
+// when the cursor is obtained and exclude later Scan/Next/Close work. Instrument
+// that application-owned streaming work with a span when its duration matters.
+// Statements produce a client span named
 // "{operation} {table}", such as "SELECT posts", carrying the SQL as gorm
 // built it, with placeholders for the bound values (the text of the
 // slow-query log), and its outcome; the
@@ -77,9 +81,9 @@ func (t *Telemetry) Instrument(d *db.DB) {
 		return
 	}
 	t.dbs[d] = true
-	o := &dbObserver{t: t}
-	desc := dbx.Observe(d, o)
-	o.system, o.slow = systemName(desc.Driver), desc.SlowThreshold
+	desc := dbx.Describe(d)
+	o := &dbObserver{t: t, system: systemName(desc.Driver), slow: desc.SlowThreshold}
+	dbx.Observe(d, o)
 	if t.db == nil {
 		return
 	}
@@ -222,4 +226,23 @@ func dbErrorType(err error) string {
 		return "timeout"
 	}
 	return "error"
+}
+
+// Phase records transaction work outside GORM statement callbacks, including
+// connection-pool wait during BEGIN. It uses the observer captured at entry.
+func (o *dbObserver) Phase(ctx context.Context, operation string, begin time.Time, err error) {
+	elapsed := time.Since(begin)
+	if m := o.t.db; m != nil {
+		m.duration.WithLabelValues(o.system, operation, "", dbErrorType(err)).Observe(elapsed.Seconds())
+		if o.slow > 0 && elapsed >= o.slow {
+			m.slow.WithLabelValues(o.system, operation, "").Inc()
+		}
+	}
+	_, span := o.t.tracer.Start(ctx, operation, trace.WithTimestamp(begin),
+		trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(semconv.DBSystemNameKey.String(o.system), semconv.DBOperationName(operation)))
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(semconv.ErrorTypeKey.String(dbErrorType(err)))
+	}
+	span.End()
 }

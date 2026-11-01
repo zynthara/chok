@@ -82,6 +82,7 @@ The database handle `db.Open` takes.
 |---|---|---|---|---|
 | `db.driver` | string |  | `oneof=sqlite mysql postgres` |  |
 | `db.migrate` | string | `auto` | `oneof=auto versioned off` | Migrate is auto (AutoMigrate the declared tables), versioned (apply the SQL files given to Migrations) or off (touch nothing, but fail if versioned files are pending). |
+| `db.migration_timeout` | duration | `30s` | `gte=0` | MigrationTimeout bounds one owner's schema work, including lock and pool wait. Open and RegisterSchema run before App.Run and use this separate budget. |
 | `db.mysql.ca_cert` | string |  |  | TLS is "", true, false, skip-verify or preferred; CACert, when set, verifies the server against that PEM file instead. |
 | `db.mysql.database` | string |  |  |  |
 | `db.mysql.host` | string | `127.0.0.1` |  |  |
@@ -168,12 +169,12 @@ Periodic jobs and transactional-outbox workers; `jobs.New` takes it.
 | `jobs.batch_size` | int | `100` |  | BatchSize is how many messages a sweep reads per query, and how many the cleanup deletes per statement; a sweep reads at most 100 batches, the rest wait for the next one. At most 10000. |
 | `jobs.cleanup_interval` | duration | `1h` |  | CleanupInterval is how often the retention cleanup runs. |
 | `jobs.enabled` | bool | `true` |  | Enabled runs the periodic jobs and the workers in this process. False makes an enqueue-only process: Enqueue works, nothing runs. Run the workers in one process (one replica) of a deployment. |
-| `jobs.max_attempts` | int | `10` |  | MaxAttempts is how many times a worker delivers a message, the first time included: a message its function still fails on then is parked in the dead letters (Jobs.Dead) and the topic moves on. |
+| `jobs.max_attempts` | int | `10` |  | MaxAttempts bounds durably recorded handler failures. A crash or failed acknowledgement can repeat an Attempt; it is not a delivery count. A message its function still fails on at the limit is parked in the dead letters (Jobs.Dead) and the topic moves on. |
 | `jobs.max_backoff` | duration | `5m` |  | MaxBackoff caps the wait between two tries of a message. |
 | `jobs.poll_interval` | duration | `1s` |  | PollInterval is how often each worker sweeps its topic for new messages: the delivery latency while it keeps up. |
-| `jobs.retention` | duration | `168h` |  | Retention deletes, every CleanupInterval, the messages older than Retention that every worker has delivered; 0 keeps them forever, and is what a Config built in code without it gets. The cleanup goes by the watermarks of the workers of its own process: one without workers deletes nothing. It never deletes the dead letters. |
+| `jobs.retention` | duration | `168h` |  | Retention deletes, every CleanupInterval, the messages older than Retention that every worker has delivered; 0 keeps them forever, and is what a Config built in code without it gets. The cleanup only deletes acknowledged messages of registered topics below the conservative watermark floor. Unknown topics and pending rows are retained; a process without workers deletes nothing. It never deletes the dead letters. |
 | `jobs.retry_backoff` | duration | `1s` |  | RetryBackoff is how long a worker waits after a message's first failure before it tries the message again; the wait doubles with every failure. The topic's later messages wait with it. |
-| `jobs.settle_window` | duration | `30s` |  | SettleWindow bounds how long a transaction that calls Enqueue may take to commit: a worker's watermark never passes messages younger than this, so a late commit is still delivered. Raise it if enqueueing transactions run longer, and keep the clocks of the processes that enqueue in sync. |
+| `jobs.settle_window` | duration | `30s` |  | SettleWindow delays advancement of the scan watermark; it is an optimization, not a transaction deadline. Pending messages behind the watermark are rescanned until durably acknowledged. |
 | `jobs.stop_budget` | duration | `15s` |  | StopBudget is how long stopping waits for runs in flight, after telling them to stop through their context. |
 
 ## `telemetry.Config` — section `telemetry`
@@ -227,6 +228,7 @@ The hub that pushes events to browsers over WebSocket and server-sent events, it
 |---|---|---|---|---|
 | `realtime.allowed_origins` | list of string |  |  | AllowedOrigins admits browser WebSockets from these origins besides the server's own host: host patterns in path.Match syntax, such as app.example.com or \*.example.com, matched against the Origin's host (against scheme://host when a pattern has a scheme); "\*" admits any origin. Empty admits the same host only. Server-sent event streams are ordinary requests that CORS governs. |
 | `realtime.channel` | string | `chok:realtime` |  | Channel is the Redis channel of the backplane and the prefix of the tickets' keys; deployments sharing one Redis each need their own. |
+| `realtime.connection_ttl` | duration | `5m` |  | ConnectionTTL bounds the lifetime of the ticket's principal snapshot. Reconnect obtains a fresh ticket through Authn. |
 | `realtime.max_subscriptions` | int | `64` |  | MaxSubscriptions caps the topics of one connection: beyond it a WebSocket is closed with 1008 and a stream request answers 400. |
 | `realtime.path` | string | `/realtime` |  | Path prefixes the three endpoints: {Path}/ticket, {Path}/ws and {Path}/sse. It starts with a slash and does not end with one. |
 | `realtime.ping_interval` | duration | `25s` |  | PingInterval paces the heartbeats: a WebSocket ping, which the client must answer within two intervals or be disconnected, and an SSE comment line. |

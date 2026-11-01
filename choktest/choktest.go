@@ -88,6 +88,17 @@ func App(t testing.TB, base chok.Base, setup func(app *chok.App)) *Client {
 	base.HTTP.Enabled = false // in process: the handler serves, nothing listens
 	logger := slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelWarn}))
 	app := chok.New(base, chok.Logger(logger))
+	t.Cleanup(func() {
+		budget := base.App.ShutdownTimeout
+		if budget <= 0 {
+			budget = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), budget)
+		defer cancel()
+		if err := app.Close(ctx); err != nil {
+			t.Errorf("choktest: construction cleanup: %v", err)
+		}
+	})
 	if setup != nil {
 		setup(app)
 	}

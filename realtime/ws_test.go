@@ -259,6 +259,7 @@ func TestWS_MissedPongsDisconnect(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := testConfig(t)
 		cfg.PingInterval = 10 * time.Second
+		cfg.ConnectionTTL = time.Hour // this test isolates missed pongs
 		h := newHub(t, cfg, Authorize(openTopics))
 		s, stop := servePipe(t, h)
 		defer stop()
