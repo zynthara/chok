@@ -47,10 +47,12 @@ type Config struct {
 	// the page to post to {prefix}/reset-password; without it the
 	// application builds the link from Mail.Token.
 	ResetURL string `yaml:"reset_url"`
-	// LoginRateWindow and LoginRateLimit throttle failed logins: once an
-	// email, or a client IP, has failed LoginRateLimit times within the
-	// window, login answers 429 until the window slides. Both 0 turn the
-	// throttle off.
+	// LoginRateWindow and LoginRateLimit throttle failed sign-ins and the
+	// mails asked for: once an email, a client IP or a user has failed to
+	// sign in, or asked passwordless/start, forgot-password or
+	// confirm-email/start for a mail, LoginRateLimit times within the
+	// window, that route answers 429 until the window slides. Both 0 turn
+	// the throttle off.
 	LoginRateWindow time.Duration `yaml:"login_rate_window" default:"15m"`
 	LoginRateLimit  int           `yaml:"login_rate_limit" default:"10"`
 	// DisableRegister drops the register route: accounts come from

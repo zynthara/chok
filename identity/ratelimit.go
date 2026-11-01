@@ -1,9 +1,12 @@
 package identity
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/zynthara/chok"
 )
 
 // maxLimiterEntries caps the in-memory size of the rate-limit table.
@@ -101,9 +104,10 @@ func (l *loginLimiter) check(keys ...limiterKey) (bool, string) {
 	return true, ""
 }
 
-// record adds a failed attempt for every supplied non-empty key. Call this
-// only on authentication failure so successful logins don't consume the
-// budget. Keying on both email and IP means an attacker rotating emails
+// record adds an attempt for every supplied non-empty key. Login calls it
+// only on an authentication failure, so successful logins don't consume
+// the budget; throttle calls it on every call of the routes that count
+// each one. Keying on both email and IP means an attacker rotating emails
 // still exhausts the IP-keyed bucket (and vice versa).
 //
 // Cleanup is offloaded to a background goroutine when the table grows
@@ -226,4 +230,24 @@ func (l *loginLimiter) evictOldestLocked() {
 	if !first {
 		delete(l.entries, oldestKey)
 	}
+}
+
+// throttle applies the login throttle to a route that counts every call,
+// not only the failures: the call counts against each key — its Name
+// picks the bucket, so a route with names of its own shares none — and is
+// refused once a key has reached login_rate_limit within
+// login_rate_window. The refusal is a 429 saying too many what were asked
+// for, with retry_after the whole window; it counts against no key, and
+// its warning names the dimension that was full, never the value. With
+// the throttle off every call passes.
+func (idn *Identity) throttle(ctx context.Context, what string, keys ...limiterKey) error {
+	if idn.limiter == nil {
+		return nil
+	}
+	if ok, by := idn.limiter.check(keys...); !ok {
+		chok.LoggerFrom(ctx).WarnContext(ctx, "identity: "+what+" throttled", "triggered_by", by)
+		return chok.ErrRateLimited.Msgf("too many %s asked for; try again later", what).With("retry_after", max(int(idn.cfg.LoginRateWindow/time.Second), 1))
+	}
+	idn.limiter.record(keys...)
+	return nil
 }

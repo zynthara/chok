@@ -427,6 +427,9 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   Roles, Extra}`，store 的 owner 隔离就读它。
 - **会话上限**：`refresh_ttl` 从登录起算，refresh-token 不能无限续。
 - **登录限速**：按 email 与客户端 IP 两维、只记失败，429 带 `retry_after`。
+  forgot-password 也受它约束，但每次调用都计：同样按 email（规范化后）与客户端
+  IP 两维，维度名另起、与登录互不占用，阈值、窗口、`retry_after` 相同；先计数再
+  查账户，未注册的邮箱也计，所以 429 与 204 一样不泄露账户是否存在。
 - **发信**：identity 不发信，只调应用给的函数（`Sender(fn)`）：
   `fn(ctx, m.To, m.Kind, m)`——模板名就是 `Mail.Kind`（password-reset /
   login-code），数据是 `identity.Mail{Kind, To, Token, Code, Link, ExpiresAt}`

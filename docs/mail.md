@@ -340,7 +340,7 @@ the cookie as the security scheme `cookieAuth` next to `bearerAuth`.
 | `POST /passwordless/start` `{email}` | `passwordless.enabled` | 202; 429 over the client's limit |
 | `POST /passwordless/verify` `{email, code}` or `{token}` | `passwordless.enabled` | 200 `{token, expires_at}`; 401 `InvalidCode` / `CodeExpired` / disabled; 429 |
 | `POST /logout` | `cookie.enabled`; bearer or cookie | 204, the cookie cleared |
-| `POST /forgot-password` `{email}` | a `Sender`, without `passwordless.only` | 204; `Mail{Kind: "password-reset"}` when the account exists |
+| `POST /forgot-password` `{email}` | a `Sender`, without `passwordless.only` | 204; `Mail{Kind: "password-reset"}` when the account exists; 429 over the address's or the client's limit |
 | `POST /confirm-email/start` | a `Sender` and the Facebook provider; bearer or cookie | 202; `Mail{Kind: "confirm-email"}` to the user's address; 429 over the user's limit |
 | `POST /confirm-email` `{code}` | the same | 204, the address confirmed; 400 `InvalidCode` (with `attempts_left`) / `CodeExpired`; 429 |
 

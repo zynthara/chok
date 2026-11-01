@@ -65,7 +65,8 @@ var (
 // nothing changes; an address that cannot sign in — an unknown one
 // without auto_register, a disabled account — gets its row but no mail.
 func (idn *Identity) passwordlessStart(ctx context.Context, req *passwordlessStartRequest) (chok.None, error) {
-	if err := idn.throttleStart(ctx); err != nil {
+	// Every start counts against the client's address.
+	if err := idn.throttle(ctx, "sign-in codes", limiterKey{Name: "passwordless_ip", Value: chok.ClientIP(ctx)}); err != nil {
 		return chok.None{}, err
 	}
 	email := normalizeEmail(req.Email)
@@ -84,22 +85,6 @@ func (idn *Identity) passwordlessStart(ctx context.Context, req *passwordlessSta
 		idn.sendMail(ctx, Mail{Kind: "login-code", To: email, Token: token, Code: code, Link: withToken(pw.MagicLinkURL, token), ExpiresAt: now.Add(pw.CodeTTL)})
 	}
 	return chok.None{}, nil
-}
-
-// throttleStart counts a start against the client's address, in the login
-// throttle's table under a name of its own, and refuses the ones over
-// login_rate_limit within login_rate_window.
-func (idn *Identity) throttleStart(ctx context.Context) error {
-	if idn.limiter == nil {
-		return nil
-	}
-	key := limiterKey{Name: "passwordless_ip", Value: chok.ClientIP(ctx)}
-	if ok, _ := idn.limiter.check(key); !ok {
-		chok.LoggerFrom(ctx).WarnContext(ctx, "identity: passwordless start throttled", "triggered_by", key.Name)
-		return chok.ErrRateLimited.Msgf("too many sign-in codes asked for; try again later").With("retry_after", max(int(idn.cfg.LoginRateWindow/time.Second), 1))
-	}
-	idn.limiter.record(key)
-	return nil
 }
 
 // saveLoginCode stores a new code and token for email, unless the row

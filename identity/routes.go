@@ -14,8 +14,8 @@ import (
 // Mount registers the routes under the prefix (/auth by default):
 //
 //	POST   {prefix}/register          public; not with disable_register
-//	POST   {prefix}/login             public
-//	POST   {prefix}/forgot-password   public; with a Sender
+//	POST   {prefix}/login             public, throttled
+//	POST   {prefix}/forgot-password   public, throttled; with a Sender
 //	POST   {prefix}/reset-password    public; with a Sender
 //	POST   {prefix}/refresh-token     bearer
 //	PUT    {prefix}/change-password   bearer
@@ -23,8 +23,8 @@ import (
 //
 // With auth.passwordless.enabled, sign-in by a mailed code:
 //
-//	POST   {prefix}/passwordless/start    public: mail a code, 202
-//	POST   {prefix}/passwordless/verify   public: the code or token for a token
+//	POST   {prefix}/passwordless/start    public, throttled: mail a code, 202
+//	POST   {prefix}/passwordless/verify   public, throttled: the code or token for a token
 //
 // and with auth.passwordless.only no password routes: register, login,
 // forgot-password, reset-password and change-password are left out.
@@ -45,12 +45,15 @@ import (
 // and, with a Sender and a provider that only implies its addresses are
 // verified (Facebook), where a signed-in user confirms the address:
 //
-//	POST   {prefix}/confirm-email/start   bearer: mail a code, 202
-//	POST   {prefix}/confirm-email         bearer: the code, 204
+//	POST   {prefix}/confirm-email/start   bearer, throttled: mail a code, 202
+//	POST   {prefix}/confirm-email         bearer, throttled: the code, 204
 //
 // and with auth.audit.enabled and admin_api, GET /audit/logs. The OpenAPI
 // document lists the routes behind Authn with its schemes and the others
-// without security.
+// without security. A throttled route answers 429 past
+// auth.login_rate_limit within auth.login_rate_window: login,
+// passwordless/verify and confirm-email count the failures, the others
+// every call.
 func (idn *Identity) Mount(r chok.Router) {
 	g := r.Group(idn.cfg.Prefix)
 	tag := chok.Tags("auth")
@@ -326,7 +329,16 @@ func (idn *Identity) takeOver(ctx context.Context, u *User) error {
 }
 
 func (idn *Identity) forgotPassword(ctx context.Context, req *forgotPasswordRequest) (chok.None, error) {
-	user, err := idn.users.Get(ctx, store.Where(where.Eq("email", normalizeEmail(req.Email))))
+	email := normalizeEmail(req.Email)
+	// Every call counts, by address and by client, before the account is
+	// looked up: an unknown address counts as a known one does, so a 429
+	// gives the account away no more than a 204, and the reset mails one
+	// inbox gets, or one client asks for, stop at the limit.
+	keys := []limiterKey{{Name: "forgot_email", Value: email}, {Name: "forgot_ip", Value: chok.ClientIP(ctx)}}
+	if err := idn.throttle(ctx, "password resets", keys...); err != nil {
+		return chok.None{}, err
+	}
+	user, err := idn.users.Get(ctx, store.Where(where.Eq("email", email)))
 	if err != nil && !errors.Is(err, chok.ErrNotFound) {
 		return chok.None{}, err
 	}
