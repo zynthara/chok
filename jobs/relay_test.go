@@ -117,6 +117,26 @@ func countMessages(t *testing.T, c *core) int64 {
 	return n
 }
 
+// topicRows reads back the messages of topic in delivery order.
+func topicRows(t *testing.T, c *core, topic string) []message {
+	t.Helper()
+	var rows []message
+	if err := c.d.Unsafe(context.Background()).Where("topic = ?", topic).Order("created_at").Order("id").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+// pending counts the messages of topic without an acknowledgement.
+func pending(t *testing.T, c *core, topic string) int64 {
+	t.Helper()
+	var n int64
+	if err := c.d.Unsafe(context.Background()).Model(&message{}).Where("topic = ? AND completed_at IS NULL", topic).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func TestEnqueue_TxGateAndAtomicity(t *testing.T) {
 	c := openCore(t)
 	ctx := t.Context()
@@ -251,13 +271,13 @@ func TestRelay_CrashRecovery_RedeliversUnsettledOnceEach(t *testing.T) {
 		enqueue(t, c, "crashy", fmt.Sprintf("m%d", i))
 	}
 	// settle = 1h: rows stay unsettled, so the watermark is never
-	// persisted — process memory is the only dedup.
+	// persisted — completed_at is the only dedup.
 	cp := &capture{}
 	r := mkRelay(t, c, "crashy", cp, time.Hour, 10)
 	if err := r.run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.run(ctx); err != nil { // same process: mem dedups
+	if err := r.run(ctx); err != nil { // same process: completed_at dedups
 		t.Fatal(err)
 	}
 	wantPayloads(t, cp.payloads(), []string{"m1", "m2", "m3"})
@@ -265,9 +285,9 @@ func TestRelay_CrashRecovery_RedeliversUnsettledOnceEach(t *testing.T) {
 		t.Fatalf("watermark = %+v, %v — must not persist inside the settle window", w, err)
 	}
 
-	// "Crash": a fresh relay instance (same topic) loses mem and replays
-	// the whole unsettled window — at-least-once, exactly the contract. A
-	// consumer-side dedup key absorbs the duplicates.
+	// "Crash": a fresh relay instance (same topic) starts from the
+	// database alone. The watermark never passed m1..m3, but their
+	// acknowledgements committed, so none of them comes again.
 	seen := map[string]int{}
 	var mu sync.Mutex
 	restarted, err := newRelay("crashy", func(_ context.Context, m rawMessage) error {
@@ -310,7 +330,7 @@ func TestRelay_SettleGatesWatermarkNotDelivery(t *testing.T) {
 	}
 
 	// Advance the clock past the settle window: the next sweep re-scans
-	// (mem dedups, nothing is redelivered) and persists.
+	// (completed_at dedups, nothing is redelivered) and persists.
 	r.now = func() time.Time { return base.Add(time.Minute) }
 	if err := r.run(ctx); err != nil {
 		t.Fatal(err)
@@ -323,8 +343,8 @@ func TestRelay_SettleGatesWatermarkNotDelivery(t *testing.T) {
 	if !w.ok {
 		t.Fatal("watermark still unpersisted after the window settled")
 	}
-	if len(r.mem) != 0 {
-		t.Fatalf("mem not pruned after settle: %v", r.mem)
+	if rows := topicRows(t, c, "settling"); !w.covers(rows[1].CreatedAt, rows[1].ID) {
+		t.Fatalf("watermark %+v after settle, want it over m2 (%d)", w, rows[1].ID)
 	}
 }
 
@@ -447,8 +467,13 @@ func TestRelay_ConcurrentEnqueue_NoLoss(t *testing.T) {
 			if err := r.run(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if w, err := c.states.load(ctx, "concurrent"); err != nil || !w.ok || len(r.mem) != 0 {
-				t.Fatalf("after the window: watermark %+v (%v), %d entries in mem, want it persisted and mem empty", w, err, len(r.mem))
+			rows := topicRows(t, c, "concurrent")
+			last := rows[len(rows)-1]
+			if w, err := c.states.load(ctx, "concurrent"); err != nil || !w.covers(last.CreatedAt, last.ID) {
+				t.Fatalf("after the window: watermark %+v (%v), want it over the last message %d", w, err, last.ID)
+			}
+			if n := pending(t, c, "concurrent"); n != 0 {
+				t.Fatalf("after the window: %d messages without an acknowledgement", n)
 			}
 			mu.Lock()
 			defer mu.Unlock()
@@ -504,7 +529,8 @@ func TestRelay_TopicFilterAndIndependentWatermarks(t *testing.T) {
 
 // TestRelay_OverlappingSweepIsRefused is v2's
 // TestRelay_RunNowOverlapReturnsBusy: there is no RunNow, and a worker's
-// sweeps never overlap under the scheduler, but the guard on mem stays.
+// sweeps never overlap under the scheduler, but the guard stays: two
+// sweeps at once would hand the same message to the function twice.
 func TestRelay_OverlappingSweepIsRefused(t *testing.T) {
 	c := openCore(t)
 	ctx := t.Context()
@@ -627,12 +653,13 @@ func TestCleanup_Round1ResidualStateCannotStandInForLaggingRelay(t *testing.T) {
 	}
 }
 
-// Round-1 review #3: mem is pruned on every watermark advance (batch
-// boundaries and failure-path saves), not only at the end of a fully
-// successful sweep — otherwise a long catch-up holds the entire
-// processed backlog in memory and an early error return leaks every
-// settled entry for the relay's lifetime.
-func TestRelay_Round1MemPrunedOnEveryAdvance(t *testing.T) {
+// Round-1 review #3 had process memory pruned on every watermark advance
+// (batch boundaries and failure-path saves), not only at the end of a
+// fully successful sweep. completed_at left nothing to prune; the durable
+// half stays: a sweep that fails on a later row has persisted the
+// watermark over the prefix it delivered, and the failing message and
+// the one behind it wait without an acknowledgement.
+func TestRelay_Round1WatermarkPersistsBeforeAFailure(t *testing.T) {
 	c := openCore(t)
 	ctx := t.Context()
 	for i := 1; i <= 6; i++ {
@@ -649,25 +676,28 @@ func TestRelay_Round1MemPrunedOnEveryAdvance(t *testing.T) {
 	if err := r.run(ctx); !errors.Is(err, boom) {
 		t.Fatalf("sweep err = %v, want the poison error", err)
 	}
-	// m1..m4 delivered and settled across two batches; the failure path
-	// persisted the watermark at m4 — nothing settled may remain in mem.
-	if len(r.mem) != 0 {
-		t.Fatalf("mem after failed sweep = %v, want empty (settled entries pruned)", r.mem)
-	}
+	// m1..m4 delivered and settled across two batches: the watermark
+	// stands at m4, and only m5 and m6 lack an acknowledgement.
+	wantPayloads(t, cp.payloads(), []string{"m1", "m2", "m3", "m4"})
+	m4 := topicRows(t, c, "pruned")[3]
 	w, err := c.states.load(ctx, "pruned")
-	if err != nil || !w.ok {
-		t.Fatalf("watermark = %+v, %v", w, err)
+	if err != nil || !w.ok || !w.At.Equal(m4.CreatedAt) || w.ID != m4.ID {
+		t.Fatalf("watermark = %+v, %v, want m4 (%v, %d)", w, err, m4.CreatedAt, m4.ID)
+	}
+	if n := pending(t, c, "pruned"); n != 2 {
+		t.Fatalf("%d messages without an acknowledgement, want m5 and m6", n)
 	}
 }
 
-// Round-2 review #1 (re-cut by round-3): the memory concern — mem
-// growing while nothing settles — is bounded ACROSS sweeps, not by
-// moving the cutoff inside one (round-3 found the per-batch refresh
-// unsound: it can cover positions the cursor passed while a legal
-// transaction was still invisible). Each sweep takes a fresh pre-scan
-// cutoff, so rows delivered unsettled in one sweep settle, persist and
-// prune on a later sweep once wall time passes.
-func TestRelay_Round2MemBoundedAcrossSweeps(t *testing.T) {
+// Round-2 review #1 (re-cut by round-3): rows delivered unsettled in one
+// sweep settle ACROSS sweeps, not by moving the cutoff inside one
+// (round-3 found the per-batch refresh unsound: it can cover positions
+// the cursor passed while a legal transaction was still invisible). Each
+// sweep takes a fresh pre-scan cutoff, so once wall time passes, a later
+// sweep advances the watermark over them without delivering them again.
+// Round 2 asked it for the process memory that held such rows; their
+// completed_at holds them now, and the watermark must still get past.
+func TestRelay_Round2SettlesAcrossSweeps(t *testing.T) {
 	c := openCore(t)
 	ctx := t.Context()
 	ts := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
@@ -686,15 +716,15 @@ func TestRelay_Round2MemBoundedAcrossSweeps(t *testing.T) {
 	if len(cp.payloads()) != n {
 		t.Fatalf("delivered %d rows, want %d", len(cp.payloads()), n)
 	}
-	if len(r.mem) != n {
-		t.Fatalf("mem after unsettled sweep = %d, want %d", len(r.mem), n)
+	if left := pending(t, c, "cross-sweep"); left != 0 {
+		t.Fatalf("%d rows without an acknowledgement after the unsettled sweep, want all %d acknowledged", left, n)
 	}
 	if w, _ := c.states.load(ctx, "cross-sweep"); w.ok {
 		t.Fatalf("watermark persisted inside the settle window: %+v", w)
 	}
 
 	// Sweep 2 under a later clock: the same rows are now settled — the
-	// rescan (mem-dedup, no redelivery) advances and prunes.
+	// rescan (completed_at dedup, no redelivery) advances.
 	clock = ts.Add(15 * time.Minute)
 	if err := r.run(ctx); err != nil {
 		t.Fatal(err)
@@ -709,35 +739,31 @@ func TestRelay_Round2MemBoundedAcrossSweeps(t *testing.T) {
 	if !w.ok || !w.At.Equal(ts) || w.ID != n {
 		t.Fatalf("watermark = %+v, want settled at (%v, %d)", w, ts, n)
 	}
-	if len(r.mem) != 0 {
-		t.Fatalf("mem after settle sweep = %d entries, want 0", len(r.mem))
-	}
 }
 
-// Round-2 review #2: run prunes mem against the loaded watermark before
-// scanning. When another process (last-write-wins degradation) advances
-// the shared state past rows this process delivered but never settled
-// locally, those mem entries would otherwise outlive every local
-// advance.
-func TestRelay_Round2LoadedWatermarkPrunesForeignAdvance(t *testing.T) {
+// Round-2 review #2: another process (the last-write-wins degradation)
+// may advance the shared watermark past rows this process delivered but
+// never settled. Round 2 had the relay prune its memory against the
+// loaded watermark; the rows carry their own acknowledgements now, and
+// what stays pinned is that the next sweep neither delivers them again
+// nor moves the watermark back.
+func TestRelay_Round2ForeignAdvanceDoesNotRedeliver(t *testing.T) {
 	c := openCore(t)
 	ctx := t.Context()
 	for i := 1; i <= 3; i++ {
 		enqueue(t, c, "shared", fmt.Sprintf("m%d", i))
 	}
 	cp := &capture{}
-	r := mkRelay(t, c, "shared", cp, time.Hour, 10) // unsettled: mem only
+	r := mkRelay(t, c, "shared", cp, time.Hour, 10) // unsettled: no watermark
 	if err := r.run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.mem) != 3 {
-		t.Fatalf("mem after first sweep = %d, want 3 unsettled entries", len(r.mem))
+	if left := pending(t, c, "shared"); left != 0 {
+		t.Fatalf("%d messages without an acknowledgement after the first sweep, want all 3 acknowledged", left)
 	}
 	// "Process B" advances the shared state past everything.
-	var last message
-	if err := c.d.Unsafe(ctx).Order("created_at DESC").Order("id DESC").Take(&last).Error; err != nil {
-		t.Fatal(err)
-	}
+	rows := topicRows(t, c, "shared")
+	last := rows[len(rows)-1]
 	if err := c.states.save(ctx, "shared", watermark{At: last.CreatedAt, ID: last.ID, ok: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -746,8 +772,8 @@ func TestRelay_Round2LoadedWatermarkPrunesForeignAdvance(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantPayloads(t, cp.payloads(), []string{"m1", "m2", "m3"}) // keyset skip, no redelivery
-	if len(r.mem) != 0 {
-		t.Fatalf("mem after foreign advance = %v, want empty (pruned on load)", r.mem)
+	if w, err := c.states.load(ctx, "shared"); err != nil || !w.covers(last.CreatedAt, last.ID) {
+		t.Fatalf("watermark after the foreign advance = %+v, %v, want it still over m3 (%d)", w, err, last.ID)
 	}
 }
 
@@ -872,7 +898,7 @@ func TestRelay_Round3LateCommitDuringLongSweepNotSkipped(t *testing.T) {
 // Round-3 review: one sweep is bounded by its page budget; the next tick
 // rescans the overlap from the persisted watermark under a fresh cutoff.
 // This is what reconciles the fixed pre-scan cutoff with sustained
-// production (the round-2 #1 memory concern).
+// production (round-2 #1).
 func TestRelay_Round3SweepBudgetBoundsOnePass(t *testing.T) {
 	c := openCore(t)
 	ctx := t.Context()
@@ -1075,11 +1101,11 @@ func wideSettledTie(t *testing.T, c *core) {
 
 // Round-5 review: pins the ACCEPTED latency trade the docs promise. A
 // same-timestamp group wider than one sweep's budget that is still
-// unsettled cannot reach its tail — mem-skips burn the budget and the
-// watermark cannot enter the group — until the timestamp settles; then
-// the composite-keyset resume (round-4) drains the tail within a couple
-// of sweeps. Total tail lag ≈ settle_window + a few poll_intervals, and
-// no message is lost.
+// unsettled cannot reach its tail — re-reading the acknowledged prefix
+// burns the budget and the watermark cannot enter the group — until the
+// timestamp settles; then the composite-keyset resume (round-4) drains
+// the tail within a couple of sweeps. Total tail lag ≈ settle_window + a
+// few poll_intervals, and no message is lost.
 func TestRelay_Round5WideUnsettledTieTailLagsUntilSettle(t *testing.T) {
 	c := openCore(t)
 	ctx := t.Context()

@@ -17,9 +17,10 @@ import (
 )
 
 // relay scans in (created_at, id) order. Watermarks only accelerate scans;
-// CompletedAt is the durable acknowledgement. Every sweep also checks pending
-// rows behind the watermark, including transactions committed arbitrarily late.
-// External effects and acknowledgement are not atomic: handlers must dedupe by ID.
+// CompletedAt is the durable acknowledgement and the only record of what
+// was delivered or parked. Every sweep also checks pending rows behind the
+// watermark, including transactions committed arbitrarily late. External
+// effects and acknowledgement are not atomic: handlers must dedupe by ID.
 type relay struct {
 	topic   string
 	handler func(ctx context.Context, m rawMessage) error
@@ -37,12 +38,10 @@ type relay struct {
 	delivered atomic.Int64 // messages the handler took, for Stats
 	parked    atomic.Int64 // messages parked in the dead letters, for Stats
 
-	// mu guards mem and restored. The scheduler never overlaps a
-	// worker's sweeps; the TryLock turns an overlap into an error instead
-	// of a race.
-	mu       sync.Mutex
-	mem      map[uint64]time.Time // delivered (or parked) but not yet settled: id → created_at
-	restored bool                 // the first sweep read the delivered set back
+	// mu makes a worker's sweeps exclusive. The scheduler never overlaps
+	// them; the TryLock turns an overlap into an error instead of two
+	// sweeps handing the same message to the handler at once.
+	mu sync.Mutex
 
 	headMu sync.Mutex
 	head   headState // where the last sweep stopped on a failing message, for Stats
@@ -141,18 +140,18 @@ func newRelay(topic string, handler func(ctx context.Context, m rawMessage) erro
 		batch:    batch,
 		now:      time.Now,
 		maxPages: maxSweepPages,
-		mem:      make(map[uint64]time.Time),
 	}, nil
 }
 
 // maxSweepPages bounds one sweep. The bound is what keeps the fixed
 // pre-scan cutoff compatible with sustained production: a sweep that
-// could loop forever would hold one cutoff forever (the round-2 #1
-// memory pathology); capped sweeps end, and the next tick rescans the
-// overlap from the persisted watermark under a fresh cutoff, so rows
-// settle and mem prunes across sweeps. With the default batch size this
-// is 10k rows per sweep per worker — delivery throughput is paced,
-// correctness is not affected (at-least-once holds at any budget).
+// could loop forever would hold one cutoff forever, and its watermark
+// would never pass the rows that settled after it began; capped sweeps
+// end, and the next tick rescans the overlap from the persisted
+// watermark under a fresh cutoff, so rows settle and the watermark
+// advances across sweeps. With the default batch size this is 10k rows
+// per sweep per worker — delivery throughput is paced, correctness is
+// not affected (at-least-once holds at any budget).
 const maxSweepPages = 100
 
 // run is one sweep. An error aborted it with the watermark parked before
@@ -164,12 +163,6 @@ func (r *relay) run(ctx context.Context) error {
 	}
 	defer r.mu.Unlock()
 
-	if !r.restored {
-		if err := r.restore(ctx); err != nil {
-			return err
-		}
-		r.restored = true
-	}
 	var head headState
 	err := r.sweep(ctx, &head)
 	r.headMu.Lock()
@@ -192,11 +185,6 @@ func (r *relay) sweep(ctx context.Context, head *headState) error {
 	if err != nil {
 		return err
 	}
-	// Prune against the loaded watermark before scanning: another process
-	// (the accepted last-write-wins degradation) may have advanced the
-	// shared state past entries this process still holds in mem — without
-	// this they would outlive every local advance (round-2 review).
-	r.prune(w)
 	cand := w
 
 	cutoff := r.now().Add(-r.settle).UTC()
@@ -248,7 +236,7 @@ func (r *relay) sweep(ctx context.Context, head *headState) error {
 			for i := range page {
 				at, id := page[i].CreatedAt, page[i].ID
 				lastID = id
-				if err := r.deliver(ctx, &page[i], at, id, w, &cand, cutoff, head); err != nil {
+				if err := r.deliver(ctx, &page[i], at, id, &cand, cutoff, head); err != nil {
 					r.persist(ctx, &w, cand)
 					return err
 				}
@@ -288,7 +276,7 @@ func (r *relay) sweep(ctx context.Context, head *headState) error {
 			} else {
 				pos = scanPos{ts: at, offset: 1}
 			}
-			if err := r.deliver(ctx, &items[i], at, id, w, &cand, cutoff, head); err != nil {
+			if err := r.deliver(ctx, &items[i], at, id, &cand, cutoff, head); err != nil {
 				r.persist(ctx, &w, cand)
 				return err
 			}
@@ -365,23 +353,17 @@ func (r *relay) scanForward(ctx context.Context, pos scanPos, batch int, strict 
 	return items, nil
 }
 
-// deliver handles one scanned row: durable completion dedup, a local
-// memory shortcut, the attempt, and the settled-candidate advance.
-// Everything up to and including this row is delivered (or parked) when
-// it returns nil (head-of-line: an error aborts the sweep above, so the
-// prefix stays contiguous).
-func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint64, w watermark, cand *watermark, cutoff time.Time, head *headState) error {
-	delivered := row.CompletedAt != nil
-	if !delivered {
-		if _, seen := r.mem[id]; seen {
-			delivered = true
-		}
-	}
-	if !delivered {
+// deliver handles one scanned row: a row with a completed_at was
+// delivered or parked already and is passed over, any other is attempted;
+// then the settled candidate advances over it. Everything up to and
+// including this row is delivered (or parked) when it returns nil
+// (head-of-line: an error aborts the sweep above, so the prefix stays
+// contiguous).
+func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint64, cand *watermark, cutoff time.Time, head *headState) error {
+	if row.CompletedAt == nil {
 		if err := r.attempt(ctx, row, head); err != nil {
 			return err
 		}
-		r.mem[id] = at
 	}
 	if !at.After(cutoff) {
 		*cand = watermark{At: at, ID: id, ok: true}
@@ -389,19 +371,13 @@ func (r *relay) deliver(ctx context.Context, row *message, at time.Time, id uint
 	return nil
 }
 
-// attempt delivers row, unless it was parked already or its next try is
-// not due (errRetryLater). nil means the topic moves past row: the
+// attempt delivers row, a row without a completed_at, unless its next try
+// is not due (errRetryLater). nil means the topic moves past row: the
 // handler took it, or it is parked. A failure below MaxAttempts is
 // counted on the row and stops the sweep there; the last one parks it.
+// Parking writes completed_at with the dead letter, so a parked row is
+// never attempted again.
 func (r *relay) attempt(ctx context.Context, row *message, head *headState) error {
-	if row.Attempts > 0 {
-		// It failed before. A crash between parking it and the watermark
-		// passing it leaves it parked and still ahead of the watermark.
-		parked, err := r.isParked(ctx, row.ID)
-		if err != nil || parked {
-			return err
-		}
-	}
 	if row.RetryAt != nil && row.RetryAt.After(r.now()) {
 		*head = headState{attempts: row.Attempts, next: row.RetryAt.UTC()}
 		return errRetryLater
@@ -494,18 +470,6 @@ func (r *relay) park(ctx context.Context, row *message, n int, cause error) erro
 	return nil
 }
 
-// isParked reports whether the message id is in the dead letters.
-func (r *relay) isParked(ctx context.Context, id uint64) (bool, error) {
-	var n int64
-	if err := r.d.Unsafe(ctx).Model(&deadRow{}).Where("id = ?", id).Count(&n).Error; err != nil {
-		return false, fmt.Errorf("jobs: worker %q: look for message %d in the dead letters: %w", r.topic, id, err)
-	}
-	if n > 0 {
-		return true, r.complete(ctx, id)
-	}
-	return false, nil
-}
-
 // complete writes the acknowledgement of the message id: its
 // completed_at, unless it has one already.
 func (r *relay) complete(ctx context.Context, id uint64) error {
@@ -515,70 +479,10 @@ func (r *relay) complete(ctx context.Context, id uint64) error {
 	return nil
 }
 
-// restore reads back the delivered set the worker saved when the jobs
-// last stopped — what it had delivered or parked that its watermark had
-// not passed — into mem, so this process does not deliver it again, and
-// deletes it: the next stop saves mem anew.
-func (r *relay) restore(ctx context.Context) error {
-	var rows []deliveredRow
-	if err := r.d.Unsafe(ctx).Where("topic = ?", r.topic).Find(&rows).Error; err != nil {
-		return fmt.Errorf("jobs: worker %q: read the delivered set: %w", r.topic, err)
-	}
-	if len(rows) == 0 {
-		return nil
-	}
-	if err := r.d.RunInTx(ctx, func(txCtx context.Context) error {
-		for _, row := range rows {
-			if err := r.complete(txCtx, row.MessageID); err != nil {
-				return err
-			}
-		}
-		return r.d.Unsafe(txCtx).Where("topic = ?", r.topic).Delete(&deliveredRow{}).Error
-	}); err != nil {
-		return err
-	}
-	// Only expose the restored shortcut after its acknowledgement commits.
-	for _, row := range rows {
-		r.mem[row.MessageID] = row.CreatedAt
-	}
-	return nil
-}
-
-// saveDelivered writes mem to chok_jobs_delivered for restore. It runs
-// when the jobs stop, after the last sweep: a sweep still in flight
-// keeps its set (errSweepRunning), and the next start may deliver it
-// again, as after a crash.
-func (r *relay) saveDelivered(ctx context.Context) (int, error) {
-	if !r.mu.TryLock() {
-		return 0, errSweepRunning
-	}
-	defer r.mu.Unlock()
-	if len(r.mem) == 0 {
-		return 0, nil
-	}
-	rows := make([]deliveredRow, 0, len(r.mem))
-	for id, at := range r.mem {
-		rows = append(rows, deliveredRow{Topic: r.topic, MessageID: id, CreatedAt: at.UTC()})
-	}
-	// A row may be there already when restore could not delete it.
-	err := r.d.Unsafe(ctx).Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, deliveredBatch).Error
-	if err != nil {
-		return 0, fmt.Errorf("jobs: worker %q: save the delivered set: %w", r.topic, err)
-	}
-	return len(rows), nil
-}
-
-// deliveredBatch is how many delivered-set rows one insert writes.
-const deliveredBatch = 500
-
-// persist advances the stored watermark to cand when it moved, then
-// prunes the mem entries the new watermark covers. Pruning rides every
-// advance — batch boundaries and the pre-return saves on failure paths
-// alike — so mem stays bounded by the unsettled window instead of the
-// whole backlog processed by a long catch-up sweep (round-1 review: an
-// end-of-sweep-only prune leaked every settled entry when a later row's
-// handler error returned early, and grew without bound while a sweep
-// never caught up).
+// persist advances the stored watermark to cand when it moved. It runs at
+// every batch boundary and before the failure paths return, so the next
+// sweep resumes near where this one stopped instead of rescanning the
+// backlog a long catch-up sweep went through.
 //
 // Save errors are logged, not returned: acknowledgements still dedupe
 // the rescan from the older cursor.
@@ -591,14 +495,4 @@ func (r *relay) persist(ctx context.Context, w *watermark, cand watermark) {
 		return
 	}
 	*w = cand
-	r.prune(*w)
-}
-
-// prune drops the mem entries the persisted watermark now covers.
-func (r *relay) prune(w watermark) {
-	for id, at := range r.mem {
-		if w.covers(at, id) {
-			delete(r.mem, id)
-		}
-	}
 }

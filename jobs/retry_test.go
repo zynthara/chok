@@ -171,9 +171,10 @@ func TestRelay_FailureCountSurvivesARestart(t *testing.T) {
 }
 
 // TestRelay_ParkedMessageIsNotRetriedAfterACrash: a crash after a worker
-// parked a message, before its watermark passed it, replays the settle
-// window; the parked message is found in the dead letters and not
-// delivered again, while the delivered one is (at least once).
+// parked a message, before its watermark passed it, has the next process
+// rescan the settle window; neither the parked message nor the delivered
+// one comes again: parking wrote completed_at with the dead letter, as
+// the acknowledgement did for the delivered one.
 func TestRelay_ParkedMessageIsNotRetriedAfterACrash(t *testing.T) {
 	c := openCore(t)
 	ctx := t.Context()

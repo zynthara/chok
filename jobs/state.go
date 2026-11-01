@@ -26,8 +26,8 @@ type watermark struct {
 }
 
 // covers reports whether the position (at, id) is at or before the
-// watermark — i.e. already delivered in a settled prefix. Zero-value
-// watermarks cover nothing.
+// watermark: behind the scan position, which says nothing about whether
+// the message there was delivered. Zero-value watermarks cover nothing.
 func (w watermark) covers(at time.Time, id uint64) bool {
 	if !w.ok {
 		return false

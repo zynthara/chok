@@ -251,7 +251,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | Declaration | |
 |---|---|
 | `var ErrOutsideTx error = outsideTxError{}` | ErrOutsideTx is what Enqueue returns when its context does not carry a transaction of the database the jobs run on: the message must commit or roll back with the writes it describes, so an autocommit insert, or one riding another handle's transaction, is refused. |
-| `func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error)` | New builds the jobs battery on d: it checks cfg and every option, then registers the tables chok_jobs_messages, chok_jobs_watermarks, chok_jobs_dead and chok_jobs_delivered under the owner "jobs" (created now in migrate: auto; from its embedded SQL files in migrate: versioned). |
+| `func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error)` | New builds the jobs battery on d: it checks cfg and every option, then registers the tables chok_jobs_messages, chok_jobs_watermarks and chok_jobs_dead under the owner "jobs" (created now in migrate: auto; from its embedded SQL files in migrate: versioned). |
 | `type Config struct{ ... }` | Config is the jobs section of an application's configuration: |
 | `type DeadMessage struct{ ... }` | DeadMessage is a message parked in the dead letters, chok_jobs_dead: its worker failed on it MaxAttempts times, or could not decode its payload. |
 | `type Event struct{ ... }` | Event is one moment of a run that Observe reports: a periodic job's run, a worker's sweep of its topic or the retention cleanup's run starting, finishing or failing, a trigger skipped while a run was in flight, or a worker parking a message in the dead letters. |

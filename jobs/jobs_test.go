@@ -492,8 +492,8 @@ func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 	}
 
 	// A graceful restart: another process on the same database. It has
-	// no watermark to go by, but it reads back what the first one
-	// delivered, so m3 comes and m1 and m2 do not come again.
+	// no watermark to go by, but m1 and m2 carry their acknowledgements,
+	// so m3 comes and m1 and m2 do not come again.
 	d2 := dbtest.OpenConfig(t, cfg)
 	j2 := newJobs(t, d2, cfg1, Worker("orders", worker))
 	stop2 := run(t, j2)
@@ -506,11 +506,10 @@ func TestWorker_DeliversAtLeastOnce_HandlersDedupeByID(t *testing.T) {
 		t.Fatalf("deliveries after the graceful restart %v: m1 and m2 came again", c)
 	}
 
-	// A crash: the process dies without stopping, so it saves nothing —
-	// here the saved set is dropped. Acknowledgements survive independently of the saved set.
-	if err := d2.Unsafe(t.Context()).Where("1 = 1").Delete(&deliveredRow{}).Error; err != nil {
-		t.Fatal(err)
-	}
+	// A crash: the process dies without stopping. A stop writes nothing —
+	// each acknowledgement was written as its message was taken — so a
+	// crash leaves the database a graceful stop leaves, and the next
+	// process does not replay m1, m2 or m3.
 	d3 := dbtest.OpenConfig(t, cfg)
 	j3 := newJobs(t, d3, cfg1, Worker("orders", worker))
 	run(t, j3)

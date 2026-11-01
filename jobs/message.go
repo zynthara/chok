@@ -70,13 +70,14 @@ func checkTopic(topic string) error {
 
 // message is a row of chok_jobs_messages: written by Enqueue in the
 // caller's transaction, read by the workers, deleted only by the retention
-// cleanup. (created_at, id) is the delivery order. One index serves a
-// worker's scan of its topic, the other the scans across topics: the
-// settled-frontier probe and the cleanup. The worker writes the last
-// failure columns when delivery fails, and CompletedAt when it finishes.
-// Head-of-line delivery
-// means only the head of a topic can be failing, and the count travels
-// with the message, so a restart picks it up.
+// cleanup. (created_at, id) is the delivery order. The topic index serves
+// a worker's scan of its topic, the pending index its revisit of the rows
+// without a CompletedAt behind its watermark, the scan index the scans
+// across topics: the settled-frontier probe and the cleanup. The worker
+// writes the last failure columns when delivery fails, and CompletedAt
+// when its function took the message or it parked it. Head-of-line
+// delivery means only the head of a topic can be failing, and the count
+// travels with the message, so a restart picks it up.
 type message struct {
 	ID        uint64    `gorm:"primaryKey;index:idx_chok_jobs_messages_scan,priority:2;index:idx_chok_jobs_messages_topic,priority:3;index:idx_chok_jobs_messages_pending,priority:4"`
 	CreatedAt time.Time `gorm:"not null;index:idx_chok_jobs_messages_scan,priority:1;index:idx_chok_jobs_messages_topic,priority:2;index:idx_chok_jobs_messages_pending,priority:3"`
@@ -87,7 +88,8 @@ type message struct {
 	Attempts  int `gorm:"not null;default:0"`
 	RetryAt   *time.Time
 	LastError string
-	// CompletedAt is the durable acknowledgement, independent of scan watermarks.
+	// CompletedAt is the durable acknowledgement, independent of scan
+	// watermarks: the only record that a worker is done with the message.
 	CompletedAt *time.Time `gorm:"index:idx_chok_jobs_messages_pending,priority:2"`
 }
 
@@ -132,26 +134,12 @@ func (r *deadRow) toDead() DeadMessage {
 	}
 }
 
-// deliveredRow is a row of chok_jobs_delivered: a message a worker
-// delivered (or parked) that its watermark had not passed yet when the
-// jobs stopped. Close writes them; the worker's first sweep after the
-// restart reads its topic's rows back into its memory and deletes them,
-// so a graceful restart does not deliver them again.
-type deliveredRow struct {
-	Topic     string    `gorm:"primaryKey;size:200"`
-	MessageID uint64    `gorm:"primaryKey;autoIncrement:false"`
-	CreatedAt time.Time `gorm:"not null"`
-}
-
-func (deliveredRow) TableName() string { return "chok_jobs_delivered" }
-
 // tables are the jobs schema: plain tables, without a model base.
 func tables() []db.TableSpec {
 	return []db.TableSpec{
 		dbx.PlainTable(&message{}).(db.TableSpec),
 		dbx.PlainTable(&watermarkRow{}).(db.TableSpec),
 		dbx.PlainTable(&deadRow{}).(db.TableSpec),
-		dbx.PlainTable(&deliveredRow{}).(db.TableSpec),
 	}
 }
 

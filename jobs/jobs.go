@@ -36,9 +36,6 @@ type Jobs struct {
 	closed   bool
 	cancel   context.CancelFunc // ends the run context of Start
 	deadline time.Time          // when the stop budget of the first stop runs out
-
-	saveMu sync.Mutex
-	saved  bool // the workers' delivered sets are written
 }
 
 // Option configures New.
@@ -109,9 +106,12 @@ func Periodic(name, spec string, fn func(ctx context.Context) error, overlap Ove
 // in (created_at, id) order, the payload decoded into T with
 // encoding/json/v2 (Worker[jsontext.Value] hands on the JSON as stored).
 // Delivery is at least once: a message comes again after fn fails on it,
-// and after a crash within the settle window, so fn must be idempotent —
-// dedupe on Message.ID or on a key in the payload. A graceful stop
-// (Close) remembers what was delivered, so a restart does not repeat it.
+// and when a crash or a failed write loses the acknowledgement that
+// follows fn's success, so fn must be idempotent — dedupe on Message.ID
+// or on a key in the payload. The acknowledgement is written as soon as
+// fn returns nil, on a short budget of its own, so a graceful stop
+// (Close) that begins while fn runs still records the success, and a
+// restart does not deliver the message again.
 //
 // While fn fails on a message (returns an error or panics), the messages
 // behind it in the topic wait; other topics keep flowing. The worker
@@ -265,10 +265,10 @@ type JobStats struct {
 }
 
 // New builds the jobs battery on d: it checks cfg and every option, then
-// registers the tables chok_jobs_messages, chok_jobs_watermarks,
-// chok_jobs_dead and chok_jobs_delivered under the owner "jobs" (created
-// now in migrate: auto; from its embedded SQL files in migrate:
-// versioned). Nothing runs until Start. One Jobs per database handle.
+// registers the tables chok_jobs_messages, chok_jobs_watermarks and
+// chok_jobs_dead under the owner "jobs" (created now in migrate: auto;
+// from its embedded SQL files in migrate: versioned). Nothing runs until
+// Start. One Jobs per database handle.
 func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error) {
 	if d == nil {
 		return nil, errors.New("jobs: nil *db.DB")
@@ -454,8 +454,8 @@ func (j *Jobs) Close(ctx context.Context) error {
 }
 
 // stop ends the run context and waits for the loops and runs, until the
-// stop budget of the first stop runs out or ctx ends; once they have
-// stopped, it saves the workers' delivered sets.
+// stop budget of the first stop runs out or ctx ends. It writes nothing:
+// each acknowledgement was written as its message was taken.
 func (j *Jobs) stop(ctx context.Context) error {
 	j.mu.Lock()
 	if !j.started {
@@ -477,31 +477,7 @@ func (j *Jobs) stop(ctx context.Context) error {
 		}
 		return fmt.Errorf("jobs: stop: %w, with runs still going: %s", ctx.Err(), running)
 	}
-	j.saveDelivered(wctx)
 	return nil
-}
-
-// saveDelivered writes, once, what each worker delivered that its
-// watermark has not passed, for its first sweep after a restart (see
-// relay.saveDelivered). A failure costs those messages a second delivery.
-func (j *Jobs) saveDelivered(ctx context.Context) {
-	j.saveMu.Lock()
-	defer j.saveMu.Unlock()
-	if j.saved {
-		return
-	}
-	j.saved = true
-	for _, r := range j.relays {
-		n, err := r.saveDelivered(ctx)
-		if err != nil {
-			j.logger.WarnContext(ctx, "jobs: saving the delivered set failed; the next start may deliver it again",
-				"worker", r.topic, "error", err)
-			continue
-		}
-		if n > 0 {
-			j.logger.DebugContext(ctx, "jobs: saved the delivered set", "worker", r.topic, "messages", n)
-		}
-	}
 }
 
 // Health reports nil: a failing job or worker does not make the process
