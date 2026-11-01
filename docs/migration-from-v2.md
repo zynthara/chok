@@ -525,7 +525,7 @@ err := d.RunInTx(ctx, func(txCtx context.Context) error {
 })
 ```
 
-语义不变：至少一次、按 `(created_at, id)` 顺序、每个 topic 独立水位、失败只阻塞
+语义不变：至少一次、按 `(created_at, id)` 的扫描顺序（迟提交的消息可能晚于更新的消息送达）、每个 topic 独立水位、失败只阻塞
 自己的 topic、handler 必须幂等（按 `Message.ID` 去重）。部署假设也不变：worker 与
 周期任务跑在一个 `jobs.enabled: true` 的进程里，其余进程 `enabled: false` 只
 Enqueue；多进程分 topic 时 `retention` 必须为 0。
