@@ -390,8 +390,13 @@ func TestWorker_EnqueueRoundTripAndDelivery(t *testing.T) {
 	if got := in.payloads(); !slices.Equal(got, []string{`"o1"`, `"o2"`, `"o3"`}) {
 		t.Fatalf("delivered %v", got)
 	}
-	// The sweep that delivered them is counted when it ends.
-	eventually(t, "a finished sweep", func() bool { return j.Stats().Workers[0].Runs > 0 })
+	// A message is counted once its acknowledgement is written, after the
+	// function returned, and a sweep when it ends; the three may come in
+	// more than one sweep.
+	eventually(t, "the count and a finished sweep", func() bool {
+		st := j.Stats().Workers[0]
+		return st.Messages == 3 && st.Runs > 0
+	})
 	st := j.Stats().Workers
 	if len(st) != 1 || st[0].Name != "orders" || st[0].Spec != "@every 10ms" || st[0].Messages != 3 || st[0].Failures != 0 || st[0].Next.IsZero() {
 		t.Fatalf("worker stats %+v", st)
