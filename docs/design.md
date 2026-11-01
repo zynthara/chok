@@ -220,6 +220,12 @@ CSRF（`http.csrf`，默认开）→ `chok.Wrap(...)` → 路由组 → 路由�
 请求内用 `chok.RequestID(ctx)`、`chok.ClientIP(ctx)`、`chok.LoggerFrom(ctx)`
 （带 request_id 的子 logger）。
 
+`http.trusted_proxies` 默认为空：谁的 `X-Forwarded-For` / `X-Real-Ip` 都不信，
+客户端伪造的转发头绕不过按地址的限速。应用放在 nginx、负载均衡或 CDN 后面而没
+列出代理时，转发头被忽略，`ClientIP` 全是代理的地址，按地址计数的限速（identity
+的登录、验证码限速）就按整个代理算；ClientIP 中间件第一次忽略不受信对端的转发头
+时记一条 Warn（带 `peer` 与 `header`），每个 App 只记一次。
+
 CSRF 是标准库的 `http.CrossOriginProtection`：只查不安全方法（POST / PUT /
 PATCH / DELETE）的 `Sec-Fetch-Site` 与 `Origin`，浏览器从别的网站发来的这类请求
 得 403 信封；curl、移动端、服务间调用不带这两个头，不受影响。

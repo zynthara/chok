@@ -57,7 +57,7 @@ Embedded without a tag in every application's Config, so its sections `app`, `ht
 | `http.read_timeout` | duration | `30s` |  |  |
 | `http.request_timeout` | duration |  |  | RequestTimeout cancels a request's context after it; 0 means none. |
 | `http.shutdown_timeout` | duration | `10s` |  | ShutdownTimeout bounds http.Server.Shutdown. |
-| `http.trusted_proxies` | list of string |  |  | TrustedProxies lists the proxy addresses or CIDRs whose X-Forwarded-For and X-Real-Ip headers are believed. |
+| `http.trusted_proxies` | list of string |  |  | TrustedProxies lists the proxy addresses or CIDRs whose X-Forwarded-For and X-Real-Ip headers are believed; it is empty by default. Behind a reverse proxy the list leaves out, those headers are ignored and every client has the proxy's address, so a limit kept per address, such as identity's login throttle, counts the whole proxy as one client. The App logs a warning the first time it ignores one. |
 | `http.write_timeout` | duration | `30s` |  |  |
 | `log.access` | bool | `true` |  | Access writes one line per request (method, path, route, status, bytes, duration, request_id, client_ip). |
 | `log.access_files[].compress` | bool | `true` |  |  |

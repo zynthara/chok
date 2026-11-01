@@ -72,7 +72,12 @@ type HTTPConfig struct {
 	// once.
 	DrainDelay time.Duration `yaml:"drain_delay" default:"5s"`
 	// TrustedProxies lists the proxy addresses or CIDRs whose
-	// X-Forwarded-For and X-Real-Ip headers are believed.
+	// X-Forwarded-For and X-Real-Ip headers are believed; it is empty by
+	// default. Behind a reverse proxy the list leaves out, those headers
+	// are ignored and every client has the proxy's address, so a limit
+	// kept per address, such as identity's login throttle, counts the
+	// whole proxy as one client. The App logs a warning the first time it
+	// ignores one.
 	TrustedProxies []string `yaml:"trusted_proxies"`
 	// MaxBodyBytes caps a request body; a route can change it with MaxBody.
 	MaxBodyBytes int64 `yaml:"max_body_bytes" default:"4194304" validate:"gte=0"`
