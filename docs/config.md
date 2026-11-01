@@ -30,7 +30,7 @@ Embedded without a tag in every application's Config, so its sections `app`, `ht
 | Key | Type | Default | Rules | Description |
 |---|---|---|---|---|
 | `app.debug` | bool |  |  | Debug mounts /debug/pprof/\* and /debug/pprof/goroutineleak. |
-| `app.shutdown_timeout` | duration | `30s` |  | ShutdownTimeout bounds the whole stop phase: drain, HTTP shutdown, stopping the Starters and closing every component. |
+| `app.shutdown_timeout` | duration | `30s` |  | ShutdownTimeout bounds the stop phase: drain, HTTP shutdown, stopping the Starters and closing every component. A Close still running when it is spent gets one second more, then is abandoned. |
 | `app.start_timeout` | duration | `30s` |  | StartTimeout bounds the start phase: every Healther must report healthy within it before the HTTP server listens. |
 | `http.addr` | string | `:8080` |  |  |
 | `http.cors.allow_credentials` | bool |  |  |  |
