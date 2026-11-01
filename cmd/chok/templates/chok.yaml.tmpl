@@ -10,6 +10,10 @@ log:
 
 http:
   addr: ":8080"
+  # Behind a reverse proxy (nginx, a load balancer, a CDN), list its
+  # addresses or CIDRs here: otherwise X-Forwarded-For is ignored, every
+  # client has the proxy's address, and rate limits count them as one.
+  # trusted_proxies: ["127.0.0.1", "10.0.0.0/8"]
   openapi:
     title: {{.Name}} API
 

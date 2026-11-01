@@ -8,6 +8,11 @@ log:
 
 http:
   addr: ":8080"
+  # Behind a reverse proxy (nginx, a load balancer, a CDN), list its
+  # addresses or CIDRs here: otherwise X-Forwarded-For is ignored, every
+  # visitor has the proxy's address, and the whole site shares one
+  # address's ten sign-in codes per 15 minutes.
+  # trusted_proxies: ["127.0.0.1", "10.0.0.0/8"]
   openapi:
     title: Chatter API
 
