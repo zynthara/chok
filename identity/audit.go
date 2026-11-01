@@ -354,9 +354,18 @@ func (a *Audit) purge(ctx context.Context, cutoff time.Time) (int64, error) {
 	}
 }
 
-func (a *Audit) fail(err error) { a.lastErr.Store(&failure{at: a.now(), err: err}) }
+// fail records a failed write for health, unless its context cut it
+// short — the caller's deadline or cancellation, or close giving up on
+// the queue: that says nothing about the store.
+func (a *Audit) fail(err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	a.lastErr.Store(&failure{at: a.now(), err: err})
+}
 
-// health fails when a write failed within the last minute.
+// health fails when a write failed within the last minute; a write its
+// context cut short does not count.
 func (a *Audit) health() error {
 	if f := a.lastErr.Load(); f != nil && a.now().Sub(f.at) < auditFailWindow {
 		return fmt.Errorf("audit: a write failed %s ago: %w", a.now().Sub(f.at).Round(time.Second), f.err)

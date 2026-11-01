@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/choktest"
+	"github.com/zynthara/chok/internal/dbtest"
 	"github.com/zynthara/chok/internal/tracectx"
 )
 
@@ -379,13 +381,52 @@ func TestAudit_HealthReportsWriteFailures(t *testing.T) {
 	if err := a.health(); err != nil {
 		t.Fatal(err)
 	}
-	a.fail(context.DeadlineExceeded)
+	a.fail(errors.New("disk I/O error"))
 	if err := a.health(); err == nil || !strings.Contains(err.Error(), "a write failed") {
 		t.Fatalf("health after a failure: %v", err)
 	}
 	a.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
 	if err := a.health(); err != nil {
 		t.Fatalf("a minute later the failure is old news: %v", err)
+	}
+}
+
+// TestAudit_HealthIgnoresAnEndedContext: LogSync on a context that was
+// canceled or ran out returns the context's error and leaves Health
+// alone: the caller gave up, the log did not fail.
+func TestAudit_HealthIgnoresAnEndedContext(t *testing.T) {
+	idn := auditOn(t, AuditConfig{})
+	a := idn.Audit()
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	expired, stop := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer stop()
+	for name, ctx := range map[string]context.Context{"canceled": canceled, "expired": expired} {
+		if err := a.LogSync(ctx, Event{Action: "post.publish"}); !errors.Is(err, ctx.Err()) {
+			t.Fatalf("%s: LogSync = %v, want the context's error", name, err)
+		}
+		if err := idn.Health(t.Context()); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if dbtest.Driver() != "sqlite" {
+		return
+	}
+	// A transaction holds SQLite's one writer while a request's LogSync
+	// waits for it until the request's deadline passes.
+	err := idn.d.RunInTx(t.Context(), func(context.Context) error {
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		if err := a.LogSync(ctx, Event{Action: "post.publish"}); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("LogSync behind a held writer = %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idn.Health(t.Context()); err != nil {
+		t.Fatalf("a deadline that passed while LogSync waited: %v", err)
 	}
 }
 

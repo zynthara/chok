@@ -240,7 +240,8 @@ func (idn *Identity) Audit() *Audit { return idn.audit }
 func (idn *Identity) Name() string { return "identity" }
 
 // Health fails while the audit log cannot write: a write failed within
-// the last minute.
+// the last minute. A write that failed because its caller's context
+// ended does not count.
 func (idn *Identity) Health(context.Context) error { return idn.audit.health() }
 
 // Close waits, within ctx, for the mails in flight and writes the queued
