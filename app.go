@@ -90,6 +90,8 @@ func Wrap(mw ...Middleware) Option {
 func Version(v string) Option { return func(a *App) { a.version = v } }
 
 // Closer is a component that releases resources when the App stops.
+// Close should return once ctx is done: the App waits for it only while
+// the stop budget lasts.
 type Closer interface {
 	Close(ctx context.Context) error
 }
@@ -243,7 +245,9 @@ func init() {
 // them has been requested since the start, so a stop nobody's probes
 // watch does not wait — the HTTP server shuts down within
 // http.shutdown_timeout, the Starters' context is canceled and Run waits
-// for them, then every Closer is closed in reverse Use order.
+// for them, then every Closer is closed in reverse Use order. A Close
+// still running when the budget is spent is abandoned and reported, and
+// the next Closer is closed.
 //
 // Run returns nil when ctx is canceled, ctx.Err() when its deadline
 // expires, and the failure otherwise. It can be called once.
@@ -462,17 +466,37 @@ func (a *App) stop(ctx context.Context, srv *http.Server, cancelRun context.Canc
 		errs = append(errs, fmt.Errorf("chok: components still running after %w", context.Cause(stopCtx)))
 	}
 
+	errs = append(errs, a.closeAll(stopCtx, comps)...)
+	a.logger.Info("chok: stopped", "duration", time.Since(begin).Round(time.Millisecond))
+	return errors.Join(errs...)
+}
+
+// closeAll closes the Closers in reverse Use order, waiting for each until
+// ctx is done. A Close still running then is abandoned: it is logged and
+// reported, its goroutine is left behind (the process is on its way out)
+// and the next Closer is closed. Once ctx is done, the remaining Closers
+// are still called but no longer waited for.
+func (a *App) closeAll(ctx context.Context, comps []*component) []error {
+	var errs []error
 	for _, comp := range slices.Backward(comps) {
 		c, ok := comp.value.(Closer)
 		if !ok {
 			continue
 		}
-		if err := callClose(stopCtx, c); err != nil {
-			errs = append(errs, fmt.Errorf("chok: close %s: %w", comp.name, err))
+		done := make(chan error, 1) // buffered: an abandoned Close never blocks on it
+		go func() { done <- callClose(ctx, c) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				errs = append(errs, fmt.Errorf("chok: close %s: %w", comp.name, err))
+			}
+		case <-ctx.Done():
+			cause := context.Cause(ctx)
+			a.logger.Error("chok: close did not return within the stop budget; abandoned", "component", comp.name, "cause", cause)
+			errs = append(errs, fmt.Errorf("chok: close %s did not return within the stop budget; abandoned: %w", comp.name, cause))
 		}
 	}
-	a.logger.Info("chok: stopped", "duration", time.Since(begin).Round(time.Millisecond))
-	return errors.Join(errs...)
+	return errs
 }
 
 func callClose(ctx context.Context, c Closer) (err error) {
@@ -491,10 +515,12 @@ func (a *App) closeLogs() {
 }
 
 // Close releases registered components if Run has not begun, in reverse
-// Use order, then closes owned log files. This supports deferred cleanup
-// during construction. After Run begins, Close waits for Run to finish;
-// cancel Run's context to stop it. A closed App cannot be run or extended.
-// Components constructed before Use remain the caller's responsibility.
+// Use order, then closes owned log files. A component's Close still
+// running when ctx is done is abandoned and reported, and the next one is
+// closed. This supports deferred cleanup during construction. After Run
+// begins, Close waits for Run to finish; cancel Run's context to stop it.
+// A closed App cannot be run or extended. Components constructed before
+// Use remain the caller's responsibility.
 func (a *App) Close(ctx context.Context) error {
 	a.mu.Lock()
 	if a.started {
@@ -511,14 +537,6 @@ func (a *App) Close(ctx context.Context) error {
 	a.mu.Unlock()
 	defer close(a.finished)
 	defer a.closeLogs()
-	var errs []error
-	for _, c := range slices.Backward(comps) {
-		if closer, ok := c.value.(Closer); ok {
-			if err := callClose(ctx, closer); err != nil {
-				errs = append(errs, fmt.Errorf("chok: close %s: %w", c.name, err))
-			}
-		}
-	}
-	a.closeErr = errors.Join(errs...)
+	a.closeErr = errors.Join(a.closeAll(ctx, comps)...)
 	return a.closeErr
 }

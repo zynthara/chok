@@ -255,6 +255,96 @@ func TestStop_FastStopCapsBudget(t *testing.T) {
 	})
 }
 
+// stuckCloser is a component whose Close ignores its ctx, like one that
+// wraps a library without a context (a headless browser, say). It returns
+// once release is closed.
+type stuckCloser struct {
+	name    string
+	release <-chan struct{}
+}
+
+func (s stuckCloser) Name() string { return s.name }
+
+func (s stuckCloser) Close(context.Context) error {
+	<-s.release
+	return nil
+}
+
+// TestStop_CloseIgnoringCtxIsAbandoned: a Close that ignores its ctx holds
+// the stop no longer than app.shutdown_timeout. Run returns when the budget
+// is spent, with an error and an Error log naming the component, and the
+// component registered before it is still closed.
+func TestStop_CloseIgnoringCtxIsAbandoned(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		base := testBase(t)
+		base.App.ShutdownTimeout = 3 * time.Second
+		var logs syncBuffer
+		app := New(base, Logger(slog.New(slog.NewTextHandler(&logs, nil))))
+		release := make(chan struct{})
+		defer close(release)
+		events := &eventLog{}
+		app.Use(&recorder{name: "first", log: events}, stuckCloser{name: "engine", release: release})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := runAsync(app, ctx)
+		synctest.Wait()
+		cancel()
+		begin := time.Now()
+		err := <-done
+		if d := time.Since(begin); d != 3*time.Second {
+			t.Fatalf("the stop takes its budget and no more, took %s", d)
+		}
+		if err == nil || !strings.Contains(err.Error(), "chok: close engine did not return within the stop budget; abandoned: app.shutdown_timeout (3s)") {
+			t.Fatalf("got %v", err)
+		}
+		if out := logs.String(); !strings.Contains(out, `level=ERROR msg="chok: close did not return within the stop budget; abandoned" component=engine`) {
+			t.Fatalf("the abandoned Close is logged at error level, naming the component:\n%s", out)
+		}
+		synctest.Wait() // the next Close, called once the budget was spent, runs in the background
+		if !slices.Contains(events.all(), "close first") {
+			t.Fatalf("the component after the abandoned one is still closed: %v", events.all())
+		}
+	})
+}
+
+// bomb is a component whose Close panics.
+type bomb struct{}
+
+func (bomb) Close(context.Context) error { panic("boom") }
+
+// TestClose_BeforeRunAbandonsACloseIgnoringCtx: App.Close waits for each
+// Close until its ctx is done. A Close that panics, in the goroutine it
+// now runs in, is reported; one that ignores ctx is abandoned when ctx
+// expires, with an error naming it, and the component registered before
+// it is still closed.
+func TestClose_BeforeRunAbandonsACloseIgnoringCtx(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		app := New(testBase(t), Logger(quiet()))
+		release := make(chan struct{})
+		defer close(release)
+		events := &eventLog{}
+		app.Use(&recorder{name: "first", log: events}, stuckCloser{name: "engine", release: release}, bomb{})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		begin := time.Now()
+		err := app.Close(ctx)
+		if d := time.Since(begin); d != 2*time.Second {
+			t.Fatalf("Close takes what its ctx allows and no more, took %s", d)
+		}
+		for _, want := range []string{"chok: close bomb: close panicked: boom", "chok: close engine did not return within the stop budget; abandoned"} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("want %q in %v", want, err)
+			}
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the abandoned Close's error wraps why ctx ended: %v", err)
+		}
+		synctest.Wait()
+		if !slices.Contains(events.all(), "close first") {
+			t.Fatalf("the component after the abandoned one is still closed: %v", events.all())
+		}
+	})
+}
+
 // TestStop_DrainDelayHolds503: through http.drain_delay /readyz and the
 // health endpoint answer 503; the health report says down and lists no
 // component, as the checks are not run.

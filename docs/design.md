@@ -99,7 +99,10 @@ body 列出每个组件的状态与耗时）；`/livez` 只说明进程活着。
 
 **停机相**：`/readyz` 与 `/healthz` 改 503 → 等 `http.drain_delay`（给负载均衡
 摘流）→ `http.Server.Shutdown(http.shutdown_timeout)` → 取消 Starter 的 ctx 并
-等待 → 逆序 `Close`，整个停机相受 `app.shutdown_timeout` 总预算约束。drain 期间
+等待 → 逆序 `Close`，整个停机相受 `app.shutdown_timeout` 总预算约束。每个
+`Close` 只在预算内等：预算用完时还没返回的那个（不理会 ctx 的实现）被放弃，
+记一条 Error 点名组件、并入 `Run` 返回的错误，接着关下一个；预算用完后才轮到
+的 Close 照样调用，但不再等它返回，被放弃的调用留在后台。drain 期间
 `/healthz` 不再跑检查，直接答 503、status 为 down、不列组件。drain 按需：只在
 进程启动以来 `/readyz` 或 `/healthz`（`http.health.path` 配到哪就是哪）被请求过
 时才等（有人在看——Kubernetes 探针、负载均衡的健康检查，后者常指向
@@ -111,8 +114,9 @@ Ctrl-C 立即停。开发时手动 curl 过 `/healthz` 也会等，再按一次 
 
 **装配失败**：构造成功后立即 Use，再构造后续组件。`App.Close(ctx)` 在 Run 前按
 逆序释放已登记组件，也关闭 App 自建日志文件；可在 main 中 defer，并给独立的
-超时 context。它不会取消已经运行的 Run，而是等 Run 完成（或 ctx 到期）；运行时
-停止仍取消 Run 的 context。未交给 Use 的外部/共享资源仍由调用方关闭。
+超时 context：ctx 到期时还没返回的 Close 同样被放弃、报错，再关下一个。它不会
+取消已经运行的 Run，而是等 Run 完成（或 ctx 到期）；运行时停止仍取消 Run 的
+context。未交给 Use 的外部/共享资源仍由调用方关闭。
 `Open` / `RegisterSchema` 在 Run 之前做 schema 工作，另受
 `db.migration_timeout`（默认 30s）约束。PostgreSQL/MySQL 持迁移锁和执行 SQL
 共用一个固定连接，单连接池也可工作。
