@@ -114,11 +114,13 @@ Ctrl-C 立即停。开发时手动 curl 过 `/healthz` 也会等，再按一次 
 所有停机路径从 `context.WithoutCancel(ctx)` 派生，trace id 与 request id 保持
 关联。
 
-**装配失败**：构造成功后立即 Use，再构造后续组件。`App.Close(ctx)` 在 Run 前按
-逆序释放已登记组件，也关闭 App 自建日志文件；可在 main 中 defer，并给独立的
-超时 context：ctx 到期时还没返回的 Close 同样被放弃、报错，再关下一个。它不会
-取消已经运行的 Run，而是等 Run 完成（或 ctx 到期）；运行时停止仍取消 Run 的
-context。未交给 Use 的外部/共享资源仍由调用方关闭。
+**装配失败**：构造成功后立即 Use，再构造后续组件。Use 都要在 `Handler()` /
+`Run` 之前：第一次 `Handler()`（Run 也调用它）固化中间件栈，之后再 Use 一个
+`Instrumenter` 会 panic，免得它静默地进不了处理链；Run 开始后任何 Use 都 panic。
+`App.Close(ctx)` 在 Run 前按逆序释放已登记组件，也关闭 App 自建日志文件；可在
+main 中 defer，并给独立的超时 context：ctx 到期时还没返回的 Close 同样被放弃、
+报错，再关下一个。它不会取消已经运行的 Run，而是等 Run 完成（或 ctx 到期）；
+运行时停止仍取消 Run 的 context。未交给 Use 的外部/共享资源仍由调用方关闭。
 `Open` / `RegisterSchema` 在 Run 之前做 schema 工作，另受
 `db.migration_timeout`（默认 30s）约束。PostgreSQL/MySQL 持迁移锁和执行 SQL
 共用一个固定连接，单连接池也可工作。

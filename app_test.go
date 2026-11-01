@@ -540,6 +540,53 @@ func TestUse_AfterRunPanics(t *testing.T) {
 	app.Use(&recorder{name: "late", log: &eventLog{}})
 }
 
+// countingInstrumenter counts the requests its middleware sees.
+type countingInstrumenter struct{ n *atomic.Int32 }
+
+func (c countingInstrumenter) Middleware() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c.n.Add(1)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// TestUse_InstrumenterAfterHandlerPanics: the first Handler call fixes the
+// middleware stack, so an Instrumenter registered after it would never see
+// a request; Use panics rather than leave it out silently. A component of
+// another kind is still registered after Handler.
+func TestUse_InstrumenterAfterHandlerPanics(t *testing.T) {
+	app := New(testBase(t), Logger(quiet()))
+	app.Handler()
+	m := &mounter{}
+	app.Use(m)
+	if !m.mounted.Load() || len(app.components) != 1 {
+		t.Fatal("a component that is not an Instrumenter is still registered after Handler")
+	}
+	defer func() {
+		msg, _ := recover().(string)
+		if !strings.Contains(msg, "chok: Use of an Instrumenter (chok.countingInstrumenter) after Handler") ||
+			!strings.Contains(msg, "register it before calling Handler or Run") {
+			t.Fatalf("Use of an Instrumenter after Handler must panic and say what to do, got %q", msg)
+		}
+	}()
+	app.Use(countingInstrumenter{n: new(atomic.Int32)})
+}
+
+// TestUse_InstrumenterBeforeHandlerSeesRequests: registered before
+// Handler, an Instrumenter's middleware is in the stack.
+func TestUse_InstrumenterBeforeHandlerSeesRequests(t *testing.T) {
+	var n atomic.Int32
+	app := New(testBase(t), Logger(quiet()))
+	app.Use(countingInstrumenter{n: &n})
+	rec := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	if rec.Code != http.StatusOK || n.Load() != 1 {
+		t.Fatalf("livez = %d; the Instrumenter saw %d requests, want 1", rec.Code, n.Load())
+	}
+}
+
 type mounter struct{ mounted atomic.Bool }
 
 func (m *mounter) Mount(r Router) {

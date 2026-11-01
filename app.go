@@ -37,6 +37,10 @@ type App struct {
 
 	handlerOnce sync.Once
 	handler     http.Handler
+	// handlerBuilt is set as the first Handler call starts building the
+	// middleware stack: an Instrumenter registered after that would be
+	// left out of it, so Use refuses one.
+	handlerBuilt atomic.Bool
 
 	mu            sync.Mutex
 	components    []*component
@@ -147,6 +151,11 @@ func New(base Base, opts ...Option) *App {
 // with a BindLogger(*slog.Logger) method is handed the App's root logger
 // as it is registered: that is how telemetry's logs.otel bridge attaches
 // to the logger New built.
+//
+// Call Use before Handler and Run. The first Handler call, which Run
+// makes too, fixes the middleware stack, so Use panics for an
+// Instrumenter registered after it, which the stack would leave out; any
+// Use panics once Run has begun.
 func (a *App) Use(components ...any) {
 	var mount []Mounter
 	a.mu.Lock()
@@ -164,6 +173,10 @@ func (a *App) Use(components ...any) {
 		_, healther := c.(Healther)
 		m, mounter := c.(Mounter)
 		in, instrumenter := c.(Instrumenter)
+		if instrumenter && a.handlerBuilt.Load() {
+			a.mu.Unlock()
+			panic(fmt.Sprintf("chok: Use of an Instrumenter (%T) after Handler: the middleware stack is fixed; register it before calling Handler or Run", c))
+		}
 		if !starter && !closer && !healther && !mounter && !instrumenter {
 			a.logger.Warn("chok: Use: value implements none of Start, Close, Health, Mount or Middleware; ignored",
 				"type", fmt.Sprintf("%T", c))

@@ -168,6 +168,9 @@ func (r *muxRecorder) Write(b []byte) (int, error) {
 // embedding in another server. Register components and routes first:
 // the middleware stack is fixed by the first call.
 func (a *App) Handler() http.Handler {
-	a.handlerOnce.Do(func() { a.handler = a.buildHandler() })
+	a.handlerOnce.Do(func() {
+		a.handlerBuilt.Store(true) // first: a Use racing the build lands in the stack or panics
+		a.handler = a.buildHandler()
+	})
 	return a.handler
 }
