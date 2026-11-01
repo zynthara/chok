@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -156,6 +157,9 @@ func TestAudit_RefusesAnEventWithoutAction(t *testing.T) {
 	}
 	if a.failed.Load() != 1 || count(t, idn, "") != 0 {
 		t.Fatalf("failed=%d rows=%d", a.failed.Load(), count(t, idn, ""))
+	}
+	if err := a.health(); err != nil {
+		t.Fatalf("an event that cannot be recorded is no failure of the store: %v", err)
 	}
 }
 
@@ -385,7 +389,7 @@ func TestAudit_HealthReportsWriteFailures(t *testing.T) {
 	if err := a.health(); err != nil {
 		t.Fatal(err)
 	}
-	a.fail(errors.New("disk I/O error"))
+	a.fail(t.Context(), context.DeadlineExceeded)
 	if err := a.health(); err == nil || !strings.Contains(err.Error(), "a write failed") {
 		t.Fatalf("health after a failure: %v", err)
 	}
@@ -395,9 +399,11 @@ func TestAudit_HealthReportsWriteFailures(t *testing.T) {
 	}
 }
 
-// TestAudit_HealthIgnoresAnEndedContext: LogSync on a context that was
-// canceled or ran out returns the context's error and leaves Health
-// alone: the caller gave up, the log did not fail.
+// TestAudit_HealthIgnoresAnEndedContext: a write that fails once its
+// context has ended, the caller canceled or out of time, leaves Health
+// alone whatever the error says, and LogSync still returns the error.
+// With the context live a failure counts, even one whose error wraps
+// context.DeadlineExceeded, as a driver's connect timeout does.
 func TestAudit_HealthIgnoresAnEndedContext(t *testing.T) {
 	idn := auditOn(t, AuditConfig{})
 	a := idn.Audit()
@@ -409,28 +415,34 @@ func TestAudit_HealthIgnoresAnEndedContext(t *testing.T) {
 		if err := a.LogSync(ctx, Event{Action: "post.publish"}); !errors.Is(err, ctx.Err()) {
 			t.Fatalf("%s: LogSync = %v, want the context's error", name, err)
 		}
+		// A driver may say so in its own words: SQLite answers "interrupted".
+		a.fail(ctx, errors.New("interrupted (9)"))
 		if err := idn.Health(t.Context()); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	if dbtest.Driver() != "sqlite" {
-		return
-	}
-	// A transaction holds SQLite's one writer while a request's LogSync
-	// waits for it until the request's deadline passes.
-	err := idn.d.RunInTx(t.Context(), func(context.Context) error {
-		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-		defer cancel()
-		if err := a.LogSync(ctx, Event{Action: "post.publish"}); !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("LogSync behind a held writer = %v", err)
+	if dbtest.Driver() == "sqlite" {
+		// A transaction holds SQLite's one writer while a request's LogSync
+		// waits for it until the request's deadline passes.
+		err := idn.d.RunInTx(t.Context(), func(context.Context) error {
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer cancel()
+			if err := a.LogSync(ctx, Event{Action: "post.publish"}); !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("LogSync behind a held writer = %v", err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+		if err := idn.Health(t.Context()); err != nil {
+			t.Fatalf("a deadline that passed while LogSync waited: %v", err)
+		}
 	}
-	if err := idn.Health(t.Context()); err != nil {
-		t.Fatalf("a deadline that passed while LogSync waited: %v", err)
+	// The context is live: the store failed, whatever the error wraps.
+	a.fail(t.Context(), fmt.Errorf("connect: %w", context.DeadlineExceeded))
+	if err := idn.Health(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a driver's timeout on a live context: %v", err)
 	}
 }
 

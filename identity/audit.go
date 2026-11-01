@@ -198,7 +198,7 @@ func (a *Audit) LogSync(ctx context.Context, e Event) error {
 		return err
 	}
 	if err := a.d.Unsafe(ctx).Create(&row).Error; err != nil {
-		a.fail(err)
+		a.fail(ctx, err)
 		return fmt.Errorf("identity: audit: %w", err)
 	}
 	a.written.Add(1)
@@ -288,7 +288,7 @@ func (a *Audit) run(ctx context.Context) {
 		}
 		if err := a.d.Unsafe(ctx).CreateInBatches(batch, len(batch)).Error; err != nil {
 			a.failed.Add(uint64(len(batch)))
-			a.fail(err)
+			a.fail(ctx, err)
 			a.logger.Error("identity: audit batch not written; dropped", "size", len(batch), "error", err)
 		} else {
 			a.written.Add(uint64(len(batch)))
@@ -308,8 +308,9 @@ func (a *Audit) run(ctx context.Context) {
 			a.pending.Add(-1)
 			r, err := a.row(e)
 			if err != nil {
+				// The caller's mistake, not the store's: logged and
+				// counted, but no failure for health.
 				a.failed.Add(1)
-				a.fail(err)
 				a.logger.Error("identity: audit event not recorded", "action", e.Action, "error", err)
 				continue
 			}
@@ -374,11 +375,13 @@ func (a *Audit) purge(ctx context.Context, cutoff time.Time) (int64, error) {
 	}
 }
 
-// fail records a failed write for health, unless its context cut it
-// short — the caller's deadline or cancellation, or close giving up on
-// the queue: that says nothing about the store.
-func (a *Audit) fail(err error) {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+// fail records a failed write for health unless ctx, the context the
+// write ran on, has ended: a caller that was canceled or ran out of time,
+// or close giving up on the queue, says nothing about the store. The
+// error does not decide: a driver's own timeout, such as a connect
+// timeout, wraps context.DeadlineExceeded and still counts.
+func (a *Audit) fail(ctx context.Context, err error) {
+	if ctx.Err() != nil {
 		return
 	}
 	a.lastErr.Store(&failure{at: a.now(), err: err})
@@ -394,8 +397,8 @@ func (a *Audit) succeed() {
 }
 
 // health fails while the latest recorded failure is under a minute old
-// and no write has gone through since; fail does not record a write its
-// context cut short.
+// and no write has gone through since; fail records none once the
+// write's context has ended.
 func (a *Audit) health() error {
 	if f := a.lastErr.Load(); f != nil && a.now().Sub(f.at) < auditFailWindow {
 		return fmt.Errorf("audit: a write failed %s ago: %w", a.now().Sub(f.at).Round(time.Second), f.err)
