@@ -25,6 +25,21 @@ func newWatcherClient(t *testing.T) *goredis.Client {
 	return c
 }
 
+// mustWatcher subscribes a watcher to channel through c, failing the
+// test with the constructor's error. A watcher that could not subscribe
+// is nil, and a test that went on with it would panic on its first
+// method call, killing the package's whole test binary and hiding the
+// cause; the subscribe fails, for one, when the machine has run out of
+// ephemeral ports.
+func mustWatcher(t *testing.T, c *goredis.Client, channel string) *redisWatcher {
+	t.Helper()
+	w, err := newRedisWatcher(context.Background(), c, channel)
+	if err != nil {
+		t.Fatalf("new watcher on %q: %v", channel, err)
+	}
+	return w
+}
+
 // awaitCondition spins on cond up to total, returning whether the
 // condition became true. Used for "peer received the publish" checks
 // — sleep-based assertions would either flake under CI load or pad
@@ -103,11 +118,11 @@ func TestRedisWatcher_SuppressesSelfPublish(t *testing.T) {
 // subscribe-pool semantics under more realistic multi-pod load.
 func TestRedisWatcher_MultipleSubscribersAllReceive(t *testing.T) {
 	c := newWatcherClient(t)
-	wA, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wA := mustWatcher(t, c, "test:authz:policy")
 	defer wA.Close()
-	wB, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wB := mustWatcher(t, c, "test:authz:policy")
 	defer wB.Close()
-	wC, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wC := mustWatcher(t, c, "test:authz:policy")
 	defer wC.Close()
 
 	var bSeen, cSeen atomic.Int32
@@ -133,9 +148,9 @@ func TestRedisWatcher_MultipleSubscribersAllReceive(t *testing.T) {
 // enforcer.
 func TestRedisWatcher_CloseStopsCallback(t *testing.T) {
 	c := newWatcherClient(t)
-	wA, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wA := mustWatcher(t, c, "test:authz:policy")
 	defer wA.Close()
-	wB, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wB := mustWatcher(t, c, "test:authz:policy")
 
 	var bSeen atomic.Int32
 	_ = wB.SetUpdateCallback(func(string) { bSeen.Add(1) })
@@ -170,7 +185,7 @@ func TestRedisWatcher_CloseIsIdempotent(t *testing.T) {
 // a structured error rather than a panic when the watcher is gone.
 func TestRedisWatcher_UpdateAfterClose_Errors(t *testing.T) {
 	c := newWatcherClient(t)
-	w, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	w := mustWatcher(t, c, "test:authz:policy")
 	w.Close()
 	if err := w.Update(); err == nil {
 		t.Fatal("Update after Close must error")
@@ -183,7 +198,7 @@ func TestRedisWatcher_UpdateAfterClose_Errors(t *testing.T) {
 // callback that will never fire.
 func TestRedisWatcher_SetCallbackAfterClose_Errors(t *testing.T) {
 	c := newWatcherClient(t)
-	w, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	w := mustWatcher(t, c, "test:authz:policy")
 	w.Close()
 	if err := w.SetUpdateCallback(func(string) {}); err == nil {
 		t.Fatal("SetUpdateCallback after Close must error")
@@ -216,9 +231,9 @@ func TestRedisWatcher_EmptyChannel_Rejected(t *testing.T) {
 // peer publish must dispatch to the new callback, not the old.
 func TestRedisWatcher_CallbackSwap(t *testing.T) {
 	c := newWatcherClient(t)
-	wA, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wA := mustWatcher(t, c, "test:authz:policy")
 	defer wA.Close()
-	wB, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wB := mustWatcher(t, c, "test:authz:policy")
 	defer wB.Close()
 
 	var oldFired, newFired atomic.Int32
@@ -245,9 +260,9 @@ func TestRedisWatcher_CallbackSwap(t *testing.T) {
 // fires read the same DB rows and waste a round-trip.
 func TestRedisWatcher_CoalescesBurstReloads(t *testing.T) {
 	c := newWatcherClient(t)
-	wA, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wA := mustWatcher(t, c, "test:authz:policy")
 	defer wA.Close()
-	wB, _ := newRedisWatcher(context.Background(), c, "test:authz:policy")
+	wB := mustWatcher(t, c, "test:authz:policy")
 	defer wB.Close()
 
 	var fired atomic.Int32

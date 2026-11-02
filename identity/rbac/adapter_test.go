@@ -115,7 +115,9 @@ func TestRemovePolicy_ExactMatch(t *testing.T) {
 	}
 
 	m := model.NewModel()
-	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.LoadPolicy(m); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +158,9 @@ func TestRemoveFilteredPolicy_WildcardSlots(t *testing.T) {
 	}
 
 	m := model.NewModel()
-	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.LoadPolicy(m); err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +253,9 @@ func TestRemoveFilteredPolicy_PartialEmpty_KeepsCasbinSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := model.NewModel()
-	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.LoadPolicy(m); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +343,9 @@ func TestAddPolicies_Batch(t *testing.T) {
 	}
 
 	m := model.NewModel()
-	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.LoadPolicy(m); err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +417,9 @@ func TestUpdatePolicy_ReplacesMatchingRule(t *testing.T) {
 	}
 
 	m := model.NewModel()
-	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.LoadPolicy(m); err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +754,9 @@ func TestUpdateFilteredPolicies_RoundTrip(t *testing.T) {
 		}
 	}
 	m := model.NewModel()
-	_ = m.LoadModelFromText(rbacWithDomainsModel)
+	if err := m.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.LoadPolicy(m); err != nil {
 		t.Fatal(err)
 	}
@@ -954,7 +966,9 @@ func TestSavePolicy_TruncateAndReplace(t *testing.T) {
 	}
 	// Reload from disk and assert we only see the new rule.
 	m2 := model.NewModel()
-	_ = m2.LoadModelFromText(rbacWithDomainsModel)
+	if err := m2.LoadModelFromText(rbacWithDomainsModel); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.LoadPolicy(m2); err != nil {
 		t.Fatal(err)
 	}
