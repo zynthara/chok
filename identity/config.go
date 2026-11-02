@@ -64,7 +64,8 @@ type Config struct {
 	LoginRateLimit      int           `yaml:"login_rate_limit" default:"10"`
 	LoginRateLimitPerIP int           `yaml:"login_rate_limit_per_ip" default:"100"`
 	// DisableRegister drops the register route: accounts come from
-	// Users().Create.
+	// Users().Create, which makes them verified — the operator vouches for
+	// the address — so auth.admins applies to them.
 	DisableRegister bool `yaml:"disable_register"`
 	// LinkByEmail lets a first OAuth sign-in join the local account with
 	// the same email, when that account's email is verified and the
@@ -94,7 +95,10 @@ type Config struct {
 	Audit AuditConfig `yaml:"audit"`
 	// Admins lists the email addresses of the first administrators: a
 	// user whose address is listed, and verified, gets the admin role the
-	// next time a token is issued to it or Authn reads it. The grant is
+	// next time a token is issued to it or Authn reads it. An account
+	// Users().Create makes counts as verified, its operator vouching for
+	// the address: a deployment that turns registration off and sends no
+	// mail has its administrators at their first login. The grant is
 	// written once and never undone here: removing an address revokes
 	// nothing (Users().SetRoles does). An unverified address gets nothing,
 	// so whoever registers a listed address first gains no power by it,

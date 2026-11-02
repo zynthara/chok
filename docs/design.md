@@ -529,7 +529,9 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   未证明的邮箱不授予（未验证的，或 Facebook 推定的）——开放注册时，抢注管理员
   邮箱的人拿不到权限。reset-password 成功即证明邮箱可达，置 `email_verified`，
   所以用密码登录的应用也能走 `auth.admins`；运维调用的 `Users().ResetPassword`
-  不置。
+  不置。运维用 `Users().Create` 建的账户算已证明（运维为邮箱担保）：建出来就是
+  `email_verified`、不推定，`auth.admins` 在它第一次登录时授予，关掉注册、由运维
+  建号又不发信的部署因此不必自己调 `SetRoles`；register 路由建的账户仍未验证。
 - **绑定要先验证邮箱**：注册邮箱的人不一定是邮箱的主人。未验证邮箱的账户不能
   绑定新的登录方式（`POST {prefix}/identities/link` 与回调都答 403
   `EMAIL_NOT_VERIFIED`）；邮箱第一次被证明时（reset-password、passwordless
