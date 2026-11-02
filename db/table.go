@@ -63,7 +63,7 @@ func Table(model any, indexes ...Index) TableSpec {
 	spec := TableSpec{model: ptr, typ: t, indexes: indexes, soft: isSoftDelete(t)}
 	for _, idx := range indexes {
 		if idx.soft && !spec.soft {
-			panic(fmt.Sprintf("db.Table: %s: SoftUnique needs a model with soft delete (db.SoftDeleteModel or db.OwnedSoftDeleteModel)", t.Name()))
+			panic(fmt.Sprintf("db.Table: %s: SoftUnique needs a model with soft delete (db.SoftDeleteModel or db.OwnedSoftDeleteModel); db.Unique takes any model and keeps a deleted row's values", t.Name()))
 		}
 		if err := checkIndex(s, idx); err != nil {
 			panic(fmt.Sprintf("db.Table: %s: %v", t.Name(), err))
