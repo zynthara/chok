@@ -162,9 +162,19 @@ func (idn *Identity) register(ctx context.Context, req *registerRequest) (*token
 // createUser makes an active account with a password: register, whose
 // registrant vouches for nothing, and UserService.Create, whose operator
 // vouches for the address. vouched makes the address proven — verified,
-// not assumed — from the start.
+// not assumed — from the start. Both get the same checks: a plain email
+// address, as auth.admins takes one, and a password of 8 bytes or more
+// that mixes two kinds of characters. register's request rules hold the
+// first two already, except for a quoted local part ("john"@example.com),
+// which they let through and auth.admins refuses.
 func (idn *Identity) createUser(ctx context.Context, email, password, name string, vouched bool) (*User, error) {
 	email = normalizeEmail(email)
+	if !plainAddress(email) {
+		return nil, chok.ErrValidation.Msgf("email must be an email address").With("fields", map[string]string{"email": "email"})
+	}
+	if len(password) < 8 {
+		return nil, chok.ErrValidation.Msgf("password must be at least 8 bytes").With("fields", map[string]string{"password": "min"})
+	}
 	if err := checkPasswordStrength("password", password); err != nil {
 		return nil, err
 	}

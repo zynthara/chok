@@ -64,10 +64,13 @@ func notFoundUser(err error) error {
 }
 
 // Create makes an active account with a password, as register does: for
-// a deployment that turns registration off and provisions accounts.
-// Unlike register, the operator vouches for the address: the account is
-// created verified, so auth.admins applies to it — a listed address gets
-// the admin role at the account's first login, no mail needed.
+// a deployment that turns registration off and provisions accounts. An
+// address that is not a plain email address, or a password shorter than
+// 8 bytes or of one kind of character, is a validation error naming the
+// field. Unlike register, the operator vouches for the address: the
+// account is created verified, so auth.admins applies to it — a listed
+// address gets the admin role at the account's first login, no mail
+// needed.
 func (s *UserService) Create(ctx context.Context, email, password, name string) (*User, error) {
 	return s.idn.createUser(ctx, email, password, name, true)
 }

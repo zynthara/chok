@@ -67,6 +67,42 @@ func TestUsers_CreateMakesAVerifiedAccount(t *testing.T) {
 	}
 }
 
+// TestUsers_CreateValidates: Create holds what it is given to register's
+// rules — a plain email address, as auth.admins takes one, and a
+// password of 8 bytes or more — and refuses the rest as register does,
+// with a validation error naming the field. The check is createUser's,
+// so register makes it too: a quoted local part, which register's request
+// rules let through, is refused there as well.
+func TestUsers_CreateValidates(t *testing.T) {
+	idn := newIdentity(t, Config{})
+	for _, tc := range []struct{ email, password, field, rule string }{
+		{"not an email", "aB1!xyz9", "email", "email"},
+		{"Ops <ops@test.com>", "aB1!xyz9", "email", "email"},
+		{"a@test.com", "aB1", "password", "min"},
+	} {
+		_, err := idn.Users().Create(t.Context(), tc.email, tc.password, "")
+		var e *chok.Error
+		if !errors.Is(err, chok.ErrValidation) || !errors.As(err, &e) || e.Code != http.StatusBadRequest || !strings.Contains(e.Message, tc.field) {
+			t.Errorf("Create(%q, %q) = %v", tc.email, tc.password, err)
+			continue
+		}
+		if fields, _ := e.Metadata["fields"].(map[string]string); fields[tc.field] != tc.rule {
+			t.Errorf("Create(%q, %q): fields %v, want %s: %s", tc.email, tc.password, e.Metadata["fields"], tc.field, tc.rule)
+		}
+	}
+	// Nothing was written for a refusal: the address is free, and good
+	// input makes the account.
+	u, err := idn.Users().Create(t.Context(), " A@Test.com", "aB1!xyz9", "")
+	if err != nil || u.Email != "a@test.com" || !u.EmailVerified {
+		t.Fatalf("a good address and password: %+v %v", u, err)
+	}
+	c := serve(t, idn)
+	var e envelope
+	if code := c.PostJSON("/auth/register", map[string]string{"email": `"john"@test.com`, "password": "password123"}, &e); code != http.StatusBadRequest || e.Reason != "Validation" || !hasKey(e.Metadata["fields"], "email") {
+		t.Fatalf("register with a quoted local part = %d %+v", code, e)
+	}
+}
+
 func TestUsers_MarkEmailVerified(t *testing.T) {
 	idn, u, tok, me := newUser(t, "alice@test.com")
 	if u.EmailVerified {
