@@ -270,9 +270,9 @@ v0.2 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复�
 | 只读句柄（`read_only`）、多实例、dbresolver、sequence、manifest、repair history、迁移 fence、baseline 收养 | 删除；SQLite 文件库自带读池 |
 | `rid.New(prefix)`、`rid.Parse` | `db.NewRID(prefix)`、`db.ParseRID(rid)` |
 | 模型基座 `db.Model` / `SoftDeleteModel` / `OwnedModel` / `OwnedSoftDeleteModel` | 同名，字段相同 |
-| `db.Table(model, db.SoftUnique(...))` | 同名；三方言统一为 `UNIQUE(cols..., delete_token)`（v2 在 Postgres 上是部分索引） |
+| `db.Table(model, db.SoftUnique(...))` | 同名；三方言统一为 `UNIQUE(cols..., delete_token)`（v2 在 Postgres 上是部分索引）。**Postgres + `migrate: auto` 的 v2 库**：v0.2.1 起 auto 模式会核对已有同名索引，v2 建的部分索引 `UNIQUE(cols) WHERE deleted_at IS NULL` 形状不符、启动报错，第一次以 v0.2 启动前先 `DROP INDEX uk_user_email; DROP INDEX uk_identity_provider;` 再加上应用自己的 `SoftUnique` 索引，之后由 auto 重建（v2 软删时已写随机 `delete_token`，重建不冲突）；versioned 模式由迁移 SQL 自己 DROP 再 CREATE |
 | `db.SoftIndex` | `db.Index`：`SoftUnique` 与新增的 `Unique` 都返回它，`db.Table` 收 `...db.Index` |
-| — | `db.Unique(name, cols...)`（新增）：任何基座上的 `UNIQUE(cols...)`，三方言同形；非软删 `OwnedModel` 的 `(owner_id, X)` 唯一约束不必再在 `Open` 之后手写 DDL。auto 模式按名字建（已有同名索引不动、不比较列），versioned / off 由应用的 SQL 建；软删模型上被删的行仍占着它的值 |
+| — | `db.Unique(name, cols...)`（新增）：任何基座上的 `UNIQUE(cols...)`，三方言同形；非软删 `OwnedModel` 的 `(owner_id, X)` 唯一约束不必再在 `Open` 之后手写 DDL。auto 模式按名字核对已有索引（同表、同列序、唯一、非部分索引，否则启动报错并写出两边），versioned / off 由应用的 SQL 建；软删模型上被删的行仍占着它的值，`Upsert` 撞上时报 `DuplicateError`（v0.2.1） |
 
 时间：v0.2 以 UTC 写入所有时间（MySQL 会话 `+00:00`、Postgres 会话 UTC、SQLite 存
 `+00:00` 结尾的文本）。两种 v2 库要换算已有数据：
@@ -306,7 +306,8 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 
 电池的表另见 §5（identity、rbac）与 §6（jobs）。`migrate: auto` 的库不需要这些
 步骤：AutoMigrate 会补上缺的列与索引，但不会改名列——identity 审计表的两列要手工
-改名（§5）。
+改名（§5）。Postgres 上还要先删掉 v2 建的部分唯一索引（§2 的 `SoftUnique` 行）：
+v0.2.1 起 auto 模式核对已有索引，形状不符就拒绝启动。
 
 ### 4.3 store
 
@@ -391,6 +392,10 @@ Postgres 的 `timestamptz` 存的是瞬时，不受影响。
 - **绑定登录方式要先验证邮箱**：未验证邮箱的账户调 `/identities/link` 答 403
   `EMAIL_NOT_VERIFIED`（v2 允许）。v2 库里已有的这类绑定，在邮箱第一次被证明时
   （reset-password、passwordless 的码、`Users().MarkEmailVerified`）自动解绑。
+  v0.2.1：`Users().Create` 建的账户直接算已验证（运维为地址担保），`auth.admins`
+  在它第一次登录时授予，不必再自己用 `SetRoles` 引导；此前建的账户不回填，要的话
+  各调一次 `MarkEmailVerified`。`Create` 与 register 都要求纯邮箱地址（带引号的本地
+  部分 `"john"@example.com` 现在 400）和至少 8 字节的密码。
 - **Facebook 的邮箱不再并入已有账户**：Meta 不说 Graph API 返回的邮箱是否已确认，
   v0.2 只把它当推定已验证。首次用 Facebook 登录不再按 `link_by_email` 并入同邮箱的
   已有账户（v2 会并入），用户先用别的方式登录，再在账户设置里绑定 Facebook；它也
@@ -433,7 +438,9 @@ chok migrate status --battery identity --battery rbac   # 全部 applied
 版本被多个 schema 共享时用 `--owner` 指明。
 
 `db.migrate: auto` 的库不用登记：auto 模式下电池不写账本，AutoMigrate 会补上缺的列
-与索引，但不会改名列——`before` / `after` 两列仍要手工改名。
+与索引，但不会改名列——`before` / `after` 两列仍要手工改名。Postgres 上先
+`DROP INDEX uk_user_email; DROP INDEX uk_identity_provider;`（v2 的部分索引，
+v0.2.1 的核对会拦下它们），auto 再以 `UNIQUE(cols..., delete_token)` 重建。
 
 v2 的全局角色绑定（`casbin_rule` 里 `ptype = 'g'` 且 `v2 = '*'` 的行，由
 `AddUserToRole` 与 `Bootstrap` 写入）v0.2 不再认：匹配器跳过它们，`DomainsForUser`
