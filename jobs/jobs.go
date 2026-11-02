@@ -113,13 +113,14 @@ func Periodic(name, spec string, fn func(ctx context.Context) error, overlap Ove
 // (Close) that begins while fn runs still records the success, and a
 // restart does not deliver the message again.
 //
-// While fn fails on a message (returns an error or panics), the messages
-// behind it in the topic wait; other topics keep flowing. The worker
-// tries the message again after Config.RetryBackoff, doubling the wait
-// up to Config.MaxBackoff; the Config.MaxAttempts-th failure parks the
-// message in the dead letters (see Jobs.Dead) and the topic moves on. A
-// payload that does not decode into T is parked at once, without calling
-// fn. One worker per topic.
+// While fn fails on a message (returns an error, panics, or runs past
+// Config.HandlerTimeout, when its context ends), the messages behind it
+// in the topic wait; other topics keep flowing. The worker tries the
+// message again after Config.RetryBackoff, doubling the wait up to
+// Config.MaxBackoff; the Config.MaxAttempts-th failure parks the message
+// in the dead letters (see Jobs.Dead) and the topic moves on. A payload
+// that does not decode into T is parked at once, without calling fn. One
+// worker per topic.
 func Worker[T any](topic string, fn func(ctx context.Context, m Message[T]) error) Option {
 	w := workerOption{topic: topic}
 	if fn != nil {
@@ -346,6 +347,7 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Jobs, error) {
 			return nil, err // unreachable: the topic and fn were checked above
 		}
 		r.retry = retryPolicy{maxAttempts: cfg.MaxAttempts, backoff: cfg.RetryBackoff, maxBackoff: cfg.MaxBackoff}
+		r.timeout = cfg.HandlerTimeout
 		j.relays = append(j.relays, r)
 		e := newEntry(typeWorker, w.topic, sweep, every(cfg.PollInterval), OverlapSkip, r.run)
 		e.quiet, e.count = true, r.delivered.Load

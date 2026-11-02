@@ -16,10 +16,10 @@ import (
 //	  retention: 720h
 //
 // New gives a zero PollInterval, BatchSize, SettleWindow, MaxAttempts,
-// RetryBackoff, MaxBackoff, CleanupInterval or StopBudget the defaults
-// below, whether the Config comes from a file or from code. Enabled and
-// Retention have no zero-value default: a Config built in code sets them
-// (a zero Retention keeps the messages forever).
+// RetryBackoff, MaxBackoff, CleanupInterval, StopBudget or HandlerTimeout
+// the defaults below, whether the Config comes from a file or from code.
+// Enabled and Retention have no zero-value default: a Config built in code
+// sets them (a zero Retention keeps the messages forever).
 type Config struct {
 	// Enabled runs the periodic jobs and the workers in this process.
 	// False makes an enqueue-only process: Enqueue works, nothing runs.
@@ -59,6 +59,16 @@ type Config struct {
 	// StopBudget is how long stopping waits for runs in flight, after
 	// telling them to stop through their context.
 	StopBudget time.Duration `yaml:"stop_budget" default:"15s"`
+	// HandlerTimeout bounds one delivery: a worker's function gets a
+	// context that ends HandlerTimeout after it was handed the message.
+	// The worker logs a Warn then and still waits for the function to
+	// return, so the next message of the topic never runs beside it; once
+	// it returns, the delivery has failed, whatever it returned, and the
+	// message is tried again or parked as after any failure. A stop that
+	// began before the function returned decides instead, as without a
+	// timeout. A zero takes the default, and no value turns it off: set it
+	// above the longest a function may take. Periodic jobs have no timeout.
+	HandlerTimeout time.Duration `yaml:"handler_timeout" default:"10m" validate:"gte=0"`
 }
 
 // The defaults New applies to the zero fields of a Config built in code.
@@ -71,6 +81,7 @@ const (
 	defaultMaxBackoff      = 5 * time.Minute
 	defaultCleanupInterval = time.Hour
 	defaultStopBudget      = 15 * time.Second
+	defaultHandlerTimeout  = 10 * time.Minute
 	maxBatchSize           = 10_000
 )
 
@@ -101,12 +112,16 @@ func (c Config) withDefaults() Config {
 	if c.StopBudget == 0 {
 		c.StopBudget = defaultStopBudget
 	}
+	if c.HandlerTimeout == 0 {
+		c.HandlerTimeout = defaultHandlerTimeout
+	}
 	return c
 }
 
 // Validate checks the values a running process uses; a disabled section
 // runs nothing, so it is not checked. It runs when chok.Load reads the
-// configuration and again in New.
+// configuration and again in New, after the validate tags: the one of
+// HandlerTimeout refuses a negative value whatever Enabled says.
 func (c *Config) Validate() error {
 	if !c.Enabled {
 		return nil

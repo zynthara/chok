@@ -28,6 +28,7 @@ type relay struct {
 	d       *db.DB
 	logger  *slog.Logger
 	retry   retryPolicy
+	timeout time.Duration                       // HandlerTimeout: how long the handler may take over a message
 	observe func(ctx context.Context, ev Event) // reports message.parked; nil without observers
 
 	settle   time.Duration
@@ -130,7 +131,8 @@ func errorText(err error) string {
 
 // newRelay builds the relay of a worker. Its retry policy tries a failed
 // message again on the next sweep and parks it at the default
-// MaxAttempts; New sets the Config's.
+// MaxAttempts, and its handler gets the default HandlerTimeout; New sets
+// the Config's.
 func newRelay(topic string, handler func(ctx context.Context, m rawMessage) error, c *core, settle time.Duration, batch int) (*relay, error) {
 	if err := checkTopic(topic); err != nil {
 		return nil, fmt.Errorf("jobs: worker %q: %w", topic, err)
@@ -145,6 +147,7 @@ func newRelay(topic string, handler func(ctx context.Context, m rawMessage) erro
 		d:        c.d,
 		logger:   c.logger.With("topic", topic),
 		retry:    retryPolicy{maxAttempts: defaultMaxAttempts},
+		timeout:  defaultHandlerTimeout,
 		settle:   settle,
 		batch:    batch,
 		now:      time.Now,
@@ -478,16 +481,42 @@ func (r *relay) attempt(ctx context.Context, row *message, head *headState) erro
 	return r.fail(persistCtx, row, n, err, head)
 }
 
-// call runs the handler on m. A panic is a failed delivery: its stack
-// goes to the log at Error, as the scheduler logs a run's.
-func (r *relay) call(ctx context.Context, m rawMessage) (err error) {
-	defer func() {
-		if p := recover(); p != nil {
-			err = fmt.Errorf("panic: %v", p)
-			r.logger.ErrorContext(ctx, "jobs: a worker function panicked", "id", m.ID, "panic", fmt.Sprint(p), "stack", panicStack())
+// call runs the handler on m, with a context that ends after
+// HandlerTimeout. A panic is a failed delivery: its stack goes to the log
+// at Error, as the scheduler logs a run's. A handler still running when
+// its time runs out is logged at Warn then, once, and waited for: the
+// next message of the topic must not run beside it. When it returns, the
+// delivery has failed, whatever it returned, unless the sweep's context
+// has ended meanwhile: a stop then decides, as attempt says, the timeout
+// changing nothing.
+func (r *relay) call(ctx context.Context, m rawMessage) error {
+	hctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	// timedOut: the timeout ended hctx, not a stop (nor cancel).
+	timedOut := func() bool { return ctx.Err() == nil && errors.Is(hctx.Err(), context.DeadlineExceeded) }
+	stopWarn := context.AfterFunc(hctx, func() {
+		if timedOut() {
+			r.logger.WarnContext(ctx, "jobs: the handler is past handler_timeout; the topic waits for it to return",
+				"id", m.ID, "attempt", m.Attempt, "handler_timeout", r.timeout)
 		}
+	})
+	defer stopWarn() // runs before cancel: a handler that returned in time starts no goroutine
+	err := func() (err error) {
+		defer func() {
+			if p := recover(); p != nil {
+				err = fmt.Errorf("panic: %v", p)
+				r.logger.ErrorContext(ctx, "jobs: a worker function panicked", "id", m.ID, "panic", fmt.Sprint(p), "stack", panicStack())
+			}
+		}()
+		return r.handler(hctx, m)
 	}()
-	return r.handler(ctx, m)
+	if !timedOut() {
+		return err
+	}
+	if err == nil {
+		return fmt.Errorf("jobs: the handler ran past handler_timeout (%s)", r.timeout)
+	}
+	return fmt.Errorf("jobs: the handler ran past handler_timeout (%s): %w", r.timeout, err)
 }
 
 // fail records the n-th failure of row on its message row: the count,

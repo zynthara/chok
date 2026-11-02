@@ -19,6 +19,7 @@ import (
 	"github.com/zynthara/chok"
 	"github.com/zynthara/chok/choktest"
 	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/conf"
 	"github.com/zynthara/chok/internal/dbtest"
 )
 
@@ -180,6 +181,9 @@ func TestNew_RefusesBadOptions(t *testing.T) {
 	if _, err := New(Config{Enabled: true, BatchSize: 20_000}, d); err == nil || !strings.Contains(err.Error(), "batch_size") {
 		t.Errorf("a bad config: %v", err)
 	}
+	if _, err := New(Config{Enabled: true, HandlerTimeout: -time.Second}, d); err == nil || !strings.Contains(err.Error(), "handler_timeout") {
+		t.Errorf("a negative handler_timeout: %v", err)
+	}
 	newJobs(t, d, fastConfig(), Worker(strings.Repeat("t", 200), in.handle))
 }
 
@@ -222,6 +226,17 @@ func TestConfig_Validate(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	// A negative handler_timeout is refused by its validate tag, which
+	// chok.Load and New run before Validate; a zero takes the default.
+	c := base()
+	c.HandlerTimeout = -time.Second
+	if err := conf.Check(&c); err == nil || !strings.Contains(err.Error(), `handler_timeout: must be at least 0 (got "-1s")`) {
+		t.Errorf("a negative handler_timeout: %v", err)
+	}
+	c.HandlerTimeout = 0
+	if err := conf.Check(&c); err != nil {
+		t.Errorf("a zero handler_timeout: %v", err)
+	}
 }
 
 func TestConfig_LoadsWithDefaults(t *testing.T) {
@@ -239,6 +254,7 @@ func TestConfig_LoadsWithDefaults(t *testing.T) {
 		Enabled: true, PollInterval: time.Second, BatchSize: 100, SettleWindow: 30 * time.Second,
 		MaxAttempts: 10, RetryBackoff: time.Second, MaxBackoff: 5 * time.Minute,
 		Retention: 168 * time.Hour, CleanupInterval: time.Hour, StopBudget: 15 * time.Second,
+		HandlerTimeout: 10 * time.Minute,
 	}
 	if cfg.Jobs != want {
 		t.Fatalf("loaded %+v, want %+v", cfg.Jobs, want)
@@ -248,19 +264,27 @@ func TestConfig_LoadsWithDefaults(t *testing.T) {
 	if _, err := chok.Load[appConfig]("jbt", chok.Args(nil)); err == nil || !strings.Contains(err.Error(), "stop_budget") {
 		t.Fatalf("a negative stop_budget: %v", err)
 	}
+	t.Setenv("JBT_JOBS_STOP_BUDGET", "15s")
+	t.Setenv("JBT_JOBS_HANDLER_TIMEOUT", "-1s")
+	if _, err := chok.Load[appConfig]("jbt", chok.Args(nil)); err == nil || !strings.Contains(err.Error(), "jobs.handler_timeout") {
+		t.Fatalf("a negative handler_timeout: %v", err)
+	}
 }
 
 func TestNew_DefaultsZeroFields(t *testing.T) {
-	j := newJobs(t, dbtest.Open(t), Config{Enabled: true})
+	j := newJobs(t, dbtest.Open(t), Config{Enabled: true}, Worker("orders", (&inbox{}).handle))
 	// Retention has no zero-value default: built in code, 0 keeps the
 	// messages forever.
 	want := Config{
 		Enabled: true, PollInterval: time.Second, BatchSize: 100, SettleWindow: 30 * time.Second,
 		MaxAttempts: 10, RetryBackoff: time.Second, MaxBackoff: 5 * time.Minute,
-		CleanupInterval: time.Hour, StopBudget: 15 * time.Second,
+		CleanupInterval: time.Hour, StopBudget: 15 * time.Second, HandlerTimeout: 10 * time.Minute,
 	}
 	if j.cfg != want {
 		t.Fatalf("defaults in code: %+v", j.cfg)
+	}
+	if r := j.relays[0]; r.timeout != 10*time.Minute || r.retry.maxAttempts != 10 {
+		t.Fatalf("the worker's handler_timeout %s, max_attempts %d", r.timeout, r.retry.maxAttempts)
 	}
 	if j.Name() != "jobs" || j.Health(t.Context()) != nil {
 		t.Fatal("Name is jobs and Health is nil")
@@ -437,6 +461,39 @@ func TestWorker_FailureBlocksOnlyItsTopic(t *testing.T) {
 	eventually(t, "topic a after healing", func() bool { return a.count() == 2 })
 	if got := a.payloads(); !slices.Equal(got, []string{`"a1"`, `"a2"`}) {
 		t.Fatalf("delivered %v", got)
+	}
+}
+
+// TestWorker_HandlerTimeout: Config.HandlerTimeout reaches the workers. A
+// function that keeps past it fails its delivery, which Stats show with an
+// error naming handler_timeout, and the message is tried again; once the
+// function keeps within the timeout, the message is delivered.
+func TestWorker_HandlerTimeout(t *testing.T) {
+	d := dbtest.Open(t)
+	var slow atomic.Bool
+	slow.Store(true)
+	in := &inbox{}
+	cfg := fastConfig()
+	cfg.HandlerTimeout = 50 * time.Millisecond
+	j := newJobs(t, d, cfg, Worker("orders", func(ctx context.Context, m Message[jsontext.Value]) error {
+		if slow.Load() {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return in.handle(ctx, m)
+	}))
+	run(t, j)
+	enqueueTx(t, d, j, "orders", "o1")
+	eventually(t, "a delivery past handler_timeout", func() bool {
+		st := j.Stats().Workers[0]
+		return st.HeadAttempts >= 1 && st.Failures >= 1 && strings.Contains(st.LastError, "the handler ran past handler_timeout (50ms)")
+	})
+	slow.Store(false)
+	eventually(t, "the delivery within the timeout", func() bool { return in.count() == 1 })
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if m := in.msgs[0]; m.Attempt < 2 || string(m.Payload) != `"o1"` {
+		t.Fatalf("delivered %+v after a timeout", m)
 	}
 }
 

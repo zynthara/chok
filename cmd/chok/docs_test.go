@@ -55,8 +55,8 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 	for _, s := range configSections {
 		total += len(conf.Keys(s.typ))
 	}
-	if len(rows) != total || total != 175 {
-		t.Fatalf("%d rows for %d keys; the configuration has 175 keys", len(rows), total)
+	if len(rows) != total || total != 176 {
+		t.Fatalf("%d rows for %d keys; the configuration has 176 keys", len(rows), total)
 	}
 	for key, want := range map[string][]string{
 		"auth.signing_key":                    {"| **secret** |", "at least 32 bytes"},
@@ -72,6 +72,7 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 		"auth.login_rate_limit_per_ip":        {"| int | `100` |", "LoginRateLimitPerIP is the limit of a client address"},
 		"log.files[].max_size_mb":             {"| int | `100` | `gte=0` |"},
 		"jobs.enabled":                        {"| bool | `true` |", "enqueue-only"},
+		"jobs.handler_timeout":                {"| duration | `10m` | `gte=0` |", "HandlerTimeout bounds one delivery", "no value turns it off"},
 		"cache.breaker.probe_timeout":         {"| duration | `2s` |"},
 		"auth.providers.<name>.hosted_domain": {"Google Workspace"},
 		"db.store.owner_scope":                {"nil means true"},

@@ -58,6 +58,13 @@
 // Requeue enqueues them again once the cause is fixed, Discard drops
 // them — from any process, the jobs enabled or not.
 //
+// A function that runs past HandlerTimeout (10m by default) fails too.
+// Its context ends then and a Warn is logged, but the worker waits for
+// it to return, as the next message of the topic must not run beside it,
+// and then counts the delivery as failed, whatever the function returned.
+// A function that does not watch its context therefore holds its topic
+// until it returns.
+//
 // Each worker keeps a watermark in chok_jobs_watermarks to accelerate
 // scanning. Pending rows behind it are always revisited, so arbitrarily
 // late commits are found without a settle deadline or synchronized clocks.
@@ -67,11 +74,12 @@
 // stay. Dead letters remain until Requeue or Discard.
 //
 // Attempts count persisted handler failures, not effects or deliveries.
-// Actual cancellation errors do not consume an attempt. A success or a
-// real error racing shutdown is still recorded, with a separate bounded
-// context, when the DB permits: a stop that begins while the function
-// runs does not repeat a message it finished, and the function gets no
-// further message until the next start.
+// Actual cancellation errors do not consume an attempt; a run past
+// HandlerTimeout does, unless a stop began before the function returned.
+// A success or a real error racing shutdown is still recorded, with a
+// separate bounded context, when the DB permits: a stop that begins while
+// the function runs does not repeat a message it finished, and the
+// function gets no further message until the next start.
 //
 // Workers and periodic jobs run in the processes where Config.Enabled is
 // true; run them in one process of a deployment and set enabled: false in

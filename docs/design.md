@@ -605,9 +605,9 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   任何东西。水位仅加速扫描，每轮补扫水位之前未确认的消息，迟提交不再受
   `settle_window` 时长限制。扫描按 `(created_at,id)`，迟提交可能晚于新消息送达，
   不保证全局入队顺序或提交顺序。
-- 失败与死信：handler 返回错误或 panic，这条消息的失败次数 +1 并写在消息行上
-  （重启不清零），`retry_backoff` 后重试、每次翻倍、不超过 `max_backoff`，等待期间
-  不再每轮重试；第 `max_attempts` 次（默认 10）仍失败就**停放**进死信表
+- 失败与死信：handler 返回错误、panic 或超过 `handler_timeout`，这条消息的失败次数
+  +1 并写在消息行上（重启不清零），`retry_backoff` 后重试、每次翻倍、不超过
+  `max_backoff`，等待期间不再每轮重试；第 `max_attempts` 次（默认 10）仍失败就**停放**进死信表
   `chok_jobs_dead`，算作已投递，topic 继续往下走；payload 解码失败直接停放。
   `j.Dead(ctx, topic, limit)` 列出、`j.Requeue(ctx, ids...)` 重新入队成新消息、
   `j.Discard(ctx, ids...)` 删除，只用数据库，`enabled: false` 的进程也能调。
@@ -615,10 +615,18 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   外部副作用到确认写入之间崩溃，仍可能重复执行；确认失败不能推进为成功。
   retention 只删本进程已登记 topic 中已确认、低于保守水位且过期的消息，不碰死信、
   未确认消息或未知 topic。配置文件不写 retention 默认 168h，代码 Config 为 0（永久）。
-  Attempt 计算已持久记录的 handler 失败，不是投递次数；取消错误不扣次数。handler 的
-  结果（成功确认或普通错误）即便与停机同时发生，也用独立的 5s context 写入，所以在
-  handler 运行中开始的优雅停机不会让它已完成的消息重投；停机开始后，这一轮剩下的消息
-  不再交给 handler，等下次启动。数据库故障或崩溃仍会丢失尚未保存的确认或计数。
+  Attempt 计算已持久记录的 handler 失败，不是投递次数；取消错误不扣次数，超时扣（停机
+  在 handler 返回前开始的除外）。handler 的结果（成功确认或普通错误）即便与停机同时
+  发生，也用独立的 5s context 写入，所以在 handler 运行中开始的优雅停机不会让它已完成
+  的消息重投；停机开始后，这一轮剩下的消息不再交给 handler，等下次启动。数据库故障或
+  崩溃仍会丢失尚未保存的确认或计数。
+- 单条超时：handler 拿到的 ctx 在 `handler_timeout`（默认 10m）后结束，到点记一条
+  Warn（点名 topic、消息 id 与超时值），但 worker 仍等它返回——同一 topic 的下一条不能
+  和它并发——返回后不论返回什么都算一次失败，照上面的规则重试、退避或停放。零值取默认，
+  没有「关」的取值：要放宽就设得比最慢的 handler 长。停机若在 handler 返回之前开始，
+  就由停机照旧决定（返回 nil 照常确认，取消错误不扣次数），超时不再算数。不看 ctx 的
+  handler 仍会一直占着它的 topic，直到它自己返回，或停机时 `stop_budget` 用完、进程
+  退出；周期任务没有超时，它的 ctx 只在停机时结束。
 
 部署假设：所有 worker 与周期任务跑在**一个** `jobs.enabled: true` 的进程里，
 其余进程 `enabled: false` 只 Enqueue。`Stats()` 给出每个作业的运行统计；

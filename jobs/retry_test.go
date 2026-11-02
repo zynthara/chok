@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -167,6 +168,215 @@ func TestRelay_FailureCountSurvivesARestart(t *testing.T) {
 	var dead deadRow
 	if err := c.d.Unsafe(ctx).Take(&dead, m1).Error; err != nil || dead.Attempts != 3 || dead.Topic != "count" || string(dead.Payload) != "m1" {
 		t.Fatalf("the dead letter %+v, %v", dead, err)
+	}
+}
+
+// pastTimeout is the Warn of a handler still running when its
+// HandlerTimeout runs out.
+const pastTimeout = "jobs: the handler is past handler_timeout; the topic waits for it to return"
+
+// TestRelay_HandlerPastItsTimeoutFails: a handler that watches its context
+// sees it end after HandlerTimeout and returns its error. The delivery has
+// failed like any other: the sweep fails, the attempt is counted on the
+// row with an error that names handler_timeout, the next try waits for
+// the backoff and the message behind it waits too. Once the handler keeps
+// within the timeout, both are delivered.
+func TestRelay_HandlerPastItsTimeoutFails(t *testing.T) {
+	c := openCore(t)
+	ctx := t.Context()
+	enqueue(t, c, "slow", "m1")
+	enqueue(t, c, "slow", "m2")
+	slow := true
+	var got []string // the deliveries, as payload/attempt
+	r, err := newRelay("slow", func(hctx context.Context, m rawMessage) error {
+		got = append(got, fmt.Sprintf("%s/%d", m.Payload, m.Attempt))
+		if slow {
+			select { // a handler that watches its context
+			case <-hctx.Done():
+				return hctx.Err()
+			case <-time.After(10 * time.Second):
+				return errors.New("the handler's context did not end")
+			}
+		}
+		return nil
+	}, c, time.Hour, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.timeout = 50 * time.Millisecond
+	r.retry = retryPolicy{maxAttempts: 5, backoff: time.Minute, maxBackoff: time.Minute}
+	// On the millisecond, so retry_at round-trips exactly: MySQL's
+	// datetime(3) rounds a finer time, up as often as down.
+	clock := time.Now().UTC().Truncate(time.Millisecond)
+	r.now = func() time.Time { return clock }
+
+	begin := time.Now()
+	err = r.run(ctx)
+	if elapsed := time.Since(begin); elapsed < 50*time.Millisecond || elapsed > 10*time.Second {
+		t.Fatalf("the sweep took %s; the handler's context ends after 50ms", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "attempt 1 of 5): jobs: the handler ran past handler_timeout (50ms): context deadline exceeded") {
+		t.Fatalf("the sweep: %v", err)
+	}
+	m1 := topicRows(t, c, "slow")[0]
+	if m1.Attempts != 1 || m1.LastError != "jobs: the handler ran past handler_timeout (50ms): context deadline exceeded" || m1.RetryAt == nil || m1.CompletedAt != nil {
+		t.Fatalf("the row after the timeout: %+v", m1)
+	}
+	if head, _ := r.headStats(); head.attempts != 1 || !head.next.Equal(clock.Add(time.Minute).UTC()) {
+		t.Fatalf("the head after the timeout: %+v", head)
+	}
+	// Until the backoff has passed, the sweeps leave the topic alone.
+	if err := r.run(ctx); !errors.Is(err, errRetryLater) {
+		t.Fatalf("a sweep before the next try: %v", err)
+	}
+	if !slices.Equal(got, []string{"m1/1"}) {
+		t.Fatalf("deliveries %v before the next try, want only m1's first", got)
+	}
+
+	clock = clock.Add(time.Minute)
+	slow = false
+	if err := r.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"m1/1", "m1/2", "m2/1"}) {
+		t.Fatalf("deliveries %v, want m1 again, then m2", got)
+	}
+	if n := pending(t, c, "slow"); n != 0 {
+		t.Fatalf("%d messages pending after the healed sweep", n)
+	}
+}
+
+// TestRelay_HandlerThatIgnoresItsTimeoutIsWaitedFor: a handler that does
+// not watch its context runs on past HandlerTimeout. The relay logs one
+// Warn then, naming the topic, the message and the timeout, hands out no
+// other message, and waits for it; when it returns, nil here, the
+// delivery has failed all the same, and the message behind it waits for
+// the next try.
+func TestRelay_HandlerThatIgnoresItsTimeoutIsWaitedFor(t *testing.T) {
+	c := openCore(t)
+	enqueue(t, c, "stuck", "m1")
+	enqueue(t, c, "stuck", "m2")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	var got []string
+	r, err := newRelay("stuck", func(_ context.Context, m rawMessage) error {
+		mu.Lock()
+		got = append(got, string(m.Payload))
+		mu.Unlock()
+		if m.Attempt == 1 && string(m.Payload) == "m1" {
+			close(entered)
+			<-release // does not watch its context
+		}
+		return nil
+	}, c, time.Hour, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.timeout = 50 * time.Millisecond
+	var logs syncBuffer
+	r.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})).With("topic", "stuck")
+
+	done := make(chan error, 1)
+	go func() { done <- r.run(t.Context()) }()
+	<-entered
+	eventually(t, "the Warn of the timeout", func() bool { return strings.Contains(logs.String(), pastTimeout) })
+	select {
+	case err := <-done:
+		t.Fatalf("the sweep returned (%v) while its handler still ran", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	mu.Lock()
+	if !slices.Equal(got, []string{"m1"}) {
+		t.Fatalf("deliveries %v while m1's handler runs past its timeout", got)
+	}
+	mu.Unlock()
+	close(release) // the handler returns nil
+	err = <-done
+	if err == nil || !strings.HasSuffix(err.Error(), "attempt 1 of 10): jobs: the handler ran past handler_timeout (50ms)") {
+		t.Fatalf("the sweep: %v", err)
+	}
+	rows := topicRows(t, c, "stuck")
+	if m1 := rows[0]; m1.Attempts != 1 || m1.LastError != "jobs: the handler ran past handler_timeout (50ms)" || m1.CompletedAt != nil {
+		t.Fatalf("m1's row after the timeout: %+v", m1)
+	}
+	if rows[1].CompletedAt != nil {
+		t.Fatal("m2 was delivered behind the failed m1")
+	}
+	var warn string
+	for line := range strings.Lines(logs.String()) {
+		if strings.Contains(line, pastTimeout) {
+			if warn != "" {
+				t.Fatalf("the timeout logged twice:\n%s", logs.String())
+			}
+			warn = line
+		}
+	}
+	for _, attr := range []string{"topic=stuck", fmt.Sprintf("id=%d ", rows[0].ID), "attempt=1 ", "handler_timeout=50ms"} {
+		if !strings.Contains(warn, attr) {
+			t.Fatalf("the Warn %q lacks %q", warn, attr)
+		}
+	}
+
+	// The next try keeps within the timeout: both go, and no other Warn.
+	if err := r.run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(got, []string{"m1", "m1", "m2"}) || strings.Count(logs.String(), pastTimeout) != 1 {
+		t.Fatalf("deliveries %v; log:\n%s", got, logs.String())
+	}
+}
+
+// TestRelay_StopDecidesAsWithoutATimeout: a stop that begins while a
+// handler runs decides as it does without a timeout, whether it begins
+// before HandlerTimeout runs out (no Warn of the timeout then) or after
+// (one Warn) but before the handler returned: the handler returns nil,
+// its work done, and its message is acknowledged, not failed.
+func TestRelay_StopDecidesAsWithoutATimeout(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		timeout time.Duration
+		warns   int
+	}{
+		{"before the timeout", time.Hour, 0},
+		{"past the timeout", 20 * time.Millisecond, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			core := openCore(t)
+			enqueue(t, core, "late", "m1")
+			entered, release := make(chan struct{}), make(chan struct{})
+			r, err := newRelay("late", func(context.Context, rawMessage) error {
+				close(entered)
+				<-release
+				return nil // the work is done; the handler did not watch its context
+			}, core, time.Hour, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.timeout = c.timeout
+			var logs syncBuffer
+			r.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})).With("topic", "late")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- r.run(ctx) }()
+			<-entered
+			if c.warns > 0 {
+				eventually(t, "the Warn of the timeout", func() bool { return strings.Contains(logs.String(), pastTimeout) })
+			}
+			cancel()       // the stop begins
+			close(release) // and then the handler returns nil
+			if err := <-done; err != nil {
+				t.Fatalf("the sweep the stop interrupted: %v", err)
+			}
+			if m1 := topicRows(t, core, "late")[0]; m1.CompletedAt == nil || m1.Attempts != 0 || m1.LastError != "" {
+				t.Fatalf("m1's row %+v: the stop decides, and the handler returned nil", m1)
+			}
+			if n := strings.Count(logs.String(), pastTimeout); n != c.warns {
+				t.Fatalf("%d Warns of the timeout, want %d:\n%s", n, c.warns, logs.String())
+			}
+		})
 	}
 }
 
