@@ -15,7 +15,7 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
 
 <!-- When tagging: replace 未发布 (unreleased) with the release date, YYYY-MM-DD. -->
 
-## [v0.2.0] - 未发布
+## [v0.2.0] - 2026-11-02
 
 The module path is `github.com/zynthara/chok` again, with no major-version
 suffix: this line continues on the path v0.1.x used, from v0.2.0 (a path
