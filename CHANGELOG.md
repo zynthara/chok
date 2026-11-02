@@ -15,6 +15,28 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
 
 <!-- When tagging: replace 未发布 (unreleased) with the release date, YYYY-MM-DD. -->
 
+## [v0.2.2] - 未发布
+
+### Fixed
+
+- **`db`**: on MySQL, a one-column `Unique` index survives the next
+  migration. gorm's MySQL driver (v1.6.0, `MigrateColumnUnique`) drops
+  every unique index over one column that it did not make itself from a
+  `unique` or `uniqueIndex` tag: in `migrate: auto` every start dropped
+  such a `Unique` and `Open` created it again, so a large table was
+  rebuilt at each start and had no unique index between the two, and a
+  unique index made by hand over one column was gone before the index
+  check of v0.2.1 could see it. chok now hands gorm a migrator without
+  that step: auto migration drops nothing it did not create, on MySQL as
+  on SQLite and Postgres. The `unique` and `uniqueIndex` tags migrate as
+  before; `SoftUnique` indexes, `delete_token` being their last column,
+  were never affected. The dialector and the migrator under `Unsafe(ctx)`
+  are chok's wrappers of the driver's types on MySQL: every method is
+  there, a type assertion to `*mysql.Dialector` or `mysql.Migrator` is
+  not. **A MySQL database that ran v0.2.0 or v0.2.1 with `migrate: auto`**
+  may have lost a one-column unique index made by hand under a name no
+  `Table` declares: check `SHOW INDEX` and create it again.
+
 ## [v0.2.1] - 2026-11-02
 
 ### Added
