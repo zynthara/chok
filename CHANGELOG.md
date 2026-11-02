@@ -15,6 +15,42 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
 
 <!-- When tagging: replace 未发布 (unreleased) with the release date, YYYY-MM-DD. -->
 
+## [v0.2.1] - 未发布
+
+### Changed
+
+- **`db`**: in `migrate: auto`, an index `db.Table` declares is checked
+  against the one of its name in the database: the same table, the same
+  columns in the same order (`delete_token` last for a `SoftUnique`),
+  unique and not partial, or `Open`, `RegisterSchema` and `Migrate` fail
+  naming both, rather than let another index stand in for it. SQLite and
+  Postgres name indexes per schema, so an index of the name on another
+  table differs too; MySQL names them per table. **A Postgres database
+  that came from v2 with `migrate: auto`** starts no more until its v2
+  soft-unique indexes, partial ones over `deleted_at IS NULL`, are
+  dropped (`uk_user_email`, `uk_identity_provider` and the application's
+  own); auto migration then creates them anew, see
+  [docs/migration-from-v2.md](docs/migration-from-v2.md).
+- **`db`**: `db.pool.max_open_conns` says how it sizes a SQLite file's
+  read pool: 1 to 64 as given, 0 or more than 64 (the default 100 among
+  them) as max(4, NumCPU); the writer is one connection apart.
+- **`store`**: on a soft-delete model, `Upsert` and `BatchUpsert` whose
+  conflict target is not a `SoftUnique` index (a `Unique`, the RID, a gorm
+  unique tag) refuse the values a deleted row holds with the
+  `DuplicateError` `Create` gets, and write nothing, instead of updating
+  the deleted row. The check runs in the transaction before the write; on
+  Postgres and MySQL a row deleted in between is still the one updated.
+- **`identity`**: `Users().Create` makes a verified account, the operator
+  vouching for the address, so `auth.admins` applies to it at its first
+  login: a deployment with registration off and no mail needs no
+  bootstrap of its own. Accounts created before this release are not
+  backfilled; `MarkEmailVerified` does it for the ones that need it.
+  register still makes unverified accounts.
+- **`identity`**: `Users().Create` and register check the address and the
+  password alike: a plain email address, as `auth.admins` takes one, and
+  at least 8 bytes. register used to accept a quoted local part
+  (`"john"@example.com`); it is a 400 now.
+
 ## [v0.2.0] - 2026-11-02
 
 The module path is `github.com/zynthara/chok` again, with no major-version
