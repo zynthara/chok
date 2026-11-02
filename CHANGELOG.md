@@ -15,10 +15,28 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
 
 <!-- When tagging: replace 未发布 (unreleased) with the release date, YYYY-MM-DD. -->
 
-## [v0.2.1] - 未发布
+## [v0.2.1] - 2026-11-02
+
+### Added
+
+- **`jobs`**: `jobs.handler_timeout` (10m) bounds one delivery: a worker's
+  function gets a context that ends then, a Warn names the message, and
+  the worker waits for the function to return so that the next message
+  never runs beside it; once it returns, the delivery has failed, whatever
+  it returned, and the message is tried again or parked as after any
+  failure. A stop that began meanwhile decides instead. A zero takes the
+  default and nothing turns it off: set it above the longest a function
+  may take. A function that ran past ten minutes before this release
+  starts failing unless the key is raised. Periodic jobs have no timeout.
 
 ### Changed
 
+- **`jobs`**: a periodic job's success is logged at Info only when it is
+  news: its first since Start, its first after a run that failed or was
+  stopped, and one an hour as a heartbeat; its other successes are Debug,
+  as every success of a worker's sweep and of the cleanup was already.
+  Failures stay at Warn, `Observe` and `Stats` see every run; a job that
+  runs every minute writes one line an hour instead of 1,440.
 - **`db`**: in `migrate: auto`, an index `db.Table` declares is checked
   against the one of its name in the database: the same table, the same
   columns in the same order (`delete_token` last for a `SoftUnique`),
