@@ -75,6 +75,7 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 		"cache.breaker.probe_timeout":         {"| duration | `2s` |"},
 		"auth.providers.<name>.hosted_domain": {"Google Workspace"},
 		"db.store.owner_scope":                {"nil means true"},
+		"db.pool.max_open_conns":              {"| int | `100` |", "sizes the read pool", "max(4, number of CPUs)"},
 		"realtime.path":                       {"| string | `/realtime` |", "{Path}/ticket"},
 		"realtime.allowed_origins":            {"| list of string |", "path.Match"},
 		"realtime.ping_interval":              {"| duration | `25s` |"},

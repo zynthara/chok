@@ -93,7 +93,7 @@ The database handle `db.Open` takes.
 | `db.pool.conn_max_idle_time` | duration | `10m` | `gte=0` |  |
 | `db.pool.conn_max_lifetime` | duration | `1h` | `gte=0` |  |
 | `db.pool.max_idle_conns` | int | `10` | `gte=0` |  |
-| `db.pool.max_open_conns` | int | `100` | `gte=0` |  |
+| `db.pool.max_open_conns` | int | `100` | `gte=0` | MaxOpenConns caps the connections of MySQL and Postgres, 0 meaning no cap. On a SQLite file it sizes the read pool, beside which one writer connection runs: 1 to 64 as given, while 0 or more than 64, the default 100 among them, becomes max(4, number of CPUs). An in-memory SQLite database is one connection. |
 | `db.postgres.ca_cert` | string |  |  |  |
 | `db.postgres.database` | string |  |  |  |
 | `db.postgres.dsn` | string |  | **secret** |  |

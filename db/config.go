@@ -69,6 +69,11 @@ type PostgresConfig struct {
 
 // PoolConfig is db.pool.
 type PoolConfig struct {
+	// MaxOpenConns caps the connections of MySQL and Postgres, 0 meaning
+	// no cap. On a SQLite file it sizes the read pool, beside which one
+	// writer connection runs: 1 to 64 as given, while 0 or more than 64,
+	// the default 100 among them, becomes max(4, number of CPUs). An
+	// in-memory SQLite database is one connection.
 	MaxOpenConns    int           `yaml:"max_open_conns" default:"100" validate:"gte=0"`
 	MaxIdleConns    int           `yaml:"max_idle_conns" default:"10" validate:"gte=0"`
 	ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime" default:"1h" validate:"gte=0"`
