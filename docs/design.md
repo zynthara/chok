@@ -408,8 +408,11 @@ MySQL 的 DDL 提交与账本更新不是一个原子动作：DDL 已执行而�
   catalog。
 - **写**：`Create` / `BatchCreate` / `Update` / `Delete`（软删写 token）/
   `Restore` / `Upsert` / `BatchUpsert`（缺省冲突键 rid；冲突字段是 `SoftUnique`
-  的列时补 `delete_token`，只算活行，是 `Unique` 的列时原样，被删的行也算，更新后
-  它仍是删除状态；带 scope 的 store 拒绝 Upsert，因为更新半边无法围栏）。
+  的列时补 `delete_token`，只算活行，是 `Unique` 的列（rid 同理）时原样，被删的行
+  也算：被删的行占着值时报 `DuplicateError`（与 `Create` 撞上同一索引时相同），
+  一行都不写。检查在写入之前、同一事务里；两者之间被并发删除的行仍会被更新、更新后
+  仍是删除状态，Postgres / MySQL 有这个窗口，SQLite 单写者没有。带 scope 的 store
+  拒绝 Upsert，因为更新半边无法围栏）。
   `Hooks` 的 BeforeCreate / BeforeUpdate /
   BeforeDelete 在变更字段、scope 与 locator 校验之后、写 SQL 之前调用；
   这不证明 locator 命中的行存在或属于当前用户，也不替代权限判断。外部副作用放在
