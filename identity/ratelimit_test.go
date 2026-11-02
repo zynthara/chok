@@ -7,12 +7,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zynthara/chok/choktest"
 )
 
 // TestLimiter_CloseWaitsForCleanup: Close returns only once a background
 // sweep has finished, and no sweep starts after it.
 func TestLimiter_CloseWaitsForCleanup(t *testing.T) {
-	l := newLoginLimiter(time.Hour, 5)
+	l := newLoginLimiter(time.Hour, 5, 5)
 	for range 100 { // the hundredth record starts a sweep
 		l.record(limiterKey{Name: "email", Value: "victim@example.com"})
 	}
@@ -30,10 +32,10 @@ func TestLimiter_CloseWaitsForCleanup(t *testing.T) {
 }
 
 func TestLimiter_KeysByDimension(t *testing.T) {
-	l := newLoginLimiter(time.Hour, 2)
+	l := newLoginLimiter(time.Hour, 2, 2)
 	t.Cleanup(l.Close)
 	email := limiterKey{Name: "email", Value: "1.2.3.4"}
-	ip := limiterKey{Name: "client_ip", Value: "1.2.3.4"}
+	ip := ipKey("client_ip", "1.2.3.4")
 	l.record(email)
 	l.record(email)
 	if ok, by := l.check(email); ok || by != "email" {
@@ -42,13 +44,55 @@ func TestLimiter_KeysByDimension(t *testing.T) {
 	if ok, _ := l.check(ip); !ok {
 		t.Fatal("an address equal to an email's text has its own bucket")
 	}
-	if ok, _ := l.check(limiterKey{Name: "client_ip", Value: ""}); !ok {
+	if ok, _ := l.check(ipKey("client_ip", "")); !ok {
 		t.Fatal("an empty value is never limited")
 	}
 }
 
+// TestLimiter_AddressHasItsOwnLimit: a client address's key is held to
+// ipLimit and every other key to limit; with ipLimit 0 an address is
+// never refused and takes no entry, and the other keys are held as
+// before.
+func TestLimiter_AddressHasItsOwnLimit(t *testing.T) {
+	email, ip := limiterKey{Name: "email", Value: "alice@test.com"}, ipKey("client_ip", "192.0.2.1")
+	entries := func(l *loginLimiter) int {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return len(l.entries)
+	}
+
+	l := newLoginLimiter(time.Hour, 2, 3)
+	t.Cleanup(l.Close)
+	l.record(email, ip)
+	l.record(email, ip)
+	if ok, by := l.check(email); ok || by != "email" {
+		t.Fatalf("the email after limit attempts: %v %q", ok, by)
+	}
+	if ok, by := l.check(ip); !ok {
+		t.Fatalf("the address after limit attempts, below ipLimit: refused by %q", by)
+	}
+	l.record(ip)
+	if ok, by := l.check(ip); ok || by != "client_ip" {
+		t.Fatalf("the address after ipLimit attempts: %v %q", ok, by)
+	}
+
+	off := newLoginLimiter(time.Hour, 2, 0)
+	t.Cleanup(off.Close)
+	for range 10 {
+		off.record(ip)
+	}
+	if ok, by := off.check(ip); !ok || entries(off) != 0 {
+		t.Fatalf("an address with ipLimit 0: refused by %q, %d entries", by, entries(off))
+	}
+	off.record(email, ip)
+	off.record(email, ip)
+	if ok, by := off.check(ip, email); ok || by != "email" || entries(off) != 1 {
+		t.Fatalf("the email beside an uncounted address: %v %q, %d entries", ok, by, entries(off))
+	}
+}
+
 func TestLogin_Throttled(t *testing.T) {
-	c := serve(t, newIdentity(t, Config{LoginRateWindow: 15 * time.Minute, LoginRateLimit: 3}))
+	c := serve(t, newIdentity(t, Config{LoginRateWindow: 15 * time.Minute, LoginRateLimit: 3, LoginRateLimitPerIP: 3}))
 	register(t, c, "victim@test.com", "password123")
 	for i := range 3 {
 		if code, _ := login(t, c, "victim@test.com", "wrong-"+strconv.Itoa(i)); code != http.StatusUnauthorized {
@@ -80,13 +124,76 @@ func TestLogin_Throttled(t *testing.T) {
 	}
 }
 
+// TestLogin_AddressHasItsOwnLimit: from one address — everyone behind a
+// NAT, or a proxy that is not trusted — an email is held to
+// login_rate_limit and the address to login_rate_limit_per_ip, so one
+// user's failures lock out that user alone, and the address only past its
+// own, wider limit. With login_rate_limit_per_ip 0 no address is counted
+// and an email is held as before; with the throttle off it turns nothing
+// on.
+func TestLogin_AddressHasItsOwnLimit(t *testing.T) {
+	fail := func(c *choktest.Client, email string) {
+		t.Helper()
+		if code, _ := login(t, c, email, "wrong-password"); code != http.StatusUnauthorized {
+			t.Fatalf("a wrong password for %s = %d", email, code)
+		}
+	}
+	c := serve(t, newIdentity(t, Config{LoginRateWindow: time.Minute, LoginRateLimit: 2, LoginRateLimitPerIP: 5}))
+	for _, email := range []string{"alice@test.com", "bob@test.com", "carol@test.com"} {
+		register(t, c, email, "password123")
+	}
+	fail(c, "alice@test.com")
+	fail(c, "alice@test.com")
+	if code, _ := login(t, c, "alice@test.com", "password123"); code != http.StatusTooManyRequests {
+		t.Fatalf("alice past login_rate_limit = %d", code)
+	}
+	if code, _ := login(t, c, "bob@test.com", "password123"); code != http.StatusOK {
+		t.Fatalf("bob from alice's address = %d: her failures locked the address", code)
+	}
+	// Failures across emails add up for the address: four let carol, who
+	// never failed, in; the fifth shuts her out with the right password.
+	fail(c, "bob@test.com")
+	fail(c, "nobody@test.com")
+	if code, _ := login(t, c, "carol@test.com", "password123"); code != http.StatusOK {
+		t.Fatalf("carol after four failures from the address = %d", code)
+	}
+	fail(c, "someone@test.com")
+	var e envelope
+	if code := c.PostJSON("/auth/login", map[string]string{"email": "carol@test.com", "password": "password123"}, &e); code != http.StatusTooManyRequests ||
+		e.Reason != "RateLimited" || e.Metadata["retry_after"] != float64(60) {
+		t.Fatalf("carol after five failures from the address = %d %+v", code, e)
+	}
+
+	// login_rate_limit_per_ip 0: ten failures across ten emails and carol
+	// still signs in, while her own email is held to login_rate_limit.
+	c0 := serve(t, newIdentity(t, Config{LoginRateWindow: time.Minute, LoginRateLimit: 2}))
+	register(t, c0, "carol@test.com", "password123")
+	for i := range 10 {
+		fail(c0, "user"+strconv.Itoa(i)+"@test.com")
+	}
+	if code, _ := login(t, c0, "carol@test.com", "password123"); code != http.StatusOK {
+		t.Fatalf("carol after ten failures from an uncounted address = %d", code)
+	}
+	fail(c0, "carol@test.com")
+	fail(c0, "carol@test.com")
+	if code, _ := login(t, c0, "carol@test.com", "password123"); code != http.StatusTooManyRequests {
+		t.Fatalf("carol past login_rate_limit, the address uncounted = %d", code)
+	}
+
+	// The throttle off: login_rate_limit_per_ip alone turns nothing on.
+	if idn := newIdentity(t, Config{LoginRateLimitPerIP: 5}); idn.limiter != nil {
+		t.Fatal("login_rate_limit_per_ip without the window and the limit made a throttle")
+	}
+}
+
 // TestForgotPassword_Throttled: every forgot-password call counts, by
 // address and by client, whether the address has an account or not, in
-// buckets apart from the login's: past login_rate_limit within the window
-// a call is a 429 with retry_after, and mails nothing.
+// buckets apart from the login's: past login_rate_limit for the address,
+// or login_rate_limit_per_ip for the client, within the window a call is
+// a 429 with retry_after, and mails nothing.
 func TestForgotPassword_Throttled(t *testing.T) {
 	sender := newMockSender()
-	idn := newIdentity(t, Config{LoginRateWindow: time.Minute, LoginRateLimit: 3}, Sender(sender.send))
+	idn := newIdentity(t, Config{LoginRateWindow: time.Minute, LoginRateLimit: 3, LoginRateLimitPerIP: 3}, Sender(sender.send))
 	h, logs := loggedApp(t, idn)
 	if _, err := idn.Users().Create(t.Context(), "alice@test.com", "password123", "Alice"); err != nil {
 		t.Fatal(err)
@@ -183,4 +290,67 @@ func TestForgotPassword_Throttled(t *testing.T) {
 		defer off.mu.Unlock()
 		return len(off.mails) == 20
 	})
+}
+
+// TestThrottle_AddressHasItsOwnLimit: what one client address asks of
+// forgot-password and passwordless/start, and the verifies it fails, are
+// held to login_rate_limit_per_ip, each route in a bucket of its own; the
+// forgot-password calls for one email and the confirmation codes of one
+// user are held to login_rate_limit.
+func TestThrottle_AddressHasItsOwnLimit(t *testing.T) {
+	cfg := Config{LoginRateWindow: time.Minute, LoginRateLimit: 2, LoginRateLimitPerIP: 3}
+	idn, _ := pwIdentity(t, cfg)
+	c := serve(t, idn)
+	from := func(addr, path string, body map[string]string) int {
+		t.Helper()
+		req := jsonRequest(t, http.MethodPost, path, body)
+		req.RemoteAddr = addr + ":40000"
+		return c.Do(req).StatusCode
+	}
+	// One client, three calls of each route — past login_rate_limit — and
+	// the fourth is refused.
+	for _, r := range []struct {
+		path string
+		ok   int
+	}{{"/auth/forgot-password", http.StatusNoContent}, {"/auth/passwordless/start", http.StatusAccepted}} {
+		for i := range 3 {
+			if code := from("192.0.2.7", r.path, map[string]string{"email": "user" + strconv.Itoa(i) + "@test.com"}); code != r.ok {
+				t.Fatalf("%s: call %d from the client = %d", r.path, i, code)
+			}
+		}
+		if code := from("192.0.2.7", r.path, map[string]string{"email": "fresh@test.com"}); code != http.StatusTooManyRequests {
+			t.Fatalf("%s: the fourth call from the client = %d", r.path, code)
+		}
+	}
+	// A verify with a token nobody was sent fails, and counts against the
+	// client's address as a failed login does.
+	for i := range 3 {
+		if code := from("192.0.2.8", "/auth/passwordless/verify", map[string]string{"token": "no-such-token-" + strconv.Itoa(i)}); code != http.StatusUnauthorized {
+			t.Fatalf("failed verify %d from the client = %d", i, code)
+		}
+	}
+	if code := from("192.0.2.8", "/auth/passwordless/verify", map[string]string{"token": "no-such-token"}); code != http.StatusTooManyRequests {
+		t.Fatalf("a verify after three failures from the client = %d", code)
+	}
+	// One email from fresh clients: forgot-password holds it to
+	// login_rate_limit, not to the wider limit of an address.
+	for i := range 2 {
+		if code := from("198.51.100."+strconv.Itoa(i+1), "/auth/forgot-password", map[string]string{"email": "alice@test.com"}); code != http.StatusNoContent {
+			t.Fatalf("call %d for the email = %d", i, code)
+		}
+	}
+	if code := from("198.51.100.3", "/auth/forgot-password", map[string]string{"email": "alice@test.com"}); code != http.StatusTooManyRequests {
+		t.Fatalf("the third call for the email = %d", code)
+	}
+	// One user's confirmation codes are held to login_rate_limit too.
+	fx := newAssumedFixture(t, cfg)
+	_, tok := fx.facebookAccount(t, "fb-ann", "ann@test.com")
+	for i := range 2 {
+		if code := fx.c.WithBearer(tok).PostJSON("/auth/confirm-email/start", nil, nil); code != http.StatusAccepted {
+			t.Fatalf("confirm-email/start %d = %d", i, code)
+		}
+	}
+	if code := fx.c.WithBearer(tok).PostJSON("/auth/confirm-email/start", nil, nil); code != http.StatusTooManyRequests {
+		t.Fatalf("the third confirm-email/start = %d", code)
+	}
 }

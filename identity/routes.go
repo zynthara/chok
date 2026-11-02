@@ -51,9 +51,10 @@ import (
 // and with auth.audit.enabled and admin_api, GET /audit/logs. The OpenAPI
 // document lists the routes behind Authn with its schemes and the others
 // without security. A throttled route answers 429 past
-// auth.login_rate_limit within auth.login_rate_window: login,
-// passwordless/verify and confirm-email count the failures, the others
-// every call.
+// auth.login_rate_limit for an email or a user, or
+// auth.login_rate_limit_per_ip for a client address, within
+// auth.login_rate_window: login, passwordless/verify and confirm-email
+// count the failures, the others every call.
 func (idn *Identity) Mount(r chok.Router) {
 	g := r.Group(idn.cfg.Prefix)
 	tag := chok.Tags("auth")
@@ -181,10 +182,11 @@ func (idn *Identity) createUser(ctx context.Context, email, password, name strin
 
 func (idn *Identity) login(ctx context.Context, req *loginRequest) (*tokenResponse, error) {
 	email := normalizeEmail(req.Email)
-	// The throttle counts failures per email and per client address:
-	// rotating emails still exhausts the address's bucket, rotating
-	// addresses the email's.
-	keys := []limiterKey{{Name: "email", Value: email}, {Name: "client_ip", Value: chok.ClientIP(ctx)}}
+	// The throttle counts failures per email, against login_rate_limit,
+	// and per client address, against login_rate_limit_per_ip: rotating
+	// emails still exhausts the address's bucket, rotating addresses the
+	// email's.
+	keys := []limiterKey{{Name: "email", Value: email}, ipKey("client_ip", chok.ClientIP(ctx))}
 	if idn.limiter != nil {
 		if ok, by := idn.limiter.check(keys...); !ok {
 			chok.LoggerFrom(ctx).WarnContext(ctx, "identity: login throttled", "triggered_by", by)
@@ -333,8 +335,9 @@ func (idn *Identity) forgotPassword(ctx context.Context, req *forgotPasswordRequ
 	// Every call counts, by address and by client, before the account is
 	// looked up: an unknown address counts as a known one does, so a 429
 	// gives the account away no more than a 204, and the reset mails one
-	// inbox gets, or one client asks for, stop at the limit.
-	keys := []limiterKey{{Name: "forgot_email", Value: email}, {Name: "forgot_ip", Value: chok.ClientIP(ctx)}}
+	// inbox gets stop at login_rate_limit, those one client asks for at
+	// login_rate_limit_per_ip.
+	keys := []limiterKey{{Name: "forgot_email", Value: email}, ipKey("forgot_ip", chok.ClientIP(ctx))}
 	if err := idn.throttle(ctx, "password resets", keys...); err != nil {
 		return chok.None{}, err
 	}

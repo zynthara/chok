@@ -201,7 +201,7 @@ func New(cfg Config, d *db.DB, opts ...Option) (*Identity, error) {
 	idn.users = store.New[User](d, store.Policy(pol))
 	idn.links = store.New[linkedIdentity](d)
 	if cfg.LoginRateWindow > 0 && cfg.LoginRateLimit > 0 {
-		idn.limiter = newLoginLimiter(cfg.LoginRateWindow, cfg.LoginRateLimit)
+		idn.limiter = newLoginLimiter(cfg.LoginRateWindow, cfg.LoginRateLimit, cfg.LoginRateLimitPerIP)
 	}
 	idn.audit = newAudit(d, cfg.Audit, o.logger)
 	idn.audit.admit = func(ctx context.Context) error { return idn.admit(ctx, "audit", "read") }

@@ -55,8 +55,8 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 	for _, s := range configSections {
 		total += len(conf.Keys(s.typ))
 	}
-	if len(rows) != total || total != 174 {
-		t.Fatalf("%d rows for %d keys; the configuration has 174 keys", len(rows), total)
+	if len(rows) != total || total != 175 {
+		t.Fatalf("%d rows for %d keys; the configuration has 175 keys", len(rows), total)
 	}
 	for key, want := range map[string][]string{
 		"auth.signing_key":                    {"| **secret** |", "at least 32 bytes"},
@@ -69,6 +69,7 @@ func TestDocsGen_MarksSecretsAndRules(t *testing.T) {
 		"telemetry.metrics.enabled":           {"| bool | `true` |", "Prometheus text format"},
 		"telemetry.tracing.endpoint":          {"&lt;endpoint&gt;/v1/traces"},
 		"auth.login_rate_limit":               {"| int | `10` |", "LoginRateWindow and LoginRateLimit throttle"},
+		"auth.login_rate_limit_per_ip":        {"| int | `100` |", "LoginRateLimitPerIP is the limit of a client address"},
 		"log.files[].max_size_mb":             {"| int | `100` | `gte=0` |"},
 		"jobs.enabled":                        {"| bool | `true` |", "enqueue-only"},
 		"cache.breaker.probe_timeout":         {"| duration | `2s` |"},

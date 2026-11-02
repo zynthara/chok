@@ -65,8 +65,9 @@ var (
 // nothing changes; an address that cannot sign in — an unknown one
 // without auto_register, a disabled account — gets its row but no mail.
 func (idn *Identity) passwordlessStart(ctx context.Context, req *passwordlessStartRequest) (chok.None, error) {
-	// Every start counts against the client's address.
-	if err := idn.throttle(ctx, "sign-in codes", limiterKey{Name: "passwordless_ip", Value: chok.ClientIP(ctx)}); err != nil {
+	// Every start counts against the client's address, held to
+	// login_rate_limit_per_ip.
+	if err := idn.throttle(ctx, "sign-in codes", ipKey("passwordless_ip", chok.ClientIP(ctx))); err != nil {
 		return chok.None{}, err
 	}
 	email := normalizeEmail(req.Email)
@@ -128,7 +129,7 @@ func (idn *Identity) passwordlessVerify(ctx context.Context, req *passwordlessVe
 		}
 		return nil, chok.ErrValidation.Msgf("give email and code, or token").With("fields", missing)
 	}
-	keys := []limiterKey{{Name: "client_ip", Value: chok.ClientIP(ctx)}}
+	keys := []limiterKey{ipKey("client_ip", chok.ClientIP(ctx))}
 	if !byToken {
 		keys = append(keys, limiterKey{Name: "email", Value: normalizeEmail(req.Email)})
 	}

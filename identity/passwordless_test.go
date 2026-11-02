@@ -110,10 +110,10 @@ func TestPasswordless_StartAnswers202(t *testing.T) {
 
 // TestPasswordless_StartIsThrottledPerClient: starts from one client
 // address are counted in the login throttle's table, on their own: over
-// the limit they are 429 with retry_after, while another address and the
-// password login carry on.
+// login_rate_limit_per_ip they are 429 with retry_after, while another
+// address and the password login carry on.
 func TestPasswordless_StartIsThrottledPerClient(t *testing.T) {
-	idn, _ := pwIdentity(t, Config{LoginRateWindow: time.Minute, LoginRateLimit: 3})
+	idn, _ := pwIdentity(t, Config{LoginRateWindow: time.Minute, LoginRateLimit: 3, LoginRateLimitPerIP: 3})
 	h, _ := loggedApp(t, idn)
 	from := func(addr string, path string, body any) *http.Response {
 		req := jsonRequest(t, http.MethodPost, path, body)
@@ -462,7 +462,7 @@ func TestPasswordless_AutoRegisterOff(t *testing.T) {
 // TestPasswordless_VerifyIsThrottled: failed verifies count in the login
 // throttle by address and by client, with failed logins.
 func TestPasswordless_VerifyIsThrottled(t *testing.T) {
-	idn, sender := pwIdentity(t, Config{LoginRateWindow: time.Minute, LoginRateLimit: 2})
+	idn, sender := pwIdentity(t, Config{LoginRateWindow: time.Minute, LoginRateLimit: 2, LoginRateLimitPerIP: 2})
 	c := serve(t, idn)
 	m := startCode(t, c, sender, "alice@test.com")
 	wrong := "000000"

@@ -18,6 +18,12 @@ func TestConfig_Validate(t *testing.T) {
 	if err := admins.Validate(); err != nil {
 		t.Fatalf("addresses, in any case and spacing, are admins: %v", err)
 	}
+	// The throttle off leaves login_rate_limit_per_ip at its default: no
+	// error, an application need not zero it as well.
+	off := Config{SigningKey: testKey, LoginRateLimitPerIP: 100}
+	if err := off.Validate(); err != nil {
+		t.Fatalf("the throttle off, the address limit at its default: %v", err)
+	}
 	cases := map[string]struct {
 		cfg  Config
 		want string
@@ -26,6 +32,7 @@ func TestConfig_Validate(t *testing.T) {
 		"no key":                 {Config{}, "signing_key"},
 		"half a throttle":        {Config{SigningKey: testKey, LoginRateWindow: 15 * time.Minute}, "both set or both 0"},
 		"the other half":         {Config{SigningKey: testKey, LoginRateLimit: 5}, "both set or both 0"},
+		"a negative ip limit":    {Config{SigningKey: testKey, LoginRateLimitPerIP: -1}, "login_rate_limit_per_ip must not be negative"},
 		"providers, no frontend": {Config{SigningKey: testKey, Providers: map[string]ProviderConfig{"google": {}}}, "oauth_callback_frontend_url is required"},
 		"a relative frontend":    {Config{SigningKey: testKey, OAuthCallbackFrontendURL: "/finish"}, "oauth_callback_frontend_url must be an absolute URL"},
 		"a bad provider name":    {Config{SigningKey: testKey, OAuthCallbackFrontendURL: "https://a.test/f", Providers: map[string]ProviderConfig{"Google!": {}}}, "lower-case name"},
@@ -65,7 +72,7 @@ func TestConfig_LoadsWithDefaults(t *testing.T) {
 	}
 	a := cfg.Auth
 	if a.Prefix != "/auth" || a.TokenTTL != 2*time.Hour || a.RefreshTTL != 168*time.Hour || a.ResetTTL != 15*time.Minute ||
-		a.LoginRateWindow != 15*time.Minute || a.LoginRateLimit != 10 || a.SigningKey != testKey {
+		a.LoginRateWindow != 15*time.Minute || a.LoginRateLimit != 10 || a.LoginRateLimitPerIP != 100 || a.SigningKey != testKey {
 		t.Fatalf("defaults: %+v", a)
 	}
 	if a.Audit.Enabled || a.Audit.Retention != 180*24*time.Hour || a.Audit.AsyncBuffer != 1024 || a.Audit.DropOnFull || !a.Audit.AdminAPI {

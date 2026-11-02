@@ -25,19 +25,25 @@ const cleanupWatermark = maxLimiterEntries * 3 / 4
 // Uses a simple sliding-window counter with automatic cleanup of stale
 // entries and a hard size cap. Thread-safe.
 //
+// A client address's key is held to a limit of its own, ipThreshold:
+// everyone behind one NAT or proxy shares the address, so it is wider by
+// default than the threshold of an email or a user, and 0 counts no
+// address at all.
+//
 // When the threshold is exceeded, the caller should return 429 Too Many
 // Requests. The limiter does NOT perform exponential backoff or account
 // lockout — those are orthogonal concerns that depend on the deployment
 // context (WAF, CDN, etc.).
 type loginLimiter struct {
-	mu        sync.Mutex
-	window    time.Duration
-	threshold int
-	entries   map[string]*limiterEntry
-	calls     int            // counter for probabilistic cleanup
-	cleaning  atomic.Int32   // atomic flag: 1 when a background cleanup goroutine is running
-	wg        sync.WaitGroup // counts in-flight cleanup goroutines for Close to await
-	closed    bool           // set by Close; suppresses future cleanup launches
+	mu          sync.Mutex
+	window      time.Duration
+	threshold   int // the limit of every key but a client address's
+	ipThreshold int // the limit of a client address's key; 0 counts none
+	entries     map[string]*limiterEntry
+	calls       int            // counter for probabilistic cleanup
+	cleaning    atomic.Int32   // atomic flag: 1 when a background cleanup goroutine is running
+	wg          sync.WaitGroup // counts in-flight cleanup goroutines for Close to await
+	closed      bool           // set by Close; suppresses future cleanup launches
 }
 
 type limiterEntry struct {
@@ -47,29 +53,46 @@ type limiterEntry struct {
 	lastSeen time.Time
 }
 
-func newLoginLimiter(window time.Duration, threshold int) *loginLimiter {
+// newLoginLimiter holds a client address's keys to ipLimit and every
+// other key to limit, within window.
+func newLoginLimiter(window time.Duration, limit, ipLimit int) *loginLimiter {
 	return &loginLimiter{
-		window:    window,
-		threshold: threshold,
-		entries:   make(map[string]*limiterEntry),
+		window:      window,
+		threshold:   limit,
+		ipThreshold: ipLimit,
+		entries:     make(map[string]*limiterEntry),
 	}
 }
 
 // limiterKey pairs a human-readable name with the bucket value so the
 // limiter can report which dimension triggered a 429 without leaking
-// the raw value (email / IP) into logs.
+// the raw value (email / IP) into logs. ip marks the key of a client
+// address, which ipKey makes.
 type limiterKey struct {
 	Name  string
 	Value string
+	ip    bool
 }
+
+// ipKey is a client address's key in the dimension name: it is held to
+// login_rate_limit_per_ip, not login_rate_limit.
+func ipKey(name, value string) limiterKey { return limiterKey{Name: name, Value: value, ip: true} }
 
 // bucket is the table key: the dimension and the value, so an email and
 // an address never share a bucket.
 func (k limiterKey) bucket() string { return k.Name + "\x00" + k.Value }
 
-// check returns true if every supplied key is within the rate limit.
-// Empty values are ignored so callers can pass an optional IP
-// unconditionally. An all-empty call returns true (no-op) so missing
+// counted reports whether the limiter keeps key at all: a key without a
+// value never counts, nor does a client address while ipThreshold is 0.
+func (l *loginLimiter) counted(key limiterKey) bool {
+	return key.Value != "" && (!key.ip || l.ipThreshold > 0)
+}
+
+// check returns true if every supplied key is within its limit:
+// ipThreshold for a client address, threshold for any other key. A key
+// the limiter does not count is ignored — an empty value, so callers can
+// pass an optional IP unconditionally, or an address while ipThreshold
+// is 0 — and a call of such keys alone returns true (no-op) so missing
 // metadata never over-limits.
 //
 // When the limit is exceeded, the second return value is the Name of
@@ -84,7 +107,7 @@ func (l *loginLimiter) check(keys ...limiterKey) (bool, string) {
 	now := time.Now()
 	cutoff := now.Add(-l.window)
 	for _, key := range keys {
-		if key.Value == "" {
+		if !l.counted(key) {
 			continue
 		}
 		e, ok := l.entries[key.bucket()]
@@ -97,18 +120,23 @@ func (l *loginLimiter) check(keys ...limiterKey) (bool, string) {
 				count++
 			}
 		}
-		if count >= l.threshold {
+		limit := l.threshold
+		if key.ip {
+			limit = l.ipThreshold
+		}
+		if count >= limit {
 			return false, key.Name
 		}
 	}
 	return true, ""
 }
 
-// record adds an attempt for every supplied non-empty key. Login calls it
-// only on an authentication failure, so successful logins don't consume
-// the budget; throttle calls it on every call of the routes that count
-// each one. Keying on both email and IP means an attacker rotating emails
-// still exhausts the IP-keyed bucket (and vice versa).
+// record adds an attempt for every supplied key the limiter counts; one
+// it does not, such as an address while ipThreshold is 0, gets no entry.
+// Login calls it only on an authentication failure, so successful logins
+// don't consume the budget; throttle calls it on every call of the routes
+// that count each one. Keying on both email and IP means an attacker
+// rotating emails still exhausts the IP-keyed bucket (and vice versa).
 //
 // Cleanup is offloaded to a background goroutine when the table grows
 // past the watermark so the login critical path stays fast under
@@ -118,7 +146,7 @@ func (l *loginLimiter) record(keys ...limiterKey) {
 	l.mu.Lock()
 	now := time.Now()
 	for _, key := range keys {
-		if key.Value == "" {
+		if !l.counted(key) {
 			continue
 		}
 		l.recordLocked(key.bucket(), now)
@@ -235,8 +263,9 @@ func (l *loginLimiter) evictOldestLocked() {
 // throttle applies the login throttle to a route that counts every call,
 // not only the failures: the call counts against each key — its Name
 // picks the bucket, so a route with names of its own shares none — and is
-// refused once a key has reached login_rate_limit within
-// login_rate_window. The refusal is a 429 saying too many what were asked
+// refused once a key has reached its limit within login_rate_window:
+// login_rate_limit_per_ip for a client address's key, login_rate_limit
+// for any other. The refusal is a 429 saying too many what were asked
 // for, with retry_after the whole window; it counts against no key, and
 // its warning names the dimension that was full, never the value. With
 // the throttle off every call passes.

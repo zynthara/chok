@@ -26,7 +26,8 @@ import (
 // (BLOG_AUTH_SIGNING_KEY for an app loaded as "blog"), never in a file.
 // New gives an empty Prefix and a zero TokenTTL, RefreshTTL, ResetTTL or
 // Audit.AsyncBuffer the defaults below, whether the Config comes from a
-// file or from code; a zero login throttle is off and a zero
+// file or from code; a zero login throttle is off, a zero
+// LoginRateLimitPerIP counts no client address and a zero
 // Audit.Retention keeps records forever.
 type Config struct {
 	// Prefix is where the routes mount: {prefix}/register, {prefix}/login, ...
@@ -48,13 +49,20 @@ type Config struct {
 	// application builds the link from Mail.Token.
 	ResetURL string `yaml:"reset_url"`
 	// LoginRateWindow and LoginRateLimit throttle failed sign-ins and the
-	// mails asked for: once an email, a client IP or a user has failed to
-	// sign in, or asked passwordless/start, forgot-password or
-	// confirm-email/start for a mail, LoginRateLimit times within the
-	// window, that route answers 429 until the window slides. Both 0 turn
-	// the throttle off.
-	LoginRateWindow time.Duration `yaml:"login_rate_window" default:"15m"`
-	LoginRateLimit  int           `yaml:"login_rate_limit" default:"10"`
+	// mails asked for: once an email or a user has failed to sign in, or
+	// asked forgot-password or confirm-email/start for a mail,
+	// LoginRateLimit times within the window, that route answers 429
+	// until the window slides. LoginRateLimitPerIP is the limit of a
+	// client address, by chok.ClientIP, within the same window: its failed
+	// logins and passwordless/verify calls, and every forgot-password and
+	// passwordless/start it makes. Everyone behind a NAT, a carrier or a
+	// proxy that http.trusted_proxies does not list shares one address, so
+	// its default is wider; 0 counts no address, and emails and users
+	// count all the same. LoginRateWindow and LoginRateLimit both 0 turn
+	// the throttle off, and LoginRateLimitPerIP is then ignored.
+	LoginRateWindow     time.Duration `yaml:"login_rate_window" default:"15m"`
+	LoginRateLimit      int           `yaml:"login_rate_limit" default:"10"`
+	LoginRateLimitPerIP int           `yaml:"login_rate_limit_per_ip" default:"100"`
 	// DisableRegister drops the register route: accounts come from
 	// Users().Create.
 	DisableRegister bool `yaml:"disable_register"`
@@ -301,6 +309,9 @@ func (c *Config) Validate() error {
 	}
 	if c.LoginRateLimit < 0 {
 		errs = append(errs, errors.New("login_rate_limit must not be negative"))
+	}
+	if c.LoginRateLimitPerIP < 0 {
+		errs = append(errs, errors.New("login_rate_limit_per_ip must not be negative"))
 	}
 	if c.Passwordless.MaxAttempts < 0 {
 		errs = append(errs, errors.New("passwordless.max_attempts must not be negative"))
