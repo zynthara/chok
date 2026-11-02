@@ -22,7 +22,9 @@
 // application's schema and at RegisterSchema to each battery's:
 //
 //   - auto: AutoMigrate the declared tables and create their Unique and
-//     SoftUnique indexes. The default, for development and small services.
+//     SoftUnique indexes; an index that already has a declared name must
+//     match its declaration, or migrating fails. The default, for
+//     development and small services.
 //   - versioned: apply the SQL files given to Migrations, named
 //     <14-digit version>_<name>.sql, forward only. One ledger table,
 //     chok_migrations, records them per owner ("app" and each battery).

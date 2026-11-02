@@ -340,8 +340,11 @@ schema；`*db.DB` 实现 Closer / Healther / Namer，交给 `app.Use`。
   模型可以两种都声明。非软删的 `OwnedModel` 要「每个 owner 唯一」就写
   `db.Unique("uk_…", "owner_id", "x")`：`OwnerID` 的 gorm tag 在框架里，应用加不了
   复合索引。可空列、缺 `not null`、`SoftUnique` 给非软删模型，都在 `db.Table` 处
-  panic。auto 模式按名字建索引（已有同名索引就不动，也不比较列）；versioned 与 off
-  模式下索引由应用的 SQL 负责。
+  panic。auto 模式按名字建索引；已有同名索引时读目录核对：同一张表、列与列序相同
+  （`SoftUnique` 的 `delete_token` 在最后）、唯一、不带 WHERE。有一处不符，`Open` /
+  `RegisterSchema` / `Migrate` 就失败，错误里写出库里的与声明的两边，不会替应用删除
+  或重建索引。SQLite 与 Postgres 的索引名在整个 schema 里唯一，同名索引在别的表上也
+  算不符；MySQL 的索引名按表计。versioned 与 off 模式下索引由应用的 SQL 负责。
 
 ### 6.2 迁移：三种模式、单账本
 
