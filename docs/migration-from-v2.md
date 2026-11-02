@@ -158,6 +158,7 @@ v0.2 的段名由应用的 Config struct 决定；下表右列用 `examples/blog
 | `account.reset_expiration` | `auth.reset_ttl` | |
 | — | `auth.refresh_ttl`（168h）、`auth.prefix`（`/auth`） | 新增；refresh-token 不再能无限续 |
 | `account.login_rate_window` / `login_rate_limit` | `auth.login_rate_window` / `login_rate_limit` | yaml 默认 15m / 10（v2 默认不开） |
+| — | `auth.login_rate_limit_per_ip`（100） | 新增：按客户端地址计的维度（login 与 passwordless/verify 的失败、forgot-password 与 passwordless/start 的每次调用）用它作阈值，email 与用户维度仍用 `login_rate_limit`；0 不计地址。代码里直接构造的 Config 零值即不计地址 |
 | `account.disable_register` / `link_by_email` / `allowed_redirect_backs` / `oauth_callback_frontend_url` | `auth.*` | 同名 |
 | `account.providers.<name>.enabled` | — | 删除：代码决定链接哪些 provider |
 | apple 的 `service_id` / `private_key` / `issuer_url` / `client_secret_ttl` | `auth.providers.apple.client_id` / `client_secret` / `endpoint` / — | client secret 固定 1h、到期前重签 |
@@ -270,6 +271,8 @@ v0.2 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复�
 | `rid.New(prefix)`、`rid.Parse` | `db.NewRID(prefix)`、`db.ParseRID(rid)` |
 | 模型基座 `db.Model` / `SoftDeleteModel` / `OwnedModel` / `OwnedSoftDeleteModel` | 同名，字段相同 |
 | `db.Table(model, db.SoftUnique(...))` | 同名；三方言统一为 `UNIQUE(cols..., delete_token)`（v2 在 Postgres 上是部分索引） |
+| `db.SoftIndex` | `db.Index`：`SoftUnique` 与新增的 `Unique` 都返回它，`db.Table` 收 `...db.Index` |
+| — | `db.Unique(name, cols...)`（新增）：任何基座上的 `UNIQUE(cols...)`，三方言同形；非软删 `OwnedModel` 的 `(owner_id, X)` 唯一约束不必再在 `Open` 之后手写 DDL。auto 模式按名字建（已有同名索引不动、不比较列），versioned / off 由应用的 SQL 建；软删模型上被删的行仍占着它的值 |
 
 时间：v0.2 以 UTC 写入所有时间（MySQL 会话 `+00:00`、Postgres 会话 UTC、SQLite 存
 `+00:00` 结尾的文本）。两种 v2 库要换算已有数据：
