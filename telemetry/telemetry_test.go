@@ -265,6 +265,25 @@ func running(t *testing.T, base chok.Base, tel *Telemetry) *chok.App {
 	return app
 }
 
+// listening waits for tel's metrics listener and returns its address.
+// The App being ready does not mean the listener is open: the start
+// phase waits on every component's Health, telemetry's is nil by
+// contract, and Start, in a goroutine of its own, can reach net.Listen
+// a little after apptest.Ready turns true.
+func listening(t *testing.T, tel *Telemetry) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if addr := tel.addr.Load(); addr != nil {
+			return *addr
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no metrics listener 5s after the App was ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // get fetches url and returns the status and the body.
 func get(t *testing.T, url string) (int, string) {
 	t.Helper()
@@ -295,14 +314,11 @@ func TestStart_ServesOnItsOwnListener(t *testing.T) {
 	tel := newTel(t, cfg)
 	app := running(t, base, tel)
 
-	addr := tel.addr.Load()
-	if addr == nil {
-		t.Fatal("no metrics listener")
-	}
-	if code, body := get(t, "http://"+*addr+"/metrics"); code != http.StatusOK || !strings.Contains(body, "go_goroutines ") {
+	addr := listening(t, tel)
+	if code, body := get(t, "http://"+addr+"/metrics"); code != http.StatusOK || !strings.Contains(body, "go_goroutines ") {
 		t.Fatalf("metrics listener: GET /metrics = %d:\n%s", code, body)
 	}
-	if code, _ := get(t, "http://"+*addr+"/healthz"); code != http.StatusNotFound {
+	if code, _ := get(t, "http://"+addr+"/healthz"); code != http.StatusNotFound {
 		t.Fatalf("metrics listener: GET /healthz = %d, want 404", code)
 	}
 	if code, _ := get(t, "http://"+app.Addr()+"/metrics"); code != http.StatusNotFound {
