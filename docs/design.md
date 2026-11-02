@@ -233,8 +233,10 @@ CSRF（`http.csrf`，默认开）→ `chok.Wrap(...)` → 路由组 → 路由�
 `http.trusted_proxies` 默认为空：谁的 `X-Forwarded-For` / `X-Real-Ip` 都不信，
 客户端伪造的转发头绕不过按地址的限速。应用放在 nginx、负载均衡或 CDN 后面而没
 列出代理时，转发头被忽略，`ClientIP` 全是代理的地址，按地址计数的限速（identity
-的登录、验证码限速）就按整个代理算；ClientIP 中间件第一次忽略不受信对端的转发头
-时记一条 Warn（带 `peer` 与 `header`），每个 App 只记一次。
+的登录、验证码限速）就按整个代理算（地址维度有自己的阈值
+`auth.login_rate_limit_per_ip`，默认 100，整个代理共用这一份）；ClientIP 中间件
+第一次忽略不受信对端的转发头时记一条 Warn（带 `peer` 与 `header`），每个 App 只记
+一次。
 
 CSRF 是标准库的 `http.CrossOriginProtection`：只查不安全方法（POST / PUT /
 PATCH / DELETE）的 `Sec-Fetch-Site` 与 `Origin`，浏览器从别的网站发来的这类请求
@@ -437,9 +439,15 @@ exchange 与 identities 管理，其中有只推定邮箱的 provider（Facebook
   Roles, Extra}`，store 的 owner 隔离就读它。
 - **会话上限**：`refresh_ttl` 从登录起算，refresh-token 不能无限续。
 - **登录限速**：按 email 与客户端 IP 两维、只记失败，429 带 `retry_after`。
+  两维阈值分开：email 维用 `login_rate_limit`（默认 10），IP 维用
+  `login_rate_limit_per_ip`（默认 100）——一个地址常是 NAT、运营商或没列进
+  `http.trusted_proxies` 的代理后面所有人共用的，阈值相同的话几个人输错就锁住整个
+  地址。`login_rate_limit_per_ip` 设 0 则所有按地址的维度都不计，按 email 与按用户
+  的照旧；窗口同是 `login_rate_window`，window 与 limit 都为 0 时限速整体关闭，它随
+  之忽略。
   forgot-password 也受它约束，但每次调用都计：同样按 email（规范化后）与客户端
-  IP 两维，维度名另起、与登录互不占用，阈值、窗口、`retry_after` 相同；先计数再
-  查账户，未注册的邮箱也计，所以 429 与 204 一样不泄露账户是否存在。
+  IP 两维，维度名另起、与登录互不占用，各维阈值、窗口、`retry_after` 与登录相同；
+  先计数再查账户，未注册的邮箱也计，所以 429 与 204 一样不泄露账户是否存在。
 - **发信**：identity 不发信，只调应用给的函数（`Sender(fn)`）：
   `fn(ctx, m.To, m.Kind, m)`——模板名就是 `Mail.Kind`（password-reset /
   login-code），数据是 `identity.Mail{Kind, To, Token, Code, Link, ExpiresAt}`

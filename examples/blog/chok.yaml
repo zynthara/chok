@@ -28,10 +28,12 @@ auth:
   # signing_key is a secret of at least 32 bytes: set it through
   # BLOG_AUTH_SIGNING_KEY instead of writing it here.
   token_ttl: 2h
-  # Ten failed logins in 15 minutes, per email or per address, answer
-  # 429 until the window slides.
+  # Ten failed logins in 15 minutes per email, and a hundred per address
+  # (shared by everyone behind one NAT or proxy), answer 429 until the
+  # window slides.
   login_rate_window: 15m
   login_rate_limit: 10
+  login_rate_limit_per_ip: 100
 
 telemetry:
   # Request and SQL metrics for Prometheus, on a port of their own that

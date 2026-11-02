@@ -232,8 +232,8 @@ people in with a code mailed to them:
   account. The mail carries a code of `code_length` digits (6) and a
   magic-link token, both good for `code_ttl` (10m). While a code is
   unused, another start within `resend_after` (60s) of it changes nothing
-  and mails nothing; each client address gets `login_rate_limit` starts
-  per `login_rate_window` (429 after that).
+  and mails nothing; each client address gets `login_rate_limit_per_ip`
+  starts (100) per `login_rate_window` (429 after that).
 - `POST /auth/passwordless/verify` `{"email", "code"}` or `{"token"}`
   answers what login does: `{"token", "expires_at"}` (and the cookie, in
   cookie mode). A wrong code is `401 InvalidCode` with
