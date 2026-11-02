@@ -17,6 +17,10 @@ import (
 // seconds, or a descriptor such as @daily or "@every 10m".
 var specParser = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
+// infoHeartbeat is how long a periodic job that keeps succeeding goes
+// between two successes logged at Info.
+const infoHeartbeat = time.Hour
+
 // every activates a fixed interval after the previous activation, for any
 // duration (cron's @every rounds to whole seconds): the worker sweeps and
 // the cleanup.
@@ -34,7 +38,7 @@ type entry struct {
 	overlap  Overlap
 	fn       func(ctx context.Context) error
 	attrs    []any        // what the log lines name it by
-	quiet    bool         // successful runs log at Debug, not Info
+	quiet    bool         // every successful run logs at Debug (the worker sweeps and the cleanup)
 	count    func() int64 // a counter whose growth over a run is Event.Messages; nil for periodic jobs
 
 	mu      sync.Mutex
@@ -43,6 +47,10 @@ type entry struct {
 	running int  // runs in flight
 	total   time.Duration
 	stats   JobStats
+	// What the next success of an entry that is not quiet logs at: see
+	// execute.
+	lastInfo time.Time // the end of the last success logged at Info; zero before the first
+	faltered bool      // the last run to end failed or was stopped by a shutdown
 }
 
 // newEntry builds the entry of typ (periodic, worker or cleanup). The log
@@ -242,6 +250,15 @@ func (s *scheduler) runs(ctx context.Context, e *entry) {
 // stopped is not a failure: it was told to stop. Nor is a worker's sweep
 // that ends at a message whose next try is not due (errRetryLater), and
 // it keeps LastError: the topic still waits on that failure.
+//
+// A failure is logged at Warn (at Debug when the worker logged it
+// already), a stopped run at Debug. A success is logged at Info only
+// when it is news: a periodic job's first success since Start, its first
+// after a run that failed or was stopped, and one infoHeartbeat after its
+// last success logged at Info, so that a job that runs every minute
+// writes one line an hour. Its other successes, and every success of a
+// quiet entry, are logged at Debug. The observers and the Stats see
+// every run.
 func (s *scheduler) execute(ctx context.Context, e *entry) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -284,6 +301,19 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 	} else if !waiting {
 		e.stats.LastError = ""
 	}
+	news := false // a success worth an Info line
+	if !e.quiet {
+		if err != nil || stopped {
+			e.faltered = true
+		} else {
+			end := start.Add(dur)
+			news = e.lastInfo.IsZero() || e.faltered || end.Sub(e.lastInfo) >= infoHeartbeat
+			if news {
+				e.lastInfo = end
+			}
+			e.faltered = false
+		}
+	}
 	e.mu.Unlock()
 
 	if len(s.observers) > 0 {
@@ -312,10 +342,10 @@ func (s *scheduler) execute(ctx context.Context, e *entry) {
 		s.logger.WarnContext(ctx, "jobs: run failed", append(attrs, "error", err.Error())...)
 	case stopped:
 		s.logger.DebugContext(ctx, "jobs: run stopped by shutdown", attrs...)
-	case e.quiet:
-		s.logger.DebugContext(ctx, "jobs: run ok", attrs...)
-	default:
+	case news:
 		s.logger.InfoContext(ctx, "jobs: run ok", attrs...)
+	default:
+		s.logger.DebugContext(ctx, "jobs: run ok", attrs...)
 	}
 }
 

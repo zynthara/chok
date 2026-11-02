@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -534,6 +535,134 @@ func TestObserve_PanicIsIsolated(t *testing.T) {
 			t.Fatalf("log:\n%s", out)
 		}
 	})
+}
+
+// TestPeriodic_LogsTheSuccessesWorthALine: a periodic job's success is
+// logged at Info the first time after Start, the first time after a run
+// that failed, panicked or was stopped by a shutdown, and an hour after
+// its last success logged at Info; its other successes at Debug, so a job
+// that runs every minute writes one Info line an hour. Its failures stay
+// at Warn, and the observers and the Stats still see every run. A
+// worker's sweeps and the cleanup, quiet, log every success at Debug: the
+// first, the one after a failure and the hourly ones too.
+func TestPeriodic_LogsTheSuccessesWorthALine(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var logs syncBuffer
+		var calls atomic.Int32
+		tick := periodicEntry(t, "tick", "@every 1m", OverlapSkip, func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err // the run below that a stop cuts short
+			}
+			switch calls.Add(1) {
+			case 70:
+				return errors.New("boom")
+			case 80:
+				panic("deliberate")
+			}
+			return nil
+		})
+		var sweeps atomic.Int32
+		worker := newEntry(typeWorker, "orders", "@every 1m0s", every(time.Minute), OverlapSkip, func(context.Context) error {
+			if sweeps.Add(1) == 2 {
+				return errors.New("down")
+			}
+			return nil
+		})
+		cleanup := newEntry(typeCleanup, "cleanup", "@every 1m0s", every(time.Minute), OverlapSkip, func(context.Context) error { return nil })
+		worker.quiet, cleanup.quiet = true, true // as New makes them
+		o := &observed{}
+		s := &scheduler{
+			logger:    slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			entries:   []*entry{tick, worker, cleanup},
+			observers: []func(Event){o.observe},
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		s.start(ctx)
+		time.Sleep(150*time.Minute + 30*time.Second) // 150 runs of each, one a minute
+		cancel()
+		if err := s.wait(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		// Then a run that a stop cuts short, and a success.
+		s.execute(ctx, tick)
+		s.execute(t.Context(), tick)
+
+		want := slices.Repeat([]string{"DEBUG ok"}, 150)
+		// The first run, an hour later, the first after the failure and
+		// after the panic, and an hour after that.
+		for _, run := range []int{1, 61, 71, 81, 141} {
+			want[run-1] = "INFO ok"
+		}
+		want[70-1], want[80-1] = "WARN failed", "WARN failed"
+		want = append(want, "DEBUG stopped", "INFO ok")
+		if got := runOutcomes(logs.String(), "job=tick"); !slices.Equal(got, want) {
+			t.Fatalf("the periodic job logged %s, want %s", notable(got), notable(want))
+		}
+		want = slices.Repeat([]string{"DEBUG ok"}, 150)
+		want[2-1] = "WARN failed"
+		if got := runOutcomes(logs.String(), "worker=orders"); !slices.Equal(got, want) {
+			t.Fatalf("the worker logged %s, want %s", notable(got), notable(want))
+		}
+		want = slices.Repeat([]string{"DEBUG ok"}, 150)
+		if got := runOutcomes(logs.String(), "job=cleanup"); !slices.Equal(got, want) {
+			t.Fatalf("the cleanup logged %s, want %s", notable(got), notable(want))
+		}
+
+		// The events and the Stats are not thinned out like the log.
+		kinds := map[string]int{}
+		for _, ev := range o.get() {
+			if ev.Job == "tick" {
+				kinds[ev.Kind]++
+			}
+		}
+		if kinds["run.started"] != 152 || kinds["run.finished"] != 150 || kinds["run.failed"] != 2 {
+			t.Fatalf("the periodic job's events %v, want 152 starts, 150 ends and 2 failures", kinds)
+		}
+		if st := tick.snapshot(); st.Runs != 152 || st.Failures != 2 || st.LastError != "" {
+			t.Fatalf("the periodic job's stats %+v", st)
+		}
+	})
+}
+
+// runOutcomes lists, run by run, the level and the outcome of the log
+// lines that end the runs of the entry its attribute names ("job=tick",
+// "worker=orders"): "INFO ok", "DEBUG ok", "WARN failed" or
+// "DEBUG stopped".
+func runOutcomes(log, attr string) []string {
+	var out []string
+	for line := range strings.Lines(log) {
+		if !strings.Contains(line, " "+attr+" duration=") {
+			continue
+		}
+		var outcome string
+		switch {
+		case strings.Contains(line, `msg="jobs: run ok"`):
+			outcome = "ok"
+		case strings.Contains(line, `msg="jobs: run failed"`):
+			outcome = "failed"
+		case strings.Contains(line, `msg="jobs: run stopped by shutdown"`):
+			outcome = "stopped"
+		default:
+			continue
+		}
+		_, rest, _ := strings.Cut(line, " level=")
+		level, _, _ := strings.Cut(rest, " ")
+		out = append(out, level+" "+outcome)
+	}
+	return out
+}
+
+// notable shows the outcomes other than "DEBUG ok" by run, and how many
+// runs there were.
+func notable(outcomes []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d runs", len(outcomes))
+	for i, o := range outcomes {
+		if o != "DEBUG ok" {
+			fmt.Fprintf(&b, ", %d: %s", i+1, o)
+		}
+	}
+	return b.String()
 }
 
 // syncBuffer is a bytes.Buffer safe for concurrent writers.

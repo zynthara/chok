@@ -844,6 +844,20 @@ func TestStats_ListsEveryEntry(t *testing.T) {
 	}
 }
 
+// TestNew_WorkersAndCleanupLogSuccessesAtDebug: New makes every worker's
+// sweeps and the cleanup quiet, so all their successes are logged at
+// Debug, and leaves the periodic jobs to the rule
+// TestPeriodic_LogsTheSuccessesWorthALine shows.
+func TestNew_WorkersAndCleanupLogSuccessesAtDebug(t *testing.T) {
+	cfg := fastConfig()
+	cfg.Retention = 24 * time.Hour
+	in := &inbox{}
+	j := newJobs(t, dbtest.Open(t), cfg, Periodic("report", "@hourly", noop, OverlapSkip), Worker("orders", in.handle), Worker("refunds", in.handle))
+	if j.periodic[0].quiet || !j.workers[0].quiet || !j.workers[1].quiet || j.cleanup == nil || !j.cleanup.quiet {
+		t.Fatalf("quiet: the periodic job %v, the workers %v and %v, the cleanup %+v", j.periodic[0].quiet, j.workers[0].quiet, j.workers[1].quiet, j.cleanup)
+	}
+}
+
 // TestStats_ShowAWorkersBacklog: a worker's Stats carry how many messages
 // of its topic waited for an acknowledgement when its last sweep ended,
 // and when the oldest of them was enqueued: both while a failing message

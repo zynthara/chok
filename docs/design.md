@@ -638,6 +638,14 @@ retention 清理）开始、结束、失败，以及因运行中而被跳过的�
 periodic / worker / cleanup。fn 在运行的 goroutine 里调用，要快；它的 panic 被
 recover 并记 Warn，不影响运行与统计。典型用法是交给 realtime 做实时的任务面板。
 
+日志比事件安静：周期任务的成功只在值得看时记 Info——Start 后的第一次成功、上一次
+运行失败（含 panic）或被停机打断之后的第一次成功、距上一条 Info 级的成功满 1 小时的
+那次（心跳），其余成功记 Debug，所以一分钟一次的任务一小时一条 Info，出过问题后恢复的
+那次也一定看得见。worker 的 sweep 与 retention 清理的成功一律 Debug。失败记 Warn
+（worker 对失败的那条消息记一条，那轮 sweep 只记 Debug），panic 与停放记 Error，被停机
+叫停的运行记 Debug。这条规则是固定的，没有选项；`Observe` 的事件与 `Stats` 照旧覆盖
+每一次运行。
+
 ### 7.3 `telemetry`
 
 `telemetry.New(cfg)` 一个值管三件事，`app.Use(tel, …)` 放第一个：

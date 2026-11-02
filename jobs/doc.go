@@ -91,4 +91,12 @@
 //	jobs.Observe(func(ev jobs.Event) {
 //		_ = hub.Publish(context.Background(), "jobs", ev.Kind, ev)
 //	})
+//
+// The log is quieter than the stream. A periodic job's success is logged
+// at Info when it is news — its first after Start, its first after a run
+// that failed or that a stop cut short, and one an hour while it keeps
+// succeeding — so a job that runs every minute writes one line an hour;
+// its other successes, and every success of the workers' sweeps and of
+// the cleanup, are logged at Debug. Failures are logged at Warn, panics
+// and parked messages at Error. Stats and Observe see every run.
 package jobs
