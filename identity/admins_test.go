@@ -134,6 +134,38 @@ func TestAdmins_UnverifiedGetsNothingUntilVerified(t *testing.T) {
 	}
 }
 
+// TestAdmins_OperatorCreatedAccountIsAdminAtLogin: an operator vouches
+// for the address it gives Users().Create, so the account is verified
+// from the start and auth.admins applies to it — with registration off
+// and no mail sent, its first login carries the admin role, recorded as
+// any grant is.
+func TestAdmins_OperatorCreatedAccountIsAdminAtLogin(t *testing.T) {
+	idn := newIdentity(t, Config{Admins: []string{"ops@test.com"}, DisableRegister: true, Audit: AuditConfig{Enabled: true}})
+	c := serve(t, idn)
+	u, err := idn.Users().Create(t.Context(), "ops@test.com", "password123", "Ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Create grants nothing itself: the role comes with the first token.
+	if roles := userByEmail(t, idn, "ops@test.com").Roles; roles != "" {
+		t.Fatalf("created with roles %q", roles)
+	}
+	code, tok := login(t, c, "ops@test.com", "password123")
+	if code != http.StatusOK {
+		t.Fatalf("login = %d", code)
+	}
+	if got := tokenRoles(t, idn, tok); !slices.Equal(got, adminOnly) {
+		t.Fatalf("the token's roles = %v", got)
+	}
+	var me meResponse
+	if code := c.WithBearer(tok).GetJSON("/auth/me", &me); code != http.StatusOK || !slices.Equal(me.Roles, adminOnly) || !me.EmailVerified || me.EmailAssumed {
+		t.Fatalf("me = %d %+v", code, me)
+	}
+	if n := grantRecords(t, idn, u.RID); n != 1 {
+		t.Fatalf("grant records = %d, want 1", n)
+	}
+}
+
 func TestAdmins_PasswordlessVerifyGrants(t *testing.T) {
 	idn, sender := pwIdentity(t, adminsConfig())
 	c := serve(t, idn)

@@ -149,16 +149,21 @@ var (
 )
 
 func (idn *Identity) register(ctx context.Context, req *registerRequest) (*tokenResponse, error) {
-	user, err := idn.createUser(ctx, req.Email, req.Password, req.Name)
+	// Whoever registers an address need not own it: the account starts
+	// unverified, and auth.admins grants it nothing until the address is
+	// proven.
+	user, err := idn.createUser(ctx, req.Email, req.Password, req.Name, false)
 	if err != nil {
 		return nil, err
 	}
 	return idn.issueToken(ctx, user, time.Now().Unix())
 }
 
-// createUser makes an active account with a password: register and
-// UserService.Create.
-func (idn *Identity) createUser(ctx context.Context, email, password, name string) (*User, error) {
+// createUser makes an active account with a password: register, whose
+// registrant vouches for nothing, and UserService.Create, whose operator
+// vouches for the address. vouched makes the address proven — verified,
+// not assumed — from the start.
+func (idn *Identity) createUser(ctx context.Context, email, password, name string, vouched bool) (*User, error) {
 	email = normalizeEmail(email)
 	if err := checkPasswordStrength("password", password); err != nil {
 		return nil, err
@@ -170,7 +175,7 @@ func (idn *Identity) createUser(ctx context.Context, email, password, name strin
 	if name == "" {
 		name = maskEmail(email)
 	}
-	user := &User{Email: email, PasswordHash: hash, HasPassword: true, Name: name, Active: true}
+	user := &User{Email: email, EmailVerified: vouched, PasswordHash: hash, HasPassword: true, Name: name, Active: true}
 	if err := idn.users.Create(ctx, user); err != nil {
 		if errors.Is(err, chok.ErrConflict) {
 			return nil, errEmailTaken

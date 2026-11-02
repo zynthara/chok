@@ -46,6 +46,27 @@ func TestUsers_CreateAndGet(t *testing.T) {
 	}
 }
 
+// TestUsers_CreateMakesAVerifiedAccount: the operator vouches for the
+// address it gives Create, so the account is verified, and not merely
+// assumed, from the start; an account the register route makes starts
+// unverified.
+func TestUsers_CreateMakesAVerifiedAccount(t *testing.T) {
+	idn := newIdentity(t, Config{})
+	c := serve(t, idn)
+	u, err := idn.Users().Create(t.Context(), "ops@test.com", "password123", "Ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := idn.Users().Get(t.Context(), u.RID)
+	if err != nil || !u.EmailVerified || u.EmailAssumed || !got.EmailVerified || got.EmailAssumed {
+		t.Fatalf("created verified %v assumed %v; read back %+v %v", u.EmailVerified, u.EmailAssumed, got, err)
+	}
+	register(t, c, "alice@test.com", "password123")
+	if r := userByEmail(t, idn, "alice@test.com"); r.EmailVerified || r.EmailAssumed {
+		t.Fatalf("a registered account: verified %v, assumed %v", r.EmailVerified, r.EmailAssumed)
+	}
+}
+
 func TestUsers_MarkEmailVerified(t *testing.T) {
 	idn, u, tok, me := newUser(t, "alice@test.com")
 	if u.EmailVerified {
@@ -258,14 +279,11 @@ func TestUsers_ListFromQuery(t *testing.T) {
 	users := idn.Users()
 	ctx := t.Context()
 	for i := range 25 {
-		u, err := users.Create(ctx, fmt.Sprintf("u%02d@test.com", i), "password123", fmt.Sprintf("user %02d", i))
+		// Every fifth account is an operator's, its address verified; the
+		// others are made as register makes them, unverified.
+		u, err := idn.createUser(ctx, fmt.Sprintf("u%02d@test.com", i), "password123", fmt.Sprintf("user %02d", i), i%5 == 0)
 		if err != nil {
 			t.Fatal(err)
-		}
-		if i%5 == 0 {
-			if err := users.MarkEmailVerified(ctx, u.RID); err != nil {
-				t.Fatal(err)
-			}
 		}
 		if i < 2 {
 			if err := users.SetActive(ctx, u.RID, false); err != nil {

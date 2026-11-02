@@ -147,8 +147,8 @@ func TestPasswordless_StartIsThrottledPerClient(t *testing.T) {
 func TestPasswordless_VerifySignsIn(t *testing.T) {
 	idn, sender := pwIdentity(t, Config{})
 	c := serve(t, idn)
-	if _, err := idn.Users().Create(t.Context(), "alice@test.com", "password123", "Alice"); err != nil {
-		t.Fatal(err)
+	if code := c.PostJSON("/auth/register", map[string]string{"email": "alice@test.com", "password": "password123", "name": "Alice"}, nil); code != http.StatusCreated {
+		t.Fatalf("register = %d", code)
 	}
 	m := startCode(t, c, sender, "alice@test.com")
 	code, tok, e := verify(c, map[string]string{"email": "ALICE@test.com", "code": m.Code})

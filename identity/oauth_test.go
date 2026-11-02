@@ -406,10 +406,8 @@ func TestOAuth_AssumedEmailCreatesNoListedAccount(t *testing.T) {
 
 func TestOAuth_LinkByEmail(t *testing.T) {
 	fx := newOAuthFixture(t, Config{LinkByEmail: true}, nil)
-	u, err := fx.idn.Users().Create(t.Context(), "alice@idp.test", "password123", "Alice")
-	if err != nil {
-		t.Fatal(err)
-	}
+	register(t, fx.c, "alice@idp.test", "password123")
+	u := userByEmail(t, fx.idn, "alice@idp.test")
 	// An unverified local email never links: the account stays someone
 	// else's until proven, so the sign-in conflicts instead.
 	fx.p.seed("c", verified("acct", "alice@idp.test"))
@@ -653,10 +651,8 @@ func TestOAuth_VerifyingTheEmailUnlinksEarlierLinks(t *testing.T) {
 			cfg.Passwordless.Enabled = true
 			idn := newIdentity(t, cfg, Providers(p), Sender(sender.send))
 			fx := &oauthFixture{idn: idn, p: p, c: serve(t, idn)}
-			u, err := idn.Users().Create(t.Context(), "alice@test.com", "password123", "Alice")
-			if err != nil {
-				t.Fatal(err)
-			}
+			register(t, fx.c, "alice@test.com", "password123")
+			u := userByEmail(t, idn, "alice@test.com")
 			// As v2 let it: a link to the unverified account.
 			if _, err := idn.oauth.linkTx(t.Context(), u.RID, verified("early-acc", "early@idp.test")); err != nil {
 				t.Fatal(err)

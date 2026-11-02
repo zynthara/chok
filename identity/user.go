@@ -21,7 +21,8 @@ type User struct {
 	db.SoftDeleteModel
 	Email string `json:"email" store:"query,update" gorm:"size:200;not null"`
 	// EmailVerified records that the address is the user's: a mailed reset
-	// token or code proved it, an OAuth provider vouched for it, or the
+	// token or code proved it, an OAuth provider or the operator who made
+	// the account with UserService.Create vouched for it, or the
 	// application called UserService.MarkEmailVerified.
 	EmailVerified bool `json:"email_verified" store:"query,update" gorm:"column:email_verified;default:false;not null"`
 	// EmailAssumed marks an EmailVerified that rests on a provider's word
