@@ -136,3 +136,43 @@ func TestBatchUpsert_ConflictTargetIsStrict(t *testing.T) {
 		t.Fatalf("the row changed: %+v", got)
 	}
 }
+
+// TestUpsert_UniqueOnSoftDeleteModel: conflict fields that are a Unique
+// index's are the conflict target as they are. With the delete_token a
+// SoftUnique adds, SQLite and PostgreSQL would find no index to match;
+// without it every dialect updates the row holding the values, a live
+// one or a deleted one, which stays deleted. A SoftUnique on the same
+// model still counts live rows only.
+func TestUpsert_UniqueOnSoftDeleteModel(t *testing.T) {
+	s := skus(t)
+	ctx := t.Context()
+	for i, title := range []string{"t1", "t2"} {
+		if err := s.Upsert(ctx, &sku{Code: "c1", Title: title, Stock: i + 1}, "code"); err != nil {
+			t.Fatalf("upsert %d: %v", i, err)
+		}
+	}
+	got, err := s.Get(ctx, store.Where(where.Eq("code", "c1")))
+	if err != nil || got.Title != "t2" || got.Stock != 2 || got.Version != 2 {
+		t.Fatalf("the second upsert updates the row: %+v %v", got, err)
+	}
+	if err := s.Delete(ctx, store.RID(got.RID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upsert(ctx, &sku{Code: "c1", Title: "t3", Stock: 3}, "code"); err != nil {
+		t.Fatalf("upsert onto a deleted row: %v", err)
+	}
+	gone, err := s.Get(ctx, store.RID(got.RID), where.WithTrashed())
+	if err != nil || !gone.DeletedAt.Valid || gone.Title != "t3" || gone.Stock != 3 || gone.Version != 4 {
+		t.Fatalf("the deleted row holding c1 is updated and stays deleted: %+v %v", gone, err)
+	}
+	if n, _ := s.Count(ctx, where.WithTrashed()); n != 1 {
+		t.Fatalf("%d rows, want the one", n)
+	}
+	// The deleted row's title t3 does not stop a live row.
+	if err := s.Upsert(ctx, &sku{Code: "c2", Title: "t3", Stock: 4}, "title"); err != nil {
+		t.Fatal(err)
+	}
+	if live, err := s.Get(ctx, store.Where(where.Eq("title", "t3"))); err != nil || live.Code != "c2" || live.Stock != 4 {
+		t.Fatalf("a new live row: %+v %v", live, err)
+	}
+}

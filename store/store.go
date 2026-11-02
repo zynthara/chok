@@ -143,7 +143,8 @@ func Alias(field, column string) Option {
 
 // Constraints names the field a unique constraint or index guards, so a
 // duplicate-key error says which field collided. The model's own unique
-// indexes and its SoftUnique indexes are known without it.
+// indexes and those its db.Table declares, Unique and SoftUnique, are
+// known without it.
 func Constraints(m map[string]string) Option {
 	m = maps.Clone(m)
 	return func(c *config) {

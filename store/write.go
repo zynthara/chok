@@ -235,11 +235,12 @@ func (s *Store[T]) Restore(ctx context.Context, loc Locator) error {
 // Upsert inserts obj or, when a row with the same conflict fields exists,
 // overwrites that row's update fields and advances its version. conflict
 // names the fields of a unique index, the RID when empty; on a soft-delete
-// model a SoftUnique index counts only live rows. MySQL updates on any
-// unique key whatever conflict says. obj is not reloaded: after an update
-// it does not hold the stored row's RID or version. An owner-scoped or
-// custom-scoped store refuses Upsert, whose update cannot be fenced: use
-// Create, and Update on a DuplicateError.
+// model a SoftUnique index counts only live rows, a Unique index every
+// row: a deleted row holding the values is the one updated, and it stays
+// deleted. MySQL updates on any unique key whatever conflict says. obj is
+// not reloaded: after an update it does not hold the stored row's RID or
+// version. An owner-scoped or custom-scoped store refuses Upsert, whose
+// update cannot be fenced: use Create, and Update on a DuplicateError.
 func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflict ...string) error {
 	if obj == nil {
 		return errors.New("store: Upsert: nil object")
@@ -291,7 +292,8 @@ func (s *Store[T]) BatchUpsert(ctx context.Context, objs []*T, conflict ...strin
 }
 
 // conflictTarget resolves the conflict fields to columns, adding
-// delete_token when they are a SoftUnique index's.
+// delete_token when they are a SoftUnique index's. A Unique index's
+// columns are the target as they are, on a soft-delete model too.
 func (s *Store[T]) conflictTarget(fields []string) ([]string, error) {
 	if len(fields) == 0 {
 		fields = []string{"id"}
@@ -309,7 +311,7 @@ func (s *Store[T]) conflictTarget(fields []string) ([]string, error) {
 	}
 	if s.soft {
 		for _, idx := range dbx.Indexes(s.d, s.schema.ModelType) {
-			if len(idx.Columns) == len(cols) && sameSet(idx.Columns, cols) {
+			if idx.Soft && len(idx.Columns) == len(cols) && sameSet(idx.Columns, cols) {
 				return append(slices.Clone(idx.Columns), "delete_token"), nil
 			}
 		}

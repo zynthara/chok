@@ -304,6 +304,77 @@ func TestSoftUnique_ReleasedByDelete(t *testing.T) {
 	}
 }
 
+// shelfItem has an owner and no soft delete: Unique keeps a book unique
+// per owner.
+type shelfItem struct {
+	db.OwnedModel
+	BookID string `json:"book_id" store:"query" gorm:"size:24;not null"`
+}
+
+// TestUnique_PerOwner: UNIQUE(owner_id, book_id) on a model without soft
+// delete, on every dialect. A second copy for the same owner is a
+// DuplicateError, a 409 whose metadata names book_id — the first column
+// that is not the owner, as for a composite SoftUnique — and another
+// owner may hold the same book.
+func TestUnique_PerOwner(t *testing.T) {
+	d := dbtest.Open(t, db.Tables(db.Table(&shelfItem{}, db.Unique("uk_shelf_owner_book", "owner_id", "book_id"))))
+	items := store.New[shelfItem](d)
+	alice, bob := as(t.Context(), "alice"), as(t.Context(), "bob")
+	mustCreate(t, alice, items, &shelfItem{BookID: "b1"})
+	err := items.Create(alice, &shelfItem{BookID: "b1"})
+	var dup *store.DuplicateError
+	if !errors.As(err, &dup) || dup.Field != "book_id" || !errors.Is(err, chok.ErrConflict) {
+		t.Fatalf("a second copy for alice: %#v", err)
+	}
+	if e := dup.APIError(); e.Code != 409 || e.Metadata["field"] != "book_id" {
+		t.Fatalf("envelope %+v", e)
+	}
+	if dbtest.Driver() != "sqlite" && dup.Constraint != "uk_shelf_owner_book" {
+		t.Fatalf("%s names the index: %q", dbtest.Driver(), dup.Constraint)
+	}
+	mustCreate(t, bob, items, &shelfItem{BookID: "b1"})
+}
+
+// sku declares both kinds on one soft-delete model: a code that is never
+// reused and a title that a delete releases.
+type sku struct {
+	db.SoftDeleteModel
+	Code  string `json:"code" store:"query" gorm:"size:20;not null"`
+	Title string `json:"title" store:"query,update" gorm:"size:50;not null"`
+	Stock int    `json:"stock" store:"query,update" gorm:"not null;default:0"`
+}
+
+func skus(t *testing.T) *store.Store[sku] {
+	t.Helper()
+	return store.New[sku](dbtest.Open(t, db.Tables(db.Table(&sku{},
+		db.Unique("uk_sku_code", "code"),
+		db.SoftUnique("uk_sku_title", "title")))))
+}
+
+// TestUnique_KeptByDelete: on a soft-delete model a delete releases the
+// SoftUnique title and keeps the Unique code, on every dialect; each
+// DuplicateError names the field of the index that refused the write.
+func TestUnique_KeptByDelete(t *testing.T) {
+	s := skus(t)
+	ctx := t.Context()
+	first := &sku{Code: "c1", Title: "t1"}
+	mustCreate(t, ctx, s, first)
+	var dup *store.DuplicateError
+	if err := s.Create(ctx, &sku{Code: "c1", Title: "t2"}); !errors.As(err, &dup) || dup.Field != "code" {
+		t.Fatalf("a live code: %v", err)
+	}
+	if err := s.Delete(ctx, store.RID(first.RID)); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, ctx, s, &sku{Code: "c2", Title: "t1"}) // the title is free again
+	if err := s.Create(ctx, &sku{Code: "c1", Title: "t3"}); !errors.As(err, &dup) || dup.Field != "code" || !errors.Is(err, chok.ErrConflict) {
+		t.Fatalf("a deleted row keeps its code: %v", err)
+	}
+	if err := s.Restore(ctx, store.RID(first.RID)); !errors.As(err, &dup) || dup.Field != "title" {
+		t.Fatalf("restore while a live row holds the title: %v", err)
+	}
+}
+
 // timed has a DATETIME and a DATE column for the MySQL time baseline.
 type timed struct {
 	db.SoftDeleteModel

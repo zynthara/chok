@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 
@@ -17,22 +19,24 @@ import (
 type TableSpec struct {
 	model   any
 	typ     reflect.Type
-	indexes []SoftIndex
+	indexes []Index
 	soft    bool
 }
 
-// SoftIndex is a unique index that soft-deleted rows do not hold.
-type SoftIndex struct {
+// Index is one index declaration of Table: SoftUnique or Unique.
+type Index struct {
 	name    string
 	columns []string
+	soft    bool // SoftUnique: delete_token joins the columns
 }
 
 // Table declares the table of model, a struct or pointer to one that
-// embeds a model base, with its SoftUnique indexes. It panics when the
-// model is not a model, when a SoftUnique is given to a model without
-// soft delete, or when an index names a column that is missing or
-// nullable: the mistake is in the declaration and surfaces at startup.
-func Table(model any, indexes ...SoftIndex) TableSpec {
+// embeds a model base, with its indexes: Unique on any model, SoftUnique
+// on a model with soft delete. It panics when the model is not a model,
+// when a SoftUnique is given to a model without soft delete, or when an
+// index names a column that is missing or nullable: the mistake is in
+// the declaration and surfaces at startup.
+func Table(model any, indexes ...Index) TableSpec {
 	t := reflect.TypeOf(model)
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -57,14 +61,12 @@ func Table(model any, indexes ...SoftIndex) TableSpec {
 		panic(fmt.Sprintf("db.Table: %s embeds its model base through an unexported type; gorm maps only exported embedded structs to columns", t.Name()))
 	}
 	spec := TableSpec{model: ptr, typ: t, indexes: indexes, soft: isSoftDelete(t)}
-	if len(indexes) > 0 {
-		if !spec.soft {
+	for _, idx := range indexes {
+		if idx.soft && !spec.soft {
 			panic(fmt.Sprintf("db.Table: %s: SoftUnique needs a model with soft delete (db.SoftDeleteModel or db.OwnedSoftDeleteModel)", t.Name()))
 		}
-		for _, idx := range indexes {
-			if err := checkSoftIndex(s, idx); err != nil {
-				panic(fmt.Sprintf("db.Table: %s: %v", t.Name(), err))
-			}
+		if err := checkIndex(s, idx); err != nil {
+			panic(fmt.Sprintf("db.Table: %s: %v", t.Name(), err))
 		}
 	}
 	return spec
@@ -103,12 +105,38 @@ func plainTable(model any) TableSpec {
 // SoftUnique is a unique index over columns among live rows:
 // UNIQUE(columns..., delete_token). A soft delete writes a random token,
 // so the deleted row stops holding the values. The same index on every
-// dialect.
-func SoftUnique(name string, columns ...string) SoftIndex {
+// dialect; Table accepts it only on a model with soft delete. It panics
+// without a name or a column.
+func SoftUnique(name string, columns ...string) Index {
+	return newIndex("db.SoftUnique", name, columns, true)
+}
+
+// Unique is a unique index over columns among all rows: UNIQUE(columns...),
+// the same index on every dialect, on a model with any base. An owned
+// model without soft delete keeps a value unique per owner:
+//
+//	db.Table(&Like{}, db.Unique("uk_like_owner_post", "owner_id", "post_id"))
+//
+// On a soft-delete model a deleted row still holds its Unique values: use
+// Unique for a value that is never reused and SoftUnique for one a delete
+// releases. It panics without a name or a column.
+func Unique(name string, columns ...string) Index {
+	return newIndex("db.Unique", name, columns, false)
+}
+
+func newIndex(fn, name string, columns []string, soft bool) Index {
 	if name == "" || len(columns) == 0 {
-		panic("db.SoftUnique: needs an index name and at least one column")
+		panic(fn + ": needs an index name and at least one column")
 	}
-	return SoftIndex{name: name, columns: columns}
+	return Index{name: name, columns: slices.Clone(columns), soft: soft}
+}
+
+// kind names the declaration in Table's panics.
+func (idx Index) kind() string {
+	if idx.soft {
+		return "SoftUnique"
+	}
+	return "Unique"
 }
 
 var schemaCache sync.Map
@@ -117,27 +145,32 @@ func parseSchema(model any) (*schema.Schema, error) {
 	return schema.Parse(model, &schemaCache, schema.NamingStrategy{})
 }
 
-func checkSoftIndex(s *schema.Schema, idx SoftIndex) error {
+// checkIndex checks the columns of either kind of index alike: each is a
+// column of the model, NOT NULL and not a nullable Go type.
+func checkIndex(s *schema.Schema, idx Index) error {
+	if idx.name == "" || len(idx.columns) == 0 {
+		return errors.New("an index needs a name and at least one column; declare it with db.Unique or db.SoftUnique")
+	}
 	for _, col := range idx.columns {
 		f := s.LookUpField(col)
 		if f == nil || f.DBName != col {
 			f = s.FieldsByDBName[col]
 		}
 		if f == nil {
-			return fmt.Errorf("SoftUnique %s: no column %q (columns are database names, such as owner_id)", idx.name, col)
+			return fmt.Errorf("%s %s: no column %q (columns are database names, such as owner_id)", idx.kind(), idx.name, col)
 		}
 		ft := f.FieldType
 		if ft.Kind() == reflect.Pointer || (ft.PkgPath() == "database/sql" && strings.HasPrefix(ft.Name(), "Null")) {
-			return fmt.Errorf("SoftUnique %s: column %q is nullable; a unique index treats NULLs as distinct, so its columns must be NOT NULL values", idx.name, col)
+			return fmt.Errorf("%s %s: column %q is nullable; a unique index treats NULLs as distinct, so its columns must be NOT NULL values", idx.kind(), idx.name, col)
 		}
 		if !f.NotNull && !f.PrimaryKey {
-			return fmt.Errorf("SoftUnique %s: column %q needs gorm:\"not null\"", idx.name, col)
+			return fmt.Errorf("%s %s: column %q needs gorm:\"not null\"", idx.kind(), idx.name, col)
 		}
 	}
 	return nil
 }
 
-// autoMigrate creates or alters the tables, then their SoftUnique indexes.
+// autoMigrate creates or alters the tables, then their indexes.
 func autoMigrate(ctx context.Context, gdb *gorm.DB, specs []TableSpec) error {
 	gdb = gdb.WithContext(ctx)
 	for _, spec := range specs {
@@ -145,7 +178,7 @@ func autoMigrate(ctx context.Context, gdb *gorm.DB, specs []TableSpec) error {
 			return fmt.Errorf("db: auto migrate %s: %w", spec.typ.Name(), err)
 		}
 		for _, idx := range spec.indexes {
-			if err := createSoftIndex(gdb, spec, idx); err != nil {
+			if err := createIndex(gdb, spec, idx); err != nil {
 				return fmt.Errorf("db: create index %s: %w", idx.name, err)
 			}
 		}
@@ -153,7 +186,11 @@ func autoMigrate(ctx context.Context, gdb *gorm.DB, specs []TableSpec) error {
 	return nil
 }
 
-func createSoftIndex(gdb *gorm.DB, spec TableSpec, idx SoftIndex) error {
+// createIndex creates idx, UNIQUE(columns...) with delete_token last for
+// a SoftUnique, unless an index of its name exists: on the table for
+// MySQL, anywhere in the schema for SQLite and Postgres, whose index
+// names are schema-wide. An existing index's columns are not compared.
+func createIndex(gdb *gorm.DB, spec TableSpec, idx Index) error {
 	stmt := &gorm.Statement{DB: gdb}
 	if err := stmt.Parse(spec.model); err != nil {
 		return err
@@ -164,7 +201,9 @@ func createSoftIndex(gdb *gorm.DB, spec TableSpec, idx SoftIndex) error {
 	for _, c := range idx.columns {
 		cols = append(cols, quote(dialect, c))
 	}
-	cols = append(cols, quote(dialect, "delete_token"))
+	if idx.soft {
+		cols = append(cols, quote(dialect, "delete_token"))
+	}
 	ddl := fmt.Sprintf("CREATE UNIQUE INDEX %s ON %s (%s)", quote(dialect, idx.name), quote(dialect, table), strings.Join(cols, ", "))
 	if dialect != "mysql" {
 		ddl = strings.Replace(ddl, "INDEX", "INDEX IF NOT EXISTS", 1)

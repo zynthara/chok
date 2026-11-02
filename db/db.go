@@ -168,9 +168,9 @@ func (d *DB) registered() []*ownerSchema {
 }
 
 // Migrate applies the migrate mode to every registered schema: auto
-// migrates the tables and their SoftUnique indexes, versioned applies the
-// pending files, off checks that none is pending. Open and RegisterSchema
-// already did this; the CLI and tests call it again.
+// migrates the tables and their Unique and SoftUnique indexes, versioned
+// applies the pending files, off checks that none is pending. Open and
+// RegisterSchema already did this; the CLI and tests call it again.
 func (d *DB) Migrate(ctx context.Context) error {
 	for _, s := range d.registered() {
 		if err := d.migrate(ctx, s); err != nil {
@@ -191,7 +191,7 @@ func (d *DB) migrate(ctx context.Context, s *ownerSchema) error {
 		if len(t.indexes) > 0 {
 			var idx []dbx.Index
 			for _, i := range t.indexes {
-				idx = append(idx, dbx.Index{Name: i.name, Columns: i.columns})
+				idx = append(idx, dbx.Index{Name: i.name, Columns: i.columns, Soft: i.soft})
 			}
 			d.indexes.Store(t.typ, idx)
 		}

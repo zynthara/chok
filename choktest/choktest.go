@@ -58,8 +58,8 @@ func DB(t testing.TB, specs ...db.TableSpec) *db.DB {
 }
 
 // Store returns the store of T on a fresh database holding T's table, as
-// store.New would with opts. Declare SoftUnique indexes with DB and
-// store.New instead.
+// store.New would with opts. Declare Unique and SoftUnique indexes with
+// DB and store.New instead.
 func Store[T db.Modeler](t testing.TB, opts ...store.Option) *store.Store[T] {
 	t.Helper()
 	return store.New[T](DB(t, db.Table(new(T))), opts...)

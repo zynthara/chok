@@ -12,7 +12,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | Package | Declarations |
 |---|---|
 | [`chok`](#chok) | 62 |
-| [`db`](#db) | 28 |
+| [`db`](#db) | 29 |
 | [`store`](#store) | 29 |
 | [`store/where`](#storewhere) | 27 |
 | [`identity`](#identity) | 19 |
@@ -27,7 +27,7 @@ full documentation is on pkg.go.dev and in `go doc`.
 | [`identity/github (provider)`](#identitygithub) | 1 |
 | [`identity/apple (provider)`](#identityapple) | 1 |
 | [`identity/facebook (provider)`](#identityfacebook) | 1 |
-| total | 234 |
+| total | 235 |
 
 ## chok
 
@@ -111,6 +111,9 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `type DB struct{ ... }` | DB is an open database: a gorm handle behind a narrow API, the schemas registered on it and, for SQLite, its maintenance. |
 | ↳ `func MustOpen(cfg Config, opts ...Option) *DB` | MustOpen is Open that panics on error. |
 | ↳ `func Open(cfg Config, opts ...Option) (*DB, error)` | Open connects, applies the migrate mode to the application's schema and returns the handle. |
+| `type Index struct{ ... }` | Index is one index declaration of Table: SoftUnique or Unique. |
+| ↳ `func SoftUnique(name string, columns ...string) Index` | SoftUnique is a unique index over columns among live rows: UNIQUE(columns..., delete_token). |
+| ↳ `func Unique(name string, columns ...string) Index` | Unique is a unique index over columns among all rows: UNIQUE(columns...), the same index on every dialect, on a model with any base. |
 | `type MigrationStatus struct{ ... }` | MigrationStatus is one versioned migration of one owner. |
 | `type Model struct{ ... }` | Model is the base of a model: a numeric key that stays internal, a public RID (json "id"), an optimistic-lock version and timestamps. |
 | `type Modeler interface{ ... }` | Modeler is satisfied only by the four model bases, through an unexported method: embed one of them to make a struct a model. |
@@ -127,11 +130,9 @@ full documentation is on pkg.go.dev and in `go doc`.
 | `type RIDPrefixer interface{ ... }` | RIDPrefixer gives a model's RIDs a prefix: posts as pst_xxx. |
 | `type SQLiteConfig struct{ ... }` | SQLiteConfig is db.sqlite. |
 | `type SoftDeleteModel struct{ ... }` | SoftDeleteModel is Model with soft delete: a deleted row keeps its data, gets DeletedAt, and a random DeleteToken that frees it from the SoftUnique indexes so a live row may reuse the values. |
-| `type SoftIndex struct{ ... }` | SoftIndex is a unique index that soft-deleted rows do not hold. |
-| ↳ `func SoftUnique(name string, columns ...string) SoftIndex` | SoftUnique is a unique index over columns among live rows: UNIQUE(columns..., delete_token). |
 | `type StorePolicy struct{ ... }` | StorePolicy is the posture a store.Store starts from: db.store in the configuration, or store.Policy for one store. |
 | `type TableSpec struct{ ... }` | TableSpec declares a model's table for auto migration. |
-| ↳ `func Table(model any, indexes ...SoftIndex) TableSpec` | Table declares the table of model, a struct or pointer to one that embeds a model base, with its SoftUnique indexes. |
+| ↳ `func Table(model any, indexes ...Index) TableSpec` | Table declares the table of model, a struct or pointer to one that embeds a model base, with its indexes: Unique on any model, SoftUnique on a model with soft delete. |
 
 ## store
 

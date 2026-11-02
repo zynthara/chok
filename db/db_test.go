@@ -2,7 +2,9 @@ package db_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -209,6 +211,143 @@ func TestSoftUnique_IndirectSoftDelete(t *testing.T) {
 	d := dbtest.Open(t, db.Tables(db.Table(&wrapped{}, db.SoftUnique("uk_wrapped_code", "code"))))
 	if !d.Unsafe(t.Context()).Migrator().HasIndex(&wrapped{}, "uk_wrapped_code") {
 		t.Fatal("a soft-delete base embedded one level down counts")
+	}
+}
+
+// bookmark has no soft delete and an owner: the framework declares
+// owner_id, so only Table can put it in a composite unique index.
+type bookmark struct {
+	db.OwnedModel
+	BookID string `gorm:"size:24;not null"`
+}
+
+func newBookmark(owner, book string) *bookmark {
+	b := &bookmark{BookID: book}
+	b.SetOwnerID(owner)
+	return b
+}
+
+// TestUnique_OwnedModel: Unique gives a model without soft delete
+// UNIQUE(owner_id, book_id), the same on every dialect. Migrating again,
+// on the handle or from a second process, keeps the index — on MySQL by
+// finding it in information_schema.
+func TestUnique_OwnedModel(t *testing.T) {
+	cfg := dbtest.Config(t)
+	tables := db.Tables(db.Table(&bookmark{}, db.Unique("uk_bookmark_owner_book", "owner_id", "book_id")))
+	d := dbtest.OpenConfig(t, cfg, tables)
+	gdb := d.Unsafe(t.Context())
+	if err := gdb.Create(newBookmark("u1", "b1")).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Create(newBookmark("u1", "b1")).Error; err == nil {
+		t.Fatal("an owner holds a book once")
+	}
+	if err := gdb.Create(newBookmark("u2", "b1")).Error; err != nil {
+		t.Fatalf("another owner may hold the same book: %v", err)
+	}
+	cols := indexColumns(t, gdb, "bookmarks", "uk_bookmark_owner_book")
+	slices.Sort(cols)
+	if !slices.Equal(cols, []string{"book_id", "owner_id"}) {
+		t.Fatalf("UNIQUE(owner_id, book_id) on %s, got %v", dbtest.Driver(), cols)
+	}
+	if err := d.Migrate(t.Context()); err != nil {
+		t.Fatalf("migrating again is a no-op: %v", err)
+	}
+	again := dbtest.OpenConfig(t, cfg, tables)
+	if err := again.Unsafe(t.Context()).Create(newBookmark("u1", "b1")).Error; err == nil {
+		t.Fatal("a second open keeps the index")
+	}
+	if n := len(indexColumns(t, again.Unsafe(t.Context()), "bookmarks", "uk_bookmark_owner_book")); n != 2 {
+		t.Fatalf("a second open leaves the index as it is: %d columns", n)
+	}
+}
+
+// member declares both kinds on one soft-delete model: a login that is
+// never reused and an email a delete releases.
+type member struct {
+	db.SoftDeleteModel
+	Login string `gorm:"size:50;not null"`
+	Email string `gorm:"size:100;not null"`
+}
+
+// TestUnique_HeldAfterSoftDelete: on a soft-delete model Unique counts
+// every row, UNIQUE(login), so a deleted row keeps its login, while
+// SoftUnique counts live rows, UNIQUE(email, delete_token), so the same
+// delete releases the email.
+func TestUnique_HeldAfterSoftDelete(t *testing.T) {
+	d := dbtest.Open(t, db.Tables(db.Table(&member{},
+		db.Unique("uk_member_login", "login"),
+		db.SoftUnique("uk_member_email", "email"))))
+	gdb := d.Unsafe(t.Context())
+	first := &member{Login: "ann", Email: "ann@x"}
+	if err := gdb.Create(first).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Create(&member{Login: "ann", Email: "other@x"}).Error; err == nil {
+		t.Fatal("a live login conflicts")
+	}
+	// What store's soft delete does: stamp a token, then delete.
+	if err := gdb.Model(first).Update("delete_token", db.NewRID("del")[4:]).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Delete(first).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Create(&member{Login: "ann", Email: "new@x"}).Error; err == nil {
+		t.Fatal("a deleted row still holds its Unique login")
+	}
+	if err := gdb.Create(&member{Login: "bea", Email: "ann@x"}).Error; err != nil {
+		t.Fatalf("a deleted row frees its SoftUnique email: %v", err)
+	}
+	login := indexColumns(t, gdb, "members", "uk_member_login")
+	email := indexColumns(t, gdb, "members", "uk_member_email")
+	slices.Sort(email)
+	if !slices.Equal(login, []string{"login"}) || !slices.Equal(email, []string{"delete_token", "email"}) {
+		t.Fatalf("UNIQUE(login) and UNIQUE(email, delete_token) on %s, got %v and %v", dbtest.Driver(), login, email)
+	}
+}
+
+// nullSQL is a model without soft delete and a sql.Null column.
+type nullSQL struct {
+	db.Model
+	Label sql.NullString `gorm:"size:20"`
+}
+
+// TestTable_IndexDeclarations: Unique takes a model with any base,
+// SoftUnique only one with soft delete; both check their columns alike
+// and their panics name the kind.
+func TestTable_IndexDeclarations(t *testing.T) {
+	db.Table(&note{}, db.Unique("uk_note_title", "title")) // a model without soft delete takes Unique
+	db.Table(&tag{}, db.Unique("uk_tag_name", "name"), db.SoftUnique("uk_tag_scope", "scope"))
+	for _, c := range []struct {
+		name, want string
+		fn         func()
+	}{
+		{"unique without a name", "db.Unique: needs an index name and at least one column", func() { db.Unique("", "title") }},
+		{"unique without columns", "db.Unique: needs an index name and at least one column", func() { db.Unique("n") }},
+		{"unique without either", "db.Unique: needs an index name and at least one column", func() { db.Unique("") }},
+		{"soft unique without a name", "db.SoftUnique: needs an index name and at least one column", func() { db.SoftUnique("", "name") }},
+		{"the zero Index", "db.Table: note: an index needs a name and at least one column", func() { db.Table(&note{}, db.Index{}) }},
+		{"unique, missing column", `db.Table: note: Unique uk_x: no column "nope"`, func() { db.Table(&note{}, db.Unique("uk_x", "nope")) }},
+		{"soft unique, missing column", `db.Table: tag: SoftUnique uk_x: no column "nope"`, func() { db.Table(&tag{}, db.SoftUnique("uk_x", "nope")) }},
+		{"unique, pointer column", `db.Table: nullable: Unique uk_x: column "label" is nullable`, func() { db.Table(&nullable{}, db.Unique("uk_x", "label")) }},
+		{"unique, sql.Null column", `db.Table: nullSQL: Unique uk_x: column "label" is nullable`, func() { db.Table(&nullSQL{}, db.Unique("uk_x", "label")) }},
+		{"soft unique, pointer column", `db.Table: nullable: SoftUnique uk_x: column "label" is nullable`, func() { db.Table(&nullable{}, db.SoftUnique("uk_x", "label")) }},
+		{"unique, no not null", `db.Table: loose: Unique uk_x: column "label" needs gorm:"not null"`, func() { db.Table(&loose{}, db.Unique("uk_x", "label")) }},
+		{"soft unique without soft delete", "db.Table: note: SoftUnique needs a model with soft delete", func() { db.Table(&note{}, db.SoftUnique("uk_x", "title")) }},
+		{"soft unique after a unique, without soft delete", "db.Table: note: SoftUnique needs a model with soft delete", func() {
+			db.Table(&note{}, db.Unique("uk_ok", "title"), db.SoftUnique("uk_x", "title"))
+		}},
+	} {
+		func() {
+			defer func() {
+				r := recover()
+				if msg := fmt.Sprint(r); r == nil || !strings.Contains(msg, c.want) {
+					t.Errorf("%s: panic %v, want one containing %q", c.name, r, c.want)
+				}
+			}()
+			c.fn()
+		}()
 	}
 }
 

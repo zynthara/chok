@@ -1,9 +1,10 @@
 // Package dbx carries what db knows about a model's tables to store and
-// the batteries without widening db's public API: the SoftUnique indexes,
-// which store uses to name the field of a duplicate-key error, the plain
-// tables a battery declares for its own schema, the statement observer
-// telemetry attaches to a handle, and the batteries' migration files the
-// chok command applies.
+// the batteries without widening db's public API: the indexes db.Table
+// declares, SoftUnique and Unique, which store uses to name the field of
+// a duplicate-key error and to resolve an upsert's conflict target, the
+// plain tables a battery declares for its own schema, the statement
+// observer telemetry attaches to a handle, and the batteries' migration
+// files the chok command applies.
 package dbx
 
 import (
@@ -23,14 +24,19 @@ import (
 // written only during package initialization.
 var Migrations = map[string]fs.FS{}
 
-// Index is one SoftUnique index.
+// Index is one index db.Table declares: a SoftUnique or a Unique.
 type Index struct {
 	Name    string
 	Columns []string
+	// Soft marks a SoftUnique, UNIQUE(Columns..., delete_token), whose
+	// upsert conflict target gains delete_token; a Unique is
+	// UNIQUE(Columns...), and Columns are its target as they are.
+	Soft bool
 }
 
-// Indexes returns the SoftUnique metadata belonging to a database handle.
-// Set by db at initialization; no model metadata is shared across handles.
+// Indexes returns the index metadata of model type t on a database
+// handle, SoftUnique and Unique alike. Set by db at initialization; no
+// model metadata is shared across handles.
 var Indexes func(d any, t reflect.Type) []Index
 
 // PlainTable, set by package db when it initializes, declares the table
