@@ -343,8 +343,11 @@ schema；`*db.DB` 实现 Closer / Healther / Namer，交给 `app.Use`。
   panic。auto 模式按名字建索引；已有同名索引时读目录核对：同一张表、列与列序相同
   （`SoftUnique` 的 `delete_token` 在最后）、唯一、不带 WHERE。有一处不符，`Open` /
   `RegisterSchema` / `Migrate` 就失败，错误里写出库里的与声明的两边，不会替应用删除
-  或重建索引。SQLite 与 Postgres 的索引名在整个 schema 里唯一，同名索引在别的表上也
-  算不符；MySQL 的索引名按表计。versioned 与 off 模式下索引由应用的 SQL 负责。
+  或重建索引。gorm 的 MySQL 驱动（v1.6.0）在 AutoMigrate 时会删掉列上不是它按
+  `unique` / `uniqueIndex` tag 建的单列唯一索引（单列的 `db.Unique`、手写的都在内），
+  `db/mysql.go` 覆盖了这一步，三方言都不删 chok 没建的索引。SQLite 与 Postgres 的
+  索引名在整个 schema 里唯一，同名索引在别的表上也算不符；MySQL 的索引名按表计。
+  versioned 与 off 模式下索引由应用的 SQL 负责。
 
 ### 6.2 迁移：三种模式、单账本
 
