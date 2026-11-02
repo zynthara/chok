@@ -218,7 +218,9 @@ func openMySQL(cfg *Config, gcfg *gorm.Config) (*gorm.DB, error) {
 	dc.ParseTime, dc.Loc = true, time.UTC
 	dc.TLSConfig = tlsName
 	dc.Params = map[string]string{"charset": "utf8mb4", "time_zone": "'+00:00'"}
-	gdb, err := gorm.Open(mysql.New(mysql.Config{DSNConfig: dc, DSN: dc.FormatDSN()}), gcfg)
+	// Exactly what mysql.New returns when DSN and DSNConfig are both set, without an interface to assert.
+	driver := &mysql.Dialector{Config: &mysql.Config{DSNConfig: dc, DSN: dc.FormatDSN()}}
+	gdb, err := gorm.Open(mysqlDialector{driver}, gcfg)
 	if err != nil {
 		return nil, fmt.Errorf("db: open mysql: %w", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"gorm.io/gorm"
+
 	"github.com/zynthara/chok/db"
 	"github.com/zynthara/chok/internal/dbtest"
 )
@@ -54,6 +56,7 @@ func openErr(t *testing.T, cfg db.Config, opts ...db.Option) error {
 // of standing in for it.
 func TestCreateIndex_DifferentIndexFails(t *testing.T) {
 	ownerBook := db.Table(&bookmark{}, db.Unique("uk_bm", "owner_id", "book_id"))
+	owner := db.Table(&bookmark{}, db.Unique("uk_bm_owner", "owner_id"))
 	nameScope := db.Table(&tag{}, db.SoftUnique("uk_tag_name", "name", "scope"))
 	email := db.Table(&member{}, db.SoftUnique("uk_member_email", "email"))
 	for _, c := range []struct {
@@ -68,8 +71,9 @@ func TestCreateIndex_DifferentIndexFails(t *testing.T) {
 			`index "uk_bm" exists on "bookmarks" over (owner_id, rid), unique; declared on "bookmarks" over (owner_id, book_id), unique`, false},
 		{"not unique", "CREATE INDEX uk_bm ON bookmarks (owner_id, book_id)", ownerBook,
 			`index "uk_bm" exists on "bookmarks" over (owner_id, book_id), not unique; declared on "bookmarks" over (owner_id, book_id), unique`, false},
-		// Two columns: gorm's MySQL AutoMigrate drops a one-column unique
-		// index on a column without a unique tag before chok looks.
+		// gorm's MySQL migrator would drop this index before chok looks.
+		{"another column", "CREATE UNIQUE INDEX uk_bm_owner ON bookmarks (book_id)", owner,
+			`index "uk_bm_owner" exists on "bookmarks" over (book_id), unique; declared on "bookmarks" over (owner_id), unique`, false},
 		{"a SoftUnique without delete_token", "CREATE UNIQUE INDEX uk_tag_name ON tags (name, scope)", nameScope,
 			`index "uk_tag_name" exists on "tags" over (name, scope), unique; declared on "tags" over (name, scope, delete_token), unique`, false},
 		{"partial", "CREATE UNIQUE INDEX uk_bm ON bookmarks (owner_id, book_id) WHERE book_id <> 'x'", ownerBook,
@@ -199,5 +203,114 @@ func TestUnique_AdoptsTheIndexMadeByHand(t *testing.T) {
 	}
 	if err := gdb.Create(item()).Error; err == nil {
 		t.Fatal("the index holds")
+	}
+}
+
+// setting is one row per owner, as an application keeps each user's
+// settings: UNIQUE(owner_id), one column, which the model base tags.
+type setting struct {
+	db.OwnedModel
+	Theme string `gorm:"size:20;not null"`
+}
+
+// TestUnique_OneColumnKeptAcrossOpens: the next Open finds a one-column
+// Unique that the first made as declared and runs no DDL on it, so the
+// table never goes without it; it stays the column's one unique index and
+// holds. gorm's MySQL migrator drops a one-column unique index it did not
+// make; chok's keeps it.
+func TestUnique_OneColumnKeptAcrossOpens(t *testing.T) {
+	cfg := dbtest.Config(t)
+	tables := db.Tables(db.Table(&setting{}, db.Unique("uk_setting_owner", "owner_id")))
+	if err := openErr(t, cfg, tables); err != nil {
+		t.Fatal(err)
+	}
+	var log logBuffer
+	d := dbtest.OpenConfig(t, cfg, db.Logger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))), tables)
+	// Statements are logged with their placeholders, so only DDL names
+	// the index.
+	if s := log.String(); !strings.Contains(s, `msg="db: query"`) || strings.Contains(s, "uk_setting_owner") {
+		t.Fatalf("the second Open runs no statement on the index:\n%s", s)
+	}
+	gdb := d.Unsafe(t.Context())
+	if names := uniqueOver(t, gdb, "settings", "owner_id"); !slices.Equal(names, []string{"uk_setting_owner"}) {
+		t.Fatalf("one unique index over (owner_id) on %s, got %v", dbtest.Driver(), names)
+	}
+	row := func() *setting {
+		s := &setting{Theme: "dark"}
+		s.SetOwnerID("u1")
+		return s
+	}
+	if err := gdb.Create(row()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Create(row()).Error; err == nil {
+		t.Fatal("the index holds")
+	}
+}
+
+// uniqueOver returns the unique indexes of table over column alone, as
+// GetIndexes lists them: MySQL lists the index behind a unique
+// constraint, Postgres and SQLite leave it out.
+func uniqueOver(t *testing.T, gdb *gorm.DB, table, column string) []string {
+	t.Helper()
+	idx, err := gdb.Migrator().GetIndexes(table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, i := range idx {
+		if u, _ := i.Unique(); u && slices.Equal(i.Columns(), []string{column}) {
+			names = append(names, i.Name())
+		}
+	}
+	return names
+}
+
+// handle and plainHandle are one table, handles, with and without gorm's
+// unique tag on name, which gorm migrates as the constraint
+// uni_handles_name.
+type handle struct {
+	db.Model
+	Name string `gorm:"size:50;not null;unique"`
+}
+
+type plainHandle struct {
+	db.Model
+	Name string `gorm:"size:50;not null"`
+}
+
+func (plainHandle) TableName() string { return "handles" }
+
+// TestOpen_MigratesTheUniqueTag: a unique tag added to a column adds the
+// constraint uni_<table>_<column>, migrating again keeps it as the
+// column's one unique index, and removing the tag drops it, on MySQL as
+// on the other dialects.
+func TestOpen_MigratesTheUniqueTag(t *testing.T) {
+	cfg := dbtest.Config(t)
+	plain, tagged := db.Tables(db.Table(&plainHandle{})), db.Tables(db.Table(&handle{}))
+	for _, tables := range []db.Option{plain, tagged} {
+		if err := openErr(t, cfg, tables); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gdb := dbtest.OpenConfig(t, cfg, tagged).Unsafe(t.Context())
+	if !gdb.Migrator().HasConstraint(&handle{}, "uni_handles_name") {
+		t.Fatal("the tag adds the constraint")
+	}
+	other := slices.DeleteFunc(uniqueOver(t, gdb, "handles", "name"), func(n string) bool { return n == "uni_handles_name" })
+	if len(other) > 0 {
+		t.Fatalf("the constraint is the one unique index over (name) on %s; also %v", dbtest.Driver(), other)
+	}
+	if err := gdb.Create(&handle{Name: "ann"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Create(&handle{Name: "ann"}).Error; err == nil {
+		t.Fatal("the constraint holds")
+	}
+	if err := openErr(t, cfg, plain); err != nil {
+		t.Fatal(err)
+	}
+	if gdb.Migrator().HasConstraint(&handle{}, "uni_handles_name") {
+		t.Fatal("removing the tag drops the constraint")
 	}
 }
