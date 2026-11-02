@@ -79,7 +79,12 @@ package, configuration key, API, table and metric to its new form.
   pool wait included; Postgres and MySQL hold the migration lock and run
   the SQL on one connection. A transaction of another handle is not
   reused: `RunInTx` on a second `*DB` inside it is an error. telemetry
-  sees `RunInTx` as BEGIN, COMMIT and ROLLBACK phases.
+  sees `RunInTx` as BEGIN, COMMIT and ROLLBACK phases. `db.Table` takes two kinds of unique index, both a `db.Index`:
+  `SoftUnique`, which a soft delete releases, and `Unique(name, cols...)`
+  on a model with any base, the same `UNIQUE(cols...)` on every dialect,
+  so an owned model without soft delete keeps a value unique per owner
+  with no hand-written DDL. A deleted row keeps its `Unique` values, and
+  an upsert by them updates that row, which stays deleted.
 - **`store`** and **`store/where`**: a generic `Store[T]` with owner
   scoping that fails closed, patches with optimistic locking, cursor
   pages, aggregates and projections as generic methods, and error types
@@ -108,7 +113,13 @@ package, configuration key, API, table and metric to its new form.
   gave up, cleared by the next write that goes through; the retention
   sweep runs beside the writer. `identity/rbac`'s watcher reloads the
   policy every 30 seconds and when its Redis subscription returns, so a
-  lost notification still converges.
+  lost notification still converges. The login throttle holds a client address
+  to a limit of its own, `auth.login_rate_limit_per_ip` (100 per
+  `login_rate_window`): the failed logins and passwordless verifies, and
+  every forgot-password and passwordless start, counted by
+  `chok.ClientIP`, which everyone behind one NAT or proxy shares; an
+  email or a user is held to `login_rate_limit` (10), and 0 counts no
+  address.
 - **`identity`**: passwordless sign-in (`auth.passwordless`):
   `POST /auth/passwordless/start` answers 202 whatever the address and
   mails a code and a magic-link token in the background;
@@ -327,6 +338,9 @@ package, configuration key, API, table and metric to its new form.
   numeric key is in ids, which `ListIn` cannot name. It now reads like
   `ListIn`: 500 keys a query, filters as options, and the rows in key
   order.
+- **Breaking:** `db.SoftIndex` is named `db.Index`, the type both
+  `db.SoftUnique` and the new `db.Unique` return; `db.Table` takes
+  `...db.Index`.
 
 ### Removed
 
