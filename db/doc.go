@@ -2,6 +2,7 @@
 //
 //	d := db.MustOpen(cfg.DB, db.Tables(
 //		db.Table(&Post{}, db.SoftUnique("uk_post_title_owner", "title", "owner_id")),
+//		db.Table(&Like{}, db.Unique("uk_like_owner_post", "owner_id", "post_id")),
 //	))
 //	app.Use(d) // health, and close after everything that uses it
 //
@@ -20,8 +21,8 @@
 // db.migrate picks one of three modes, applied at Open to the
 // application's schema and at RegisterSchema to each battery's:
 //
-//   - auto: AutoMigrate the declared tables and create their SoftUnique
-//     indexes. The default, for development and small services.
+//   - auto: AutoMigrate the declared tables and create their Unique and
+//     SoftUnique indexes. The default, for development and small services.
 //   - versioned: apply the SQL files given to Migrations, named
 //     <14-digit version>_<name>.sql, forward only. One ledger table,
 //     chok_migrations, records them per owner ("app" and each battery).

@@ -44,7 +44,7 @@ RCU 快照。v0.2 把这些全部拿掉，只留三条规则：
 | 包 | 职责 | 依赖 |
 |---|---|---|
 | `chok`（根） | 配置装载、App 与生命周期、路由与类型化 handler、绑定与校验、错误信封、默认中间件、OpenAPI 3.1 与 `/docs`、健康探针、slog、`Principal` | 不 import 任何电池，也不 import gorm |
-| `db` | 打开三方言（SQLite / MySQL / Postgres）、池、事务、模型基座、RID、`Table` / `SoftUnique`、三种迁移模式与单账本 | gorm 与三个驱动 |
+| `db` | 打开三方言（SQLite / MySQL / Postgres）、池、事务、模型基座、RID、`Table` / `SoftUnique` / `Unique`、三种迁移模式与单账本 | gorm 与三个驱动 |
 | `store` | 泛型 `Store[T]`：CRUD、owner 隔离、Patch 与乐观锁、游标、聚合与投影、自描述错误 | `chok`、`db`、`store/where` |
 | `store/where` | 查询 DSL：`Eq` / `In` / `Like` / `Order` / `Page` / `Cursor` / `FromQuery` … | gorm（`Option` 的签名里出现 `*gorm.DB`，D11） |
 | `identity` | 账户、JWT、登录限速、OAuth、邮件验证码的无密码登录、cookie 会话、审计；`Authn()` 中间件；`/auth/*` 路由 | `chok`、`db`、`store` |
@@ -61,7 +61,7 @@ RCU 快照。v0.2 把这些全部拿掉，只留三条规则：
 协作时，由应用写一个闭包把它们接起来——`jobs.Observe(func(ev jobs.Event) {
 hub.Publish(…) })` 把任务的运行事件交给 realtime。需要跨包协作而又不该成为公开
 API 的地方，走 `internal/` 下的挂点：`internal/dbx`
-（db 告诉 store 与电池的东西：SoftUnique 索引、无基座的普通表、语句观察者、
+（db 告诉 store 与电池的东西：`Table` 声明的唯一索引、无基座的普通表、语句观察者、
 电池的迁移文件）、`internal/logtap`（telemetry 桥接 App 的 logger）、
 `internal/tracectx`（审计记录补 trace id）、`internal/redislog`（go-redis
 日志进 slog）、`internal/apptest`（choktest 读 App 的就绪状态）。挂点都由提供方
@@ -332,15 +332,22 @@ schema；`*db.DB` 实现 Closer / Healther / Namer，交给 `app.Use`。
   `CreatedAt` / `UpdatedAt`）、`SoftDeleteModel`（加 `DeletedAt` +
   `DeleteToken`）、`OwnedModel`（加 `OwnerID`）、`OwnedSoftDeleteModel`。
   对外 ID 是带前缀的 RID（`pst_…`，模型实现 `RIDPrefix()`），数字主键不出进程。
-- **`db.Table(model, db.SoftUnique(name, cols...))`**：软删模型上的唯一约束
-  三方言同一形状 `UNIQUE(cols..., delete_token)`，活行的 token 为空串，软删时
-  写入随机值，于是删除释放唯一值。可空列、非软删模型在 `db.Table` 处 panic。
+- **`db.Table(model, indexes...)`**：两种唯一索引声明，各自三方言同一形状。
+  `db.SoftUnique(name, cols...)` 只给软删模型，形状 `UNIQUE(cols..., delete_token)`：
+  活行的 token 为空串，软删时写入随机值，于是删除释放唯一值。
+  `db.Unique(name, cols...)` 任何基座都行，形状 `UNIQUE(cols...)`；软删模型上被删的
+  行仍占着它的值。永不复用的值用 `Unique`，删除后要释放的值用 `SoftUnique`，同一个
+  模型可以两种都声明。非软删的 `OwnedModel` 要「每个 owner 唯一」就写
+  `db.Unique("uk_…", "owner_id", "x")`：`OwnerID` 的 gorm tag 在框架里，应用加不了
+  复合索引。可空列、缺 `not null`、`SoftUnique` 给非软删模型，都在 `db.Table` 处
+  panic。auto 模式按名字建索引（已有同名索引就不动，也不比较列）；versioned 与 off
+  模式下索引由应用的 SQL 负责。
 
 ### 6.2 迁移：三种模式、单账本
 
 | `db.migrate` | 行为 |
 |---|---|
-| `auto`（默认） | AutoMigrate 声明的表并建 SoftUnique 索引；版本化 SQL 不执行 |
+| `auto`（默认） | AutoMigrate 声明的表并建 `Unique` / `SoftUnique` 索引；版本化 SQL 不执行 |
 | `versioned` | 启动时在跨进程锁下按版本顺序应用未应用的 SQL 文件 |
 | `off` | 什么都不做，但有待应用 / 部分完成 / 漂移 / 缺失的文件就拒绝启动（`db.ErrNotMigrated`） |
 
@@ -362,8 +369,8 @@ MySQL 的 DDL 提交与账本更新不是一个原子动作：DDL 已执行而�
 
 ### 6.3 `store`：安全栏
 
-`store.New[T](d, opts...)` 校验模型（必须有 `store` tag、字段名拼写、
-SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
+`store.New[T](d, opts...)` 校验模型（必须有 `store` tag、字段名拼写；索引列
+已在 `db.Table` 处校验）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
 
 - **tag 管客户端，不管代码**：`store:"query"` 只管 URL——`ListFromQuery` /
   `chok.List` 的过滤与排序、`QueryFields()`、OpenAPI 的过滤参数；
@@ -400,8 +407,10 @@ SoftUnique 列）后返回 `*Store[T]`，`T` 必须嵌入某个 db 基座：
   排序）、`GroupBy[K]`；结果类型由 Go 类型决定，入口做静态检查，不读数据库
   catalog。
 - **写**：`Create` / `BatchCreate` / `Update` / `Delete`（软删写 token）/
-  `Restore` / `Upsert` / `BatchUpsert`（缺省冲突键 rid；带 scope 的 store 拒绝
-  Upsert，因为更新半边无法围栏）。`Hooks` 的 BeforeCreate / BeforeUpdate /
+  `Restore` / `Upsert` / `BatchUpsert`（缺省冲突键 rid；冲突字段是 `SoftUnique`
+  的列时补 `delete_token`，只算活行，是 `Unique` 的列时原样，被删的行也算，更新后
+  它仍是删除状态；带 scope 的 store 拒绝 Upsert，因为更新半边无法围栏）。
+  `Hooks` 的 BeforeCreate / BeforeUpdate /
   BeforeDelete 在变更字段、scope 与 locator 校验之后、写 SQL 之前调用；
   这不证明 locator 命中的行存在或属于当前用户，也不替代权限判断。外部副作用放在
   提交后的可靠任务中，不能靠 Before hook 保证最终写入成功。
@@ -655,7 +664,7 @@ provider 默认按 Telemetry 实例隔离；第三方客户端可显式接收 Tr
 App.Use 将日志桥绑定到当前 App，自建访问日志与根日志共享这个桥，不串到其他 App。
 root 的默认 New 仍安装 slog.Default（兼容单 App 常见用法）；多 App 用 chok.Logger
 显式传入各自 logger。数据库在 Open 时固定捕获 logger，后续 New 不再重定向它。
-Base 自带 Load 来源，SIGHUP 不读取其他配置的来源；SoftUnique 元数据归 DB 句柄所有。
+Base 自带 Load 来源，SIGHUP 不读取其他配置的来源；`Table` 声明的索引元数据归 DB 句柄所有。
 
 ### 7.4 `cache`
 
