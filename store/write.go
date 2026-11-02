@@ -9,6 +9,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -234,13 +235,17 @@ func (s *Store[T]) Restore(ctx context.Context, loc Locator) error {
 
 // Upsert inserts obj or, when a row with the same conflict fields exists,
 // overwrites that row's update fields and advances its version. conflict
-// names the fields of a unique index, the RID when empty; on a soft-delete
-// model a SoftUnique index counts only live rows, a Unique index every
-// row: a deleted row holding the values is the one updated, and it stays
-// deleted. MySQL updates on any unique key whatever conflict says. obj is
-// not reloaded: after an update it does not hold the stored row's RID or
-// version. An owner-scoped or custom-scoped store refuses Upsert, whose
-// update cannot be fenced: use Create, and Update on a DuplicateError.
+// names the fields of a unique index, the RID when empty. On a soft-delete
+// model a SoftUnique index counts only live rows; any other index, a
+// Unique or the RID's, counts deleted rows too, and a deleted row holding
+// obj's values is the DuplicateError Create gets, with nothing written.
+// The check runs before the write: on PostgreSQL and MySQL a row deleted
+// in between is still the one updated, and stays deleted; SQLite's single
+// writer leaves no such gap. MySQL updates on any unique key whatever
+// conflict says. obj is not reloaded: after an update it does not hold
+// the stored row's RID or version. An owner-scoped or custom-scoped store
+// refuses Upsert, whose update cannot be fenced: use Create, and Update
+// on a DuplicateError.
 func (s *Store[T]) Upsert(ctx context.Context, obj *T, conflict ...string) error {
 	if obj == nil {
 		return errors.New("store: Upsert: nil object")
@@ -257,7 +262,7 @@ func (s *Store[T]) BatchUpsert(ctx context.Context, objs []*T, conflict ...strin
 	if len(objs) == 0 {
 		return nil
 	}
-	target, err := s.conflictTarget(conflict)
+	target, live, err := s.conflictTarget(conflict)
 	if err != nil {
 		return err
 	}
@@ -287,14 +292,22 @@ func (s *Store[T]) BatchUpsert(ctx context.Context, objs []*T, conflict ...strin
 	}
 	onConflict := clause.OnConflict{Columns: cols, DoUpdates: assignments}
 	return s.d.RunInTx(ctx, func(txCtx context.Context) error {
+		if s.soft && !live {
+			if err := s.deletedConflict(txCtx, objs, target); err != nil {
+				return err
+			}
+		}
 		return s.mapError(s.d.Unsafe(txCtx).Clauses(onConflict).CreateInBatches(objs, batchSize).Error)
 	})
 }
 
-// conflictTarget resolves the conflict fields to columns, adding
-// delete_token when they are a SoftUnique index's. A Unique index's
-// columns are the target as they are, on a soft-delete model too.
-func (s *Store[T]) conflictTarget(fields []string) ([]string, error) {
+// conflictTarget resolves the conflict fields to the columns of ON
+// CONFLICT. live reports a SoftUnique index's columns, to which it adds
+// delete_token so that only live rows conflict. Any other target, a
+// Unique index, the RID or a gorm unique tag, is the columns as they are:
+// on a soft-delete model a deleted row holding the values conflicts too,
+// which BatchUpsert checks before it writes.
+func (s *Store[T]) conflictTarget(fields []string) ([]string, bool, error) {
 	if len(fields) == 0 {
 		fields = []string{"id"}
 	}
@@ -302,21 +315,144 @@ func (s *Store[T]) conflictTarget(fields []string) ([]string, error) {
 	for _, f := range fields {
 		col, err := q.Column(s.columns, f)
 		if err != nil {
-			return nil, fmt.Errorf("store: Upsert: %s: conflict %w", s.schema.Name, err)
+			return nil, false, fmt.Errorf("store: Upsert: %s: conflict %w", s.schema.Name, err)
 		}
 		if slices.Contains(cols, col) {
-			return nil, fmt.Errorf("store: Upsert: %s: conflict field %q repeats column %q", s.schema.Name, f, col)
+			return nil, false, fmt.Errorf("store: Upsert: %s: conflict field %q repeats column %q", s.schema.Name, f, col)
 		}
 		cols = append(cols, col)
 	}
 	if s.soft {
 		for _, idx := range dbx.Indexes(s.d, s.schema.ModelType) {
 			if idx.Soft && len(idx.Columns) == len(cols) && sameSet(idx.Columns, cols) {
-				return append(slices.Clone(idx.Columns), "delete_token"), nil
+				return append(slices.Clone(idx.Columns), "delete_token"), true, nil
 			}
 		}
 	}
-	return cols, nil
+	return cols, false, nil
+}
+
+// deletedConflict returns the DuplicateError of a batch in which a
+// deleted row holds an object's values in the target columns, which ON
+// CONFLICT would update and leave deleted; nil when no deleted row does.
+// It asks once per batchSize objects, as CreateInBatches inserts them:
+// the deleted rows equal to any object's values, one parenthesized group
+// of equalities per object. An object with a value assigned at insert
+// (an empty RID, a NULL, a zero value the database's default replaces)
+// matches no stored row and is left out. A target column that is no
+// field of the model, an Alias gorm does not map, cannot be read off the
+// objects; such a target is not checked.
+func (s *Store[T]) deletedConflict(ctx context.Context, objs []*T, target []string) error {
+	fields := make([]*schema.Field, len(target))
+	for i, col := range target {
+		if fields[i] = s.schema.LookUpField(col); fields[i] == nil {
+			return nil
+		}
+	}
+	tx := s.d.Unsafe(ctx)
+	eqs := make([]string, len(fields))
+	for i, f := range fields {
+		eqs[i] = tx.Statement.Quote(clause.Column{Table: s.table(), Name: f.DBName}) + " = ?"
+	}
+	group := "(" + strings.Join(eqs, " AND ") + ")"
+	for chunk := range slices.Chunk(objs, batchSize) {
+		groups := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*len(fields))
+		for _, obj := range chunk {
+			values, ok := insertValues(ctx, fields, reflect.ValueOf(obj))
+			if !ok {
+				continue
+			}
+			groups = append(groups, group)
+			args = append(args, values...)
+		}
+		if len(groups) == 0 {
+			continue
+		}
+		var one int
+		res := tx.Model(new(T)).Unscoped().
+			Where(s.table()+".deleted_at IS NOT NULL AND ("+strings.Join(groups, " OR ")+")", args...).
+			Select("1").Limit(1).Scan(&one)
+		if res.Error != nil {
+			return s.mapError(res.Error)
+		}
+		if res.RowsAffected > 0 {
+			return s.deletedDuplicate(target)
+		}
+	}
+	return nil
+}
+
+// insertValues reads off obj the values an insert writes to fields, as
+// gorm writes them: a zero value whose default gorm knows is that
+// default. ok is false when one is assigned at insert, so that it matches
+// no stored row: an empty RID, a NULL, a zero value the database's own
+// default replaces.
+func insertValues(ctx context.Context, fields []*schema.Field, obj reflect.Value) ([]any, bool) {
+	values := make([]any, len(fields))
+	for i, f := range fields {
+		v, zero := f.ValueOf(ctx, obj)
+		if zero {
+			switch {
+			case f.DBName == "rid", f.HasDefaultValue && f.DefaultValueInterface == nil:
+				return nil, false
+			case f.DefaultValueInterface != nil:
+				v = f.DefaultValueInterface
+			}
+		}
+		if n, err := normalizeValue(v); err != nil || n == nil {
+			return nil, false
+		}
+		values[i] = v
+	}
+	return values, true
+}
+
+// deletedDuplicate is the DuplicateError of target values a deleted row
+// holds, named as PostgreSQL and MySQL name Create's: by the unique index
+// over the target, else by its columns.
+func (s *Store[T]) deletedDuplicate(target []string) *DuplicateError {
+	dup := &DuplicateError{Constraint: s.uniqueIndexOf(target)}
+	if dup.Constraint != "" {
+		dup.Field = s.constraintField(dup.Constraint)
+	}
+	if dup.Field == "" {
+		dup.Field = s.columnsField(target)
+	}
+	return dup
+}
+
+// uniqueIndexOf names the unique index over exactly cols that counts
+// deleted rows: a Unique, a gorm uniqueIndex such as the RID's, or the
+// constraint of a gorm unique tag. It is empty when the model declares
+// none.
+func (s *Store[T]) uniqueIndexOf(cols []string) string {
+	for _, idx := range dbx.Indexes(s.d, s.schema.ModelType) {
+		if !idx.Soft && len(idx.Columns) == len(cols) && sameSet(idx.Columns, cols) {
+			return idx.Name
+		}
+	}
+	for _, idx := range s.schema.ParseIndexes() {
+		if idx.Class != "UNIQUE" || len(idx.Fields) != len(cols) {
+			continue
+		}
+		idxCols := make([]string, 0, len(idx.Fields))
+		for _, f := range idx.Fields {
+			if f.Field != nil {
+				idxCols = append(idxCols, f.DBName)
+			}
+		}
+		if len(idxCols) == len(cols) && sameSet(idxCols, cols) {
+			return idx.Name
+		}
+	}
+	if len(cols) == 1 {
+		if f := s.schema.LookUpField(cols[0]); f != nil && f.Unique {
+			// gorm's name for the constraint of a unique tag, as in New.
+			return "uni_" + s.schema.Table + "_" + f.DBName
+		}
+	}
+	return ""
 }
 
 func sameSet(a, b []string) bool {

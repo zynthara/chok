@@ -173,6 +173,13 @@ func (s *Store[T]) constraintField(name string) string {
 		}
 		cols = append(cols, seg)
 	}
+	// SQLite names the columns, not the index.
+	return s.columnsField(cols)
+}
+
+// columnsField resolves the columns of a unique index to a field: a
+// constraint declared under the column list, then the columns.
+func (s *Store[T]) columnsField(cols []string) string {
 	if f, ok := s.constraints[strings.Join(cols, ",")]; ok {
 		return f
 	}
@@ -181,7 +188,6 @@ func (s *Store[T]) constraintField(name string) string {
 			return f
 		}
 	}
-	// SQLite names the columns, not the index.
 	return s.fieldOfColumns(cols)
 }
 
