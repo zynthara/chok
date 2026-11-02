@@ -229,8 +229,8 @@ func newBookmark(owner, book string) *bookmark {
 
 // TestUnique_OwnedModel: Unique gives a model without soft delete
 // UNIQUE(owner_id, book_id), the same on every dialect. Migrating again,
-// on the handle or from a second process, keeps the index — on MySQL by
-// finding it in information_schema.
+// on the handle or from a second process, finds the index in the catalog
+// as declared and keeps it.
 func TestUnique_OwnedModel(t *testing.T) {
 	cfg := dbtest.Config(t)
 	tables := db.Tables(db.Table(&bookmark{}, db.Unique("uk_bookmark_owner_book", "owner_id", "book_id")))
