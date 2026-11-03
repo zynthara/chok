@@ -25,8 +25,10 @@
 // column of the model, the managed ones too (Set and Patch never write
 // those). A field name that the code got from a client must be checked
 // against QueryFields first; an unknown name in code is a programming
-// error, a 500 that still matches where.ErrUnknownField. Alias maps a
-// field to another column.
+// error, a 500 that still matches where.ErrUnknownField, and the store
+// logs it where it happens: "store: unknown field" at error level, with
+// the model, the field and the request's ID. Alias maps a field to
+// another column.
 //
 // # Owner scope
 //

@@ -108,12 +108,12 @@ func (c *Changes) build(ctx context.Context, update, columns map[string]string, 
 		return built{}, &EmptyChangesError{}
 	}
 	if c.patch == nil {
-		return buildSet(c.set, columns, sch)
+		return buildSet(ctx, c.set, columns, sch)
 	}
 	return c.patch.build(ctx, update, sch)
 }
 
-func buildSet(kv map[string]any, columns map[string]string, sch *schema.Schema) (built, error) {
+func buildSet(ctx context.Context, kv map[string]any, columns map[string]string, sch *schema.Schema) (built, error) {
 	if len(kv) == 0 {
 		return built{}, &EmptyChangesError{}
 	}
@@ -121,6 +121,7 @@ func buildSet(kv map[string]any, columns map[string]string, sch *schema.Schema) 
 	for name, v := range kv {
 		col, err := q.Column(columns, name)
 		if err != nil {
+			logUnknownField(ctx, sch.Name, err)
 			return built{}, fmt.Errorf("store: Set: %s: %w", sch.Name, err)
 		}
 		if protectedColumns[col] {

@@ -62,7 +62,7 @@ func (s *Store[T]) Max[N Scalar](ctx context.Context, field string, opts ...wher
 // CountDistinct returns the number of distinct non-NULL values of field.
 // Strings count by the column's collation, which may fold case.
 func (s *Store[T]) CountDistinct(ctx context.Context, field string, opts ...where.Option) (int64, error) {
-	col, spec, err := s.aggField("CountDistinct", field)
+	col, spec, err := s.aggField(ctx, "CountDistinct", field)
 	if err != nil {
 		return 0, err
 	}
@@ -161,7 +161,7 @@ func (s *Store[T]) GroupBy[K comparable](ctx context.Context, field string, aggs
 	if len(aggs) == 0 {
 		return nil, errors.New("store: GroupBy needs at least one Aggregate")
 	}
-	keyCol, keySpec, err := s.aggField("GroupBy", field)
+	keyCol, keySpec, err := s.aggField(ctx, "GroupBy", field)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func (s *Store[T]) GroupBy[K comparable](ctx context.Context, field string, aggs
 	selects := []string{key}
 	kinds := make([]aggKind, len(aggs))
 	for i, a := range aggs {
-		expr, kind, err := s.aggPlan(a)
+		expr, kind, err := s.aggPlan(ctx, a)
 		if err != nil {
 			return nil, fmt.Errorf("store: GroupBy: aggregate %d: %w", i, err)
 		}
@@ -228,7 +228,7 @@ func (s *Store[T]) GroupBy[K comparable](ctx context.Context, field string, aggs
 func (s *Store[T]) Pluck[F any](ctx context.Context, field string, opts ...where.Option) ([]F, error) {
 	col, err := q.Column(s.columns, field)
 	if err != nil {
-		return nil, s.codeError(err)
+		return nil, s.codeError(ctx, err)
 	}
 	return pluck[F](ctx, s, s.qualify(col), opts)
 }
@@ -352,7 +352,7 @@ func (s *Store[T]) idIn(ids []any) where.Option {
 // single runs one aggregate function over field.
 func single[N Scalar, T db.Modeler](ctx context.Context, s *Store[T], fn, field string, opts []where.Option) (N, bool, error) {
 	var zero N
-	col, spec, err := s.aggField(fn, field)
+	col, spec, err := s.aggField(ctx, fn, field)
 	if err != nil {
 		return zero, false, err
 	}
@@ -394,10 +394,10 @@ func single[N Scalar, T db.Modeler](ctx context.Context, s *Store[T], fn, field 
 // fields without a scalar kind cannot be aggregated. The kind follows the
 // Go type; the column type the model declares only refuses what would
 // compute wrongly — JSON, or text under a number or a time.
-func (s *Store[T]) aggField(fn, field string) (string, fieldSpec, error) {
+func (s *Store[T]) aggField(ctx context.Context, fn, field string) (string, fieldSpec, error) {
 	col, err := q.Column(s.columns, field)
 	if err != nil {
-		return "", fieldSpec{}, s.codeError(err)
+		return "", fieldSpec{}, s.codeError(ctx, err)
 	}
 	if table, _, qualified := strings.Cut(col, "."); qualified && table != s.table() {
 		return "", fieldSpec{}, fmt.Errorf("store: %s: %s is column %q of another table; aggregates read the store's own table %s", fn, field, col, s.table())
@@ -461,7 +461,7 @@ func (s *Store[T]) aggExpr(col, kind string) string {
 }
 
 // aggPlan renders one Aggregate of GroupBy.
-func (s *Store[T]) aggPlan(a Aggregate) (string, aggKind, error) {
+func (s *Store[T]) aggPlan(ctx context.Context, a Aggregate) (string, aggKind, error) {
 	fn := strings.ToLower(a.Func)
 	if fn == "count" {
 		if a.Field != "" {
@@ -469,7 +469,7 @@ func (s *Store[T]) aggPlan(a Aggregate) (string, aggKind, error) {
 		}
 		return "COUNT(*)", aggInt, nil
 	}
-	col, spec, err := s.aggField(fn, a.Field)
+	col, spec, err := s.aggField(ctx, fn, a.Field)
 	if err != nil {
 		return "", 0, err
 	}

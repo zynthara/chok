@@ -132,8 +132,10 @@ func TestFields_CodeNamesEveryColumn(t *testing.T) {
 
 // TestFields_UnknownFieldStatus: an unknown field in the URL is the
 // client's 400 naming the allowed fields; in the code it is a 500 whose
-// response names nothing and whose log names the model and the field,
-// and errors.Is still matches where.ErrUnknownField.
+// response names nothing, and errors.Is still matches
+// where.ErrUnknownField. The store logs the model and the field where it
+// meets the field, in a where option, Set or Upsert's conflict, with the
+// request's ID; the line the root logs for the 500 names neither.
 func TestFields_UnknownFieldStatus(t *testing.T) {
 	s := accounts(t)
 	ctx := t.Context()
@@ -167,20 +169,37 @@ func TestFields_UnknownFieldStatus(t *testing.T) {
 	chok.GET(app.Router(), "/accounts", func(ctx context.Context, _ *chok.None) (*chok.Page[account], error) {
 		return s.List(ctx, where.Eq("secrte", "s1")) // the typo a 500 is for
 	})
+	chok.GET(app.Router(), "/set", func(ctx context.Context, _ *chok.None) (chok.None, error) {
+		return chok.None{}, s.Update(ctx, store.RID("acc_x"), store.Set(map[string]any{"amonut": 1}))
+	})
+	chok.GET(app.Router(), "/upsert", func(ctx context.Context, _ *chok.None) (chok.None, error) {
+		return chok.None{}, s.Upsert(ctx, &account{Secret: "x"}, "cdoe")
+	})
 	chok.List(app.Router(), "/listed", s)
 	h := app.Handler()
+	for path, field := range map[string]string{"/accounts": "secrte", "/set": "amonut", "/upsert": "cdoe"} {
+		logs.Reset()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), field) || strings.Contains(rec.Body.String(), "account") {
+			t.Fatalf("%s: code's unknown field: %d %s", path, rec.Code, rec.Body)
+		}
+		want := `level=ERROR msg="store: unknown field" request_id=` + rec.Header().Get("X-Request-Id") + " model=account field=" + field + "\n"
+		failed := ""
+		for line := range strings.Lines(logs.String()) {
+			if strings.Contains(line, `msg="chok: request failed"`) {
+				failed = line
+			}
+		}
+		if !strings.Contains(logs.String(), want) || failed == "" || strings.Contains(failed, "account") || strings.Contains(failed, field) {
+			t.Errorf("%s: the store's line names the model and the field, the root's line neither:\n%s", path, logs.String())
+		}
+	}
+	logs.Reset()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/accounts", nil))
-	if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "secrte") || strings.Contains(rec.Body.String(), "account") {
-		t.Fatalf("code's unknown field: %d %s", rec.Code, rec.Body)
-	}
-	if !strings.Contains(logs.String(), `store: account: where: unknown field \"secrte\"`) {
-		t.Fatalf("the log names the model and the field: %s", logs.String())
-	}
-	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/listed?secret=s1", nil))
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "filter on one of") {
-		t.Fatalf("URL's unknown field: %d %s", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "filter on one of") || strings.Contains(logs.String(), "store: unknown field") {
+		t.Fatalf("URL's unknown field: %d %s\n%s", rec.Code, rec.Body, logs.String())
 	}
 }
 

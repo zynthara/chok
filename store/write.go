@@ -80,7 +80,7 @@ func (s *Store[T]) write(ctx context.Context, loc Locator, opts []where.Option) 
 		return nil, nil, err
 	}
 	if tx, err = loc.apply(s, tx); err != nil {
-		return nil, nil, s.codeError(err)
+		return nil, nil, s.codeError(ctx, err)
 	}
 	return tx, cfg, nil
 }
@@ -140,7 +140,7 @@ func (s *Store[T]) missed(ctx context.Context, loc Locator, lock int) error {
 		if err != nil {
 			return err
 		}
-		found, err := s.exists(tx, loc)
+		found, err := s.exists(ctx, tx, loc)
 		if err != nil {
 			return err
 		}
@@ -223,7 +223,7 @@ func (s *Store[T]) Restore(ctx context.Context, loc Locator) error {
 	if err != nil {
 		return err
 	}
-	found, err := s.exists(live, loc)
+	found, err := s.exists(ctx, live, loc)
 	if err != nil {
 		return err
 	}
@@ -262,7 +262,7 @@ func (s *Store[T]) BatchUpsert(ctx context.Context, objs []*T, conflict ...strin
 	if len(objs) == 0 {
 		return nil
 	}
-	target, live, err := s.conflictTarget(conflict)
+	target, live, err := s.conflictTarget(ctx, conflict)
 	if err != nil {
 		return err
 	}
@@ -307,7 +307,7 @@ func (s *Store[T]) BatchUpsert(ctx context.Context, objs []*T, conflict ...strin
 // Unique index, the RID or a gorm unique tag, is the columns as they are:
 // on a soft-delete model a deleted row holding the values conflicts too,
 // which BatchUpsert checks before it writes.
-func (s *Store[T]) conflictTarget(fields []string) ([]string, bool, error) {
+func (s *Store[T]) conflictTarget(ctx context.Context, fields []string) ([]string, bool, error) {
 	if len(fields) == 0 {
 		fields = []string{"id"}
 	}
@@ -315,6 +315,7 @@ func (s *Store[T]) conflictTarget(fields []string) ([]string, bool, error) {
 	for _, f := range fields {
 		col, err := q.Column(s.columns, f)
 		if err != nil {
+			logUnknownField(ctx, s.schema.Name, err)
 			return nil, false, fmt.Errorf("store: Upsert: %s: conflict %w", s.schema.Name, err)
 		}
 		if slices.Contains(cols, col) {

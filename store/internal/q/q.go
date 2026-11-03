@@ -12,14 +12,33 @@ import (
 // packages return the same value.
 var ErrUnknownField = errors.New("where: unknown field")
 
+// UnknownFieldError is the ErrUnknownField that Column returns: it keeps
+// the field the code named, which store logs, and errors.Is matches it
+// with ErrUnknownField.
+type UnknownFieldError struct {
+	Field string
+	// Column is set when the field is known but its column is not a
+	// plain identifier.
+	Column string
+}
+
+func (e *UnknownFieldError) Error() string {
+	if e.Column != "" {
+		return fmt.Sprintf("%s %q: column %q is not a plain identifier", ErrUnknownField, e.Field, e.Column)
+	}
+	return fmt.Sprintf("%s %q", ErrUnknownField, e.Field)
+}
+
+func (e *UnknownFieldError) Unwrap() error { return ErrUnknownField }
+
 // Column resolves a public field name to its column.
 func Column(fields map[string]string, field string) (string, error) {
 	col, ok := fields[field]
 	if !ok {
-		return "", fmt.Errorf("%w %q", ErrUnknownField, field)
+		return "", &UnknownFieldError{Field: field}
 	}
 	if !SafeIdent(col) {
-		return "", fmt.Errorf("%w %q: column %q is not a plain identifier", ErrUnknownField, field, col)
+		return "", &UnknownFieldError{Field: field, Column: col}
 	}
 	return col, nil
 }

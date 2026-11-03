@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/zynthara/chok"
+	"github.com/zynthara/chok/store/internal/q"
 	"github.com/zynthara/chok/store/where"
 )
 
@@ -115,14 +117,26 @@ func (e *MissingConditionsError) Error() string {
 func (e *MissingConditionsError) APIError() *chok.Error { return chok.ErrInternal.Wrap(e) }
 
 // codeError is queryError for the options and field names the code
-// passed: an unknown field there is a programming error, a 500 whose log
-// names the model and the field and whose response names neither. It
-// still matches where.ErrUnknownField.
-func (s *Store[T]) codeError(err error) error {
+// passed: an unknown field there is a programming error, a 500 whose
+// response names neither the model nor the field; logUnknownField logs
+// them. It still matches where.ErrUnknownField.
+func (s *Store[T]) codeError(ctx context.Context, err error) error {
 	if errors.Is(err, where.ErrUnknownField) {
+		logUnknownField(ctx, s.schema.Name, err)
 		return fmt.Errorf("store: %s: %w", s.schema.Name, err)
 	}
 	return queryError(err)
+}
+
+// logUnknownField logs, where it happens and with the request's ID, the
+// model and the field of an unknown field the code named: the line the
+// root logs for the 500 names its errors by their kinds alone.
+func logUnknownField(ctx context.Context, model string, err error) {
+	field := ""
+	if f, ok := errors.AsType[*q.UnknownFieldError](err); ok {
+		field = f.Field
+	}
+	chok.LoggerFrom(ctx).ErrorContext(ctx, "store: unknown field", "model", model, "field", field)
 }
 
 // queryError turns a malformed query option into a 400; anything else

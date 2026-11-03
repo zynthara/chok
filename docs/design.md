@@ -403,9 +403,10 @@ MySQL 的 DDL 提交与账本更新不是一个原子动作：DDL 已执行而�
   寻址（用 `store.ID` / `PluckIDs` / `ListByIDs`）。托管列（version、时间戳、
   owner_id、软删两列）可以出现在读条件里，`Set` 与 Patch 仍然不写它们。两个
   字段同名不同列，New panic。URL 里的未知字段是 400，并列出可用字段；代码里的
-  未知字段是程序错误，500，日志里有模型名与字段、响应里没有，`errors.Is(err,
-  where.ErrUnknownField)` 照样成立。所以把客户端给的字段名交给 `where.*` 之前，
-  先用 `QueryFields()` 核对。
+  未知字段是程序错误，500，响应里没有模型名与字段，它们由 store 在出错处记：一条
+  Error `store: unknown field`，带 model、field 与请求的 request_id（根包那行 5xx
+  只记分类）；`errors.Is(err, where.ErrUnknownField)` 照样成立。所以把客户端给的
+  字段名交给 `where.*` 之前，先用 `QueryFields()` 核对。
 - **页大小也只管客户端**：代码里的 `List` 不带分页选项时返回全部行，带
   `where.Page` / `Limit` 就按给的大小取（没给大小用缺省页大小）。
   `db.store.default_page_size` / `max_page_size` 管的是 URL 来的列表：
