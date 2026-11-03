@@ -93,25 +93,68 @@ func (g *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 
 // expected reports errors that are outcomes rather than faults: a missing
 // record, a canceled request, a constraint the data violated (store turns
-// those into 404, 409 and 400 answers).
+// those into 404, 409 and 400 answers). A violation is told by the
+// driver's error type and code, never by the message, which may quote a
+// value that reads like one: Postgres's class 23, MySQL's duplicate key,
+// foreign key, NOT NULL and CHECK refusals, and every SQLITE_CONSTRAINT
+// code. An error without a driver's type is no violation.
+//
+// MySQL's 1061, an index name already taken, counts too, though it is a
+// schema error: createIndex in db/table.go expects it when a process
+// migrating at the same time made the index first, and then reads the
+// index back to check it, so the statement must not log a failure. A 1061
+// anywhere else still fails its migration and reaches the caller; only
+// its log line is at debug.
 func expected(err error) bool {
 	if errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, context.Canceled) {
 		return true
 	}
-	msg := strings.ToLower(err.Error())
-	for _, s := range []string{"duplicate", "unique constraint", "foreign key", "constraint failed", "violates check constraint", "check constraint"} {
-		if strings.Contains(msg, s) {
+	if pg, ok := errors.AsType[*pgconn.PgError](err); ok {
+		return strings.HasPrefix(pg.Code, "23") // integrity constraint violation
+	}
+	if my, ok := errors.AsType[*gomysql.MySQLError](err); ok {
+		switch my.Number {
+		case mysqlDupKey, mysqlDupKeyName, mysqlDuplicateEntry,
+			mysqlForeignDuplicateKeyWithChildInfo, mysqlForeignDuplicateKeyWithoutChildInfo,
+			mysqlNoReferencedRow, mysqlRowIsReferenced, mysqlRowIsReferenced2, mysqlNoReferencedRow2,
+			mysqlBadNull, mysqlNoDefaultForField, mysqlCheckViolated:
 			return true
 		}
+		return false
+	}
+	if lite, ok := errors.AsType[sqliteCoder](err); ok {
+		return lite.Code()&0xff == sqliteConstraint
 	}
 	return false
 }
 
-// The codes errorText reads.
+// sqliteCoder is the pure-Go SQLite driver's error, which carries its
+// extended result code. Its methods are spelled out: embedding error
+// would make go doc take error for a type of this package and stop
+// listing Open under DB.
+type sqliteCoder interface {
+	Error() string
+	Code() int
+}
+
+// The codes expected and errorText read, MySQL's under the names of its
+// error reference.
 const (
-	mysqlDuplicateEntry     = 1062 // ER_DUP_ENTRY
-	sqliteError             = 1    // SQLITE_ERROR, the low byte of its extended codes
-	sqliteConstraintTrigger = 1811 // SQLITE_CONSTRAINT_TRIGGER: a trigger's RAISE
+	mysqlDupKey                              = 1022 // ER_DUP_KEY: Can't write; duplicate key in table 't'
+	mysqlBadNull                             = 1048 // ER_BAD_NULL_ERROR: Column 'c' cannot be null
+	mysqlDupKeyName                          = 1061 // ER_DUP_KEYNAME: Duplicate key name 'k' (see expected)
+	mysqlDuplicateEntry                      = 1062 // ER_DUP_ENTRY: Duplicate entry 'x' for key 'k'
+	mysqlNoReferencedRow                     = 1216 // ER_NO_REFERENCED_ROW: a foreign key refuses an insert or an update
+	mysqlRowIsReferenced                     = 1217 // ER_ROW_IS_REFERENCED: a foreign key refuses a delete or an update
+	mysqlNoDefaultForField                   = 1364 // ER_NO_DEFAULT_FOR_FIELD: a NOT NULL column without a default left out
+	mysqlRowIsReferenced2                    = 1451 // ER_ROW_IS_REFERENCED_2: 1217 naming the constraint
+	mysqlNoReferencedRow2                    = 1452 // ER_NO_REFERENCED_ROW_2: 1216 naming the constraint
+	mysqlForeignDuplicateKeyWithChildInfo    = 1761 // ER_FOREIGN_DUPLICATE_KEY_WITH_CHILD_INFO: a cascade would duplicate a key of the child table it names
+	mysqlForeignDuplicateKeyWithoutChildInfo = 1762 // ER_FOREIGN_DUPLICATE_KEY_WITHOUT_CHILD_INFO: the same, naming no child table
+	mysqlCheckViolated                       = 3819 // ER_CHECK_CONSTRAINT_VIOLATED: Check constraint 'c' is violated.
+	sqliteError                              = 1    // SQLITE_ERROR, the low byte of its extended codes
+	sqliteConstraint                         = 19   // SQLITE_CONSTRAINT, the low byte of its extended codes
+	sqliteConstraintTrigger                  = 1811 // SQLITE_CONSTRAINT_TRIGGER: a trigger's RAISE
 )
 
 // mysqlDuplicateKey finds the key in MySQL's Duplicate entry 'x' for key
@@ -155,7 +198,7 @@ var (
 // destination quotes the value as well; it is cut out and the rest of
 // the message kept. Any other error, a network fault, a cancellation,
 // gorm's or chok's own, is logged as it is. The caller gets the error
-// unchanged, and expected reads all of it.
+// unchanged, and expected reads its type and code.
 func errorText(err error) string {
 	if pg, ok := errors.AsType[*pgconn.PgError](err); ok {
 		words := []string{"postgres", pg.Code}
@@ -180,11 +223,7 @@ func errorText(err error) string {
 		}
 		return s
 	}
-	// The pure-Go SQLite driver's error carries its extended result code.
-	if lite, ok := errors.AsType[interface {
-		error
-		Code() int
-	}](err); ok {
+	if lite, ok := errors.AsType[sqliteCoder](err); ok {
 		if code := lite.Code(); code&0xff == sqliteError || code == sqliteConstraintTrigger {
 			return fmt.Sprintf("sqlite %d", code)
 		}

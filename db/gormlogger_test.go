@@ -32,15 +32,50 @@ func TestGORMLogger_ThresholdAndClassification(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Fatalf("a fast query is debug: %s", buf.String())
 	}
-	g.Trace(ctx, time.Now(), sql, errors.New("Error 1062 (23000): Duplicate entry 'a' for key 'uk'"))
-	g.Trace(ctx, time.Now(), sql, gorm.ErrRecordNotFound)
-	g.Trace(ctx, time.Now(), sql, context.Canceled)
+	pg := func(code, msg string) error { return &pgconn.PgError{Severity: "ERROR", Code: code, Message: msg} }
+	my := func(n uint16, msg string) error { return &gomysql.MySQLError{Number: n, Message: msg} }
+	// An outcome is told by the error's type and code, wrapped or not:
+	// Postgres's class 23, MySQL's duplicate key, foreign key, NOT NULL
+	// and CHECK refusals and a taken index name, SQLite's
+	// SQLITE_CONSTRAINT codes.
+	for _, err := range []error{
+		gorm.ErrRecordNotFound,
+		context.Canceled,
+		pg("23505", ""), pg("23503", ""), pg("23514", ""),
+		pg("23502", `null value in column "email" of relation "users" violates not-null constraint`),
+		pg("23P01", `conflicting key value violates exclusion constraint "ex_booking"`),
+		my(1022, ""), my(1062, ""), my(1216, ""), my(1217, ""), my(1451, ""), my(1452, ""), my(1761, ""), my(1762, ""), my(3819, ""),
+		my(1048, "Column 'email' cannot be null"),
+		my(1364, "Field 'email' doesn't have a default value"),
+		// createIndex (db/table.go) expects it of a concurrent migration.
+		my(1061, "Duplicate key name 'uk_user_email'"),
+		liteError{2067, ""}, liteError{1555, ""}, liteError{1299, ""}, liteError{787, ""},
+		liteError{275, ""}, liteError{1811, ""}, liteError{3091, ""},
+	} {
+		for _, err := range []error{err, fmt.Errorf("create: %w", err)} {
+			g.Trace(ctx, time.Now(), sql, err)
+		}
+	}
 	if buf.Len() != 0 {
 		t.Fatalf("expected outcomes are not errors: %s", buf.String())
 	}
-	g.Trace(ctx, time.Now(), sql, errors.New("connection reset by peer"))
-	if !strings.Contains(buf.String(), "level=ERROR") || !strings.Contains(buf.String(), "query failed") {
-		t.Fatalf("a fault is an error: %s", buf.String())
+	// A fault stays one whatever its message reads: the message may quote
+	// a value, and an error without a driver's type is no violation.
+	for _, err := range []error{
+		errors.New("connection reset by peer"),
+		context.DeadlineExceeded,
+		errors.New("Error 1062 (23000): Duplicate entry 'a' for key 'uk'"),
+		my(1366, "Incorrect integer value: 'duplicate' for column 'n' at row 1"),
+		my(1060, "Duplicate column name 'email'"),
+		pg("22P02", `invalid input syntax for type integer: "unique constraint"`),
+		pg("P0001", "duplicate booking"),
+		liteError{1, "SQL logic error: no such table: duplicate_checks (1)"},
+	} {
+		buf.Reset()
+		g.Trace(ctx, time.Now(), sql, err)
+		if !strings.Contains(buf.String(), "level=ERROR") || !strings.Contains(buf.String(), "query failed") {
+			t.Fatalf("%v is a fault: %s", err, buf.String())
+		}
 	}
 	if s, args := g.ParamsFilter(ctx, "SELECT ?", "secret"); s != "SELECT ?" || args != nil {
 		t.Fatal("bound values never reach the log")
