@@ -43,6 +43,7 @@ Embedded without a tag in every application's Config, so its sections `app`, `ht
 | `http.drain_delay` | duration | `5s` |  | DrainDelay is how long /readyz and the health endpoint report 503 before the server stops accepting, so load balancers move traffic away first. A stop waits it only when one of them has been requested since the start: with no probe watching, Ctrl-C stops at once. |
 | `http.enabled` | bool | `true` |  | Enabled starts the HTTP server; false runs a worker process whose Handler still serves in-process requests. |
 | `http.h2c` | bool |  |  | H2C serves HTTP/2 without TLS (behind a proxy that speaks it). |
+| `http.health.details` | bool |  |  | Details puts a failing component's error in the body of /healthz, or wherever Path puts it. Off, the body names each component with its status and duration only, since an error can hold an address or part of a DSN. A failure is logged at warn with its error either way. |
 | `http.health.enabled` | bool | `true` |  |  |
 | `http.health.path` | string | `/healthz` |  |  |
 | `http.health.probe_timeout` | duration | `3s` |  | ProbeTimeout bounds each component's Health call. |

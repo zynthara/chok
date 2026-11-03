@@ -120,6 +120,12 @@ type HealthConfig struct {
 	Path    string `yaml:"path" default:"/healthz"`
 	// ProbeTimeout bounds each component's Health call.
 	ProbeTimeout time.Duration `yaml:"probe_timeout" default:"3s"`
+	// Details puts a failing component's error in the body of /healthz,
+	// or wherever Path puts it. Off, the body names each component with
+	// its status and duration only, since an error can hold an address
+	// or part of a DSN. A failure is logged at warn with its error
+	// either way.
+	Details bool `yaml:"details"`
 }
 
 // LogConfig is the log section.

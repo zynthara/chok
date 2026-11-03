@@ -191,15 +191,22 @@ func TestStart_FailurePreventsListening(t *testing.T) {
 	}
 }
 
+// TestStart_UnhealthyAfterStartTimeout: the start error carries each
+// failing component's error, http.health.details or not; the polls
+// before it log nothing of their own.
 func TestStart_UnhealthyAfterStartTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		base := testBase(t)
 		base.App.StartTimeout = 2 * time.Second
-		app := New(base, Logger(quiet()))
+		var logs syncBuffer
+		app := New(base, Logger(slog.New(slog.NewTextHandler(&logs, nil))))
 		app.Use(&recorder{name: "db", log: &eventLog{}, health: errors.New("connection refused")})
 		err := app.Run(context.Background())
 		if err == nil || !strings.Contains(err.Error(), "not healthy after app.start_timeout (2s): db: connection refused") {
 			t.Fatalf("got %v", err)
+		}
+		if strings.Contains(logs.String(), "chok: health check failed") {
+			t.Fatalf("a poll of the start logged a failure:\n%s", logs.String())
 		}
 	})
 }
@@ -631,9 +638,56 @@ func TestHealth_AggregatesComponents(t *testing.T) {
 		t.Fatal(err)
 	}
 	if report.Status != statusDown || report.Version != "1.2.3" || len(report.Components) != 2 ||
-		report.Components[0].Component != "cache" || report.Components[0].Error != "redis down" ||
+		report.Components[0].Component != "cache" || report.Components[0].Status != statusDown ||
 		report.Components[1].Status != statusUp {
 		t.Fatalf("report: %+v", report)
+	}
+}
+
+// TestHealth_DetailsShowTheErrors: a failing component turns the health
+// endpoint 503 and its entry down, but its error, which can hold an
+// address or part of a DSN, is in the body only with http.health.details;
+// either way the failure is logged at warn with its error and how long
+// the check took, and a passing check logs nothing. /readyz runs no
+// checks and never names a component.
+func TestHealth_DetailsShowTheErrors(t *testing.T) {
+	const cause = "dial tcp 10.0.0.7:6379: connection refused"
+	for _, details := range []bool{false, true} {
+		base := testBase(t)
+		base.HTTP.Health.Details = details
+		var logs syncBuffer
+		app := New(base, Logger(slog.New(slog.NewTextHandler(&logs, nil))))
+		app.Use(&recorder{name: "db", log: &eventLog{}}, &recorder{name: "cache", log: &eventLog{}, health: errors.New(cause)})
+		rec := httptest.NewRecorder()
+		app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var report healthReport
+		if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusServiceUnavailable || report.Status != statusDown || len(report.Components) != 2 ||
+			report.Components[0].Component != "cache" || report.Components[0].Status != statusDown || report.Components[1].Status != statusUp {
+			t.Fatalf("details=%v: %d %s", details, rec.Code, rec.Body)
+		}
+		if shown := strings.Contains(rec.Body.String(), `"error":`) || strings.Contains(rec.Body.String(), "10.0.0.7"); shown != details {
+			t.Errorf("details=%v: the body shows the error: %v\n%s", details, shown, rec.Body)
+		}
+		if details && report.Components[0].Error != cause {
+			t.Errorf("details: the error is %q, want %q", report.Components[0].Error, cause)
+		}
+		out := logs.String()
+		for _, want := range []string{`level=WARN msg="chok: health check failed"`, "component=cache", `error="` + cause + `"`, "elapsed="} {
+			if !strings.Contains(out, want) {
+				t.Errorf("details=%v: the log lacks %s:\n%s", details, want, out)
+			}
+		}
+		if strings.Contains(out, "component=db") {
+			t.Errorf("details=%v: a passing check is logged:\n%s", details, out)
+		}
+		rec = httptest.NewRecorder()
+		app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if body := strings.TrimSpace(rec.Body.String()); body != `{"status":"down"}` {
+			t.Errorf("details=%v: /readyz = %s, want the status alone", details, body)
+		}
 	}
 }
 

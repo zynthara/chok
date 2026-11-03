@@ -96,7 +96,9 @@ telemetry 的 logs.otel 桥接就是这样接上的（§7.3）。
 返回 nil（如 `jobs.enabled: false`）；App 只把 ctx 未取消时返回的错误当失败。
 
 **运行相**：`/readyz` 200；`/healthz` 聚合所有 Healther（任一失败 → 503，
-body 列出每个组件的状态与耗时）；`/livez` 只说明进程活着。就绪后某个 Start
+body 列出每个组件的状态与耗时）；失败组件的错误原文可能带内网地址或 DSN 片段，
+默认不进 body，`http.health.details: true` 才给，失败照记一条 Warn（组件名、
+错误原文、耗时）；`/livez` 只说明进程活着。就绪后某个 Start
 返回错误 → App 停机，`Run` 返回该错误。
 
 **停机相**：`/readyz` 与 `/healthz` 改 503 → 等 `http.drain_delay`（给负载均衡

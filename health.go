@@ -21,11 +21,16 @@ type healthReport struct {
 	Components []healthEntry `json:"components"`
 }
 
+// healthEntry is one component's check. Error is the text of its
+// failure, which failures() and the log read; the health endpoint drops
+// it from the body unless http.health.details is on.
 type healthEntry struct {
 	Component  string `json:"component"`
 	Status     string `json:"status"`
 	Error      string `json:"error,omitzero"`
 	DurationMS int64  `json:"duration_ms"`
+
+	elapsed time.Duration
 }
 
 func (r healthReport) failures() string {
@@ -58,7 +63,8 @@ func (a *App) checkHealth(ctx context.Context, comps []*component) healthReport 
 			defer cancel()
 			begin := time.Now()
 			err := callHealth(cctx, h)
-			e := healthEntry{Component: c.name, Status: statusUp, DurationMS: time.Since(begin).Milliseconds()}
+			elapsed := time.Since(begin)
+			e := healthEntry{Component: c.name, Status: statusUp, DurationMS: elapsed.Milliseconds(), elapsed: elapsed}
 			if err != nil {
 				e.Status, e.Error = statusDown, err.Error()
 			}
@@ -125,10 +131,23 @@ func (a *App) mountBuiltins() {
 			writeJSON(w, r, http.StatusServiceUnavailable, healthReport{Status: statusDown, Version: a.version, Components: []healthEntry{}})
 			return
 		}
-		report := a.checkHealth(r.Context(), a.snapshot())
+		ctx := r.Context()
+		report := a.checkHealth(ctx, a.snapshot())
 		code := http.StatusOK
 		if report.Status != statusUp {
 			code = http.StatusServiceUnavailable
+		}
+		// A failure is logged with its error; the body carries the error
+		// only with http.health.details, as it can hold an address or
+		// part of a DSN.
+		for i, e := range report.Components {
+			if e.Status == statusUp {
+				continue
+			}
+			LoggerFrom(ctx).WarnContext(ctx, "chok: health check failed", "component", e.Component, "error", e.Error, "elapsed", e.elapsed)
+			if !h.Details {
+				report.Components[i].Error = ""
+			}
 		}
 		writeJSON(w, r, code, report)
 	})
