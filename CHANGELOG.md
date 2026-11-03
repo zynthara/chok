@@ -36,6 +36,17 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
   not. **A MySQL database that ran v0.2.0 or v0.2.1 with `migrate: auto`**
   may have lost a one-column unique index made by hand under a name no
   `Table` declares: check `SHOW INDEX` and create it again.
+- **`db`**: on Postgres and SQLite, a column unique by a constraint of
+  another name than gorm's `uni_<table>_<column>`, added by hand or by an
+  earlier schema, no longer breaks `migrate: auto`. gorm's migrator
+  dropped the constraint of its own name without looking for it: Postgres
+  failed `Open` (SQLSTATE 42704, no such constraint) and SQLite rebuilt
+  the table on every `Open`, losing an index made by hand on it and
+  firing the foreign keys that refer to it (a cascade deleted the
+  referring rows, the default action failed `Open`). The constraint of
+  gorm's name is dropped only when it exists; the `unique` tag migrates as
+  before. Auto migration drops or rebuilds no index or constraint that
+  chok did not create, on the three dialects.
 
 ## [v0.2.1] - 2026-11-02
 
