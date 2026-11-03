@@ -46,6 +46,10 @@ type Index struct {
 // drop or rebuild the index. MySQL names indexes per table, SQLite and
 // Postgres per schema: there an index of the name on another table
 // differs too.
+//
+// On Postgres, migrate: auto also fails when search_path finds the table
+// in a schema other than current_schema(), where migrating would create
+// an empty table of the name that hides it.
 func Table(model any, indexes ...Index) TableSpec {
 	t := reflect.TypeOf(model)
 	for t != nil && t.Kind() == reflect.Pointer {
@@ -181,9 +185,17 @@ func checkIndex(s *schema.Schema, idx Index) error {
 }
 
 // autoMigrate creates or alters the tables, then creates their indexes
-// or checks the ones that exist.
+// or checks the ones that exist. On Postgres it first checks where
+// search_path finds each table, before any DDL.
 func autoMigrate(ctx context.Context, gdb *gorm.DB, specs []TableSpec) error {
 	gdb = gdb.WithContext(ctx)
+	if gdb.Name() == "postgres" {
+		for _, spec := range specs {
+			if err := checkSearchPath(gdb, spec); err != nil {
+				return err
+			}
+		}
+	}
 	for _, spec := range specs {
 		if err := gdb.AutoMigrate(spec.model); err != nil {
 			return fmt.Errorf("db: auto migrate %s: %w", spec.typ.Name(), err)
@@ -195,6 +207,42 @@ func autoMigrate(ctx context.Context, gdb *gorm.DB, specs []TableSpec) error {
 		}
 	}
 	return nil
+}
+
+// checkSearchPath refuses a table that search_path finds in a schema
+// other than current_schema(). gorm's Postgres migrator looks for a table
+// in current_schema() alone (HasTable, gorm.io/driver/postgres v1.6.2
+// migrator.go:283), so AutoMigrate would create an empty one there, ahead
+// of the table holding the rows on search_path, and every query after
+// would use the new one. A table that search_path finds nowhere is left
+// to AutoMigrate to create, and a temporary table, which only its session
+// sees, is not where an application keeps its rows.
+func checkSearchPath(gdb *gorm.DB, spec TableSpec) error {
+	stmt := &gorm.Statement{DB: gdb}
+	if err := stmt.Parse(spec.model); err != nil {
+		return fmt.Errorf("db: auto migrate %s: %w", spec.typ.Name(), err)
+	}
+	table := stmt.Schema.Table
+	var nsp, path string
+	var current sql.NullString
+	// to_regclass resolves the name as a query does; quoted, it keeps the
+	// case gorm created the table with. Only a relation that a query reads
+	// through the name counts: a table, partitioned table, view,
+	// materialized view or foreign table. An index, sequence or composite
+	// type of the name holds no rows for a new table to hide.
+	err := gdb.Raw(`SELECT n.nspname, current_schema(), current_setting('search_path')
+		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.oid = to_regclass(?) AND c.relkind IN ('r', 'p', 'v', 'm', 'f')`, quote("postgres", table)).Row().Scan(&nsp, &current, &path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("db: auto migrate %s: find table %q on search_path: %w", spec.typ.Name(), table, err)
+	}
+	if nsp == current.String || strings.HasPrefix(nsp, "pg_temp") {
+		return nil
+	}
+	return fmt.Errorf("db: table %q is in schema %q, but current_schema() is %q (search_path %s): auto migrate would create an empty %q there that hides it (put the application's schema first on search_path, or set search_path in the DSN)", table, nsp, current.String, path, table)
 }
 
 // indexShape is an index as Table declares it or as the catalog holds it.
