@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"gorm.io/gorm"
@@ -104,6 +105,48 @@ func TestInstrument_SpansAndDurations(t *testing.T) {
 	}
 	if _, ok := metric(t, reg, "db_client_slow_operations_total", nil); ok {
 		t.Fatal("db.slow_threshold 0 counts no statement as slow")
+	}
+}
+
+// TestInstrument_FailedStatusNamesNoValue: a failed statement's span
+// words its error as the statement log does, by driver, code and names:
+// the value the driver's message quotes (Postgres's invalid input syntax
+// for type integer "x", MySQL's Incorrect integer value 'x', SQLite's
+// bad JSON path 'x') stays out of the trace.
+func TestInstrument_FailedStatusNamesNoValue(t *testing.T) {
+	tel, spans := tracing(t, metricsOn())
+	d := openNotes(t, 0)
+	tel.Instrument(d)
+	gdb := d.Unsafe(t.Context())
+	const secret = "s3cret-value"
+	// SQLite keeps text in an integer column; it quotes a JSON path it
+	// refuses instead.
+	query, name := "INSERT INTO traced_numbers (n) VALUES (?)", "INSERT"
+	if dbtest.Driver() == "sqlite" {
+		query, name = "SELECT json_extract('{}', ?)", "SELECT"
+	} else if err := gdb.Exec("CREATE TABLE traced_numbers (n integer)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec(query, secret).Error; err == nil {
+		t.Fatalf("%s refuses %q on %s", query, secret, dbtest.Driver())
+	}
+	want := map[string]string{"sqlite": "sqlite 1", "postgres": "postgres 22P02", "mysql": "mysql 1366 (HY000)"}[dbtest.Driver()]
+	failed, ok := spanNamed(spans, name)
+	if !ok || failed.Status.Code != codes.Error || failed.Status.Description != want {
+		t.Fatalf("the failed statement's status on %s: %+v, want %q", dbtest.Driver(), failed.Status, want)
+	}
+}
+
+// TestPhase_FailedStatusNamesNoValue: a transaction phase that fails, a
+// COMMIT a deferred constraint trigger refuses with the row's value in
+// its message, words its error the same way.
+func TestPhase_FailedStatusNamesNoValue(t *testing.T) {
+	tel, spans := tracing(t, metricsOn())
+	o := &dbObserver{t: tel, system: "postgresql"}
+	o.Phase(t.Context(), "COMMIT", time.Now(), &pgconn.PgError{Severity: "ERROR", Code: "P0001", Message: "booking s3cret-value overlaps"})
+	commit, ok := spanNamed(spans, "COMMIT")
+	if !ok || commit.Status.Code != codes.Error || commit.Status.Description != "postgres P0001" {
+		t.Fatalf("the failed COMMIT's status: %+v", commit.Status)
 	}
 }
 

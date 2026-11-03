@@ -18,6 +18,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/zynthara/chok/db"
+	"github.com/zynthara/chok/internal/dberr"
 	"github.com/zynthara/chok/internal/dbx"
 )
 
@@ -55,7 +56,10 @@ func (m *dbMetrics) collectors() []prometheus.Collector {
 // Statements produce a client span named
 // "{operation} {table}", such as "SELECT posts", carrying the SQL as gorm
 // built it, with placeholders for the bound values (the text of the
-// slow-query log), and its outcome; the
+// slow-query log), and its outcome: a failed statement's or transaction
+// phase's error status words the error as the statement log does, by its
+// driver, code and names, never with a value the driver's message
+// quotes; the
 // statement's duration in db_client_operation_duration_seconds, by
 // operation, table and error type (canceled, timeout or error; a missing
 // record is not an error); and db_client_slow_operations_total, counting
@@ -179,7 +183,7 @@ func (o *dbObserver) After(tx *gorm.DB, op string) {
 	}
 	if errType != "" {
 		attrs = append(attrs, semconv.ErrorTypeKey.String(errType))
-		s.span.SetStatus(codes.Error, tx.Error.Error())
+		s.span.SetStatus(codes.Error, dberr.Text(tx.Error))
 	}
 	s.span.SetAttributes(attrs...)
 	s.span.End()
@@ -241,7 +245,7 @@ func (o *dbObserver) Phase(ctx context.Context, operation string, begin time.Tim
 	_, span := o.t.tracer.Start(ctx, operation, trace.WithTimestamp(begin),
 		trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(semconv.DBSystemNameKey.String(o.system), semconv.DBOperationName(operation)))
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
+		span.SetStatus(codes.Error, dberr.Text(err))
 		span.SetAttributes(semconv.ErrorTypeKey.String(dbErrorType(err)))
 	}
 	span.End()
