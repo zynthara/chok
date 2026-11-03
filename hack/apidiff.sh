@@ -4,8 +4,8 @@
 # (continue-on-error) while chok is at v0, where a minor release may
 # break the API; it becomes blocking at v1.0.0.
 #
-# The baseline is v0.2.0, or the git ref APIDIFF_BASE names; move
-# it to each new release. Until the baseline exists the script prints
+# The baseline is v0.2.2, or the git ref APIDIFF_BASE names; move it to each new release.
+# Until the baseline exists the script prints
 # "no baseline tag yet" and exits 0. An incompatible change fails the
 # script unless CHANGELOG.md has changed since the baseline.
 # Portable to the bash 3.2 that macOS ships.
@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-BASE="${APIDIFF_BASE:-v0.2.0}"
+BASE="${APIDIFF_BASE:-v0.2.2}"
 MOD="github.com/zynthara/chok"
 # Pinned so runs are reproducible; bump deliberately.
 APIDIFF="golang.org/x/exp/cmd/apidiff@v0.0.0-20260611194520-c48552f49976"

@@ -24,7 +24,7 @@ var templates embed.FS
 // writes it into go.mod when the running binary is not a release itself
 // (a build of a working tree reports no usable version); bump it with
 // every release.
-const releaseVersion = "v0.2.0"
+const releaseVersion = "v0.2.2"
 
 // scaffold is what the templates see.
 type scaffold struct {
