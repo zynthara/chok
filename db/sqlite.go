@@ -1,6 +1,11 @@
 package db
 
 import (
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
@@ -18,7 +23,8 @@ func (d sqliteDialector) Migrator(gdb *gorm.DB) gorm.Migrator {
 	return sqliteMigrator{d.Dialector.Migrator(gdb).(sqlite.Migrator)}
 }
 
-// sqliteMigrator is the driver's migrator with its own MigrateColumnUnique.
+// sqliteMigrator is the driver's migrator with its own MigrateColumnUnique,
+// and with the four methods that rebuild a table run through rebuilding.
 type sqliteMigrator struct {
 	sqlite.Migrator
 }
@@ -28,4 +34,184 @@ type sqliteMigrator struct {
 // create.
 func (m sqliteMigrator) MigrateColumnUnique(value any, field *schema.Field, columnType gorm.ColumnType) error {
 	return migrateColumnUnique(m.Migrator.Migrator, value, field, columnType)
+}
+
+// AlterColumn runs the driver's through rebuilding, on value's table.
+func (m sqliteMigrator) AlterColumn(value any, field string) error {
+	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		return m.rebuilding(stmt.Table, func() error { return m.Migrator.AlterColumn(value, field) })
+	})
+}
+
+// DropColumn runs the driver's through rebuilding, on value's table.
+func (m sqliteMigrator) DropColumn(value any, name string) error {
+	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		return m.rebuilding(stmt.Table, func() error { return m.Migrator.DropColumn(value, name) })
+	})
+}
+
+// CreateConstraint runs the driver's through rebuilding, on the table the
+// driver rebuilds: the constraint's, found as the driver finds it with
+// GuessConstraintInterfaceAndTable. For the foreign key of a has-one or
+// has-many relation that is the table holding the key, which need not be
+// value's. A foreign key added while foreign keys are on must then hold
+// for the rows the rebuild copied: checkForeignKey.
+func (m sqliteMigrator) CreateConstraint(value any, name string) error {
+	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		constraint, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+		return m.withoutForeignKeys(func(on bool) error {
+			if err := m.rebuilding(table, func() error { return m.Migrator.CreateConstraint(value, name) }); err != nil {
+				return err
+			}
+			if fk, ok := constraint.(*schema.Constraint); ok && on {
+				return m.checkForeignKey(value, name, table, fk)
+			}
+			return nil
+		})
+	})
+}
+
+// DropConstraint runs the driver's through rebuilding, on the table the
+// driver rebuilds, found as for CreateConstraint.
+func (m sqliteMigrator) DropConstraint(value any, name string) error {
+	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		_, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+		return m.rebuilding(table, func() error { return m.Migrator.DropConstraint(value, name) })
+	})
+}
+
+// rebuilding runs rebuild, the driver's AlterColumn, DropColumn,
+// CreateConstraint or DropConstraint (glebarez/sqlite v1.11.0). SQLite
+// cannot alter a column or a constraint in place, so each rebuilds table:
+// in one transaction it creates <table>__temp with the new DDL, copies the
+// rows into it, drops table and renames the copy. DROP TABLE drops the
+// indexes of table with it, and AutoMigrate and createIndex made only
+// their own again: an index made by hand was lost. With foreign keys on,
+// as chok opens SQLite, DROP TABLE also deletes the rows first, which
+// fires the foreign keys of the tables that refer to table: their rows
+// were deleted where the key cascades, and the rebuild failed (787) where
+// it takes the default action. The driver turns the keys off for
+// AlterColumn alone.
+//
+// rebuilding reads the indexes of table that have SQL, runs rebuild with
+// foreign keys off, then makes again from that SQL each index the rebuild
+// dropped; one it cannot make again, such as an index over a column that
+// DropColumn dropped, fails the call rather than vanish without a word.
+// The indexes without SQL are those of UNIQUE and PRIMARY KEY clauses,
+// which come back with the DDL of the table. So, as on the dialects that
+// alter a table in place, auto migration drops or rebuilds no index or
+// constraint that chok did not create, and fires no foreign key action.
+// With the keys off, the rows copied are not checked against them either;
+// CreateConstraint checks them against a foreign key it adds, as those
+// dialects do.
+//
+// The rebuild commits before the indexes are made again: a process that
+// stops in between leaves table without them, and no later Open makes
+// again the ones made by hand.
+func (m sqliteMigrator) rebuilding(table string, rebuild func() error) error {
+	before, err := m.indexSQL(table)
+	if err != nil {
+		return err
+	}
+	return m.withoutForeignKeys(func(bool) error {
+		if err := rebuild(); err != nil || len(before) == 0 {
+			return err
+		}
+		after, err := m.indexSQL(table)
+		if err != nil {
+			return err
+		}
+		for _, idx := range before {
+			if slices.ContainsFunc(after, func(a sqliteIndex) bool { return strings.EqualFold(a.name, idx.name) }) {
+				continue
+			}
+			if err := m.DB.Exec(idx.sql).Error; err != nil {
+				return fmt.Errorf("rebuilding table %s dropped index %s, and %s failed: %w", table, idx.name, idx.sql, err)
+			}
+		}
+		return nil
+	})
+}
+
+// checkForeignKey keeps foreign key name, which CreateConstraint has just
+// added to table with foreign keys off, only when every row of table has
+// the parent row it refers to, as Postgres (23503) and MySQL (1452) refuse
+// to add a key that a row breaks. SQLite's own steps for changing a table
+// run PRAGMA foreign_key_check before the commit, but the driver has
+// committed: when rows break the key, it is dropped again, by another
+// rebuild, and the call fails naming the table, the rows, the parent
+// table and the key, so every Open fails until the data is fixed, as on
+// those dialects. Only the rows that refer to the key's parent table
+// count: rows that break another key of the table, to another table, do
+// not stop this one.
+func (m sqliteMigrator) checkForeignKey(value any, name, table string, fk *schema.Constraint) error {
+	parent := fk.ReferenceSchema.Table
+	var n int64
+	err := m.DB.Raw("SELECT count(*) FROM pragma_foreign_key_check(?) WHERE parent = ? COLLATE NOCASE", table, parent).Scan(&n).Error
+	switch {
+	case err != nil:
+		err = fmt.Errorf("check the rows of table %s against foreign key %s: %w", table, name, err)
+	case n == 0:
+		return nil
+	case n == 1:
+		err = fmt.Errorf("table %s has 1 row that refers to no row of %s, so foreign key %s was not added: fix the data and start again", table, parent, name)
+	default:
+		err = fmt.Errorf("table %s has %d rows that refer to no row of %s, so foreign key %s was not added: fix the data and start again", table, n, parent, name)
+	}
+	if dropErr := m.rebuilding(table, func() error { return m.Migrator.DropConstraint(value, name) }); dropErr != nil {
+		return errors.Join(err, fmt.Errorf("dropping foreign key %s again failed, so it is in table %s: %w", name, table, dropErr))
+	}
+	return err
+}
+
+// withoutForeignKeys runs fn with foreign keys off and tells it whether
+// they were on: only then does it turn them off, and on again after fn,
+// failing the call when they do not go on. It is the driver's
+// RunWithoutForeignKey with that answer and with its errors. PRAGMA
+// foreign_keys applies to its connection and does nothing inside a
+// transaction. Auto migration runs outside one, on the one connection of
+// the SQLite writer, so the keys stay off through the rebuild's own
+// transaction; called inside a transaction, they stay on.
+func (m sqliteMigrator) withoutForeignKeys(fn func(on bool) error) (err error) {
+	var on int
+	if err := m.DB.Raw("PRAGMA foreign_keys").Scan(&on).Error; err != nil {
+		return fmt.Errorf("read PRAGMA foreign_keys: %w", err)
+	}
+	if on != 1 {
+		return fn(false)
+	}
+	if err := m.DB.Exec("PRAGMA foreign_keys = OFF").Error; err != nil {
+		return fmt.Errorf("turn foreign keys off: %w", err)
+	}
+	defer func() {
+		if onErr := m.DB.Exec("PRAGMA foreign_keys = ON").Error; onErr != nil {
+			err = errors.Join(err, fmt.Errorf("turn foreign keys on again: %w", onErr))
+		}
+	}()
+	return fn(true)
+}
+
+// sqliteIndex is an index of the SQLite catalog and the SQL that made it.
+type sqliteIndex struct{ name, sql string }
+
+// indexSQL reads the indexes of table that have SQL, in the order the
+// catalog holds them.
+func (m sqliteMigrator) indexSQL(table string) ([]sqliteIndex, error) {
+	rows, err := m.DB.Raw("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY rowid", table).Rows()
+	if err != nil {
+		return nil, fmt.Errorf("read the indexes of table %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []sqliteIndex
+	for rows.Next() {
+		var i sqliteIndex
+		if err := rows.Scan(&i.name, &i.sql); err != nil {
+			return nil, fmt.Errorf("read the indexes of table %s: %w", table, err)
+		}
+		out = append(out, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the indexes of table %s: %w", table, err)
+	}
+	return out, nil
 }
