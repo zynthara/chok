@@ -67,6 +67,37 @@ func TestRecover_PanicLogsAnErrorByItsKind(t *testing.T) {
 	}
 }
 
+// TestRecover_LogsWithTheRequestLogger: RequestID sits outside Recover,
+// so the request Recover holds already carries the request's logger and
+// ID: the panic line and the line of the 500 it becomes both go to the
+// App's logger with the request_id, and nothing goes to slog.Default.
+func TestRecover_LogsWithTheRequestLogger(t *testing.T) {
+	before := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(before) })
+	var global syncBuffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&global, nil)))
+	var logs syncBuffer
+	app := New(testBase(t), Logger(slog.New(slog.NewTextHandler(&logs, nil))))
+	GET(app.Router(), "/boom", func(context.Context, *None) (None, error) { panic("kaboom") })
+	rec := do(t, app.Handler(), call{method: http.MethodGet, path: "/boom"})
+	id := rec.Header().Get(requestIDHeader)
+	if rec.Code != http.StatusInternalServerError || id == "" {
+		t.Fatalf("%d, request id %q", rec.Code, id)
+	}
+	out := logs.String()
+	for _, want := range []string{
+		`msg="chok: panic in handler" request_id=` + id + ` panic=kaboom`,
+		`msg="chok: request failed" request_id=` + id + ` status=500 reason=InternalError`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the App's log lacks %s:\n%s", want, out)
+		}
+	}
+	if g := global.String(); g != "" {
+		t.Errorf("slog.Default got a line:\n%s", g)
+	}
+}
+
 func TestRecover_DoesNotDoubleWrite(t *testing.T) {
 	app := newTestApp(t)
 	app.Router().Handle(http.MethodGet, "/half", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

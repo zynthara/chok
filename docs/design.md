@@ -228,8 +228,10 @@ reason 匹配副本。store、identity、jobs 的错误都实现 `Coder`，所�
 
 ### 5.3 默认中间件栈
 
-外到内，顺序冻结：Recover → RequestID（`X-Request-Id`，响应回写）→
-ClientIP（只信 `http.trusted_proxies` 里的代理）→ 遥测槽位（`Instrumenter`）
+外到内，顺序冻结：RequestID（`X-Request-Id`，响应回写；请求 logger 带上
+request_id）→ Recover（在 RequestID 里面，panic 那行和它变成的 500 那行都由请求
+logger 记、带 request_id）→ ClientIP（只信 `http.trusted_proxies` 里的代理）→
+遥测槽位（`Instrumenter`）
 → AccessLog（字段固定：method、path、route、status、bytes、duration、
 request_id、client_ip；JSON 格式下 duration 是 `"1.5ms"` 这样的字符串）→
 Timeout（`http.request_timeout` > 0 时）→ CORS（配置了 `http.cors` 时）→

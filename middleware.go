@@ -48,9 +48,11 @@ func ClientIP(ctx context.Context) string {
 	return s
 }
 
-// buildHandler assembles, outermost first: Recover, RequestID, ClientIP,
+// buildHandler assembles, outermost first: RequestID, Recover, ClientIP,
 // the Instrumenters, AccessLog, Timeout, CORS, CSRF, the Wrap middleware,
-// then the routes.
+// then the routes. RequestID is outside Recover so that a panic is
+// logged, and answered, with the request's logger and ID; it does too
+// little to need recovering.
 func (a *App) buildHandler() http.Handler {
 	h, security := wrap(http.HandlerFunc(a.serveMux), a.wrap)
 	a.wrapSecurity = security
@@ -74,8 +76,8 @@ func (a *App) buildHandler() http.Handler {
 		h = in.Middleware()(h)
 	}
 	h = a.clientIP(h)
-	h = a.requestID(h)
-	return a.recover(h)
+	h = a.recover(h)
+	return a.requestID(h)
 }
 
 // statusWriter records the status and size of a response.
@@ -153,13 +155,10 @@ func (a *App) recover(next http.Handler) http.Handler {
 			if len(stack) > 8<<10 {
 				stack = stack[:8<<10]
 			}
-			// The request this layer holds predates the request id; the
-			// response header carries it.
-			id := sw.Header().Get(requestIDHeader)
-			ctx := context.WithValue(r.Context(), requestIDKey, id)
-			a.logger.ErrorContext(ctx, "chok: panic in handler", "request_id", id, "panic", panicText(p), "stack", string(stack))
+			ctx := r.Context()
+			LoggerFrom(ctx).ErrorContext(ctx, "chok: panic in handler", "panic", panicText(p), "stack", string(stack))
 			if sw.status == 0 {
-				a.writeError(sw, r.WithContext(ctx), ErrInternal)
+				a.writeError(sw, r, ErrInternal)
 			}
 		}()
 		next.ServeHTTP(sw, r)
