@@ -343,10 +343,15 @@ schema；`*db.DB` 实现 Closer / Healther / Namer，交给 `app.Use`。
   panic。auto 模式按名字建索引；已有同名索引时读目录核对：同一张表、列与列序相同
   （`SoftUnique` 的 `delete_token` 在最后）、唯一、不带 WHERE。有一处不符，`Open` /
   `RegisterSchema` / `Migrate` 就失败，错误里写出库里的与声明的两边，不会替应用删除
-  或重建索引。gorm 的 MySQL 驱动（v1.6.0）在 AutoMigrate 时会删掉列上不是它按
-  `unique` / `uniqueIndex` tag 建的单列唯一索引（单列的 `db.Unique`、手写的都在内），
-  `db/mysql.go` 覆盖了这一步，三方言都不删 chok 没建的索引。SQLite 与 Postgres 的
-  索引名在整个 schema 里唯一，同名索引在别的表上也算不符；MySQL 的索引名按表计。
+  或重建索引。gorm 的迁移器在 AutoMigrate 时会动它没建的唯一索引和约束。MySQL 驱动
+  （v1.6.0）删掉列上不是它按 `unique` / `uniqueIndex` tag 建的单列唯一索引（单列的
+  `db.Unique`、手写的都在内）。Postgres 与 SQLite 用 gorm（v1.31.2）的通用迁移器：列
+  被别的名字的单列唯一约束管着（手写的、旧 schema 建的）而字段没有 `unique` tag 时，
+  它不看 `uni_<表>_<列>` 在不在就去删，Postgres 上 `Open` 因此失败（42704），SQLite
+  上每次 `Open` 都重建这张表：表上手写的索引丢失，`DROP TABLE` 还让引用它的外键级联
+  删掉子表的行，或让 `Open` 失败。`db/mysql.go` 与 `db/unique.go` 覆盖了这两步，三方言
+  的 auto 迁移都不删、不重建 chok 没建的索引和约束。SQLite 与 Postgres 的索引名在整个
+  schema 里唯一，同名索引在别的表上也算不符；MySQL 的索引名按表计。
   versioned 与 off 模式下索引由应用的 SQL 负责。
 
 ### 6.2 迁移：三种模式、单账本
