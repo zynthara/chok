@@ -201,6 +201,27 @@ func TestErrorText(t *testing.T) {
 			t.Errorf("wrapped %v: %q, want %q", c.err, got, "find: "+c.want)
 		}
 	}
+	// pgx quotes, with %#v or %v, an argument it cannot encode for the
+	// type of its parameter, after failed to encode args[i]: the index
+	// stays and the rest goes, whatever the value holds.
+	encode := func(i int, err error) error { return fmt.Errorf("failed to encode args[%d]: %w", i, err) }
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{encode(0, fmt.Errorf("unable to encode %#v into %s format for %s (OID %d): %w",
+			struct{ V string }{"s3cret-value"}, "binary", "int4", 23, errors.New("cannot find encode plan"))),
+			"failed to encode args[0]"},
+		{encode(1, fmt.Errorf("unable to encode %v into OID %d in binary format", "s3cret-value", 16385)), "failed to encode args[1]"},
+		{encode(12, fmt.Errorf("unable to encode %v", "s3cret; value\ns3cret-value")), "failed to encode args[12]"},
+	} {
+		if got := errorText(c.err); got != c.want {
+			t.Errorf("%v: %q, want %q", c.err, got, c.want)
+		}
+		if got := errorText(fmt.Errorf("exec: %w", c.err)); got != "exec: "+c.want {
+			t.Errorf("wrapped %v: %q, want %q", c.err, got, "exec: "+c.want)
+		}
+	}
 }
 
 // TestGORMLogger_LogsErrorText: a failed and a refused statement log

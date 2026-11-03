@@ -168,9 +168,19 @@ var mysqlDuplicateKey = regexp.MustCompile(`for key '([^']+)'$`)
 // over. couldn't convert "x" into type bool, from database/sql/driver,
 // quotes it with %q, %d or %v (%T), and the match runs to the last into
 // type bool, so a value that reads like one goes as well.
+//
+// pgxEncode finds the argument pgx quotes when it cannot encode it for
+// the type of its parameter, before the statement is sent: pgx v5's
+// ExtendedQueryBuilder.Build wraps pgtype's unable to encode x into
+// binary format for int4 (OID 23), or unable to encode x for an element
+// of an array or a field of a composite, as failed to encode args[i].
+// The argument is printed with %#v or %v and may hold anything, a
+// separator or a line break included, so the match runs from the index
+// to the end of the text.
 var (
 	scanValue = regexp.MustCompile(`(converting driver\.Value type \S+ )\("(?:[^"\\]|\\.)*"\) `)
 	scanBool  = regexp.MustCompile(`(couldn't convert ).* (into type bool)`)
+	pgxEncode = regexp.MustCompile(`(?s)(failed to encode args\[\d+\]): .*`)
 )
 
 // errorText is what the log says of a statement's error. The drivers'
@@ -196,9 +206,12 @@ var (
 // FTS5 query. A trigger's RAISE text is the trigger's and may quote the
 // row. database/sql's own error for a value it cannot scan into the
 // destination quotes the value as well; it is cut out and the rest of
-// the message kept. Any other error, a network fault, a cancellation,
-// gorm's or chok's own, is logged as it is. The caller gets the error
-// unchanged, and expected reads its type and code.
+// the message kept. pgx's error for an argument it cannot encode for the
+// type of its parameter, which a raw statement given a Go value of the
+// wrong type meets, quotes the argument: it is cut after the argument's
+// index (failed to encode args[0]). Any other error, a network fault, a
+// cancellation, gorm's or chok's own, is logged as it is. The caller
+// gets the error unchanged, and expected reads its type and code.
 func errorText(err error) string {
 	if pg, ok := errors.AsType[*pgconn.PgError](err); ok {
 		words := []string{"postgres", pg.Code}
@@ -229,5 +242,6 @@ func errorText(err error) string {
 		}
 	}
 	s := scanValue.ReplaceAllString(err.Error(), "$1")
-	return scanBool.ReplaceAllString(s, "$1$2")
+	s = scanBool.ReplaceAllString(s, "$1$2")
+	return pgxEncode.ReplaceAllString(s, "$1")
 }

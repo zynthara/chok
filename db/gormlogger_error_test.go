@@ -103,6 +103,43 @@ func TestGORMLogger_FailedErrorLogsNoValue(t *testing.T) {
 	}
 }
 
+// loggedArg is a value no driver binds: pgx quotes it when it cannot
+// encode it for the type of its parameter, database/sql names its type.
+type loggedArg struct{ V string }
+
+// TestGORMLogger_EncodeErrorLogsNoValue: an argument the driver cannot
+// bind is logged at error without its value. pgx fails to encode it for
+// an integer parameter and quotes it, after failed to encode args[0],
+// which alone is logged. MySQL's and SQLite's drivers take no struct:
+// database/sql refuses it before the driver sees it, in an error that
+// names its type and not its value.
+func TestGORMLogger_EncodeErrorLogsNoValue(t *testing.T) {
+	d, log := debugHandle(t)
+	gdb := d.Unsafe(t.Context())
+	if err := gdb.Exec("CREATE TABLE logged_args (n integer)").Error; err != nil {
+		t.Fatal(err)
+	}
+	const query = "INSERT INTO logged_args (n) VALUES (?)"
+	if err := gdb.Exec(query, loggedArg{V: boundValue}).Error; err == nil {
+		t.Fatalf("%s binds %T on %s", query, loggedArg{}, dbtest.Driver())
+	}
+	s := log.String()
+	line := statementLine(s, "db: query failed", query)
+	if !strings.Contains(line, "level=ERROR") {
+		t.Fatalf("the statement is logged at error on %s:\n%s", dbtest.Driver(), s)
+	}
+	want := "sql: converting argument $1 type: unsupported type db_test.loggedArg, a struct"
+	if dbtest.Driver() == "postgres" {
+		want = "failed to encode args[0]"
+	}
+	if got := logField(line, "error"); got != want {
+		t.Errorf("error=%q on %s, want %q", got, dbtest.Driver(), want)
+	}
+	if strings.Contains(s, boundValue) {
+		t.Errorf("the value stays out of the log on %s:\n%s", dbtest.Driver(), s)
+	}
+}
+
 // loggedInt and loggedBool read the column of logged_texts, which holds
 // text, into an int and a bool field, as a model would after the type of
 // its column changed under it.
