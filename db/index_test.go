@@ -174,8 +174,8 @@ func TestUnique_AdoptsTheIndexMadeByHand(t *testing.T) {
 	var log logBuffer
 	d := dbtest.OpenConfig(t, cfg, db.Logger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))),
 		db.Tables(db.Table(&bookshelfItem{}, db.Unique("uk_bsi_owner_book", "owner_id", "book_id"))))
-	// Statements are logged with their placeholders, so only DDL names
-	// the index.
+	// Statements, queries read with Scan included, are logged with their
+	// placeholders, so only DDL names the index.
 	if s := log.String(); !strings.Contains(s, `msg="db: query"`) || strings.Contains(s, "uk_bsi_owner_book") {
 		t.Fatalf("Open logs its statements and runs none on the index:\n%s", s)
 	}
@@ -226,8 +226,8 @@ func TestUnique_OneColumnKeptAcrossOpens(t *testing.T) {
 	}
 	var log logBuffer
 	d := dbtest.OpenConfig(t, cfg, db.Logger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))), tables)
-	// Statements are logged with their placeholders, so only DDL names
-	// the index.
+	// Statements, queries read with Scan included, are logged with their
+	// placeholders, so only DDL names the index.
 	if s := log.String(); !strings.Contains(s, `msg="db: query"`) || strings.Contains(s, "uk_setting_owner") {
 		t.Fatalf("the second Open runs no statement on the index:\n%s", s)
 	}
@@ -361,9 +361,9 @@ func TestOpen_KeepsAForeignUniqueConstraint(t *testing.T) {
 	var log logBuffer
 	d := dbtest.OpenConfig(t, cfg, db.Logger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))),
 		db.Tables(db.Table(&member{})))
-	// gorm logs the values of a query read with Scan in place of its
-	// placeholders, so look at how each statement starts rather than for
-	// names; a SQLite rebuild also copies the rows through members__temp.
+	// Look at how each statement starts rather than for names: stricter,
+	// as it catches DDL whatever it names; a SQLite rebuild also copies
+	// the rows through members__temp.
 	s := log.String()
 	if !strings.Contains(s, `msg="db: query"`) {
 		t.Fatalf("Open logs its statements:\n%s", s)

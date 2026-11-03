@@ -42,6 +42,11 @@ func TestGORMLogger_ThresholdAndClassification(t *testing.T) {
 	if s, args := g.ParamsFilter(ctx, "SELECT ?", "secret"); s != "SELECT ?" || args != nil {
 		t.Fatal("bound values never reach the log")
 	}
+	// gorm logs a query read with Scan through its recorder, which asks
+	// this variable instead of the handle's logger.
+	if s, args := gormlogger.RecorderParamsFilter(ctx, "SELECT ?", "secret"); s != "SELECT ?" || args != nil {
+		t.Fatal("nor do the bound values of a query read with Scan")
+	}
 	g0 := g.LogMode(gormlogger.Silent).(*gormLogger)
 	buf.Reset()
 	g0.Trace(ctx, time.Now().Add(-time.Second), sql, errors.New("boom"))

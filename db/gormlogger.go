@@ -12,9 +12,27 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 )
 
+// gorm's Scan runs its query under gorm's recorder logger, then hands the
+// SQL the recorder kept to the handle's logger: the handle's ParamsFilter
+// is never asked about that query. The recorder asks only the package
+// variable gormlogger.RecorderParamsFilter, whose default keeps the
+// values, so it is set here. It is process-wide: in a process that
+// imports chok/db, a query read with Scan through any gorm handle, chok's
+// or another, is logged with its placeholders.
+func init() {
+	gormlogger.RecorderParamsFilter = keepPlaceholders
+}
+
+// keepPlaceholders drops a statement's bound values, so gorm logs its SQL
+// with the placeholders where the values would go.
+func keepPlaceholders(_ context.Context, sql string, _ ...any) (string, []any) {
+	return sql, nil
+}
+
 // gormLogger bridges gorm to the handle's slog logger: failed statements
 // at error (a missing record is not a failure), slow ones at warn, the
-// rest at debug. SQL is logged with placeholders, never with values.
+// rest at debug. SQL is logged with placeholders, never with values, a
+// query read with Scan included (see init).
 type gormLogger struct {
 	d     *DB
 	slow  time.Duration
@@ -28,8 +46,8 @@ func (g *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 }
 
 // ParamsFilter keeps bound values out of the logged SQL.
-func (g *gormLogger) ParamsFilter(_ context.Context, sql string, _ ...any) (string, []any) {
-	return sql, nil
+func (g *gormLogger) ParamsFilter(ctx context.Context, sql string, params ...any) (string, []any) {
+	return keepPlaceholders(ctx, sql, params...)
 }
 
 func (g *gormLogger) Info(ctx context.Context, msg string, data ...any) {
