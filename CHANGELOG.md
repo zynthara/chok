@@ -48,7 +48,7 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
   before. Auto migration drops or rebuilds no index or constraint that
   chok did not create, on the three dialects.
 - **`db`**: on SQLite, a migration that rebuilds a table keeps the
-  table's indexes and fires no foreign key action. gorm's driver alters a
+  table's indexes and triggers and fires no foreign key action. gorm's driver alters a
   column, and adds or drops a constraint such as the `unique` tag's, by
   making the table anew and copying its rows: its DROP TABLE took every
   index of the table with it, of which gorm's tags and `db.Table` brought
@@ -61,7 +61,40 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
   go missing. A foreign key the rebuild adds is checked against the rows
   as Postgres and MySQL check it: a row without a parent fails the
   migration and the key is not added. The keys are turned on again even
-  when the migration's context ends meanwhile.
+  when the migration's context ends meanwhile. A table a view refers to
+  still cannot be rebuilt (SQLite checks the view when it renames the
+  copy): drop the view, start, and create it again; a trigger of another
+  table that refers to it is the same. A trigger made again after the
+  rebuild that no longer compiles, as it used a column `DropColumn`
+  dropped, is dropped and the migration fails naming it and its SQL, as
+  SQLite's own DROP COLUMN refuses; left in place it would have failed
+  every later rebuild in the database.
+- **`db`**: a failed or refused statement is logged with its driver's
+  error code and the names the error carries, never with the driver's
+  message: MySQL's `Duplicate entry 'alice@example.com' for key ...` and
+  `Incorrect integer value: 'abc' ...`, Postgres's `invalid input syntax
+  for type integer: "abc"` put the statement's values in the message, so
+  the `error` of a `db: query failed` or `db: query refused` line now
+  reads `mysql 1062 (23000) key users.uk_user_email` or `postgres 23505
+  constraint uk_user_email table users`. SQLite's messages name objects
+  and are logged as they are, except the ones of SQLITE_ERROR and of a
+  trigger's RAISE, which can quote a JSON path, a word of an FTS5 query
+  or a row: they read `sqlite 1` or `sqlite 1811`. A row database/sql
+  cannot convert is logged without the value it quotes. Every other
+  error is logged as it is, and the error a caller gets is unchanged.
+- **`db`**: whether a failed statement is logged at Debug as refused (a
+  constraint the data violated) or at Error is decided by the driver's
+  error code, no longer by words of its message, which a value could
+  carry: Postgres's class 23, MySQL's 1022, 1048, 1062, 1216, 1217,
+  1364, 1451, 1452, 1761, 1762 and 3819, and SQLite's SQLITE_CONSTRAINT codes
+  are refused, as is MySQL's 1061, which a concurrent migration raises
+  on purpose when two processes create the same index. A not-null
+  violation, which the words missed, is refused now; a message that
+  merely contains such a word, a table named duplicate_checks that does
+  not exist, is a failure now.
+- **`store`**: the key name of a MySQL duplicate is read from the end of
+  the driver's message, so a value that itself reads `for key 'x'` cannot
+  stand in for the key in a 409's `metadata.constraint`.
 - **`db`**: a query read with gorm's `Scan` is logged with its
   placeholders, as every other statement is. gorm's `Scan` records the
   statement through its own recorder, whose filter is the package-level
