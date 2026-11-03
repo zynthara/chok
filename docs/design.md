@@ -353,9 +353,12 @@ schema；`*db.DB` 实现 Closer / Healther / Namer，交给 `app.Use`。
   的 auto 迁移都不删、不重建 chok 没建的索引和约束。SQLite 与 Postgres 的索引名在整个
   schema 里唯一，同名索引在别的表上也算不符；MySQL 的索引名按表计。
   versioned 与 off 模式下索引由应用的 SQL 负责。SQLite 驱动（glebarez/sqlite
-  v1.11.0）改列、删列、增删约束都要整表重建，`DROP TABLE` 会连带删掉表上的索引、
-  触发引用这张表的外键动作，`db/sqlite.go` 因此在关掉外键时重建，并按目录里原来的
-  SQL 补回被删的索引，加外键时还核对已有的行。
+  v1.11.0）改列、删列、增删约束都要整表重建，`DROP TABLE` 会连带删掉表上的索引和
+  触发器、触发引用这张表的外键动作，`db/sqlite.go` 因此在关掉外键时重建，并按目录里
+  原来的 SQL 补回被删的索引和触发器（删掉的列还被触发器用着时报错，和 SQLite 自己的
+  `DROP COLUMN` 一样），加外键时还核对已有的行。有视图或别的表上的触发器引用的表改
+  不了结构：重建最后改名时 SQLite 会校验它们，那一刻表不在，整个重建回滚、`Open`
+  失败；先 `DROP VIEW`（或那个触发器），启动之后再建回来。
 
 ### 6.2 迁移：三种模式、单账本
 
