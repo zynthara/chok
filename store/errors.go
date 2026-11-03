@@ -196,8 +196,11 @@ func (s *Store[T]) columnsField(cols []string) string {
 //	MySQL     Duplicate entry 'x' for key 'posts.uk_post_title'   (8.0.19+ prefixes the table)
 //	Postgres  duplicate key value violates unique constraint "uk_post_title"
 //	SQLite    UNIQUE constraint failed: posts.title, posts.owner_id, posts.delete_token (2067)
+//
+// MySQL's key ends the message; the value comes first and may itself read
+// for key 'y', so the match is anchored at the end.
 var (
-	mysqlKey     = regexp.MustCompile(`for key '([^']+)'`)
+	mysqlKey     = regexp.MustCompile(`for key '([^']+)'$`)
 	postgresKey  = regexp.MustCompile(`unique constraint "([^"]+)"`)
 	sqliteUnique = regexp.MustCompile(`UNIQUE constraint failed:\s*([^\n]+)`)
 	sqliteCode   = regexp.MustCompile(`\s*\(\d+\)$`)

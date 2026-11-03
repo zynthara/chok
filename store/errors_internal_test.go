@@ -114,6 +114,8 @@ func TestConstraintName_AllDialects(t *testing.T) {
 		"UNIQUE constraint failed: users.email":                                                               "users.email",
 		"something else entirely":                                                                             "",
 		`ERROR: duplicate key value violates unique constraint "idx_posts_rid" DETAIL: Key (rid)=(x) exists.`: "idx_posts_rid",
+		// The key ends the message; a value that reads like one is not it.
+		"Error 1062 (23000): Duplicate entry 'x' for key 's3cret-value' for key 'users.uk_user_email'": "uk_user_email",
 	} {
 		if got := constraintName(msg); got != want {
 			t.Errorf("%q → %q, want %q", msg, got, want)
