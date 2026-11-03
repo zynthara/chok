@@ -102,3 +102,63 @@ func TestGORMLogger_FailedErrorLogsNoValue(t *testing.T) {
 		t.Errorf("the value stays out of the log on %s:\n%s", dbtest.Driver(), s)
 	}
 }
+
+// loggedInt and loggedBool read the column of logged_texts, which holds
+// text, into an int and a bool field, as a model would after the type of
+// its column changed under it.
+type loggedInt struct{ N int }
+
+type loggedBool struct{ N bool }
+
+func (loggedInt) TableName() string  { return "logged_texts" }
+func (loggedBool) TableName() string { return "logged_texts" }
+
+// TestGORMLogger_ScanErrorLogsNoValue: a value that database/sql cannot
+// scan into the field is logged at error without the value its message
+// quotes (converting driver.Value type string ("x") to a int, couldn't
+// convert "x" into type bool).
+func TestGORMLogger_ScanErrorLogsNoValue(t *testing.T) {
+	d, log := debugHandle(t)
+	gdb := d.Unsafe(t.Context())
+	// SQLite keeps text in an integer column; the others want a text one.
+	column, src := "varchar(64)", "string"
+	switch dbtest.Driver() {
+	case "sqlite":
+		column = "integer"
+	case "mysql":
+		src = "[]uint8"
+	}
+	if err := gdb.Exec("CREATE TABLE logged_texts (n " + column + ")").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec("INSERT INTO logged_texts (n) VALUES (?)", boundValue).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		dest any
+		want string
+	}{
+		{&[]loggedInt{}, `sql: Scan error on column index 0, name "n": converting driver.Value type ` + src + ` to a int: invalid syntax`},
+		{&[]loggedBool{}, `sql: Scan error on column index 0, name "n": sql/driver: couldn't convert into type bool`},
+	} {
+		start := len(log.String())
+		if err := gdb.Find(c.dest).Error; err == nil {
+			t.Fatalf("%T holds %q on %s", c.dest, boundValue, dbtest.Driver())
+		}
+		var line string
+		for l := range strings.Lines(log.String()[start:]) {
+			if strings.Contains(l, `msg="db: query failed"`) && strings.Contains(logField(l, "sql"), "logged_texts") {
+				line = l
+			}
+		}
+		if !strings.Contains(line, "level=ERROR") {
+			t.Fatalf("reading %T is logged at error on %s:\n%s", c.dest, dbtest.Driver(), log.String()[start:])
+		}
+		if got := logField(line, "error"); got != c.want {
+			t.Errorf("%T: error=%q on %s, want %q", c.dest, got, dbtest.Driver(), c.want)
+		}
+	}
+	if s := log.String(); strings.Contains(s, boundValue) {
+		t.Errorf("the value stays out of the log on %s:\n%s", dbtest.Driver(), s)
+	}
+}

@@ -119,6 +119,17 @@ const (
 // read for key 'y', so the match is anchored at the end.
 var mysqlDuplicateKey = regexp.MustCompile(`for key '([^']+)'$`)
 
+// scanValue and scanBool find the value database/sql quotes when it
+// cannot scan it into the destination. converting driver.Value type
+// string ("x") to a int quotes it with %q, whose escapes the match steps
+// over. couldn't convert "x" into type bool, from database/sql/driver,
+// quotes it with %q, %d or %v (%T), and the match runs to the last into
+// type bool, so a value that reads like one goes as well.
+var (
+	scanValue = regexp.MustCompile(`(converting driver\.Value type \S+ )\("(?:[^"\\]|\\.)*"\) `)
+	scanBool  = regexp.MustCompile(`(couldn't convert ).* (into type bool)`)
+)
+
 // errorText is what the log says of a statement's error. The drivers'
 // messages quote the values a statement bound: MySQL's Duplicate entry
 // 'x' for key 'k', Incorrect integer value 'x' for column 'c' and
@@ -140,9 +151,11 @@ var mysqlDuplicateKey = regexp.MustCompile(`for key '([^']+)'$`)
 // whose message quotes the SQL, and of a value a function or a virtual
 // table refuses, whose message may quote it: a JSON path, a word of an
 // FTS5 query. A trigger's RAISE text is the trigger's and may quote the
-// row. Any other error, a network fault, a cancellation, gorm's or
-// chok's own, is logged as it is. The caller gets the error unchanged,
-// and expected reads all of it.
+// row. database/sql's own error for a value it cannot scan into the
+// destination quotes the value as well; it is cut out and the rest of
+// the message kept. Any other error, a network fault, a cancellation,
+// gorm's or chok's own, is logged as it is. The caller gets the error
+// unchanged, and expected reads all of it.
 func errorText(err error) string {
 	if pg, ok := errors.AsType[*pgconn.PgError](err); ok {
 		words := []string{"postgres", pg.Code}
@@ -176,5 +189,6 @@ func errorText(err error) string {
 			return fmt.Sprintf("sqlite %d", code)
 		}
 	}
-	return err.Error()
+	s := scanValue.ReplaceAllString(err.Error(), "$1")
+	return scanBool.ReplaceAllString(s, "$1$2")
 }

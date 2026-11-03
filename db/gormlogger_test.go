@@ -136,6 +136,36 @@ func TestErrorText(t *testing.T) {
 			}
 		}
 	}
+	// database/sql quotes a value it cannot scan with %q, %d or %v; the
+	// value goes and the rest stays. A quote or a closing parenthesis in
+	// the value does not end it early.
+	scan := func(format string, v ...any) error {
+		return fmt.Errorf("sql: Scan error on column index 0, name %q: %w", "n", fmt.Errorf(format, v...))
+	}
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{scan("converting driver.Value type %T (%q) to a %s: %v", "", "s3cret-value", "int", "invalid syntax"),
+			`sql: Scan error on column index 0, name "n": converting driver.Value type string to a int: invalid syntax`},
+		{scan("converting driver.Value type %T (%q) to a %s: %v", []byte(nil), `s3cret "value") to a int: x`, "float64", "invalid syntax"),
+			`sql: Scan error on column index 0, name "n": converting driver.Value type []uint8 to a float64: invalid syntax`},
+		{scan("converting driver.Value type string (%q) to a UUID: %v", "s3cret-value", "invalid uuid"),
+			`sql: Scan error on column index 0, name "n": converting driver.Value type string to a UUID: invalid uuid`},
+		{scan("sql/driver: couldn't convert %q into type bool", `s3cret "value" into type bool`),
+			`sql: Scan error on column index 0, name "n": sql/driver: couldn't convert into type bool`},
+		{scan("sql/driver: couldn't convert %d into type bool", 31337),
+			`sql: Scan error on column index 0, name "n": sql/driver: couldn't convert into type bool`},
+		{scan("sql/driver: couldn't convert %v (%T) into type bool", 3.5, 3.5),
+			`sql: Scan error on column index 0, name "n": sql/driver: couldn't convert into type bool`},
+	} {
+		if got := errorText(c.err); got != c.want {
+			t.Errorf("%v: %q, want %q", c.err, got, c.want)
+		}
+		if got := errorText(fmt.Errorf("find: %w", c.err)); got != "find: "+c.want {
+			t.Errorf("wrapped %v: %q, want %q", c.err, got, "find: "+c.want)
+		}
+	}
 }
 
 // TestGORMLogger_LogsErrorText: a failed and a refused statement log
