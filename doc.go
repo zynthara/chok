@@ -38,5 +38,9 @@
 //
 // A handler returns an *Error or any error implementing Coder; the App
 // renders it as {"code","reason","message","request_id","metadata"}.
-// Any other error is a 500 whose cause is logged and never sent.
+// Any other error is a 500 whose cause is never sent. A 5xx logs its
+// status, its reason and each error of the chain: an *Error by its reason
+// and message, context.Canceled, context.DeadlineExceeded, io.EOF and
+// io.ErrUnexpectedEOF by name, anything else by its Go type, never by
+// its text.
 package chok

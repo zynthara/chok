@@ -373,8 +373,9 @@ func TestErrors_ResolutionOrder(t *testing.T) {
 			t.Fatal("metadata retry_after becomes the Retry-After header")
 		}
 		if c.path == "/secret" {
-			if strings.Contains(rec.Body.String(), "hunter2") || !strings.Contains(logs.String(), "hunter2") {
-				t.Fatal("a 500's cause is logged, never sent")
+			if strings.Contains(rec.Body.String(), "hunter2") || strings.Contains(logs.String(), "hunter2") ||
+				!strings.Contains(logs.String(), `"error":"*errors.errorString"`) {
+				t.Fatalf("a 500's cause is never sent, and logged by its type alone: %s", logs.String())
 			}
 		}
 	}

@@ -211,7 +211,11 @@ type Coder interface{ APIError() *Error }
 handler 返回 error，渲染器按顺序解析：`OnError` 钩子 → `*chok.Error` →
 `Coder`（`errors.AsType`）→ validator 的错误（400 Validation，
 `metadata.fields` 以字段的来源名为键）→ `context.DeadlineExceeded`（504
-Timeout）→ 其余 500（原错误只进日志，不进响应）。信封总带 `request_id`；
+Timeout）→ 其余 500（原错误不进响应）。5xx 记一条 Error 日志，只记分类：状态码、
+reason，和错误链上每一层——`*chok.Error` 记它的 reason 与 message，
+`context.Canceled`、`context.DeadlineExceeded`、`io.EOF`、`io.ErrUnexpectedEOF`
+记名字，其余只记 Go 类型、不记文本（驱动和标准库的错误文本常引用输入值），同一
+`request_id` 把它和出错处自己记的日志串起来。信封总带 `request_id`；
 `metadata.retry_after` 同时写 `Retry-After` 头。哨兵 `ErrBadRequest` …
 `ErrInternal` 用 `With` / `Msgf` / `Wrap` 派生副本，`errors.Is` 按 code +
 reason 匹配副本。store、identity、jobs 的错误都实现 `Coder`，所以 404 / 409 /

@@ -1,9 +1,12 @@
 package chok
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,3 +149,85 @@ type coded struct{}
 
 func (coded) Error() string    { return "coded" }
 func (coded) APIError() *Error { return ErrConflict.Msgf("already there") }
+
+// TestWriteError_5xxLogsTheClassificationOnly: the line a 5xx logs names
+// the status, the reason and each error of the chain — an *Error by its
+// reason and message, anything else by its Go type — and never carries
+// the text of an error chok did not write: a driver's or the standard
+// library's message often quotes the input. The request_id ties the line
+// to whatever the error's origin logged.
+func TestWriteError_5xxLogsTheClassificationOnly(t *testing.T) {
+	var logs bytes.Buffer
+	app := New(testBase(t), Logger(slog.New(slog.NewTextHandler(&logs, nil))))
+	leaky := errors.New(`strconv.Atoi: parsing "s3cret-value": invalid syntax`)
+	cases := []struct {
+		path   string
+		err    error
+		status int
+		reason string
+		chain  string
+	}{
+		{"/plain", leaky, 500, "InternalError", `error=*errors.errorString`},
+		{"/wrapped", fmt.Errorf("load: %w", leaky), 500, "InternalError", `error="*fmt.wrapError <- *errors.errorString"`},
+		{"/joined", errors.Join(leaky, ErrInternal.Msgf("two failures")), 500, "InternalError",
+			`error="*errors.joinError <- [*errors.errorString | InternalError: two failures]"`},
+		{"/timeout", fmt.Errorf("query: %w", context.DeadlineExceeded), 504, "Timeout",
+			`error="*fmt.wrapError <- context.DeadlineExceeded"`},
+		// The message is chok's or the application's own words; the cause
+		// below it is not.
+		{"/chok", ErrInternal.Msgf("settings unavailable").Wrap(fmt.Errorf("load: %w", leaky)), 500, "InternalError",
+			`error="InternalError: settings unavailable <- *fmt.wrapError <- *errors.errorString"`},
+	}
+	for _, c := range cases {
+		GET(app.Router(), c.path, func(context.Context, *None) (None, error) { return None{}, c.err })
+	}
+	for _, c := range cases {
+		logs.Reset()
+		rec := do(t, app.Handler(), call{method: http.MethodGet, path: c.path})
+		if rec.Code != c.status || strings.Contains(rec.Body.String(), "s3cret-value") {
+			t.Fatalf("%s: %d %s", c.path, rec.Code, rec.Body)
+		}
+		line := logs.String()
+		for _, want := range []string{`level=ERROR`, `msg="chok: request failed"`, "request_id=" + rec.Header().Get(requestIDHeader),
+			fmt.Sprintf("status=%d", c.status), "reason=" + c.reason, c.chain} {
+			if !strings.Contains(line, want) {
+				t.Errorf("%s: the log lacks %s:\n%s", c.path, want, line)
+			}
+		}
+		if strings.Contains(line, "s3cret-value") || strings.Contains(line, "load:") || strings.Contains(line, "query:") {
+			t.Errorf("%s: the log carries the text of an error chok did not write:\n%s", c.path, line)
+		}
+	}
+}
+
+// timeoutLike is an error whose own Is method matches
+// context.DeadlineExceeded, as the timeout of net/http's client does.
+type timeoutLike struct{}
+
+func (timeoutLike) Error() string        { return "timed out reading s3cret-value" }
+func (timeoutLike) Is(target error) bool { return target == context.DeadlineExceeded }
+
+// TestDescribe_NamesTheCommonSentinels: context.Canceled,
+// context.DeadlineExceeded, io.EOF and io.ErrUnexpectedEOF are named
+// where they sit in the chain, as errors.Is matches one link, instead of
+// shown as a type that says nothing; a wrapper around one keeps its own
+// type, and an error that only reads like one is not it.
+func TestDescribe_NamesTheCommonSentinels(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{context.Canceled, "context.Canceled"},
+		{context.DeadlineExceeded, "context.DeadlineExceeded"},
+		{io.EOF, "io.EOF"},
+		{fmt.Errorf("read body: %w", io.ErrUnexpectedEOF), "*fmt.wrapError <- io.ErrUnexpectedEOF"},
+		{ErrInternal.Wrap(io.EOF), "InternalError: internal server error <- io.EOF"},
+		{errors.Join(context.Canceled, errors.New("other")), "*errors.joinError <- [context.Canceled | *errors.errorString]"},
+		{fmt.Errorf("call: %w", timeoutLike{}), "*fmt.wrapError <- context.DeadlineExceeded"},
+		{errors.New("context canceled"), "*errors.errorString"},
+	} {
+		if got := describe(c.err); got != c.want {
+			t.Errorf("describe = %q, want %q", got, c.want)
+		}
+	}
+}

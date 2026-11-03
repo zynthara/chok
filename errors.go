@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -88,8 +90,8 @@ func (e *Error) Msgf(format string, args ...any) *Error {
 	return cp
 }
 
-// Wrap returns a copy whose cause is err. The cause is logged, never
-// sent to the client.
+// Wrap returns a copy whose cause is err. The cause is never sent to
+// the client, and a 5xx logs what kind of error it is, never its text.
 func (e *Error) Wrap(cause error) *Error {
 	cp := e.clone()
 	cp.cause = cause
@@ -110,7 +112,7 @@ func OnError(h ErrorHook) Option { return func(a *App) { a.onError = h } }
 
 // resolve maps any error to its response: the ErrorHook, then *Error,
 // then Coder, then validator errors, then an expired deadline (504);
-// anything else is a 500 whose cause is only logged.
+// anything else is a 500 that keeps its cause out of the response.
 func (a *App) resolve(ctx context.Context, err error) *Error {
 	if a != nil && a.onError != nil {
 		if e := a.onError(ctx, err); e != nil {
@@ -149,8 +151,9 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	a.writeError(w, r, err)
 }
 
-// writeError renders err as the envelope; a 5xx logs its cause. A nil
-// App renders without an ErrorHook.
+// writeError renders err as the envelope; a 5xx logs how it is
+// classified: the status, the reason and describe(err), never the
+// error's text. A nil App renders without an ErrorHook.
 func (a *App) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	e := a.resolve(ctx, err)
@@ -159,7 +162,7 @@ func (a *App) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		code = http.StatusInternalServerError
 	}
 	if code >= 500 {
-		LoggerFrom(ctx).ErrorContext(ctx, "chok: request failed", "status", code, "error", err)
+		LoggerFrom(ctx).ErrorContext(ctx, "chok: request failed", "status", code, "reason", e.Reason, "error", describe(err))
 	}
 	if ra, ok := e.Metadata["retry_after"]; ok {
 		w.Header().Set("Retry-After", fmt.Sprint(ra))
@@ -172,6 +175,86 @@ func (a *App) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		Metadata  map[string]any `json:"metadata,omitzero"`
 	}{code, e.Reason, e.Message, RequestID(ctx), e.Metadata}
 	writeJSON(w, r, code, body)
+}
+
+// describe names each error of err's chain, outermost first, joined by
+// " <- ": an *Error by its reason and message, which chok or the
+// application wrote, one of the sentinels below by its name, anything
+// else by its Go type alone, because the text of a driver's or the
+// standard library's error often quotes the input — the duplicate value,
+// the string that did not parse. The causes of an error that wraps
+// several are listed in brackets, separated by " | ". The request_id of
+// the line ties it to whatever the code that met the error logged.
+func describe(err error) string {
+	var b strings.Builder
+	describeChain(&b, err)
+	return b.String()
+}
+
+func describeChain(b *strings.Builder, err error) {
+	for {
+		if e, ok := err.(*Error); ok {
+			b.WriteString(e.Reason)
+			if e.Message != "" {
+				b.WriteString(": " + e.Message)
+			}
+		} else if name := sentinelName(err); name != "" {
+			b.WriteString(name)
+		} else {
+			fmt.Fprintf(b, "%T", err)
+		}
+		switch u := err.(type) {
+		case interface{ Unwrap() error }:
+			if err = u.Unwrap(); err == nil {
+				return
+			}
+			b.WriteString(" <- ")
+		case interface{ Unwrap() []error }:
+			causes := u.Unwrap()
+			if len(causes) == 0 {
+				return
+			}
+			b.WriteString(" <- [")
+			for i, c := range causes {
+				if i > 0 {
+					b.WriteString(" | ")
+				}
+				describeChain(b, c)
+			}
+			b.WriteString("]")
+			return
+		default:
+			return
+		}
+	}
+}
+
+// sentinels are the standard errors describe names, since the type of
+// most of them, *errors.errorString, says nothing.
+var sentinels = [...]struct {
+	err  error
+	name string
+}{
+	{context.Canceled, "context.Canceled"},
+	{context.DeadlineExceeded, "context.DeadlineExceeded"},
+	{io.EOF, "io.EOF"},
+	{io.ErrUnexpectedEOF, "io.ErrUnexpectedEOF"},
+}
+
+// sentinelName is the name of the sentinel err is: err equals it, or
+// err's own Is method matches it. That is the test errors.Is makes of
+// each link of a chain, made here without unwrapping, so that an error
+// wrapping a sentinel keeps its own type.
+func sentinelName(err error) string {
+	for _, s := range sentinels {
+		if err == s.err {
+			return s.name
+		}
+		if x, ok := err.(interface{ Is(error) bool }); ok && x.Is(s.err) {
+			return s.name
+		}
+	}
+	return ""
 }
 
 // validationError is the 400 for failed validate rules: metadata.fields
