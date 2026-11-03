@@ -234,12 +234,12 @@ v0.2 用 `encoding/json/v2` 解码请求体：字段名大小写敏感、重复�
 | `store.MapError(err)` | 删除：store 的错误类型自己实现 `Coder` |
 
 信封形状不变：`{"code","reason","message","request_id","metadata"}`，下游客户端
-不用改。未实现 `Coder` 的错误一律 500，原错误只进日志；`context.DeadlineExceeded`
+不用改。未实现 `Coder` 的错误一律 500，原错误不进响应，5xx 日志记分类，细节看同 request_id 的 db 行；`context.DeadlineExceeded`
 是 504（reason `Timeout`）；没有路由 404 信封、方法不对 405 带 `Allow`。
 
 ### 3.4 中间件、OpenAPI、健康与调试
 
-- 默认中间件栈（Recover、RequestID、ClientIP、访问日志、超时、CORS）保留，次序
+- 默认中间件栈（RequestID、Recover、ClientIP、访问日志、超时、CORS）保留，次序
   冻结；遥测由 `telemetry` 作为 `Instrumenter` 插进去，不再由 web 模块按角色自动挂。
   CSRF 用标准库的 `http.CrossOriginProtection`（`http.csrf`，默认开；只拦浏览器
   的跨站写请求，curl 与移动端不受影响）。

@@ -873,8 +873,8 @@ func TestProviders_MountTheirRoutes(t *testing.T) {
 
 func TestOAuth_ProviderErrorsReachTheClient(t *testing.T) {
 	fx := newOAuthFixture(t, Config{}, nil)
-	// An unknown code: the provider's error is a 500 whose cause stays in
-	// the log.
+	// An unknown code: the provider's error is a 500; the response leaves
+	// it out, and the log line names only its type.
 	resp := fx.signIn(t, "never-seeded", "")
 	var e envelope
 	decodeBody(t, resp, &e)
