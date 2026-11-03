@@ -86,31 +86,55 @@ func (m sqliteMigrator) DropConstraint(value any, name string) error {
 // cannot alter a column or a constraint in place, so each rebuilds table:
 // in one transaction it creates <table>__temp with the new DDL, copies the
 // rows into it, drops table and renames the copy. DROP TABLE drops the
-// indexes of table with it, and AutoMigrate and createIndex made only
-// their own again: an index made by hand was lost. With foreign keys on,
-// as chok opens SQLite, DROP TABLE also deletes the rows first, which
-// fires the foreign keys of the tables that refer to table: their rows
-// were deleted where the key cascades, and the rebuild failed (787) where
-// it takes the default action. The driver turns the keys off for
-// AlterColumn alone.
+// indexes and triggers of table with it, and AutoMigrate and createIndex
+// made only their own indexes again: an index or a trigger made by hand
+// was lost. With foreign keys on, as chok opens SQLite, DROP TABLE also
+// deletes the rows first, which fires the foreign keys of the tables that
+// refer to table: their rows were deleted where the key cascades, and the
+// rebuild failed (787) where it takes the default action. The driver
+// turns the keys off for AlterColumn alone.
 //
-// rebuilding reads the indexes of table that have SQL, runs rebuild with
-// foreign keys off, then makes again from that SQL each index the rebuild
-// dropped; one it cannot make again, such as an index over a column that
-// DropColumn dropped, fails the call rather than vanish without a word.
-// The indexes without SQL are those of UNIQUE and PRIMARY KEY clauses,
-// which come back with the DDL of the table. So, as on the dialects that
-// alter a table in place, auto migration drops or rebuilds no index or
-// constraint that chok did not create, and fires no foreign key action.
-// With the keys off, the rows copied are not checked against them either;
+// rebuilding reads the indexes and triggers of table that have SQL, runs
+// rebuild with foreign keys off, then makes again from that SQL, in the
+// order the catalog held them, each one the rebuild dropped. One it cannot
+// make again, such as an index over a column that DropColumn dropped,
+// fails the call rather than vanish without a word; the ones after it are
+// still made again, and the call returns every such error joined. The
+// indexes without SQL are those of UNIQUE and PRIMARY KEY clauses, which
+// come back with the DDL of the table. So, as on the dialects that alter a
+// table in place, auto migration drops or rebuilds no index or constraint
+// that chok did not create, and fires no foreign key action. With the keys
+// off, the rows copied are not checked against them either;
 // CreateConstraint checks them against a foreign key it adds, as those
 // dialects do.
 //
-// The rebuild commits before the indexes are made again: a process that
-// stops in between leaves table without them, and no later Open makes
-// again the ones made by hand.
+// CREATE TRIGGER does not check the body of a trigger, so each trigger
+// made again is compiled with the statements that fire it, by
+// compileTriggers. One that does not compile, such as a trigger whose
+// body uses a column that DropColumn dropped, is dropped again and fails
+// the call, as SQLite's own ALTER TABLE DROP COLUMN refuses to drop that
+// column. Left in place, it failed each statement that fires it and each
+// later rebuild of any table, whose rename checks every trigger of the
+// schema. A trigger of UPDATE OF a dropped column whose body does not use
+// the column is fired by no statement, so nothing compiles it: it is made
+// again as it was and never fires. Should a trigger that does not compile
+// fail to be dropped again, each later check would fail on it, so the
+// triggers made after it are not checked, and its error says so.
+//
+// A view that refers to table fails the rebuild, and so does a trigger of
+// another table that refers to it: renaming the copy checks every view and
+// trigger of the schema while table is not there, so the driver's
+// transaction rolls back and the call fails. SQLite's own steps for
+// changing a table drop such a view first and make it again afterwards;
+// rebuilding leaves that to the application on purpose, and does not set
+// PRAGMA legacy_alter_table either, which lets the rename through and
+// leaves the view broken without a word.
+//
+// The rebuild commits before the indexes and triggers are made again: a
+// process that stops in between leaves table without them, and no later
+// Open makes again the ones made by hand.
 func (m sqliteMigrator) rebuilding(table string, rebuild func() error) error {
-	before, err := m.indexSQL(table)
+	before, err := m.objectSQL(table)
 	if err != nil {
 		return err
 	}
@@ -118,20 +142,66 @@ func (m sqliteMigrator) rebuilding(table string, rebuild func() error) error {
 		if err := rebuild(); err != nil || len(before) == 0 {
 			return err
 		}
-		after, err := m.indexSQL(table)
+		after, err := m.objectSQL(table)
 		if err != nil {
 			return err
 		}
-		for _, idx := range before {
-			if slices.ContainsFunc(after, func(a sqliteIndex) bool { return strings.EqualFold(a.name, idx.name) }) {
+		var errs []error
+		check := true // whether a trigger made again is compiled
+		for _, o := range before {
+			if slices.ContainsFunc(after, func(a sqliteObject) bool { return a.kind == o.kind && strings.EqualFold(a.name, o.name) }) {
 				continue
 			}
-			if err := m.DB.Exec(idx.sql).Error; err != nil {
-				return fmt.Errorf("rebuilding table %s dropped index %s, and %s failed: %w", table, idx.name, idx.sql, err)
+			// Each error about o starts with what the rebuild dropped and
+			// the SQL that makes it again.
+			dropped := fmt.Sprintf("rebuilding table %s dropped %s %s, and %s", table, o.kind, o.name, o.sql)
+			if err := m.DB.Exec(o.sql).Error; err != nil {
+				errs = append(errs, fmt.Errorf("%s failed: %w", dropped, err))
+				continue
 			}
+			if o.kind != "trigger" || !check {
+				continue
+			}
+			compileErr := m.compileTriggers(table)
+			if compileErr == nil {
+				continue
+			}
+			if err := m.DB.Exec("DROP TRIGGER " + quote("sqlite", o.name)).Error; err != nil {
+				check = false
+				errs = append(errs, fmt.Errorf("%s makes it again, but it does not compile (%w), and dropping it again failed, so it is on the table and the triggers made after it are not checked: %w", dropped, compileErr, err))
+				continue
+			}
+			errs = append(errs, fmt.Errorf("%s makes it again, but it does not compile, so it is dropped again: %w", dropped, compileErr))
 		}
-		return nil
+		return errors.Join(errs...)
 	})
+}
+
+// compileTriggers compiles, without running them, an INSERT, an UPDATE of
+// every column and a DELETE on table, and so each trigger of table that
+// such a statement fires: SQLite checks the body of a trigger when it
+// compiles a statement that fires it, not when CREATE TRIGGER makes it.
+// Generated columns cannot be set and stay out of the UPDATE.
+func (m sqliteMigrator) compileTriggers(table string) error {
+	var columns []string
+	if err := m.DB.Raw("SELECT name FROM pragma_table_xinfo(?) WHERE hidden = 0", table).Scan(&columns).Error; err != nil {
+		return fmt.Errorf("read the columns of table %s: %w", table, err)
+	}
+	set := make([]string, len(columns))
+	for i, c := range columns {
+		set[i] = quote("sqlite", c) + " = " + quote("sqlite", c)
+	}
+	t := quote("sqlite", table)
+	for _, q := range []string{
+		"EXPLAIN INSERT INTO " + t + " DEFAULT VALUES",
+		"EXPLAIN UPDATE " + t + " SET " + strings.Join(set, ", "),
+		"EXPLAIN DELETE FROM " + t,
+	} {
+		if err := m.DB.Exec(q).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkForeignKey keeps foreign key name, which CreateConstraint has just
@@ -199,27 +269,29 @@ func (m sqliteMigrator) withoutForeignKeys(fn func(on bool) error) (err error) {
 	return fn(true)
 }
 
-// sqliteIndex is an index of the SQLite catalog and the SQL that made it.
-type sqliteIndex struct{ name, sql string }
+// sqliteObject is an index or a trigger of the SQLite catalog, its kind
+// (index or trigger, the catalog's type) and the SQL that made it.
+type sqliteObject struct{ kind, name, sql string }
 
-// indexSQL reads the indexes of table that have SQL, in the order the
-// catalog holds them.
-func (m sqliteMigrator) indexSQL(table string) ([]sqliteIndex, error) {
-	rows, err := m.DB.Raw("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY rowid", table).Rows()
+// objectSQL reads the indexes and triggers of table that have SQL, in the
+// order the catalog holds them. The catalog names the table of a trigger
+// as its CREATE TRIGGER spelled it, so the name matches in any case.
+func (m sqliteMigrator) objectSQL(table string) ([]sqliteObject, error) {
+	rows, err := m.DB.Raw("SELECT type, name, sql FROM sqlite_master WHERE type IN ('index', 'trigger') AND tbl_name = ? COLLATE NOCASE AND sql IS NOT NULL ORDER BY rowid", table).Rows()
 	if err != nil {
-		return nil, fmt.Errorf("read the indexes of table %s: %w", table, err)
+		return nil, fmt.Errorf("read the indexes and triggers of table %s: %w", table, err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []sqliteIndex
+	var out []sqliteObject
 	for rows.Next() {
-		var i sqliteIndex
-		if err := rows.Scan(&i.name, &i.sql); err != nil {
-			return nil, fmt.Errorf("read the indexes of table %s: %w", table, err)
+		var o sqliteObject
+		if err := rows.Scan(&o.kind, &o.name, &o.sql); err != nil {
+			return nil, fmt.Errorf("read the indexes and triggers of table %s: %w", table, err)
 		}
-		out = append(out, i)
+		out = append(out, o)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read the indexes of table %s: %w", table, err)
+		return nil, fmt.Errorf("read the indexes and triggers of table %s: %w", table, err)
 	}
 	return out, nil
 }

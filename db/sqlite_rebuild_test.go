@@ -105,8 +105,8 @@ func rbSpecs(parent any) []db.TableSpec {
 func rbTables(parent any) db.Option { return db.Tables(rbSpecs(parent)...) }
 
 // rbSeed opens cfg with the parent model the schema has, adds a parent, a
-// child of it and an index made by hand on rb_parents, and returns the
-// parent's RID.
+// child of it, and an index and the trigger rbTrigger made by hand on
+// rb_parents, and returns the parent's RID.
 func rbSeed(t *testing.T, cfg db.Config, parent any) string {
 	t.Helper()
 	d, err := db.Open(cfg, testLogger(t), rbTables(parent))
@@ -125,7 +125,64 @@ func rbSeed(t *testing.T, cfg db.Config, parent any) string {
 	if err := gdb.Exec("CREATE INDEX idx_rb_parents_hand ON rb_parents (shelf)").Error; err != nil {
 		t.Fatal(err)
 	}
+	for _, ddl := range rbTriggerSQL() {
+		if err := gdb.Exec(ddl).Error; err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+	}
 	return p.RID
+}
+
+// rbTrigger is a trigger made by hand on rb_parents: updating a row sets
+// its label to touched. rbTriggerSQL makes it in the dialect's syntax. A
+// SQLite trigger cannot set NEW, so it updates the row again after the
+// update, and its body names the label column; Postgres runs a function
+// before the update, and MySQL sets NEW.
+const rbTrigger = "trg_rb_parents_touch"
+
+func rbTriggerSQL() []string {
+	switch dbtest.Driver() {
+	case "postgres":
+		return []string{
+			"CREATE FUNCTION rb_parents_touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.label := 'touched'; RETURN NEW; END $$",
+			"CREATE TRIGGER " + rbTrigger + " BEFORE UPDATE ON rb_parents FOR EACH ROW EXECUTE FUNCTION rb_parents_touch()",
+		}
+	case "mysql":
+		return []string{"CREATE TRIGGER " + rbTrigger + " BEFORE UPDATE ON rb_parents FOR EACH ROW SET NEW.label = 'touched'"}
+	}
+	return []string{"CREATE TRIGGER " + rbTrigger + " AFTER UPDATE ON rb_parents BEGIN UPDATE rb_parents SET label = 'touched' WHERE id = NEW.id AND label <> 'touched'; END"}
+}
+
+// hasTrigger reports whether trigger name is on table, as the dialect's
+// catalog lists it.
+func hasTrigger(t *testing.T, gdb *gorm.DB, table, name string) bool {
+	t.Helper()
+	q := "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? AND name = ?"
+	switch dbtest.Driver() {
+	case "postgres":
+		q = "SELECT count(*) FROM information_schema.triggers WHERE trigger_schema = current_schema() AND event_object_table = ? AND trigger_name = ?"
+	case "mysql":
+		q = "SELECT count(*) FROM information_schema.triggers WHERE trigger_schema = DATABASE() AND event_object_table = ? AND trigger_name = ?"
+	}
+	var n int64
+	if err := gdb.Raw(q, table, name).Scan(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	return n > 0
+}
+
+// rbTouched updates the parent with code c1 and returns its label then,
+// which rbTrigger sets to touched.
+func rbTouched(t *testing.T, gdb *gorm.DB) string {
+	t.Helper()
+	if err := gdb.Exec("UPDATE rb_parents SET shelf = ? WHERE code = ?", "s2", "c1").Error; err != nil {
+		t.Fatalf("update the parent: %v", err)
+	}
+	var label string
+	if err := gdb.Raw("SELECT label FROM rb_parents WHERE code = ?", "c1").Scan(&label).Error; err != nil {
+		t.Fatal(err)
+	}
+	return label
 }
 
 // indexesOver returns the indexes of table over column alone, as
@@ -148,14 +205,15 @@ func indexesOver(t *testing.T, gdb *gorm.DB, table, column string) []string {
 // TestOpen_ChangingAModelKeepsIndexesAndRows: a change to a model that the
 // SQLite driver migrates by rebuilding the table (copying it into
 // rb_parents__temp, dropping it and renaming the copy) keeps what ALTER
-// TABLE keeps on Postgres and MySQL. Open succeeds; the index made by
-// hand on the table stays; the rows of the table and of the table whose
-// foreign key refers to it stay; the index of the model's tag and the
-// declared one are there once each and hold, as do the foreign key and
-// the unique tag's constraint while the tag is on. Before, the rebuild
-// lost the index made by hand, and with foreign keys on, its DROP TABLE
-// deleted the child rows where the key cascades and failed Open (787)
-// where it takes the default action.
+// TABLE keeps on Postgres and MySQL. Open succeeds; the index and the
+// trigger made by hand on the table stay, and the trigger still fires;
+// the rows of the table and of the table whose foreign key refers to it
+// stay; the index of the model's tag and the declared one are there once
+// each and hold, as do the foreign key and the unique tag's constraint
+// while the tag is on. Before, the rebuild lost the index and the trigger
+// made by hand, and with foreign keys on, its DROP TABLE deleted the
+// child rows where the key cascades and failed Open (787) where it takes
+// the default action.
 func TestOpen_ChangingAModelKeepsIndexesAndRows(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -213,7 +271,126 @@ func TestOpen_ChangingAModelKeepsIndexesAndRows(t *testing.T) {
 			if refused := gdb.Create(&rbParent{Code: "c4", Name: "n1"}).Error != nil; refused != c.unique {
 				t.Errorf("a second parent named n1 refused: %v, want %v", refused, c.unique)
 			}
+			if !hasTrigger(t, gdb, "rb_parents", rbTrigger) {
+				t.Errorf("the trigger made by hand, %s, stays on %s", rbTrigger, dbtest.Driver())
+			}
+			if got := rbTouched(t, gdb); got != "touched" {
+				t.Errorf("the trigger made by hand sets the label of an updated row on %s; got %q", dbtest.Driver(), got)
+			}
 		})
+	}
+}
+
+// TestDropColumn_UsedByATriggerFails: on SQLite, dropping a column that a
+// trigger made by hand on the table uses fails and names the trigger, as
+// SQLite's own ALTER TABLE DROP COLUMN does. The driver drops the column
+// by rebuilding the table, whose DROP TABLE drops the trigger, and the
+// trigger, made again, does not compile over the columns left, so it is
+// dropped again. The error names each index and trigger that is not made
+// again, with its SQL, and the ones after it are still made again.
+// Afterwards the table can be updated, and another table can be rebuilt:
+// SQLite checks every trigger of the schema when a rebuild renames its
+// copy. Before, the trigger vanished without a word, and the first index
+// or trigger that could not be made again kept the ones after it from
+// being made again.
+func TestDropColumn_UsedByATriggerFails(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("only SQLite drops a column by rebuilding the table, which drops its triggers")
+	}
+	labelIndex := "CREATE INDEX idx_rb_parents_label ON rb_parents (label)"
+	insertTrigger := "CREATE TRIGGER trg_rb_parents_insert AFTER INSERT ON rb_parents BEGIN SELECT NEW.code; END"
+	for _, c := range []struct {
+		name string
+		ddl  []string // made by hand after rbSeed, after its index and trigger
+		lost []string // what the error says: each object not made again and its SQL
+		kept []string // the objects made by hand that are made again
+	}{
+		{
+			"a trigger", nil,
+			[]string{"trigger " + rbTrigger, rbTriggerSQL()[0]},
+			[]string{"idx_rb_parents_hand"},
+		},
+		{
+			"a trigger and an index, then a trigger that compiles", []string{labelIndex, insertTrigger},
+			[]string{"trigger " + rbTrigger, rbTriggerSQL()[0], "index idx_rb_parents_label", labelIndex},
+			[]string{"idx_rb_parents_hand", "trg_rb_parents_insert"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := dbtest.Config(t)
+			rbSeed(t, cfg, &rbParent{})
+			gdb := dbtest.OpenConfig(t, cfg, rbTables(&rbParent{})).Unsafe(t.Context())
+			for _, ddl := range c.ddl {
+				if err := gdb.Exec(ddl).Error; err != nil {
+					t.Fatalf("%s: %v", ddl, err)
+				}
+			}
+
+			err := gdb.Migrator().DropColumn(&rbParent{}, "label")
+			for _, w := range c.lost {
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("dropping label fails, and the error says %q; got %v", w, err)
+				}
+			}
+			if hasTrigger(t, gdb, "rb_parents", rbTrigger) {
+				t.Errorf("%s, which uses label, is not made again", rbTrigger)
+			}
+			for _, name := range c.kept {
+				var n int64
+				if err := gdb.Raw("SELECT count(*) FROM sqlite_master WHERE tbl_name = 'rb_parents' AND name = ?", name).Scan(&n).Error; err != nil {
+					t.Fatal(err)
+				}
+				if n != 1 {
+					t.Errorf("%s is made again", name)
+				}
+			}
+			if err := gdb.Exec("UPDATE rb_parents SET shelf = ? WHERE code = ?", "s2", "c1").Error; err != nil {
+				t.Errorf("the parent can be updated afterwards: %v", err)
+			}
+			if err := gdb.Migrator().AlterColumn(&rbChild{}, "parent_id"); err != nil {
+				t.Errorf("rb_children can be rebuilt afterwards: %v", err)
+			}
+			var parents, children int64
+			if err := gdb.Table("rb_parents").Count(&parents).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := gdb.Table("rb_children").Count(&children).Error; err != nil {
+				t.Fatal(err)
+			}
+			if parents != 1 || children != 1 {
+				t.Errorf("the parent and its child stay; got %d parents and %d children", parents, children)
+			}
+		})
+	}
+}
+
+// TestOpen_TriggerSpellingItsTableInAnotherCaseStays: on SQLite, a
+// trigger whose CREATE TRIGGER spells its table in another case is made
+// again when a change to the model rebuilds the table. The catalog keeps
+// the table name of a trigger as the statement wrote it, and the rebuild
+// looked the table's triggers up by the table's own spelling, so it lost
+// this one.
+func TestOpen_TriggerSpellingItsTableInAnotherCaseStays(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("only SQLite migrates a table by rebuilding it, which drops its triggers")
+	}
+	cfg := dbtest.Config(t)
+	d, err := db.Open(cfg, testLogger(t), rbTables(&rbParent{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Unsafe(t.Context()).Exec("CREATE TRIGGER trg_rb_parents_spelled AFTER UPDATE ON RB_Parents BEGIN SELECT 1; END").Error; err != nil {
+		t.Fatal(err)
+	}
+	_ = d.Close(t.Context())
+
+	gdb := dbtest.OpenConfig(t, cfg, rbTables(&rbParentLabel{})).Unsafe(t.Context())
+	var n int64
+	if err := gdb.Raw("SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_rb_parents_spelled'").Scan(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Error("the trigger made by hand on RB_Parents stays")
 	}
 }
 
