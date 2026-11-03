@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -91,7 +92,8 @@ func (e *Error) Msgf(format string, args ...any) *Error {
 }
 
 // Wrap returns a copy whose cause is err. The cause is never sent to
-// the client, and a 5xx logs what kind of error it is, never its text.
+// the client, and a 5xx logs it by its kind, without text that could
+// quote the input.
 func (e *Error) Wrap(cause error) *Error {
 	cp := e.clone()
 	cp.cause = cause
@@ -178,11 +180,7 @@ func (a *App) writeError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // describe names each error of err's chain, outermost first, joined by
-// " <- ": an *Error by its reason and message, which chok or the
-// application wrote, one of the sentinels below by its name, anything
-// else by its Go type alone, because the text of a driver's or the
-// standard library's error often quotes the input — the duplicate value,
-// the string that did not parse. The causes of an error that wraps
+// " <- ", the way describeLink names one. The causes of an error that wraps
 // several are listed in brackets, separated by " | ". The request_id of
 // the line ties it to whatever the code that met the error logged.
 func describe(err error) string {
@@ -193,16 +191,7 @@ func describe(err error) string {
 
 func describeChain(b *strings.Builder, err error) {
 	for {
-		if e, ok := err.(*Error); ok {
-			b.WriteString(e.Reason)
-			if e.Message != "" {
-				b.WriteString(": " + e.Message)
-			}
-		} else if name := sentinelName(err); name != "" {
-			b.WriteString(name)
-		} else {
-			fmt.Fprintf(b, "%T", err)
-		}
+		b.WriteString(describeLink(err))
 		switch u := err.(type) {
 		case interface{ Unwrap() error }:
 			if err = u.Unwrap(); err == nil {
@@ -227,6 +216,29 @@ func describeChain(b *strings.Builder, err error) {
 			return
 		}
 	}
+}
+
+// describeLink names one error of a chain, without what it wraps: an
+// *Error by its reason and message, which chok or the application
+// wrote; one of the sentinels below by its name; a runtime.Error by its
+// text, the Go runtime's own words, which hold an index, a length or
+// type names at most; anything else by its Go type alone, because the
+// text of a driver's or the standard library's error often quotes the
+// input — the duplicate value, the string that did not parse.
+func describeLink(err error) string {
+	if e, ok := err.(*Error); ok {
+		if e.Message == "" {
+			return e.Reason
+		}
+		return e.Reason + ": " + e.Message
+	}
+	if name := sentinelName(err); name != "" {
+		return name
+	}
+	if re, ok := err.(runtime.Error); ok {
+		return re.Error()
+	}
+	return fmt.Sprintf("%T", err)
 }
 
 // sentinels are the standard errors describe names, since the type of

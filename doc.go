@@ -41,6 +41,6 @@
 // Any other error is a 500 whose cause is never sent. A 5xx logs its
 // status, its reason and each error of the chain: an *Error by its reason
 // and message, context.Canceled, context.DeadlineExceeded, io.EOF and
-// io.ErrUnexpectedEOF by name, anything else by its Go type, never by
-// its text.
+// io.ErrUnexpectedEOF by name, a runtime.Error by its text, and anything
+// else by its Go type alone, since its text can quote the input.
 package chok

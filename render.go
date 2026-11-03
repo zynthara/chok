@@ -8,12 +8,14 @@ import (
 )
 
 // writeJSON writes v as the response body with code; an encoding
-// failure becomes a logged 500 rather than a truncated body.
+// failure becomes a logged 500 rather than a truncated body. The log
+// describes the error, as a 5xx does: the text of a MarshalJSON error
+// can quote a value.
 func writeJSON(w http.ResponseWriter, r *http.Request, code int, v any) {
 	b, err := json.Marshal(v, jsonx.Options)
 	if err != nil {
 		ctx := r.Context()
-		LoggerFrom(ctx).ErrorContext(ctx, "chok: response encoding failed", "error", err)
+		LoggerFrom(ctx).ErrorContext(ctx, "chok: response encoding failed", "error", describe(err))
 		code = http.StatusInternalServerError
 		b, _ = json.Marshal(map[string]any{
 			"code": code, "reason": ErrInternal.Reason, "message": ErrInternal.Message, "request_id": RequestID(ctx),

@@ -339,6 +339,30 @@ func TestResponse_NilSliceIsEmptyArray(t *testing.T) {
 	}
 }
 
+// badJSON fails to encode with an error that quotes a value, as a
+// MarshalJSON method can.
+type badJSON struct{}
+
+func (badJSON) MarshalJSON() ([]byte, error) { return nil, errors.New("cannot encode s3cret-value") }
+
+// TestResponse_EncodingFailureLogsTheKindOnly: a response that fails to
+// encode is a 500 envelope, and the line it logs names the error's chain
+// the way a 5xx does, never by the text, which can quote a value.
+func TestResponse_EncodingFailureLogsTheKindOnly(t *testing.T) {
+	var logs bytes.Buffer
+	app := New(testBase(t), Logger(slog.New(slog.NewTextHandler(&logs, nil))))
+	GET(app.Router(), "/enc", func(context.Context, *None) (badJSON, error) { return badJSON{}, nil })
+	rec := do(t, app.Handler(), call{method: http.MethodGet, path: "/enc"})
+	if e := decode[envelope](t, rec); rec.Code != http.StatusInternalServerError || e.Reason != "InternalError" || e.RequestID == "" {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `level=ERROR msg="chok: response encoding failed"`) ||
+		!strings.Contains(out, `error="*json.SemanticError <- *errors.errorString"`) || strings.Contains(out, "s3cret-value") {
+		t.Fatalf("the log names the error by its kind alone:\n%s", out)
+	}
+}
+
 type stockError struct{}
 
 func (stockError) Error() string { return "out of stock" }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,41 @@ func TestRecover_PanicBecomes500Envelope(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "kaboom") || !strings.Contains(buf.String(), `"request_id"`) {
 		t.Fatalf("the panic is logged with the request id: %s", buf.String())
+	}
+}
+
+// panicNote is a panic value that is not an error but prints itself.
+type panicNote string
+
+func (n panicNote) String() string { return "note: " + string(n) }
+
+// TestRecover_PanicLogsAnErrorByItsKind: a handler that panics with an
+// error is logged the way a 5xx is, by the kinds of its chain, since the
+// text can quote a value; a runtime error keeps its text, the Go
+// runtime's own words; any other panic value, a string or a
+// fmt.Stringer, is the application's own words and is logged as it is.
+func TestRecover_PanicLogsAnErrorByItsKind(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		boom func()
+		want string
+	}{
+		{"error", func() { panic(fmt.Errorf("decode: %w", errors.New("bad token s3cret-value"))) }, `"panic":"*fmt.wrapError <- *errors.errorString"`},
+		{"string", func() { panic("plain message") }, `"panic":"plain message"`},
+		{"stringer", func() { panic(panicNote("a stringer")) }, `"panic":"note: a stringer"`},
+		{"index", func() { func(s []int, i int) { _ = s[i] }(nil, 5) }, `"panic":"runtime error: index out of range [5] with length 0"`},
+		{"nil map", func() { func(m map[string]int) { m["k"] = 1 }(nil) }, `"panic":"assignment to entry in nil map"`},
+		{"assertion", func() { func(v any) { _ = v.(int) }("x") }, `"panic":"interface conversion: interface {} is string, not int"`},
+	} {
+		var buf bytes.Buffer
+		app := New(testBase(t), Logger(slog.New(slog.NewJSONHandler(&buf, nil))))
+		GET(app.Router(), "/boom", func(context.Context, *None) (None, error) { c.boom(); return None{}, nil })
+		rec := do(t, app.Handler(), call{method: http.MethodGet, path: "/boom"})
+		out := buf.String()
+		if rec.Code != http.StatusInternalServerError || !strings.Contains(out, `"msg":"chok: panic in handler"`) ||
+			!strings.Contains(out, c.want) || strings.Contains(out, "s3cret-value") {
+			t.Errorf("%s: %d, want %s in the log:\n%s", c.name, rec.Code, c.want, out)
+		}
 	}
 }
 

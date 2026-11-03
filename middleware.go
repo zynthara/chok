@@ -157,13 +157,23 @@ func (a *App) recover(next http.Handler) http.Handler {
 			// response header carries it.
 			id := sw.Header().Get(requestIDHeader)
 			ctx := context.WithValue(r.Context(), requestIDKey, id)
-			a.logger.ErrorContext(ctx, "chok: panic in handler", "request_id", id, "panic", fmt.Sprint(p), "stack", string(stack))
+			a.logger.ErrorContext(ctx, "chok: panic in handler", "request_id", id, "panic", panicText(p), "stack", string(stack))
 			if sw.status == 0 {
 				a.writeError(sw, r.WithContext(ctx), ErrInternal)
 			}
 		}()
 		next.ServeHTTP(sw, r)
 	})
+}
+
+// panicText is what the log says a handler panicked with: an error is
+// described as a 5xx's is, since its text can quote a value; anything
+// else, a string or a fmt.Stringer, is the application's own words.
+func panicText(p any) string {
+	if err, ok := p.(error); ok {
+		return describe(err)
+	}
+	return fmt.Sprint(p)
 }
 
 const requestIDHeader = "X-Request-Id"

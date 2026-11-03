@@ -231,3 +231,17 @@ func TestDescribe_NamesTheCommonSentinels(t *testing.T) {
 		}
 	}
 }
+
+// TestDescribe_RuntimeErrorsKeepTheirText: a runtime.Error is the Go
+// runtime's own words, an index, a length or type names, so describe
+// writes its text where it sits in the chain; a wrapper keeps its type.
+func TestDescribe_RuntimeErrorsKeepTheirText(t *testing.T) {
+	var rt error
+	func() {
+		defer func() { rt, _ = recover().(error) }()
+		func(s []int, i int) { _ = s[i] }(nil, 5)
+	}()
+	if got, want := describe(fmt.Errorf("step: %w", rt)), "*fmt.wrapError <- runtime error: index out of range [5] with length 0"; got != want {
+		t.Fatalf("describe = %q, want %q", got, want)
+	}
+}
