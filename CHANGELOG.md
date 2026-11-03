@@ -17,6 +17,35 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
 
 ## [v0.2.2] - 未发布
 
+### Added
+
+- **`chok`**: `http.health.details` (false) puts a failed component's
+  error into the response of the health and readiness endpoints; off,
+  the response names each component with its status and duration only,
+  as a probe needs. A failed check is logged at Warn with its error
+  either way.
+
+### Changed
+
+- **`chok`**: the health and readiness endpoints no longer carry a failed
+  component's error text unless `http.health.details` is on: the text
+  could name an internal address. A client reading the `error` field
+  turns the key on.
+- **`chok`**: the log line of a 5xx (`chok: request failed`) names the
+  status, the reason and the chain of the error's types, with the
+  reason and message of each `chok.Error` in it, and no longer the
+  error's text: third-party errors quote their input (a driver's
+  message, `strconv`'s `parsing "x"`), and the `db` line of the same
+  request_id already holds the sanitized detail. A JSON encoding error
+  and a panic whose value is an error are logged the same way; `store`
+  logs an unknown field of a code path itself, with the model and the
+  field, where it finds it. A runtime error's own words (an index out
+  of range, a nil map) stay.
+- **`chok`**: the request-ID and logger middleware now sit outside the
+  recover middleware, so the `chok: request failed` line of a panic
+  carries the request_id and reaches the request's logger rather than
+  `slog.Default()`.
+
 ### Fixed
 
 - **`db`**: on MySQL, a one-column `Unique` index survives the next
@@ -95,6 +124,28 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
 - **`store`**: the key name of a MySQL duplicate is read from the end of
   the driver's message, so a value that itself reads `for key 'x'` cannot
   stand in for the key in a 409's `metadata.constraint`.
+- **`db`**: three more ways a value reached the log are closed: pgx's
+  client-side encoding error (`failed to encode args[N]: unable to
+  encode x ...`) is logged up to the argument's index; a driver's error
+  that gorm flattened into text while joining it with a later one (`%v;
+  %w`, a rollback that failed after a refused statement) is logged as
+  its driver and code, as it would be with its type; and `store` reads
+  the constraint of a duplicate from the driver's error itself before
+  falling back to its text. pgx's error under the simple protocol
+  (`unable to encode x into text format ...`) loses its value too.
+- **`telemetry`**: the status of a database span describes the driver's
+  error as the `db` log does, by its driver, code and names, no longer by
+  the driver's message, which a trace backend would have received with
+  the statement's values.
+- **`db`**: on Postgres, `migrate: auto` refuses to start when a table
+  it declares resolves through `search_path` to a schema other than
+  `current_schema()`: gorm's migrator looks for the table in
+  `current_schema()` only and made an empty table of the name there,
+  which shadowed the real one, so the application read and wrote the
+  empty table while its data stayed behind, without a word. The error
+  names the table, both schemas and `search_path`: put the application's
+  schema first, in the DSN or the role. `versioned` and `off` make no
+  tables and resolve the real one.
 - **`db`**: a query read with gorm's `Scan` is logged with its
   placeholders, as every other statement is. gorm's `Scan` records the
   statement through its own recorder, whose filter is the package-level
