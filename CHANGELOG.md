@@ -47,6 +47,29 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
   gorm's name is dropped only when it exists; the `unique` tag migrates as
   before. Auto migration drops or rebuilds no index or constraint that
   chok did not create, on the three dialects.
+- **`db`**: on SQLite, a migration that rebuilds a table keeps the
+  table's indexes and fires no foreign key action. gorm's driver alters a
+  column, and adds or drops a constraint such as the `unique` tag's, by
+  making the table anew and copying its rows: its DROP TABLE took every
+  index of the table with it, of which gorm's tags and `db.Table` brought
+  back their own while an index made by hand was lost, and, except when
+  altering a column, it ran with foreign keys on, so the tables referring
+  to the rebuilt one lost their rows under ON DELETE CASCADE or `Open`
+  failed under the default action. chok now turns foreign keys off
+  around the rebuild and creates the missing indexes again from their
+  SQL; an index that cannot be made again fails the migration rather than
+  go missing. A foreign key the rebuild adds is checked against the rows
+  as Postgres and MySQL check it: a row without a parent fails the
+  migration and the key is not added. The keys are turned on again even
+  when the migration's context ends meanwhile.
+- **`db`**: a query read with gorm's `Scan` is logged with its
+  placeholders, as every other statement is. gorm's `Scan` records the
+  statement through its own recorder, whose filter is the package-level
+  `logger.RecorderParamsFilter` rather than chok's, so the values of a
+  `store` `Exists` or of the duplicate check of `Create` (an email, say)
+  reached the Debug, slow-query Warn and failure Error lines. chok sets
+  that filter when its `db` package is imported; it applies to every gorm
+  handle in the process.
 
 ## [v0.2.1] - 2026-11-02
 
