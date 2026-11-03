@@ -105,6 +105,8 @@ func TestIsDuplicate(t *testing.T) {
 	}
 }
 
+// TestConstraintName_AllDialects: an error that lost its type, or
+// SQLite's, is read from its text.
 func TestConstraintName_AllDialects(t *testing.T) {
 	for msg, want := range map[string]string{
 		"Error 1062 (23000): Duplicate entry 'a@b.com' for key 'uk_email'":                                    "uk_email",
@@ -117,9 +119,44 @@ func TestConstraintName_AllDialects(t *testing.T) {
 		// The key ends the message; a value that reads like one is not it.
 		"Error 1062 (23000): Duplicate entry 'x' for key 's3cret-value' for key 'users.uk_user_email'": "uk_user_email",
 	} {
-		if got := constraintName(msg); got != want {
+		if got := constraintName(errors.New(msg)); got != want {
 			t.Errorf("%q → %q, want %q", msg, got, want)
 		}
+	}
+}
+
+// TestConstraintName_TypedError: a driver's error that keeps its type is
+// read from its own fields, whatever text follows it: another error
+// joined after it, a wrapper's words. Postgres's constraint field names
+// the constraint in any language of the message.
+func TestConstraintName_TypedError(t *testing.T) {
+	state := [5]byte{'2', '3', '0', '0', '0'}
+	rollback := errors.New("rollback failed")
+	for _, err := range []error{
+		&mysql.MySQLError{Number: 1062, SQLState: state, Message: "Duplicate entry 'x' for key 'users.uk_user_email'"},
+		// The key ends the message; a value that reads like one is not it.
+		&mysql.MySQLError{Number: 1062, SQLState: state, Message: "Duplicate entry 'x' for key 's3cret-value' for key 'users.uk_user_email'"},
+		&pgconn.PgError{Severity: "ERROR", Code: "23505", Message: `duplicate key value violates unique constraint "uk_user_email"`, ConstraintName: "uk_user_email"},
+		&pgconn.PgError{Severity: "FEHLER", Code: "23505", Message: "doppelter Schlüsselwert verletzt Unique-Constraint »uk_user_email«", ConstraintName: "uk_user_email"},
+		// Without the field, the message.
+		&pgconn.PgError{Severity: "ERROR", Code: "23505", Message: `duplicate key value violates unique constraint "uk_user_email"`},
+	} {
+		for _, err := range []error{
+			err,
+			errors.Join(err, rollback),
+			fmt.Errorf("%w; %v", err, rollback),
+			fmt.Errorf("create: %w (while saving)", err),
+		} {
+			if got := constraintName(err); got != "uk_user_email" {
+				t.Errorf("%q → %q, want uk_user_email", err, got)
+			}
+		}
+	}
+	// The name resolves to the field of the store's constraint.
+	var dup *DuplicateError
+	err := fencedStore(t).mapError(errors.Join(&mysql.MySQLError{Number: 1062, SQLState: state, Message: "Duplicate entry 't' for key 'fenceds.uk_fenced_title'"}, rollback))
+	if !errors.As(err, &dup) || dup.Field != "title" || dup.Constraint != "uk_fenced_title" {
+		t.Errorf("a duplicate with an error joined after it → %#v", err)
 	}
 }
 

@@ -222,6 +222,37 @@ func TestErrorText(t *testing.T) {
 			t.Errorf("wrapped %v: %q, want %q", c.err, got, "exec: "+c.want)
 		}
 	}
+	// gorm adds an error to a statement's as %v; %w, so only the last
+	// keeps its type: a driver's error before it, the statement's when
+	// the rollback fails too, is text, logged as its driver and code.
+	// MySQL's message runs to the separator, a line break in the value
+	// included; Postgres's runs to its last SQLSTATE, so a value that reads
+	// like one goes as well.
+	join := func(first, last error) error { return fmt.Errorf("%v; %w", first, last) }
+	rollback := errors.New("rollback failed")
+	dup := &gomysql.MySQLError{Number: 1062, SQLState: state("23000"), Message: "Duplicate entry 's3cret-value' for key 'users.uk_user_email'"}
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{join(dup, rollback), "mysql 1062 (23000); rollback failed"},
+		{join(&gomysql.MySQLError{Number: 1366, SQLState: state("HY000"), Message: "Incorrect integer value: 's3cret\nvalue' for column 'age' at row 1"}, rollback),
+			"mysql 1366 (HY000); rollback failed"},
+		{join(join(dup, errors.New("driver: bad connection")), rollback), "mysql 1062 (23000); driver: bad connection; rollback failed"},
+		{join(&pgconn.PgError{Severity: "ERROR", Code: "23505", Message: `duplicate key value violates unique constraint "uk_user_email"`}, rollback),
+			"postgres 23505; rollback failed"},
+		{join(&pgconn.PgError{Severity: "ERROR", Code: "22P02", Message: `invalid input syntax for type integer: "s3cret (SQLSTATE 00000); value"`}, rollback),
+			"postgres 22P02; rollback failed"},
+		{join(&pgconn.PgError{Severity: "FATAL", Code: "57P01", Message: "terminating connection due to administrator command"}, rollback),
+			"postgres 57P01; rollback failed"},
+	} {
+		if got := errorText(c.err); got != c.want {
+			t.Errorf("%v: %q, want %q", c.err, got, c.want)
+		}
+		if got := errorText(fmt.Errorf("create: %w", c.err)); got != "create: "+c.want {
+			t.Errorf("wrapped %v: %q, want %q", c.err, got, "create: "+c.want)
+		}
+	}
 }
 
 // TestGORMLogger_LogsErrorText: a failed and a refused statement log

@@ -147,7 +147,7 @@ func (s *Store[T]) mapError(err error) error {
 		return err
 	}
 	dup := &DuplicateError{cause: err}
-	if name := constraintName(err.Error()); name != "" {
+	if name := constraintName(err); name != "" {
 		dup.Constraint = name
 		dup.Field = s.constraintField(name)
 	}
@@ -206,7 +206,24 @@ var (
 	sqliteCode   = regexp.MustCompile(`\s*\(\d+\)$`)
 )
 
-func constraintName(msg string) string {
+// constraintName returns the constraint a duplicate names. A driver's
+// error that keeps its type is read from its own fields, so text after
+// it, an error joined to it or a wrapper's words, cannot move the end
+// MySQL's match is anchored at: Postgres's constraint field, else its
+// message, and MySQL's message. SQLite's message is all its error says;
+// it is read as a whole, as is the text of an error that lost its type.
+func constraintName(err error) string {
+	var msg string
+	if pg, ok := errors.AsType[*pgconn.PgError](err); ok {
+		if pg.ConstraintName != "" {
+			return pg.ConstraintName
+		}
+		msg = pg.Message
+	} else if my, ok := errors.AsType[*mysql.MySQLError](err); ok {
+		msg = my.Message
+	} else {
+		msg = err.Error()
+	}
 	if m := mysqlKey.FindStringSubmatch(msg); m != nil {
 		if _, bare, ok := strings.Cut(m[1], "."); ok {
 			return bare

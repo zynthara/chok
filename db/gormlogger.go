@@ -177,10 +177,24 @@ var mysqlDuplicateKey = regexp.MustCompile(`for key '([^']+)'$`)
 // The argument is printed with %#v or %v and may hold anything, a
 // separator or a line break included, so the match runs from the index
 // to the end of the text.
+//
+// postgresText and mysqlText find a Postgres or a MySQL error that lost
+// its type. gorm adds an error to a statement's as %v; %w, which keeps
+// the type of the last one alone: when the rollback fails after the
+// statement, the statement's error is text before the rollback's. pgx
+// writes it ERROR: message (SQLSTATE 22P02), with FATAL or PANIC for the
+// severity, and the match runs to the last SQLSTATE, so a value that
+// reads like one goes as well. go-sql-driver writes it Error 1062
+// (23000): message, whose end nothing marks but the separator gorm puts
+// after it, so the match runs to the first separator or the end of the
+// text, a line break in the value included; a value that holds the
+// separator ends it early.
 var (
-	scanValue = regexp.MustCompile(`(converting driver\.Value type \S+ )\("(?:[^"\\]|\\.)*"\) `)
-	scanBool  = regexp.MustCompile(`(couldn't convert ).* (into type bool)`)
-	pgxEncode = regexp.MustCompile(`(?s)(failed to encode args\[\d+\]): .*`)
+	scanValue    = regexp.MustCompile(`(converting driver\.Value type \S+ )\("(?:[^"\\]|\\.)*"\) `)
+	scanBool     = regexp.MustCompile(`(couldn't convert ).* (into type bool)`)
+	pgxEncode    = regexp.MustCompile(`(?s)(failed to encode args\[\d+\]): .*`)
+	postgresText = regexp.MustCompile(`(?s)\b(?:ERROR|FATAL|PANIC): .* \(SQLSTATE ([0-9A-Z]{5})\)`)
+	mysqlText    = regexp.MustCompile(`(?s)\bError (\d+) (\([0-9A-Z]{5}\)): .*?(; |$)`)
 )
 
 // errorText is what the log says of a statement's error. The drivers'
@@ -209,9 +223,14 @@ var (
 // the message kept. pgx's error for an argument it cannot encode for the
 // type of its parameter, which a raw statement given a Go value of the
 // wrong type meets, quotes the argument: it is cut after the argument's
-// index (failed to encode args[0]). Any other error, a network fault, a
-// cancellation, gorm's or chok's own, is logged as it is. The caller
-// gets the error unchanged, and expected reads its type and code.
+// index (failed to encode args[0]). A Postgres or MySQL error that lost
+// its type is logged as its driver and code, and the text around it is
+// kept: gorm keeps the type of a statement's last error alone, so when
+// the rollback fails after the statement, the statement's error is text
+// before the rollback's (mysql 1062 (23000); driver: bad connection).
+// Any other error, a network fault, a cancellation, gorm's or chok's
+// own, is logged as it is. The caller gets the error unchanged, and
+// expected reads its type and code.
 func errorText(err error) string {
 	if pg, ok := errors.AsType[*pgconn.PgError](err); ok {
 		words := []string{"postgres", pg.Code}
@@ -243,5 +262,7 @@ func errorText(err error) string {
 	}
 	s := scanValue.ReplaceAllString(err.Error(), "$1")
 	s = scanBool.ReplaceAllString(s, "$1$2")
-	return pgxEncode.ReplaceAllString(s, "$1")
+	s = pgxEncode.ReplaceAllString(s, "$1")
+	s = postgresText.ReplaceAllString(s, "postgres $1")
+	return mysqlText.ReplaceAllString(s, "mysql $1 $2$3")
 }
