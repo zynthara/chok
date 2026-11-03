@@ -222,6 +222,31 @@ func TestErrorText(t *testing.T) {
 			t.Errorf("wrapped %v: %q, want %q", c.err, got, "exec: "+c.want)
 		}
 	}
+	// In pgx's simple protocol pgtype's error comes bare: the value goes,
+	// the format and the type stay, and what follows them goes too, which
+	// may quote the value again or nest another encode error.
+	pgtype := func(v any, format, typ string, oid int, err error) error {
+		return fmt.Errorf("unable to encode %#v into %s format for %s (OID %d): %w", v, format, typ, oid, err)
+	}
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		// As pgx 5.10 answers a struct in the simple protocol.
+		{errors.New(`unable to encode db_test.loggedArg{V:"s3cret-value"} into text format for unknown type (OID 0): cannot find encode plan`),
+			"unable to encode into text format for unknown type (OID 0)"},
+		{pgtype(31337, "binary", "int2", 21, fmt.Errorf("%d is greater than maximum value for int2", 31337)),
+			"unable to encode into binary format for int2 (OID 21)"},
+		{pgtype(struct{ V any }{"x"}, "text", "unknown type", 0, pgtype("s3cret-value", "text", "unknown type", 0, errors.New("cannot find encode plan"))),
+			"unable to encode into text format for unknown type (OID 0)"},
+	} {
+		if got := errorText(c.err); got != c.want {
+			t.Errorf("%v: %q, want %q", c.err, got, c.want)
+		}
+		if got := errorText(fmt.Errorf("exec: %w", c.err)); got != "exec: "+c.want {
+			t.Errorf("wrapped %v: %q, want %q", c.err, got, "exec: "+c.want)
+		}
+	}
 	// gorm adds an error to a statement's as %v; %w, so only the last
 	// keeps its type: a driver's error before it, the statement's when
 	// the rollback fails too, is text, logged as its driver and code.

@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -137,6 +138,45 @@ func TestGORMLogger_EncodeErrorLogsNoValue(t *testing.T) {
 	}
 	if strings.Contains(s, boundValue) {
 		t.Errorf("the value stays out of the log on %s:\n%s", dbtest.Driver(), s)
+	}
+}
+
+// TestGORMLogger_SimpleProtocolEncodeErrorLogsNoValue: in pgx's simple
+// protocol, which a DSN's default_query_exec_mode=simple_protocol picks
+// (PgBouncer's transaction pooling wants it), pgx encodes the arguments
+// into the SQL itself and returns pgtype's error bare: unable to encode
+// x into text format for unknown type (OID 0). The value goes, the format
+// and the type stay.
+func TestGORMLogger_SimpleProtocolEncodeErrorLogsNoValue(t *testing.T) {
+	if dbtest.Driver() != "postgres" {
+		t.Skip("pgx's simple protocol is Postgres's")
+	}
+	cfg := dbtest.Config(t)
+	sep := "&" // dbtest gives a URL its query, a keyword DSN its search_path
+	if !strings.Contains(cfg.Postgres.DSN, "://") {
+		sep = " "
+	}
+	cfg.Postgres.DSN += sep + "default_query_exec_mode=simple_protocol"
+	log := new(logBuffer)
+	d := dbtest.OpenConfig(t, cfg, db.Logger(slog.New(slog.NewTextHandler(log, &slog.HandlerOptions{Level: slog.LevelDebug}))))
+	gdb := d.Unsafe(t.Context())
+	if err := gdb.Exec("CREATE TABLE logged_args (n integer)").Error; err != nil {
+		t.Fatal(err)
+	}
+	const query = "INSERT INTO logged_args (n) VALUES (?)"
+	if err := gdb.Exec(query, loggedArg{V: boundValue}).Error; err == nil {
+		t.Fatalf("%s binds %T", query, loggedArg{})
+	}
+	s := log.String()
+	line := statementLine(s, "db: query failed", query)
+	if !strings.Contains(line, "level=ERROR") {
+		t.Fatalf("the statement is logged at error:\n%s", s)
+	}
+	if got, want := logField(line, "error"), "unable to encode into text format for unknown type (OID 0)"; got != want {
+		t.Errorf("error=%q, want %q", got, want)
+	}
+	if strings.Contains(s, boundValue) {
+		t.Errorf("the value stays out of the log:\n%s", s)
 	}
 }
 
