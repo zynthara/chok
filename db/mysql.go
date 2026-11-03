@@ -31,11 +31,11 @@ type mysqlMigrator struct {
 // tag's index. Each migration of an existing table dropped a one-column
 // db.Unique, leaving the table without it until createIndex built it
 // again, and lost a one-column unique index made by hand or, under a
-// declared name, dropped it before createIndex could check it. chok's
-// auto migration drops nothing it did not create, alike on the three
-// dialects: gorm's migrator for SQLite and Postgres drops only the unique
-// tag's constraint. The unique and uniqueIndex tags migrate as in the
-// driver; compare the two functions when upgrading the driver.
+// declared name, dropped it before createIndex could check it. Auto
+// migration drops or rebuilds no index or constraint that chok did not
+// create; migrateColumnUnique in db/unique.go keeps the rule for SQLite
+// and Postgres. The unique and uniqueIndex tags migrate as in the driver;
+// compare the two functions when upgrading the driver.
 func (m mysqlMigrator) MigrateColumnUnique(value any, field *schema.Field, columnType gorm.ColumnType) error {
 	unique, ok := columnType.Unique()
 	if !ok || field.PrimaryKey {

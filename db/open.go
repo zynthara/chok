@@ -46,7 +46,8 @@ func openSQLite(cfg *Config, gcfg *gorm.Config) (*gorm.DB, *sql.DB, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		gdb, err := gorm.Open(sqlite.Open(dsn), gcfg)
+		// What sqlite.Open returns, without an interface to assert.
+		gdb, err := gorm.Open(sqliteDialector{&sqlite.Dialector{DSN: dsn}}, gcfg)
 		if err != nil {
 			return nil, nil, fmt.Errorf("db: open sqlite: %w", err)
 		}
@@ -65,7 +66,7 @@ func openSQLite(cfg *Config, gcfg *gorm.Config) (*gorm.DB, *sql.DB, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	gdb, err := gorm.Open(sqlite.Open(writeDSN), gcfg)
+	gdb, err := gorm.Open(sqliteDialector{&sqlite.Dialector{DSN: writeDSN}}, gcfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("db: open sqlite: %w", err)
 	}
@@ -256,7 +257,8 @@ func openPostgres(cfg *Config, gcfg *gorm.Config) (*gorm.DB, error) {
 	} else {
 		dsn = postgresUTC(dsn)
 	}
-	gdb, err := gorm.Open(postgres.Open(dsn), gcfg)
+	// What postgres.Open returns, without an interface to assert.
+	gdb, err := gorm.Open(postgresDialector{&postgres.Dialector{Config: &postgres.Config{DSN: dsn}}}, gcfg)
 	if err != nil {
 		return nil, fmt.Errorf("db: open postgres: %w", err)
 	}

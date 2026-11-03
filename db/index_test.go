@@ -314,3 +314,73 @@ func TestOpen_MigratesTheUniqueTag(t *testing.T) {
 		t.Fatal("removing the tag drops the constraint")
 	}
 }
+
+// withUniqueConstraint returns the configuration of a fresh database
+// holding the table of model, migrated, with column made unique by hand
+// under the constraint name: ALTER TABLE adds it on Postgres and MySQL.
+// SQLite cannot add a constraint to a table, so the table is made again
+// from the DDL gorm wrote with the constraint added, and then its indexes.
+func withUniqueConstraint(t *testing.T, model any, table, name, column string) db.Config {
+	t.Helper()
+	constraint := "CONSTRAINT " + name + " UNIQUE (" + column + ")"
+	if dbtest.Driver() != "sqlite" {
+		return withIndex(t, "ALTER TABLE "+table+" ADD "+constraint, model)
+	}
+	cfg := dbtest.Config(t)
+	d, err := db.Open(cfg, testLogger(t), db.Tables(db.Table(model)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close(t.Context()) }()
+	gdb := d.Unsafe(t.Context())
+	var ddl string
+	var indexes []string
+	if err := gdb.Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&ddl).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Raw("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL", table).Scan(&indexes).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range append([]string{"DROP TABLE " + table, strings.TrimSuffix(ddl, ")") + "," + constraint + ")"}, indexes...) {
+		if err := gdb.Exec(s).Error; err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	return cfg
+}
+
+// TestOpen_KeepsAForeignUniqueConstraint: a column unique by a
+// constraint of another name than the unique tag's, made by hand or by
+// an earlier schema, while the model declares nothing on it. Open runs
+// no DDL on the table, and the constraint stays and holds. gorm's
+// migrator for Postgres and SQLite dropped the unique tag's constraint,
+// uni_members_login, without looking for it: Postgres failed Open, as
+// there is none, and SQLite rebuilt the table on every Open.
+func TestOpen_KeepsAForeignUniqueConstraint(t *testing.T) {
+	cfg := withUniqueConstraint(t, &member{}, "members", "uq_members_login", "login")
+	var log logBuffer
+	d := dbtest.OpenConfig(t, cfg, db.Logger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))),
+		db.Tables(db.Table(&member{})))
+	// gorm logs the values of a query read with Scan in place of its
+	// placeholders, so look at how each statement starts rather than for
+	// names; a SQLite rebuild also copies the rows through members__temp.
+	s := log.String()
+	if !strings.Contains(s, `msg="db: query"`) {
+		t.Fatalf("Open logs its statements:\n%s", s)
+	}
+	for _, ddl := range []string{`sql="ALTER `, `sql="CREATE `, `sql="DROP `, "members__temp"} {
+		if strings.Contains(s, ddl) {
+			t.Fatalf("Open runs no DDL on the table; found %q in:\n%s", ddl, s)
+		}
+	}
+	gdb := d.Unsafe(t.Context())
+	if !gdb.Migrator().HasConstraint(&member{}, "uq_members_login") {
+		t.Fatal("the constraint stays")
+	}
+	if err := gdb.Create(&member{Login: "ann", Email: "ann@example.com"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Create(&member{Login: "ann", Email: "ann2@example.com"}).Error; err == nil {
+		t.Fatal("the constraint holds")
+	}
+}
