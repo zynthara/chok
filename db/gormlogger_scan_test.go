@@ -9,17 +9,18 @@ import (
 	"github.com/zynthara/chok/internal/dbtest"
 )
 
-// boundValue is bound to one query in each test and appears nowhere else,
-// neither in a table name nor in an error the database returns.
+// boundValue is bound to one query in each test and named nowhere else,
+// so it reaches the log only as a bound value or in an error message that
+// quotes one.
 const boundValue = "s3cret-value"
 
-// debugHandle opens a fresh database whose handle logs every statement to
-// the returned buffer.
-func debugHandle(t *testing.T) (*db.DB, *logBuffer) {
+// debugHandle opens a fresh database with opts whose handle logs every
+// statement to the returned buffer.
+func debugHandle(t *testing.T, opts ...db.Option) (*db.DB, *logBuffer) {
 	t.Helper()
 	log := new(logBuffer)
-	d := dbtest.Open(t, db.Logger(slog.New(slog.NewTextHandler(log, &slog.HandlerOptions{Level: slog.LevelDebug}))))
-	return d, log
+	opts = append([]db.Option{db.Logger(slog.New(slog.NewTextHandler(log, &slog.HandlerOptions{Level: slog.LevelDebug})))}, opts...)
+	return dbtest.Open(t, opts...), log
 }
 
 // statementLine returns the line of s logged as msg for query, whatever
