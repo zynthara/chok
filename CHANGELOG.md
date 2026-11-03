@@ -15,7 +15,7 @@ without blocking. The histories of v0.1.x and v2 are in the `CHANGELOG.md` of th
 
 <!-- When tagging: replace 未发布 (unreleased) with the release date, YYYY-MM-DD. -->
 
-## [v0.2.2] - 未发布
+## [v0.2.2] - 2026-11-03
 
 ### Added
 
