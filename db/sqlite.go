@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -172,6 +173,12 @@ func (m sqliteMigrator) checkForeignKey(value any, name, table string, fk *schem
 // transaction. Auto migration runs outside one, on the one connection of
 // the SQLite writer, so the keys stay off through the rebuild's own
 // transaction; called inside a transaction, they stay on.
+//
+// The keys go on again under the migration's context without its
+// cancellation, as cleanup does: under a context that had ended, by
+// cancellation or by the migration timeout, PRAGMA foreign_keys = ON did
+// not run, and the writer went on without foreign keys for as long as the
+// handle lived.
 func (m sqliteMigrator) withoutForeignKeys(fn func(on bool) error) (err error) {
 	var on int
 	if err := m.DB.Raw("PRAGMA foreign_keys").Scan(&on).Error; err != nil {
@@ -184,7 +191,8 @@ func (m sqliteMigrator) withoutForeignKeys(fn func(on bool) error) (err error) {
 		return fmt.Errorf("turn foreign keys off: %w", err)
 	}
 	defer func() {
-		if onErr := m.DB.Exec("PRAGMA foreign_keys = ON").Error; onErr != nil {
+		cleanup := m.DB.Session(&gorm.Session{Context: context.WithoutCancel(m.DB.Statement.Context)})
+		if onErr := cleanup.Exec("PRAGMA foreign_keys = ON").Error; onErr != nil {
 			err = errors.Join(err, fmt.Errorf("turn foreign keys on again: %w", onErr))
 		}
 	}()

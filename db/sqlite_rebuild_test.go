@@ -1,8 +1,11 @@
 package db_test
 
 import (
+	"context"
+	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"gorm.io/gorm"
@@ -279,5 +282,89 @@ func TestOpen_ForeignKeyOverRowsWithoutAParentFails(t *testing.T) {
 		if err := gdb.Raw("PRAGMA foreign_keys").Scan(&on).Error; err != nil || on != 1 {
 			t.Errorf("the writer has foreign keys on afterwards; got %d (%v)", on, err)
 		}
+	}
+}
+
+// cancelAt is a slog.Handler that calls cancel when the handle logs a
+// statement starting with prefix, and records in seen that it did.
+type cancelAt struct {
+	prefix string
+	cancel context.CancelFunc
+	seen   *atomic.Bool
+}
+
+func (h cancelAt) Enabled(context.Context, slog.Level) bool { return true }
+func (h cancelAt) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h cancelAt) WithGroup(string) slog.Handler            { return h }
+
+func (h cancelAt) Handle(_ context.Context, r slog.Record) error {
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "sql" && strings.HasPrefix(a.Value.String(), h.prefix) {
+			h.seen.Store(true)
+			h.cancel()
+		}
+		return true
+	})
+	return nil
+}
+
+// TestMigrate_EndedContextLeavesForeignKeysOn: a migration whose context
+// ends while SQLite rebuilds a table fails and leaves the writer with
+// foreign keys on, whether the context ends once they are off or inside
+// the rebuild's transaction, which rolls back. Before, the keys went on
+// again under the ended context, which failed without a word, and the
+// writer went on without them.
+func TestMigrate_EndedContextLeavesForeignKeysOn(t *testing.T) {
+	if dbtest.Driver() != "sqlite" {
+		t.Skip("only SQLite migrates a table by rebuilding it with foreign keys off")
+	}
+	for _, c := range []struct{ name, at string }{
+		{"keys off", "PRAGMA foreign_keys = OFF"},
+		{"inside the rebuild", "DROP TABLE `rb_parents`"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := dbtest.Config(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var seen atomic.Bool
+			d := dbtest.OpenConfig(t, cfg, db.Logger(slog.New(cancelAt{c.at, cancel, &seen})), rbTables(&rbParentLabel{}))
+			gdb := d.Unsafe(t.Context())
+			p := &rbParent{Code: "c1", Name: "n1", Label: "l1"}
+			if err := gdb.Create(p).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := gdb.Create(&rbChild{ParentID: p.ID}).Error; err != nil {
+				t.Fatal(err)
+			}
+			// Another process migrates the table back, which leaves the
+			// handle's Migrate a rebuild to do.
+			if err := openErr(t, cfg, rbTables(&rbParent{})); err != nil {
+				t.Fatal(err)
+			}
+			if seen.Load() {
+				t.Fatal("the context ended before Migrate")
+			}
+			if err := d.Migrate(ctx); err == nil || !seen.Load() {
+				t.Fatalf("Migrate fails once the context ends at %s; got %v", c.at, err)
+			}
+
+			var on int
+			if err := gdb.Raw("PRAGMA foreign_keys").Scan(&on).Error; err != nil || on != 1 {
+				t.Errorf("the writer has foreign keys on; got %d (%v)", on, err)
+			}
+			var parents, children int64
+			if err := gdb.Table("rb_parents").Count(&parents).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := gdb.Table("rb_children").Count(&children).Error; err != nil {
+				t.Fatal(err)
+			}
+			if parents != 1 || children != 1 {
+				t.Errorf("the rows stay; got %d parents and %d children", parents, children)
+			}
+			if gdb.Create(&rbChild{ParentID: 1 << 30}).Error == nil {
+				t.Error("the foreign key holds")
+			}
+		})
 	}
 }
